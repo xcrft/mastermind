@@ -255,6 +255,12 @@ static TOOLS: &[ToolDef] = &[
     ),
     read_only_tool("mmcg_tasks", schema_tasks, handle_tasks),
     read_only_tool("mmcg_history", schema_history, handle_history),
+    read_only_tool("mmcg_docs", schema_docs, handle_docs),
+    read_only_tool(
+        "mmcg_project_profile",
+        schema_project_profile,
+        handle_project_profile,
+    ),
     refreshable_tool("mmcg_centrality", schema_centrality, handle_centrality),
     refreshable_tool("mmcg_semantic", schema_semantic, handle_semantic),
     read_only_tool("mmcg_facts", schema_facts, handle_facts),
@@ -290,6 +296,7 @@ static TOOLS: &[ToolDef] = &[
         handle_change_class,
     ),
     refreshable_tool("mmcg_concept", schema_concept, handle_concept),
+    read_only_tool("mmcg_profile", schema_profile, handle_profile),
 ];
 
 pub(crate) fn is_known_tool(name: &str) -> bool {
@@ -313,6 +320,8 @@ fn tool_requires_fresh_index(name: &str) -> bool {
         name,
         "mmcg_tasks"
             | "mmcg_history"
+            | "mmcg_docs"
+            | "mmcg_project_profile"
             | "mmcg_facts"
             | "mmcg_team_map"
             | "mmcg_recent_changes"
@@ -320,6 +329,7 @@ fn tool_requires_fresh_index(name: &str) -> bool {
             | "mmcg_scratchpad_append"
             | "mmcg_scratchpad_read"
             | "mmcg_change_class"
+            | "mmcg_profile"
     )
 }
 
@@ -2112,6 +2122,35 @@ fn schema_history() -> Value {
     })
 }
 
+fn schema_docs() -> Value {
+    json!({
+        "name": "mmcg_docs",
+        "description": "Search admitted Markdown sections in CONTEXT.md, workflow artifacts, root README.md and docs/**/*.md. Returns exact source paths and line ranges, plus coverage and live freshness. Text matches are retrieval evidence, not accepted project facts or verified links to code.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "FTS5 MATCH query" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
+fn schema_project_profile() -> Value {
+    json!({
+        "name": "mmcg_project_profile",
+        "description": "Read a bounded, source-cited projection of this repository's indexed CONTEXT.md. Optional query selects matching sections and explicit decision-log candidates. Returns text only when the project-history, section, and candidate indexes are complete and fresh; otherwise withholds it and reports why. Secret-like sections are omitted by a heuristic. Citations point to the full section line range, which may be wider than a search snippet. Candidate decisions preserve their source-declared status but remain unreviewed; no code relationship is verified. The person's global profile is separate in mmcg_profile.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": NON_BLANK_PATTERN, "description": "Optional FTS5 query within CONTEXT.md" },
+                "top": { "type": "integer", "minimum": 1, "maximum": 32, "default": 12 }
+            }
+        }
+    })
+}
+
 fn schema_centrality() -> Value {
     json!({
         "name": "mmcg_centrality",
@@ -2188,6 +2227,27 @@ fn schema_facts() -> Value {
             "properties": {
                 "path": { "type": "string", "default": ".", "description": "Repository-relative file or directory scope" },
                 "top": { "type": "integer", "minimum": 1, "maximum": 400, "default": 100 }
+            }
+        }
+    })
+}
+
+fn schema_profile() -> Value {
+    json!({
+        "name": "mmcg_profile",
+        "description": "Read an advisory slice of the user's global mined profile for paths, role and workflow. Requires an explicit grant for this server's project root and its configured MMCG_PROFILE_CLIENT; absent or denied access returns a status without profile content. Scope filters run before source reads. Only author-accepted feedback and reviewed habits with independent task episodes are exposed; retained source quotes stay local. Source verification covers selected claims only. store_revision identifies SQL inputs; profile_revision identifies the verified selection, including the still-global Git aggregate. Git patterns come from an unverified author filter, so they describe sampled commits rather than proving a person's preferences. The task, repository code and tooling take precedence. Over budget, the least specific lists are dropped and named in `omitted`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN },
+                    "maxItems": 64,
+                    "description": "Repository-relative paths being changed; omit for the whole profile"
+                },
+                "role": { "type": "string", "enum": ["planner", "executor", "auditor"], "description": "Optional agent duty used only to filter role-scoped accepted feedback" },
+                "workflow": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": NON_BLANK_PATTERN, "description": "Optional workflow name used only to filter workflow-scoped accepted feedback" },
+                "budget_tokens": { "type": "integer", "minimum": 256, "maximum": 8000, "default": 1500, "description": "Conservative bound computed as ceil(response bytes / 4)" }
             }
         }
     })
@@ -2748,6 +2808,31 @@ fn handle_history(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         ),
     };
     response.map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_docs(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let query = non_blank_str_arg(args, "query")?;
+    let top = bounded_u64_arg(args, "top", 10, 1, 50)? as u32;
+    ensure_schema_compatible(store)?;
+    let response = queries::documents(store, query, top)
+        .map_err(|error| HandlerError::internal("documents_query", error))?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn handle_project_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let query = opt_non_blank_str_arg(args, "query")?;
+    if query.is_some_and(|query| query.chars().count() > 256) {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: query".into(),
+        ));
+    }
+    let top = bounded_u64_arg(args, "top", 12, 1, 32)? as u32;
+    ensure_schema_compatible(store)?;
+    let response = queries::project_profile(store, query, top)
+        .map_err(|error| HandlerError::internal("project_profile_query", error))?;
+    serde_json::to_value(response)
+        .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
 fn handle_centrality(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -3559,6 +3644,39 @@ fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, Hand
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
+fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let invalid = || HandlerError::InvalidArguments("Invalid argument: paths".into());
+    let paths = match args.get("paths") {
+        None => Vec::new(),
+        Some(Value::Array(items)) if items.len() <= 64 => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .and_then(|path| queries::normalize_map_path(path).ok())
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(invalid()),
+    };
+    let budget = bounded_u64_arg(args, "budget_tokens", 1500, 256, 8000)? as usize;
+    let role = opt_enum_arg(args, "role", &["planner", "executor", "auditor"])?;
+    let workflow = opt_non_blank_str_arg(args, "workflow")?;
+    if workflow.is_some_and(|value| value.len() > 128) {
+        return Err(HandlerError::InvalidArguments(
+            "Invalid argument: workflow".into(),
+        ));
+    }
+    // The served root and client identity come from server configuration, never
+    // from tool arguments or database metadata supplied by a caller.
+    let root = store.serve_root();
+    let client = std::env::var("MMCG_PROFILE_CLIENT").ok();
+    let repo = root.and_then(crate::miner::profile::RepoContext::for_root);
+    let audience = root.zip(client.as_deref());
+    crate::miner::profile::view(&paths, repo.as_ref(), budget, audience, role, workflow)
+        .map_err(|error| HandlerError::internal("profile_view", error))
+}
+
 fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = queries::normalize_map_path(non_blank_str_arg(args, "file")?)
         .ok()
@@ -4233,7 +4351,7 @@ mod tests {
         }
 
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 33);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -4242,7 +4360,7 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 33);
         let mut readers = 0;
         let mut refreshers = 0;
         for tool in tools {
@@ -4272,7 +4390,7 @@ mod tests {
                 readers += 1;
             }
         }
-        assert_eq!(readers, 8);
+        assert_eq!(readers, 11);
         assert_eq!(refreshers, 21);
     }
 
@@ -4681,6 +4799,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Markdown"));
+        assert!(result["review_status"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
         assert_eq!(result["skipped_artifacts"], 0);
         assert_eq!(result["corpus_truncated"], false);
         assert_eq!(result["truncated"], false);
@@ -6388,9 +6510,303 @@ mod checks {
     }
 
     #[test]
+    fn docs_tool_returns_source_section_lines_and_coverage() {
+        let (root, mut store) = fresh_test_store();
+        store
+            .replace_project_history(&[crate::store::ProjectHistoryEntry {
+                path: "docs/runtime.md".into(),
+                kind: "documentation".into(),
+                title: "Runtime".into(),
+                body: "# Runtime\n\n## Admission\nVerify the admission contract.\n".into(),
+            }])
+            .unwrap();
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_docs", "arguments": { "query": "admission contract" } }),
+        )
+        .unwrap();
+        let result = unwrap_content(&envelope);
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["observed"][0]["path"], "docs/runtime.md");
+        assert_eq!(result["observed"][0]["heading"], "Runtime > Admission");
+        assert_eq!(result["observed"][0]["start_line"], 3);
+        assert_eq!(result["observed"][0]["end_line"], 4);
+        assert!(result["source_of_truth"]
+            .as_str()
+            .unwrap()
+            .contains("Markdown"));
+        store
+            .set_meta("document_section_extractor_version", "older-version")
+            .unwrap();
+        let old = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_docs", "arguments": { "query": "admission contract" } }),
+        )
+        .unwrap();
+        let old = unwrap_content(&old);
+        assert_eq!(old["section_extractor_current"], false);
+        assert_eq!(old["count"], 0);
+        assert!(old["observed"].as_array().unwrap().is_empty());
+        drop(root);
+    }
+
+    #[test]
+    fn project_profile_returns_only_fresh_context_sections() {
+        let (root, mut store) = fresh_test_store();
+        let context = root.path().join("CONTEXT.md");
+        std::fs::write(
+            &context,
+            "# Project identity\nLocal source of truth.\n## Delivery boundary\nCheck rollout before live status.\n",
+        )
+        .unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        let read = |store: &mut Store, arguments: Value| {
+            let envelope = handle_tools_call(
+                ProtocolVersion::Current,
+                store,
+                &json!({ "name": "mmcg_project_profile", "arguments": arguments }),
+            )
+            .unwrap();
+            unwrap_content(&envelope)
+        };
+        let profile = read(&mut store, json!({}));
+        assert_eq!(profile["status"], "ok");
+        assert_eq!(profile["scope"], "project");
+        assert_eq!(profile["source"], "CONTEXT.md");
+        assert_eq!(profile["indexed_sections"], 2);
+        assert_eq!(
+            profile["observed"][1]["heading"],
+            "Project identity > Delivery boundary"
+        );
+        assert_eq!(profile["observed"][1]["section_citation"], "CONTEXT.md:3-4");
+        assert!(profile["review_status"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
+        let selected = read(&mut store, json!({ "query": "rollout" }));
+        assert_eq!(selected["matched_total"], 1);
+        assert_eq!(selected["count"], 1);
+        std::fs::write(&context, "# Changed\nOld sections must not be served.\n").unwrap();
+        let stale = read(&mut store, json!({}));
+        assert_eq!(stale["status"], "index_not_fresh");
+        assert_eq!(stale["freshness"], "stale");
+        assert!(stale["observed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_profile_omits_secret_like_sections_and_bounds_headings() {
+        let (root, mut store) = fresh_test_store();
+        let long_heading = "A".repeat(1_000);
+        let context = format!(
+            "# Credentials\napi_key = \"sampleprivatevalue123\"\n# {long_heading}\nPublic section.\n# Delivery\n{} targetword {}\n# Markers\n«literal» text.\n",
+            "before ".repeat(25),
+            "after ".repeat(25)
+        );
+        std::fs::write(root.path().join("CONTEXT.md"), context).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        let read = |store: &mut Store, arguments: Value| {
+            let envelope = handle_tools_call(
+                ProtocolVersion::Current,
+                store,
+                &json!({ "name": "mmcg_project_profile", "arguments": arguments }),
+            )
+            .unwrap();
+            unwrap_content(&envelope)
+        };
+        let profile = read(&mut store, json!({}));
+        assert_eq!(profile["status"], "partial");
+        assert_eq!(profile["unsafe_sections_omitted"], 1);
+        assert_eq!(profile["count"], 3);
+        assert_eq!(profile["result_truncated"], true);
+        assert_eq!(profile["observed"][0]["heading_truncated"], true);
+        assert_eq!(
+            profile["observed"][0]["heading"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            240
+        );
+        assert_eq!(profile["observed"][2]["excerpt_truncated"], false);
+        assert!(!profile.to_string().contains("sampleprivatevalue123"));
+        let safe_page = read(&mut store, json!({ "top": 1 }));
+        assert_eq!(safe_page["status"], "partial");
+        assert_eq!(safe_page["count"], 1);
+        assert_eq!(safe_page["observed"][0]["heading_truncated"], true);
+        let secret_match = read(&mut store, json!({ "query": "sampleprivatevalue123" }));
+        assert_eq!(secret_match["status"], "partial");
+        assert_eq!(secret_match["count"], 0);
+        assert_eq!(secret_match["unsafe_sections_omitted"], 1);
+        let snippet = read(&mut store, json!({ "query": "targetword" }));
+        assert_eq!(snippet["status"], "ok");
+        assert_eq!(snippet["observed"][0]["excerpt_truncated"], true);
+        assert!(snippet["observed"][0]["section_citation"]
+            .as_str()
+            .unwrap()
+            .starts_with("CONTEXT.md:5-"));
+        let unicode_query = read(&mut store, json!({ "query": "я".repeat(200) }));
+        assert_eq!(unicode_query["status"], "no_match");
+    }
+
+    #[test]
+    fn project_profile_withholds_incomplete_section_index() {
+        let (root, mut store) = fresh_test_store();
+        let context = (0..130)
+            .map(|number| format!("# Section {number}\nSome content.\n"))
+            .collect::<String>();
+        std::fs::write(root.path().join("CONTEXT.md"), context).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_project_profile", "arguments": {} }),
+        )
+        .unwrap();
+        let profile = unwrap_content(&envelope);
+        assert_eq!(profile["sections_truncated"], true);
+        assert_eq!(profile["freshness"], "incomplete");
+        assert_eq!(profile["status"], "index_not_fresh");
+        assert_eq!(profile["omitted_reason"], "document_sections_truncated");
+        assert_eq!(profile["count"], 0);
+        assert!(profile["observed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_profile_decision_candidates_follow_source_revision() {
+        let (root, mut store) = fresh_test_store();
+        let context = root.path().join("CONTEXT.md");
+        std::fs::write(
+            &context,
+            "# Context\n## Decision log\n### 2026-01-01 — Storage\n- **Decision:** Keep Markdown authoritative.\n- **Status:** active\n",
+        )
+        .unwrap();
+        let index = crate::indexer::Indexer::new(root.path());
+        index.index_project_history(&mut store).unwrap();
+        let read = |store: &mut Store, arguments: Value| {
+            let envelope = handle_tools_call(
+                ProtocolVersion::Current,
+                store,
+                &json!({ "name": "mmcg_project_profile", "arguments": arguments }),
+            )
+            .unwrap();
+            unwrap_content(&envelope)
+        };
+        let first = read(&mut store, json!({}));
+        assert_eq!(first["status"], "ok");
+        assert_eq!(first["claim_extraction_status"], "candidates");
+        assert_eq!(first["claim_candidates_total"], 1);
+        assert_eq!(first["claim_candidates"][0]["status"], "candidate");
+        assert_eq!(first["claim_candidates"][0]["review_status"], "unknown");
+        assert_eq!(first["claim_candidates"][0]["source_status"], "active");
+        assert_eq!(
+            first["claim_candidates"][0]["source_citation"],
+            "CONTEXT.md:4"
+        );
+        let selected = read(&mut store, json!({ "query": "Markdown" }));
+        assert_eq!(selected["claim_candidates_total"], 1);
+        store
+            .set_meta("project_claim_extractor_version", "older-version")
+            .unwrap();
+        let old_index = read(&mut store, json!({}));
+        assert_eq!(old_index["status"], "index_not_fresh");
+        assert_eq!(old_index["claim_extraction_status"], "not_indexed");
+        assert_eq!(old_index["omitted_reason"], "project_claim_index_missing");
+        assert!(old_index["claim_candidates"].as_array().unwrap().is_empty());
+        store
+            .set_meta(
+                "project_claim_extractor_version",
+                crate::project_claims::EXTRACTOR_VERSION,
+            )
+            .unwrap();
+        store
+            .set_meta("document_section_extractor_version", "older-version")
+            .unwrap();
+        let old_sections = read(&mut store, json!({}));
+        assert_eq!(old_sections["status"], "index_not_fresh");
+        assert_eq!(old_sections["section_extractor_current"], false);
+        assert_eq!(
+            old_sections["omitted_reason"],
+            "document_section_index_outdated"
+        );
+        assert!(old_sections["observed"].as_array().unwrap().is_empty());
+        store
+            .set_meta(
+                "document_section_extractor_version",
+                crate::document_sections::EXTRACTOR_VERSION,
+            )
+            .unwrap();
+        let first_id = first["claim_candidates"][0]["id"].clone();
+        let first_evidence = first["claim_candidates"][0]["evidence_id"].clone();
+        std::fs::write(
+            &context,
+            "# Context\n## Decision log\n### 2026-01-01 — Storage\n- **Decision:** Keep reviewed Markdown authoritative.\n- **Status:** deprecated\n",
+        )
+        .unwrap();
+        let stale = read(&mut store, json!({}));
+        assert_eq!(stale["status"], "index_not_fresh");
+        assert_eq!(stale["claim_candidates_count"], 0);
+        assert!(stale["claim_candidates"].as_array().unwrap().is_empty());
+        index.index_project_history(&mut store).unwrap();
+        let revised = read(&mut store, json!({}));
+        assert_eq!(revised["status"], "ok");
+        assert_eq!(revised["claim_candidates"][0]["id"], first_id);
+        assert_ne!(
+            revised["claim_candidates"][0]["evidence_id"],
+            first_evidence
+        );
+        assert_eq!(
+            revised["claim_candidates"][0]["source_status"],
+            "deprecated"
+        );
+        assert_eq!(revised["claim_candidates"][0]["status"], "candidate");
+        std::fs::remove_file(&context).unwrap();
+        index.index_project_history(&mut store).unwrap();
+        let removed = read(&mut store, json!({}));
+        assert_eq!(removed["status"], "missing_context");
+        assert_eq!(removed["claim_candidates_total"], 0);
+    }
+
+    #[test]
+    fn project_profile_withholds_malformed_decision_extraction() {
+        let (root, mut store) = fresh_test_store();
+        std::fs::write(
+            root.path().join("CONTEXT.md"),
+            "# Context\n## Decision log\n### Valid\n- **Decision:** Keep Markdown.\n- **Status:** active\n### Incomplete\n- **Decision:** Missing status.\n",
+        )
+        .unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_project_history(&mut store)
+            .unwrap();
+        let envelope = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_project_profile", "arguments": {} }),
+        )
+        .unwrap();
+        let profile = unwrap_content(&envelope);
+        assert_eq!(profile["status"], "index_not_fresh");
+        assert_eq!(profile["claim_extraction_status"], "extraction_incomplete");
+        assert_eq!(profile["claim_candidates_omitted"], 1);
+        assert_eq!(
+            profile["omitted_reason"],
+            "project_claim_extraction_incomplete"
+        );
+        assert_eq!(profile["count"], 0);
+        assert_eq!(profile["claim_candidates_count"], 0);
+    }
+
+    #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 30, "expected 30 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 33, "expected 33 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),
@@ -6830,6 +7246,8 @@ mod checks {
         let exempt = [
             "mmcg_tasks",
             "mmcg_history",
+            "mmcg_docs",
+            "mmcg_project_profile",
             "mmcg_facts",
             "mmcg_team_map",
             "mmcg_recent_changes",
@@ -6837,6 +7255,7 @@ mod checks {
             "mmcg_scratchpad_append",
             "mmcg_scratchpad_read",
             "mmcg_change_class",
+            "mmcg_profile",
         ];
         for tool in TOOLS {
             assert_eq!(

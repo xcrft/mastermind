@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.3
+  version: 0.17.4
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -67,14 +67,29 @@ precision, stale-index, and truncation notes. For one or two lookups work
 inline; use the researcher for a bounded batch and the investigator only for an
 unknown-cause bug.
 
-When `~/.mastermind/style.md` exists, read only the sections relevant to the
-planned implementation. Treat them as advisory preferences: repository code,
-tool-enforced conventions, product behavior, security, and the approved
-contract take precedence. Manual and interpreted preferences may guide a real
-choice. Deterministic code-shape observations are diagnostic evidence, not
-implementation instructions, and a language-specific observation never crosses
-into a different language. Commit voice is fallback-only when repository policy
-is silent.
+When the author has a profile, call `mmcg_profile` with the planned paths,
+`role: planner`, and `workflow` equal to the selected task mode (`direct`,
+`verified`, or `strict`). Use only returned reviewed preferences and observed
+habits that apply to this selection. The task's instructions, repository code,
+tooling, and approved contract take precedence. Preserve claim IDs, review
+revisions, store/view revisions, source verification and omissions in the
+handoff. Missing or denied access means no personal context for this request;
+do not substitute a full `style.md` or unreviewed notes. `style.md` is a local
+inspection snapshot, whose source checks may be older than the current view.
+Git code-shape observations are diagnostic evidence, and Range records exposure.
+Neither establishes a personal habit. Commit voice is fallback-only when
+repository policy is silent.
+
+Compose four separate components: the code brief, relevant
+`mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+`mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+revisions, citations and caveats. Before handoff, serialize the combined JSON,
+including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+queries, lower `top` or reduce supported brief/profile budgets and retrieve
+again. Omit a whole optional component only with its tool, verification status
+and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+task-critical evidence explicitly. Each receiving role retrieves its own slice.
 
 ## Design review
 

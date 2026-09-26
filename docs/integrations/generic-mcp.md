@@ -13,7 +13,7 @@ dedicated Claude Code, Codex, Cursor, or Continue setup command applies.
 | transport | stdio |
 | command | `mastermind serve` |
 | protocol | MCP 2025-11-25; legacy 2024-11-05 |
-| tools | 30: 21 refreshable non-destructive queries, 8 read-only queries, 1 additive local write (see below) |
+| tools | 33: 21 refreshable non-destructive queries, 11 read-only queries, 1 additive local write (see below) |
 | resources | none |
 | prompts | none |
 
@@ -76,8 +76,12 @@ The `--index` flag is global and must come before `serve`.
   `mmcg_semantic`, `mmcg_facts`, `mmcg_team_map`, `mmcg_map`, `mmcg_temporal`.
 - Change analysis: `mmcg_symbols_changed_since`, `mmcg_change_class`,
   `mmcg_change_impact`, `mmcg_brief`, `mmcg_test_impact`, `mmcg_recent_changes`.
-- Workflow state: `mmcg_tasks`, `mmcg_history`, `mmcg_status`, `mmcg_scratchpad_read`, and the
+- Workflow state and project documentation: `mmcg_tasks`, `mmcg_history`, `mmcg_docs`, `mmcg_project_profile`, `mmcg_status`, `mmcg_scratchpad_read`, and the
   additive local write `mmcg_scratchpad_append`.
+- Author profile: `mmcg_profile` reads the granted global profile for the
+  paths, role, and workflow. Configure `MMCG_PROFILE_CLIENT` in this server's
+  environment and grant that client access to this project's canonical root
+  with `mastermind miner access grant . --client <id>`.
 
 The standard MCP `tools/list` response is the schema source of truth. See the
 [technical reference](../reference/mmcg.md#mcp-tools) for arguments, limits,

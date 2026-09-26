@@ -12,7 +12,7 @@ workflow:
       runtime: portable
       exclusivity_group: task-executor
 metadata:
-  version: 0.6.2
+  version: 0.6.3
   authors: [mastermind]
   tags: [workflow, execution, delegation, mmcg]
 ---
@@ -40,12 +40,24 @@ read another artifact only when the spec or caller names it.
 2. Confirm that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification agree with one another.
 3. Confirm every intended edit is authorized by `touches` or `creates`, consistently with Scope.
-4. When `~/.mastermind/style.md` exists, use relevant non-conflicting rules as
-   preferences. Repository code, formatter/linter configuration, and the spec
-   take precedence over the user-global profile. Deterministic code-shape
-   observations are diagnostic evidence, not implementation instructions; do
-   not apply a language-specific observation to another language. Commit voice
-   is fallback-only when repository policy is silent.
+4. Call `mmcg_profile` with Scope paths, `role: executor`, and `workflow` equal
+   to the spec's task mode. Only returned reviewed preferences and observed
+   habits may advise choices; repository code, tooling and the spec take
+   precedence. Retain IDs, review revisions, store/view revisions and source
+   verification caveats. Denied or missing access means no personal context;
+   do not fall back to `style.md`, legacy notes or inbox candidates. Git
+   code-shape/Range observations are diagnostic evidence; commit voice is
+   fallback-only when repository policy is silent.
+   Combine four separate components: the code brief, relevant
+   `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+   `mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+   revisions, citations and caveats. Before handoff, serialize the combined JSON,
+   including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+   This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+   queries, lower `top` or reduce supported brief/profile budgets and retrieve
+   again. Omit a whole optional component only with its tool, verification status
+   and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+   task-critical evidence explicitly. Each receiving role retrieves its own slice.
 5. For a named symbol, use mmcg to check its current location and impact. Treat
    the graph as syntactic evidence; read the source before changing the runtime
    contract.

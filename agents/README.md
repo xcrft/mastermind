@@ -23,6 +23,7 @@ delegation runtime.
 | [`mastermind-comment-auditor`](subagents/mastermind-comment-auditor.md) | Post-implementation comment reviewer. Flags added narration with quoted evidence and reports deleted rationale. |
 | [`mastermind-frontend-auditor`](subagents/mastermind-frontend-auditor.md) | Post-implementation UI reviewer. Uses the codegraph for unrendered components, props-contract breaks, duplicates, and raw values. |
 | [`mastermind-test-auditor`](subagents/mastermind-test-auditor.md) | Post-implementation test reviewer. Uses `mmcg_test_impact` classifications to separate real coverage from a filename match. |
+| [`mastermind-feedback-collector`](subagents/mastermind-feedback-collector.md) | End-of-session collector. Records preferences the user stated to agents, quoted verbatim from the transcript, in their own profile. |
 | [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
 
 ## Give a project durable context

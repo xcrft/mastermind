@@ -19,6 +19,7 @@ correctness, or evidence that the behavior survives a long real-world task.
 | `fixtures/` | Real Git histories for researcher/auditor cases | Exact planted change |
 | `scorecard.md` | Dated full-suite results | Environment and trust notes |
 | `benchmark/` | Three-condition research trial preparation and adapter transport | Full answers retained for semantic review; no quality score yet |
+| `persona_replay.py` | Frozen local Git history and isolated persona stores | Exact attribution selection, deterministic replay, temporal cache equality and measured diff accounting |
 
 `runner.py` invokes `claude -p`. Researcher and auditor cases load the shipped
 agents through Claude's `--agents` / `--agent` runtime contract, so frontmatter
@@ -108,8 +109,13 @@ harness contract through:
 python3 -m unittest \
   evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py \
   evals/test_claude_adapter.py evals/test_benchmark_corpus.py \
-  evals/test_benchmark_review.py
+  evals/test_benchmark_review.py evals/test_persona_replay.py
 ```
+
+Persona replay uses the actual local `mmcg` binary without calling a model.
+Its private reports stay in an ignored output directory. See the
+[mining contract](../docs/reference/persona-mining-contract.md) for the replay
+commands, mathematical invariants, score interpretation and coverage limits.
 
 ## Reports and token gates
 

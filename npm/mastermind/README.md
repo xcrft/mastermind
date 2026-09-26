@@ -28,7 +28,7 @@ A diff tells you what changed. Mastermind shows what the change reaches:
 downstream callers, architecture boundaries, candidate tests, ownership,
 security findings, runtime evidence, and repository policy.
 
-One local snapshot powers the CLI, 30 bounded MCP tools, the read-only Lens UI,
+One local snapshot powers the CLI, 31 bounded MCP tools, the read-only Lens UI,
 SARIF output, and a standalone review package.
 
 ## Your first review in three commands
@@ -130,7 +130,7 @@ writer conflicts, unreachable tools, and componentized context estimates.
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup previews changes unless `--write` is present. The MCP server
 exposes 21 non-destructive queries that may refresh the managed derived index,
-8 read-only tools, and one additive write to the local gitignored scratchpad.
+9 read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## Supported stack
 

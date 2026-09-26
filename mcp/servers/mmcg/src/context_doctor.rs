@@ -4,6 +4,7 @@
 //! review, and structured lesson lifecycle. It deliberately does not require a
 //! decision or lesson per task: durable knowledge is selective, not ceremonial.
 
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -315,6 +316,26 @@ fn placeholder_tokens(text: &str) -> Vec<String> {
                 }
             }
             index += 1;
+        }
+    }
+    // A standalone placeholder with spaces can be parsed as an HTML block.
+    // Inspect only the block's first node, so examples inside <pre> stay code.
+    let mut html_block_start = None;
+    for (event, range) in Parser::new(text).into_offset_iter() {
+        match event {
+            Event::Start(Tag::HtmlBlock) => html_block_start = Some(range.start),
+            Event::Html(raw) if html_block_start == Some(range.start) => {
+                let trimmed = raw.trim();
+                if let Some(inner) = trimmed.strip_prefix('<').and_then(|v| v.strip_suffix('>')) {
+                    if inner.chars().any(char::is_whitespace)
+                        && !inner.contains(['<', '>', '=', '/', '!'])
+                    {
+                        tokens.insert(format!("<{inner}>"));
+                    }
+                }
+            }
+            Event::End(TagEnd::HtmlBlock) => html_block_start = None,
+            _ => {}
         }
     }
     tokens.into_iter().collect()
@@ -791,79 +812,133 @@ pub(crate) struct ProseLine<'a> {
     pub(crate) text: &'a str,
 }
 
-/// Scan before slicing into records so quoted headings cannot lose their
-/// opening fence or comment. Lines containing comments are excluded in full.
-pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
-    let mut visible = Vec::new();
+/// Keep original byte ranges while recognizing LF, CRLF, and CR-only lines.
+pub(crate) fn source_lines(body: &str) -> Vec<ProseLine<'_>> {
+    let bytes = body.as_bytes();
+    let mut lines = Vec::new();
     let mut offset = 0;
-    let mut fence = None;
-    let mut comment = false;
-    for (index, raw) in body.split_inclusive('\n').enumerate() {
+    while offset < bytes.len() {
         let start = offset;
-        offset += raw.len();
+        while offset < bytes.len() && !matches!(bytes[offset], b'\r' | b'\n') {
+            offset += 1;
+        }
+        if bytes.get(offset) == Some(&b'\r') && bytes.get(offset + 1) == Some(&b'\n') {
+            offset += 2;
+        } else if offset < bytes.len() {
+            offset += 1;
+        }
+        let raw = &body[start..offset];
         let content = raw.trim_end_matches(['\r', '\n']);
         let indent = content.bytes().take_while(|byte| *byte == b' ').count();
-        let text = &content[indent..];
-        let code_indent = indent > 3 || text.starts_with('\t');
-        let marker = text.as_bytes().first().copied();
-        let width = text
-            .bytes()
-            .take_while(|byte| Some(*byte) == marker)
-            .count();
-        if let Some((character, opening_width)) = fence {
-            if !code_indent
-                && marker == Some(character)
-                && width >= opening_width
-                && text[width..].trim_matches([' ', '\t']).is_empty()
-            {
-                fence = None;
-            }
-            continue;
-        }
-        if comment {
-            let mut remaining = content;
-            while let Some(end) = remaining.find("-->") {
-                comment = false;
-                remaining = &remaining[end + 3..];
-                let Some(start) = remaining.find("<!--") else {
-                    break;
-                };
-                comment = true;
-                remaining = &remaining[start + 4..];
-            }
-            continue;
-        }
-        if code_indent || text.starts_with('>') {
-            continue;
-        }
-        if let Some(character @ (b'`' | b'~')) = marker {
-            if width >= 3 && (character != b'`' || !text[width..].contains('`')) {
-                fence = Some((character, width));
-                continue;
-            }
-        }
-        if let Some(start) = text.find("<!--") {
-            let mut remaining = &text[start + 4..];
-            comment = true;
-            while let Some(end) = remaining.find("-->") {
-                comment = false;
-                remaining = &remaining[end + 3..];
-                let Some(start) = remaining.find("<!--") else {
-                    break;
-                };
-                comment = true;
-                remaining = &remaining[start + 4..];
-            }
-            continue;
-        }
-        visible.push(ProseLine {
+        lines.push(ProseLine {
             offset: start,
-            index,
+            index: lines.len(),
             raw,
-            text,
+            text: &content[indent..],
         });
     }
-    visible
+    lines
+}
+
+fn hide_span(starts: &[usize], delta: &mut [i32], start: usize, end: usize) {
+    if start >= end || starts.is_empty() {
+        return;
+    }
+    let first = starts
+        .partition_point(|offset| *offset <= start)
+        .saturating_sub(1);
+    let last = starts
+        .partition_point(|offset| *offset < end)
+        .saturating_sub(1);
+    delta[first] += 1;
+    delta[last + 1] -= 1;
+}
+
+/// Preserve byte offsets while accepting CR-only lines and a tab after a
+/// closing fence. The parser currently keeps such fences open.
+fn parser_input(body: &str) -> String {
+    let mut bytes = body.as_bytes().to_vec();
+    for source in source_lines(body) {
+        let raw = source.raw;
+        if raw.ends_with('\r') {
+            bytes[source.offset + raw.len() - 1] = b'\n';
+        }
+        let content = raw.trim_end_matches(['\r', '\n']);
+        let line = content.as_bytes();
+        let spaces = line.iter().take_while(|byte| **byte == b' ').count();
+        if spaces <= 3 {
+            let marker = line.get(spaces).copied();
+            if matches!(marker, Some(b'`' | b'~')) {
+                let width = line[spaces..]
+                    .iter()
+                    .take_while(|byte| Some(**byte) == marker)
+                    .count();
+                if width >= 3
+                    && line[spaces + width..]
+                        .iter()
+                        .all(|byte| matches!(byte, b' ' | b'\t'))
+                {
+                    for index in spaces + width..line.len() {
+                        if line[index] == b'\t' {
+                            bytes[source.offset + index] = b' ';
+                        }
+                    }
+                }
+            }
+        }
+    }
+    String::from_utf8(bytes).expect("only ASCII line breaks and tabs are replaced")
+}
+
+/// Parse the whole document before slicing into records. Byte ranges from the
+/// Markdown parser keep comments, raw HTML, code, and quotes from creating
+/// headings or decision fields. A comment anywhere on a line hides that line.
+pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
+    let lines = source_lines(body);
+    let starts: Vec<usize> = lines.iter().map(|line| line.offset).collect();
+    let mut delta = vec![0i32; lines.len() + 1];
+    let mut quotes = Vec::new();
+    let mut code_blocks = Vec::new();
+    let mut html_blocks = Vec::new();
+    let parsed = parser_input(body);
+    for (event, range) in Parser::new(&parsed).into_offset_iter() {
+        match event {
+            Event::Start(Tag::BlockQuote(_)) => quotes.push(range.start),
+            Event::End(TagEnd::BlockQuote(_)) => {
+                if let Some(start) = quotes.pop() {
+                    hide_span(&starts, &mut delta, start, range.end);
+                }
+            }
+            Event::Start(Tag::CodeBlock(_)) => code_blocks.push(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_blocks.pop() {
+                    hide_span(&starts, &mut delta, start, range.end);
+                }
+            }
+            Event::Start(Tag::HtmlBlock) => html_blocks.push(range.start),
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(start) = html_blocks.pop() {
+                    hide_span(&starts, &mut delta, start, range.end);
+                }
+            }
+            Event::InlineHtml(html) if html.trim_start().starts_with("<!--") => {
+                hide_span(&starts, &mut delta, range.start, range.end);
+            }
+            _ => {}
+        }
+    }
+    let mut hidden = 0i32;
+    lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            hidden += delta[index];
+            let content = line.raw.trim_end_matches(['\r', '\n']);
+            let indent = content.bytes().take_while(|byte| *byte == b' ').count();
+            let code_indent = indent > 3 || line.text.starts_with('\t');
+            (hidden == 0 && !code_indent && !line.text.starts_with('>')).then_some(line)
+        })
+        .collect()
 }
 
 fn markdown_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
@@ -936,10 +1011,21 @@ fn normalized(value: &str) -> String {
 
 fn pending_lesson_value(value: &str) -> bool {
     let value = normalized(value);
+    // Field values are scalar metadata, even when a bare placeholder would be
+    // parsed as a complete HTML block in a Markdown document.
+    let scalar_placeholder = value
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .is_some_and(|inner| {
+            !inner.is_empty()
+                && !inner.starts_with(['!', '/'])
+                && !matches!(inner, "br" | "details" | "summary")
+        });
     matches!(
         value.as_str(),
         "pending" | "pending semantic review" | "semantic review required" | "todo" | "tbd"
-    ) || !placeholder_tokens(&value).is_empty()
+    ) || scalar_placeholder
+        || !placeholder_tokens(&value).is_empty()
 }
 
 fn skipped(name: &'static str, reason: &str) -> Check {
@@ -1039,15 +1125,68 @@ mod tests {
         let visible = prose_lines(body);
         assert_eq!(
             visible.iter().map(|line| line.text).collect::<Vec<_>>(),
-            ["intro λ", "## live", "- **Status:** candidate", "last"]
+            [
+                "intro λ",
+                "## hidden-second-comment",
+                "-->",
+                "## live",
+                "- **Status:** candidate",
+                "last"
+            ]
         );
-        let heading = &visible[1];
+        let heading = &visible[3];
         assert_eq!(heading.raw, "  ## live\r\n");
         assert_eq!(heading.offset, body.find("  ## live").unwrap());
         assert_eq!(heading.index, 19);
         for line in visible {
             assert_eq!(&body[line.offset..line.offset + line.raw.len()], line.raw);
         }
+    }
+
+    #[test]
+    fn literal_comment_marker_in_inline_code_does_not_hide_following_lines() {
+        let body = "## Decision log\nUse `<!--` in examples.\nUse ``<!--`` too.\nUse `<!--\\` too.\nUse \\<!-- as text.\n<!-- real comment --> `<!--`\n### Real\n- **Decision:** Keep the visible entry.\n- **Status:** active\n";
+        let visible = prose_lines(body);
+        assert_eq!(
+            visible.iter().map(|line| line.text).collect::<Vec<_>>(),
+            [
+                "## Decision log",
+                "Use `<!--` in examples.",
+                "Use ``<!--`` too.",
+                "Use `<!--\\` too.",
+                "Use \\<!-- as text.",
+                "### Real",
+                "- **Decision:** Keep the visible entry.",
+                "- **Status:** active"
+            ]
+        );
+    }
+
+    #[test]
+    fn multiline_inline_code_and_raw_html_do_not_hide_or_create_decisions() {
+        let body = "## Decision log\nUse `literal\nwith <!-- marker\nend` here.\n<pre>\n### Fake\n- **Decision:** Do not use.\n- **Status:** active\n</pre>\n### Real\n- **Decision:** Keep the visible entry.\n- **Status:** active\n";
+        let visible = prose_lines(body);
+        assert_eq!(
+            visible.iter().map(|line| line.text).collect::<Vec<_>>(),
+            [
+                "## Decision log",
+                "Use `literal",
+                "with <!-- marker",
+                "end` here.",
+                "### Real",
+                "- **Decision:** Keep the visible entry.",
+                "- **Status:** active"
+            ]
+        );
+    }
+
+    #[test]
+    fn many_comments_on_one_line_leave_next_heading_visible() {
+        let body = format!("{}\n### Real\n", "<!--x-->".repeat(8_192));
+        let visible = prose_lines(&body);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, "### Real");
+        assert_eq!(visible[0].index, 1);
     }
 
     #[test]
@@ -1416,6 +1555,8 @@ mod tests {
             ("Status:** active", "Status:** unexpected"),
             ("Evidence:** `audit.md`", "Evidence:** ``"),
             ("Evidence:** `audit.md`", "Evidence:** TBD"),
+            ("Evidence:** `audit.md`", "Evidence:** <evidence>"),
+            ("Evidence:** `audit.md`", "Evidence:** `<evidence>`"),
             ("Provenance:** planner review", "Provenance:**"),
             (
                 "Reusable lesson:** Scope the implementation before handing off.",
@@ -1428,6 +1569,10 @@ mod tests {
             (
                 "Reusable lesson:** Scope the implementation before handing off.",
                 "Reusable lesson:** `<reviewed lesson>`",
+            ),
+            (
+                "Reusable lesson:** Scope the implementation before handing off.",
+                "Reusable lesson:** <lesson>",
             ),
         ] {
             std::fs::write(tasks.join("_lessons.md"), valid.replace(from, to)).unwrap();

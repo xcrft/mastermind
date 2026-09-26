@@ -91,7 +91,7 @@ excerpts.
 | Review the current change | Changed symbols, downstream reach, component crossings, candidate tests, and an evidence inspector |
 | Audit the architecture | Components, entry points, cycles, centrality, large-file pressure, ownership concentration, and change hotspots |
 | Keep boundaries enforceable | Repository policy checks with text, JSON, and SARIF output |
-| Give an agent real context | 30 bounded MCP tools, including local concept search and one revision-bound role brief, over the same local graph |
+| Give an agent real context | 32 bounded MCP tools, including code and document search plus one revision-bound role brief, over the same local graph |
 | Hand the review to anyone | A standalone offline Lens package with HTML, SARIF, summary, and a revision/evidence manifest |
 
 <table>
@@ -230,7 +230,7 @@ runtime execution or acceptance.
 
 Mastermind supports Claude Code, Codex, Cursor, Continue, and generic MCP stdio
 clients. Setup is dry-run-first unless `--write` is present. The MCP surface has
-21 non-destructive queries that may refresh the managed derived index, 8
+21 non-destructive queries that may refresh the managed derived index, 9
 read-only tools, and one additive write to the local gitignored scratchpad.
 
 ## How it works
@@ -298,8 +298,8 @@ not permission to skip tests or delete code.
 
 Explicit agent-assisted commands are the privacy exception:
 `mastermind init` without `--no-claude` may send repository content through the
-configured Claude CLI, and `mastermind miner profile --deep` sends bounded
-samples for synthesis. Deterministic indexing, Lens, MCP, policy, facts, and
+configured Claude CLI, and `mastermind miner profile --deep` sends screened,
+bounded samples to produce an unreviewed candidate. Deterministic indexing, Lens, MCP, policy, facts, and
 review export remain local.
 
 ## Documentation

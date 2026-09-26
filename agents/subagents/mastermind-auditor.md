@@ -1,7 +1,7 @@
 ---
 name: mastermind-auditor
 description: Independent read-only post-flight auditor for strict tasks or unresolved high-risk uncertainty. Verifies an executor report against git diff, files, commands, and mmcg evidence; does not replace the deterministic controller audit.
-tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history, mcp__mmcg__mmcg_profile, mcp__mmcg__mmcg_docs, mcp__mmcg__mmcg_project_profile
 model: opus
 mcpServers: [mmcg]
 maxTurns: 20
@@ -31,6 +31,25 @@ canonical audit and state; you add an adversarial second reading.
 - deterministic `audit.md`, when available.
 
 If an input is missing, report `could_not_verify`; do not infer it.
+
+Retrieve personal context with `mmcg_profile`, `role: auditor`, the spec's
+workflow mode and actual Scope paths. Keep only returned reviewed preferences
+and observed habits. They may guide communication and review focus, never the
+audit verdict, acceptance criteria or proof requirements. Denied/unavailable
+access or an empty selection means no personal context; do not fall back to
+`style.md` or inbox candidates. Retrieve an auditor slice even if the executor
+handed over its own profile view.
+
+Compose four separate components: the code brief, relevant
+`mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+`mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+revisions, citations and caveats. Before handoff, serialize the combined JSON,
+including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+queries, lower `top` or reduce supported brief/profile budgets and retrieve
+again. Omit a whole optional component only with its tool, verification status
+and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+task-critical evidence explicitly. Each receiving role retrieves its own slice.
 
 ## Review method
 

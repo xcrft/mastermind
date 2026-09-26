@@ -10,6 +10,9 @@
 //!   not direct implementation preferences or allowed to override local code.
 //! - Deterministic: git + line heuristics, no LLM, so output is reproducible and
 //!   unit-testable.
+//! - The sampling unit is the commit. Lines in one commit share one decision and
+//!   often one formatter pass, so each commit with an opportunity votes once and
+//!   a rule needs enough agreeing commits, not enough lines.
 //! - A rule is emitted only with a dominant pattern over enough samples, and
 //!   names the counter-pattern it rejects. No signal → no rule, never filler.
 //! - Each mine enriches a user-global cross-repo store (`~/.mastermind/style.db`)
@@ -17,9 +20,15 @@
 //!   manual and interpreted blocks. `--force` rebuilds the store from this repo
 //!   alone. Re-mining is user-invoked — there is no silent online update.
 
+use super::range;
+use super::stats::{bump, cget, dominant, gate, support, Confidence, MIN_COMMITS};
 use super::store::{self, Counts};
+use super::tooling::{self, Governed, ToolScope};
+use super::workflow::{self, CommitShape};
 use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
 use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -29,17 +38,30 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Drop a repo's contribution once it hasn't been mined in this many days.
 const RETENTION_DAYS: i64 = 365;
 
-/// Commits scanned for diffs. Provenance still counts the full history.
+/// Newest authored commits listed for commit voice and sample selection.
+/// Provenance still counts the full history.
+const LISTED_COMMIT_CAP: usize = 2000;
+/// Commits whose diffs feed the code-shape detectors.
 const COMMIT_SAMPLE_CAP: usize = 400;
+/// Added source lines above which a commit is bulk (vendoring, generation, mass
+/// moves) rather than hand-written code, and is left out of diff sampling.
+/// ponytail: fixed threshold; calibrate on held-out history.
+const BULK_COMMIT_LINES: usize = 2000;
+/// Commits per `git log --stdin` diff request; an oversized batch splits.
+const DIFF_BATCH: usize = 50;
+/// Detector contract of stored commit tallies. Bump it when a detector changes
+/// so incremental mines measure old commits again instead of reusing them.
+const EXTRACTOR: &str = "style-commit-v5";
 const GIT_METADATA_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GIT_SAMPLE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
-const MIN_SAMPLES: usize = 20;
-const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:3 -->";
-const PROFILE_REVISION_PREFIX: &str = "<!-- mastermind-style:store-revision:";
+const PROFILE_SCHEMA_MARKER: &str = "<!-- mastermind-style:schema:5 -->";
+const PROFILE_REVISION_PREFIX: &str = "<!-- mastermind-style:snapshot-revision:";
+const PROFILE_STORE_REVISION_PREFIX: &str = "<!-- mastermind-style:store-revision:";
 const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const PROFILE_LOCK_FILE: &str = ".style-profile.lock";
 const PROFILE_WRITE_ATTEMPTS: usize = 3;
+const MAX_HABITS_TO_REVALIDATE: usize = 64;
 const DEEP_PROMPT_LIMIT: usize = 24 * 1024;
 const DEEP_OUTPUT_LIMIT: usize = 64 * 1024;
 const DEEP_COMMIT_FIELD_LIMIT: usize = 160;
@@ -98,6 +120,7 @@ fn mine_to_paths(
     path: &Path,
 ) -> Result<SeedOutcome, Box<dyn std::error::Error>> {
     let repo_key = repository_key(repo_root)?;
+    let repo_label = repository_label(&repo_key);
     let author = match author {
         Some(a) => a,
         None => resolve_git_author(repo_root)?,
@@ -112,90 +135,200 @@ fn mine_to_paths(
         return Ok(SeedOutcome::NoCommits { author });
     }
 
-    let requested_sample = prov.commits_total.min(COMMIT_SAMPLE_CAP);
-    let (raw, sampled_commits) = git_log_patch(repo_root, &author, requested_sample, &history_ref)?;
-    let lines = parse_added_lines(&raw);
-    let commit_msgs = collect_commits(repo_root, &author, sampled_commits, &history_ref)?;
-    prov.commits_sampled = sampled_commits;
-    prov.added_lines_sampled = lines.len();
+    let commit_msgs = collect_commits(repo_root, &author, LISTED_COMMIT_CAP, &history_ref)?;
+    let shapes = commit_shapes(repo_root, &author, commit_msgs.len(), &history_ref)?;
+    let listing = tooling::listing(repo_root, &history_ref)?;
+    let scopes = tooling::detect(repo_root, &history_ref, listing.as_deref())?;
+    let first_party =
+        range::FirstParty::from_snapshot(repo_root, &history_ref, listing.as_deref())?;
+    // Reuse requires the same detectors, tooling and local-module classifier.
+    let extractor = format!(
+        "{EXTRACTOR}+{}+{}",
+        tooling::fingerprint(&scopes),
+        first_party.fingerprint()
+    );
+    // `--force` rebuilds and `--deep` needs fresh diff text, so both measure again.
+    let mut previous = if force || deep {
+        HashMap::new()
+    } else {
+        reusable_evidence(db_path, &repo_key, &author, &extractor)
+    };
+    let selected = select_sample(&commit_msgs, &shapes);
+    // The cache only avoids I/O. It must not change which commits participate.
+    let selected_set: BTreeSet<_> = selected.iter().cloned().collect();
+    previous.retain(|sha, _| selected_set.contains(sha));
+    let missing: Vec<_> = selected
+        .into_iter()
+        .filter(|sha| !previous.contains_key(sha))
+        .collect();
+    let diffs = fetch_diffs(repo_root, &missing, &scopes)?;
+    let evidence = commit_evidence(
+        &commit_msgs,
+        &shapes,
+        &diffs,
+        &previous,
+        (&repo_label, &first_party),
+    );
+    prov.commits_sampled = evidence
+        .iter()
+        .filter(|commit| cget(&commit.counts, "diff.sampled") > 0)
+        .count();
+    prov.added_lines_sampled = evidence
+        .iter()
+        .map(|commit| cget(&commit.counts, "diff.lines") as usize)
+        .sum();
 
-    let mut counts = Counts::new();
-    accumulate(&lines, &commit_msgs, &mut counts);
+    let mut deep_rules = None;
+    let (pruned, published) = publish_profile(
+        db_path,
+        path,
+        force,
+        |db| {
+            if !force {
+                ensure_owner_compatible(db, &author, &prov.identities)?;
+            }
+            let pruned = if force {
+                Vec::new()
+            } else {
+                stale_repository_keys(db)?
+            };
+            let aliases = if force {
+                Vec::new()
+            } else {
+                legacy_repository_keys(db, &repo_key)?
+            };
+            let mut removed = pruned.clone();
+            removed.extend(aliases);
+            db.apply_mine(
+                force,
+                &removed,
+                &repo_key,
+                &store::RepoProvenance {
+                    author: author.clone(),
+                    commits_total: prov.commits_total as i64,
+                    commits_sampled: prov.commits_sampled as i64,
+                    added_lines_sampled: prov.added_lines_sampled as i64,
+                    latest_sha: prov.latest_sha.clone(),
+                    latest_date: prov.latest_date.clone(),
+                    mined_at_epoch: now_epoch(),
+                    extractor: extractor.clone(),
+                },
+                &prov.identities,
+                &evidence,
+            )?;
+            for key in &pruned {
+                eprintln!("retention: dropped {key} (gone or stale > {RETENTION_DAYS}d)");
+            }
+            Ok(pruned)
+        },
+        // Capture the exact rules from the published SQL snapshot. The model
+        // runs after the global publication lock has been released.
+        |rules| {
+            if deep {
+                deep_rules = Some(rules.to_vec());
+            }
+            None
+        },
+    )?;
+    let candidate_saved = if let Some(rules) = deep_rules {
+        eprintln!("Deep mode sends screened sampled lines and commit messages to `claude -p`.");
+        let lines: Vec<AddedLine> = commit_msgs
+            .iter()
+            .filter_map(|commit| diffs.get(&commit.sha)?.as_ref())
+            .flatten()
+            .cloned()
+            .collect();
+        match synthesize(repo_root, &rules, &commit_msgs, &lines) {
+            Ok(candidate) => {
+                match write_deep_candidate(
+                    path,
+                    &repo_key,
+                    &history_ref,
+                    &published.revision,
+                    &candidate,
+                ) {
+                    Ok(target) => {
+                        eprintln!("Deep interpretation candidate saved at {}. Review source evidence before using it.", target.display());
+                        true
+                    }
+                    Err(error) => {
+                        eprintln!("deep candidate could not be saved — {error}");
+                        false
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("deep synthesis skipped — {error}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    Ok(SeedOutcome::Enriched {
+        repo_commits: prov.commits_total as i64,
+        author,
+        repos: published.repos,
+        rules: published.rules,
+        commits: published.commits,
+        pruned: pruned.len(),
+        synthesized: candidate_saved,
+        empty: published.rules == 0,
+    })
+}
 
+/// What one publication of `style.md` contained.
+pub(super) struct Published {
+    pub(super) repos: usize,
+    pub(super) commits: i64,
+    pub(super) rules: usize,
+    pub(super) revision: String,
+}
+
+/// Apply `mutate` to the store and regenerate `style.md` from the new aggregate
+/// under the global profile lock. Manual and interpreted sections survive
+/// unless `replace` (a full owner replacement) is set; `interpret` may supply a
+/// new interpreted section from the derived rules.
+pub(super) fn publish_profile<T>(
+    db_path: &Path,
+    path: &Path,
+    replace: bool,
+    mutate: impl FnOnce(&mut store::ProfileStore) -> Result<T, Box<dyn std::error::Error>>,
+    interpret: impl FnOnce(&[StyleRule]) -> Option<String>,
+) -> Result<(T, Published), Box<dyn std::error::Error>> {
     let (profile_root, profile_target) = crate::bounded_fs::prepare_file_target(path)?;
     let lock_path = profile_root.canonical_root().join(PROFILE_LOCK_FILE);
     let lock =
         crate::bounded_fs::open_locked_regular_file_with_capability(&profile_root, &lock_path)?;
 
-    let result: Result<SeedOutcome, Box<dyn std::error::Error>> = (|| {
-        // Snapshot after acquiring the global style lock so two miners cannot
+    let result: Result<(T, Published), Box<dyn std::error::Error>> = (|| {
+        // Snapshot after acquiring the global style lock so two writers cannot
         // derive and publish from the same stale profile/store pair.
-        let mut existing = read_existing_profile(&profile_root, &profile_target, force)?;
-
+        let mut existing = read_existing_profile(&profile_root, &profile_target, replace)?;
         let mut db = store::ProfileStore::open(db_path)?;
-        if !force {
-            ensure_owner_compatible(&db, &author, &prov.identities)?;
-        }
-        let pruned = if force {
-            Vec::new()
-        } else {
-            stale_repository_keys(&db)?
-        };
-        let aliases = if force {
-            Vec::new()
-        } else {
-            legacy_repository_keys(&db, &repo_key)?
-        };
-        let mut removed = pruned.clone();
-        removed.extend(aliases);
-        db.apply_mine(
-            force,
-            &removed,
-            &repo_key,
-            &store::RepoProvenance {
-                author: author.clone(),
-                commits_total: prov.commits_total as i64,
-                commits_sampled: prov.commits_sampled as i64,
-                added_lines_sampled: prov.added_lines_sampled as i64,
-                latest_sha: prov.latest_sha.clone(),
-                latest_date: prov.latest_date.clone(),
-                mined_at_epoch: now_epoch(),
-            },
-            &prov.identities,
-            &counts,
-        )?;
-        for key in &pruned {
-            eprintln!("retention: dropped {key} (gone or stale > {RETENTION_DAYS}d)");
-        }
-
-        let agg = db.aggregate()?;
-        let rules = derive_rules(&agg.counts);
-
-        // Stage 2 (opt-in): an LLM writes the "design patterns" section regex can't,
-        // from this repo's samples + the measured rules. Best-effort.
-        let generated_interpreted = if deep {
-            eprintln!("Deep mode sends sampled added lines and commit messages to `claude -p`.");
-            match synthesize(repo_root, &rules, &commit_msgs, &lines) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    eprintln!("deep synthesis skipped — {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let synthesized = generated_interpreted.is_some();
+        let mut value = Some(mutate(&mut db)?);
+        let mut agg = db.aggregate()?;
+        let store_revision = agg.profile_revision();
+        let mut verifier = super::feedback::QuoteSourceVerifier::new();
+        mark_unavailable_claims(&db, &mut agg, &mut verifier);
+        let rules = derive_rules(&agg.counts, &agg.commits);
+        let generated_interpreted = interpret(&rules);
 
         for attempt in 0..PROFILE_WRITE_ATTEMPTS {
-            // `--force` is a full owner/profile replacement, so carrying manual or
-            // interpreted prose from the previous owner would be cross-person leakage.
+            // A replacement is a new owner, so carrying manual or interpreted
+            // prose from the previous owner would be cross-person leakage.
             let manual = existing.body.as_deref().and_then(extract_manual);
             let preserved_interpreted = existing.body.as_deref().and_then(extract_interpreted);
             let interpreted = generated_interpreted
                 .as_deref()
                 .or(preserved_interpreted.as_deref());
-            let markdown = render_profile(&author, &agg, &rules, interpreted, manual.as_deref());
+            let markdown = render_profile(
+                &agg,
+                &store_revision,
+                &rules,
+                interpreted,
+                manual.as_deref(),
+            );
             if markdown.len() as u64 > MAX_STYLE_PROFILE_SIZE {
                 return Err(format!(
                     "rendered style profile has {} bytes, limit is {MAX_STYLE_PROFILE_SIZE}",
@@ -211,19 +344,16 @@ fn mine_to_paths(
                 existing.expectation,
             ) {
                 Ok(()) => {
-                    return Ok(SeedOutcome::Enriched {
-                        repo_commits: prov.commits_total as i64,
-                        author,
+                    let published = Published {
                         repos: agg.repos,
-                        rules: rules.len(),
                         commits: agg.commits_total,
-                        pruned: pruned.len(),
-                        synthesized,
-                        empty: rules.is_empty(),
-                    });
+                        rules: rules.len(),
+                        revision: agg.profile_revision(),
+                    };
+                    return Ok((value.take().expect("published once"), published));
                 }
                 Err(BoundedReadError::SnapshotChanged)
-                    if !force && attempt + 1 < PROFILE_WRITE_ATTEMPTS =>
+                    if !replace && attempt + 1 < PROFILE_WRITE_ATTEMPTS =>
                 {
                     existing = read_existing_profile(&profile_root, &profile_target, false)?;
                 }
@@ -236,6 +366,41 @@ fn mine_to_paths(
     match (result, unlock) {
         (Err(error), _) => Err(error),
         (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
+}
+
+/// Update private collection state under the same global writer lock, without
+/// publishing it into style.md or changing the profile's aggregate revision.
+/// Prepare against a read-only snapshot before opening a writable store, so
+/// a failed first collection does not create a seemingly broken profile.
+/// A preparation can return a completed no-op without opening/migrating SQLite.
+pub(super) fn mutate_private_store<P, T>(
+    db_path: &Path,
+    prepare: impl FnOnce(
+        Option<&store::ProfileStore>,
+    ) -> Result<std::ops::ControlFlow<T, P>, Box<dyn std::error::Error>>,
+    mutate: impl FnOnce(&mut store::ProfileStore, P) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let (root, target) = crate::bounded_fs::prepare_file_target(db_path)?;
+    let lock = crate::bounded_fs::open_locked_regular_file_with_capability(
+        &root,
+        &root.canonical_root().join(PROFILE_LOCK_FILE),
+    )?;
+    let result = (|| {
+        let existing = store::ProfileStore::open_optional_read_only(&target)?;
+        let prepared = match prepare(existing.as_ref())? {
+            std::ops::ControlFlow::Continue(prepared) => prepared,
+            std::ops::ControlFlow::Break(value) => return Ok(value),
+        };
+        drop(existing);
+        let mut db = store::ProfileStore::open(&target)?;
+        mutate(&mut db, prepared)
+    })();
+    let unlock = lock.unlock();
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(error)) => Err(error.into()),
     }
 }
@@ -253,6 +418,80 @@ fn repository_key(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let path = output.strip_suffix('\n').unwrap_or(&output);
     let path = path.strip_suffix('\r').unwrap_or(path);
     Ok(canonical_repository_key(Path::new(path))?)
+}
+
+/// Short repository name for range areas: the checkout directory owning the
+/// Git common directory, without a `.git` suffix.
+fn repository_label(key: &str) -> String {
+    let path = Path::new(key);
+    let owner = if path.file_name() == Some(".git".as_ref()) {
+        path.parent().and_then(Path::file_name)
+    } else {
+        path.file_name()
+    };
+    owner
+        .map(|name| name.to_string_lossy().trim_end_matches(".git").to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "repository".to_string())
+}
+
+/// A remote-backed project identifier when available. A repo without an origin
+/// uses its Git common directory and cannot prove cross-project independence. The Claude
+/// directory slug is lossy and must never authorize retrieval.
+pub(super) fn persona_project_id(root: &Path) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    if let Some(remote) = persona_repository_id(&root) {
+        return Some(format!("remote:{remote}"));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-persona-project-local-v1\0");
+    let identity = repository_key(&root).unwrap_or_else(|_| root.to_string_lossy().into_owned());
+    digest.update(identity.as_bytes());
+    Some(format!("local:{}", crate::hex::encode(&digest.finalize())))
+}
+
+/// Canonical remote identity for the global-habit independence gate. Local
+/// paths and missing remotes cannot prove that two checkouts are different
+/// projects, so they return None.
+pub(super) fn persona_repository_id(root: &Path) -> Option<String> {
+    let remote = git_config(root, "remote.origin.url")?;
+    let normalized = normalize_git_remote(&remote)?;
+    let mut digest = Sha256::new();
+    digest.update(b"mastermind-persona-remote-v1\0");
+    digest.update(normalized.as_bytes());
+    Some(crate::hex::encode(&digest.finalize()))
+}
+
+fn normalize_git_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let (host, path) = if let Some((scheme, rest)) = remote.split_once("://") {
+        if !matches!(scheme, "https" | "http" | "ssh" | "git") {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = remote.split_once(':')?;
+        if authority.contains('/') {
+            return None;
+        }
+        (authority.rsplit('@').next()?, path)
+    };
+    let host = host.to_ascii_lowercase();
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    let path = if host == "github.com" {
+        path.to_ascii_lowercase()
+    } else {
+        path.to_string()
+    };
+    if host.is_empty()
+        || path.is_empty()
+        || host.contains(|c: char| c.is_whitespace())
+        || path.chars().any(|ch| matches!(ch, '?' | '#' | '\\'))
+    {
+        return None;
+    }
+    Some(format!("{host}/{path}"))
 }
 
 fn canonical_repository_key(path: &Path) -> std::io::Result<String> {
@@ -382,12 +621,13 @@ pub fn run(
                 println!("Retention: dropped {pruned} stale repo(s).");
             }
             if synthesized {
-                println!("Included a deep LLM analysis section (design patterns & tendencies).");
+                println!("Saved a deep interpretation candidate for human review; it is not in style.md or MCP.");
             }
             if empty {
                 println!(
-                    "No idiom cleared the falsifiability gate (needs a dominant pattern with \
-                     enough samples). Recorded honestly rather than padded with generic advice."
+                    "Insufficient evidence: no idiom has agreement across at least \
+                     {MIN_COMMITS} commits yet. Recorded honestly rather than padded with \
+                     generic advice."
                 );
             }
         }
@@ -396,9 +636,48 @@ pub fn run(
 }
 
 /// `~/.mastermind/style.md` — the user-global, cross-repo profile location.
-fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub(super) fn profile_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let home = std::env::home_dir().ok_or("could not resolve home directory")?;
     Ok(home.join(".mastermind").join("style.md"))
+}
+
+/// Keep unreviewed model text outside the managed profile. Each run creates a
+/// new no-follow artifact, so re-running cannot silently replace a reviewed or
+/// edited candidate from the same Git snapshot.
+fn write_deep_candidate(
+    profile_path: &Path,
+    repo_key: &str,
+    snapshot: &str,
+    profile_revision: &str,
+    candidate: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mut digest = Sha256::new();
+    digest.update(repo_key.as_bytes());
+    digest.update([0]);
+    digest.update(snapshot.as_bytes());
+    let id = crate::hex::encode(&digest.finalize());
+    let target = profile_path.with_file_name(format!(
+        "style.deep-candidate-{}-{}.md",
+        &id[..16],
+        now_epoch()
+    ));
+    let (root, target) = crate::bounded_fs::prepare_file_target(&target)?;
+    let absent = crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())?
+        .ok_or("deep candidate path already exists")?;
+    let body = format!(
+        "# Unreviewed persona interpretation\n\nSource: `{repo_key}` at Git commit `{snapshot}`.\n\
+         Profile SQL revision: `{profile_revision}`.\n\
+         Model output is a candidate only. Check attribution, cited examples, and counterexamples \
+         before moving any statement into the profile.\n\n{candidate}\n"
+    );
+    crate::bounded_fs::write_atomic_regular_file_expected_with_capability(
+        &root,
+        &target,
+        body.as_bytes(),
+        true,
+        AtomicWriteExpectation::Missing(absent),
+    )?;
+    Ok(target)
 }
 
 /// Freshness of the on-disk profile relative to the author's commits in `root`.
@@ -473,8 +752,11 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
     };
     match (profile, db) {
         (None, None) => Staleness::Absent,
-        (None, Some(_)) => Staleness::Invalid {
-            reason: "style.md is missing while style.db still exists".into(),
+        (None, Some(db)) => match db.has_only_collection_data() {
+            Ok(true) => Staleness::Absent,
+            _ => Staleness::Invalid {
+                reason: "style.md is missing while style.db still exists".into(),
+            },
         },
         (Some(_), None) => Staleness::Invalid {
             reason: "style.db is missing for the generated style.md".into(),
@@ -484,7 +766,7 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
                 Ok(revision) => revision,
                 Err(reason) => return Staleness::Invalid { reason },
             };
-            let aggregate = match db.aggregate() {
+            let mut aggregate = match db.aggregate() {
                 Ok(aggregate) => aggregate,
                 Err(error) => {
                     return Staleness::Invalid {
@@ -492,6 +774,15 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
                     };
                 }
             };
+            if header_revision(&profile, 4, PROFILE_STORE_REVISION_PREFIX)
+                != Ok(aggregate.profile_revision().as_str())
+            {
+                return Staleness::Invalid {
+                    reason: "style.md was generated from different canonical SQL inputs".into(),
+                };
+            }
+            let mut verifier = super::feedback::QuoteSourceVerifier::new();
+            mark_unavailable_claims(&db, &mut aggregate, &mut verifier);
             if profile_revision != aggregate.profile_revision() {
                 return Staleness::Invalid {
                     reason: "style.md was generated from a different style.db revision".into(),
@@ -503,15 +794,19 @@ fn staleness_at(root: &Path, profile_path: &Path, db_path: &Path) -> Staleness {
 }
 
 fn profile_revision(profile: &str) -> Result<&str, String> {
+    header_revision(profile, 3, PROFILE_REVISION_PREFIX)
+}
+
+fn header_revision<'a>(profile: &'a str, line: usize, prefix: &str) -> Result<&'a str, String> {
     if !has_current_profile_header(profile) {
         return Err("style profile header is malformed".into());
     }
     let line = profile
         .lines()
-        .nth(3)
+        .nth(line)
         .ok_or_else(|| "style profile store revision is missing".to_string())?;
     let revision = line
-        .strip_prefix(PROFILE_REVISION_PREFIX)
+        .strip_prefix(prefix)
         .and_then(|line| line.strip_suffix(" -->"))
         .ok_or_else(|| "style profile store revision is malformed".to_string())?;
     if revision.len() != 64
@@ -801,21 +1096,18 @@ fn parse_shortlog_identities(raw: &str) -> Result<Vec<String>, Box<dyn std::erro
     Ok(identities)
 }
 
-/// `git log -p` for the author's most recent `cap` commits, zero context so the
-/// scan sees only changed lines.
-fn git_log_patch(
+/// File kinds and added lines per authored commit. Renames count as rewrites
+/// here, which only makes a moved file look bulkier.
+fn commit_shapes(
     root: &Path,
     author: &str,
     cap: usize,
     history_ref: &str,
-) -> Result<(String, usize), Box<dyn std::error::Error>> {
-    if cap == 0 {
-        return Ok((String::new(), 0));
-    }
+) -> Result<HashMap<String, CommitShape>, Box<dyn std::error::Error>> {
     let author = format!("--author={author}");
-    let mut sampled = cap;
-    loop {
-        let count = format!("-n{sampled}");
+    let mut listed = cap;
+    while listed > 0 {
+        let count = format!("-n{listed}");
         let out = run_bounded_git_with_limit(
             root,
             &[
@@ -823,12 +1115,10 @@ fn git_log_patch(
                 "--no-merges",
                 "--fixed-strings",
                 &author,
-                "-p",
-                "--unified=0",
-                "-M", // follow renames; don't count moved code as authored
                 &count,
-                "--no-color",
-                "--pretty=format:", // suppress commit headers — we only want diffs
+                "--numstat",
+                "--no-renames",
+                "--format=%x1e%H",
                 history_ref,
             ],
             None,
@@ -836,46 +1126,144 @@ fn git_log_patch(
         );
         match out {
             Ok(out) if out.success => {
-                let sampled_commits = git_sample_count(root, &author, sampled, history_ref)?;
-                return Ok((
-                    String::from_utf8_lossy(&out.stdout).into_owned(),
-                    sampled_commits,
+                let raw = String::from_utf8_lossy(&out.stdout);
+                return Ok(workflow::parse_numstat(
+                    &raw,
+                    should_mine_path,
+                    is_generated_path,
                 ));
             }
-            Ok(_) => return Err("git log -p exited unsuccessfully".into()),
-            Err(WorkingTreeDiffError::GitOutputLimit) if sampled > 1 => {
-                sampled = sampled.div_ceil(2);
-            }
-            Err(error) => return Err(format!("git log -p failed: {error}").into()),
+            Ok(_) => return Err("git log --numstat exited unsuccessfully".into()),
+            // Commits beyond the shortened listing have no size and are not sampled.
+            Err(WorkingTreeDiffError::GitOutputLimit) => listed /= 2,
+            Err(error) => return Err(format!("git log --numstat failed: {error}").into()),
         }
+    }
+    Ok(HashMap::new())
+}
+
+/// Diff tallies from an earlier mine of this repository that are still valid:
+/// same author label and detector contract. Reuse is an optimisation, so an
+/// unreadable or older store is measured again; the locked write path still
+/// reports real store errors.
+fn reusable_evidence(
+    db_path: &Path,
+    repo_key: &str,
+    author: &str,
+    extractor: &str,
+) -> HashMap<String, Counts> {
+    let stored = store::ProfileStore::open_optional_read_only(db_path)
+        .ok()
+        .flatten()
+        .and_then(|db| db.repo_evidence(repo_key).ok().flatten());
+    match stored {
+        Some(stored)
+            if stored.extractor == extractor && stored.author.eq_ignore_ascii_case(author) =>
+        {
+            stored
+                .commits
+                .into_iter()
+                .filter(|commit| cget(&commit.counts, "diff.sampled") > 0)
+                .map(|commit| (commit.sha, commit.counts))
+                .collect()
+        }
+        _ => HashMap::new(),
     }
 }
 
-/// Count the exact prefix selected for a bounded patch sample. The requested
-/// cap is only an upper bound: a short history must not be reported as though
-/// it supplied more commits than it contains.
-fn git_sample_count(
+/// Current sample, independent of earlier mines. The cap goes round-robin
+/// across months, newest month first and
+/// newest commit first within a month, so one busy week cannot fill the sample.
+/// Bulk and non-source commits are never selected.
+fn select_sample(commits: &[Commit], shapes: &HashMap<String, CommitShape>) -> Vec<String> {
+    let mut months: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for commit in commits {
+        let added = shapes
+            .get(&commit.sha)
+            .map_or(0, |shape| shape.source_added);
+        if added == 0 || added > BULK_COMMIT_LINES {
+            continue;
+        }
+        let month = commit.date.get(..7).unwrap_or(&commit.date);
+        months.entry(month).or_default().push(&commit.sha);
+    }
+    let mut queues: Vec<_> = months.into_values().rev().map(Vec::into_iter).collect();
+    let mut picked = Vec::new();
+    while picked.len() < COMMIT_SAMPLE_CAP {
+        let before = picked.len();
+        for queue in &mut queues {
+            if picked.len() == COMMIT_SAMPLE_CAP {
+                break;
+            }
+            if let Some(sha) = queue.next() {
+                picked.push(sha.to_string());
+            }
+        }
+        if picked.len() == before {
+            break;
+        }
+    }
+    picked
+}
+
+/// Added lines of each selected commit; `None` when its diff was too large to read.
+type CommitDiffs = HashMap<String, Option<Vec<AddedLine>>>;
+
+/// Diffs of the selected commits, read in batches through stdin. A batch over
+/// the output limit splits in half; a single oversized commit maps to `None`,
+/// because a diff that large is bulk rather than hand-written code.
+fn fetch_diffs(
     root: &Path,
-    author_option: &str,
-    cap: usize,
-    history_ref: &str,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let count = format!("-n{cap}");
-    let out = run_profile_git(
+    shas: &[String],
+    scopes: &[ToolScope],
+) -> Result<CommitDiffs, Box<dyn std::error::Error>> {
+    let mut diffs = HashMap::new();
+    for batch in shas.chunks(DIFF_BATCH) {
+        fetch_diff_batch(root, batch, scopes, &mut diffs)?;
+    }
+    Ok(diffs)
+}
+
+fn fetch_diff_batch(
+    root: &Path,
+    batch: &[String],
+    scopes: &[ToolScope],
+    diffs: &mut CommitDiffs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let input: String = batch.iter().map(|sha| format!("{sha}\n")).collect();
+    let out = run_bounded_git_with_limit(
         root,
         &[
-            "rev-list",
-            "--count",
-            "--no-merges",
-            "--fixed-strings",
-            author_option,
-            &count,
-            history_ref,
+            "log",
+            "--stdin",
+            "--no-walk=unsorted",
+            "-p",
+            "--unified=0",
+            "-M", // follow renames; don't count moved code as authored
+            "--no-color",
+            "--pretty=format:%x1e%H",
         ],
-        GIT_METADATA_OUTPUT_LIMIT,
-        "git sampled history count",
-    )?;
-    Ok(String::from_utf8(out)?.trim().parse::<usize>()?)
+        Some(input.as_bytes()),
+        GIT_SAMPLE_OUTPUT_LIMIT,
+    );
+    match out {
+        Ok(out) if out.success => {
+            let parsed = parse_commit_diffs(&String::from_utf8_lossy(&out.stdout), scopes);
+            diffs.extend(parsed.into_iter().map(|(sha, lines)| (sha, Some(lines))));
+            Ok(())
+        }
+        Ok(_) => Err("git log -p exited unsuccessfully".into()),
+        Err(WorkingTreeDiffError::GitOutputLimit) if batch.len() > 1 => {
+            let (first, second) = batch.split_at(batch.len() / 2);
+            fetch_diff_batch(root, first, scopes, diffs)?;
+            fetch_diff_batch(root, second, scopes, diffs)
+        }
+        Err(WorkingTreeDiffError::GitOutputLimit) => {
+            diffs.insert(batch[0].clone(), None);
+            Ok(())
+        }
+        Err(error) => Err(format!("git log -p failed: {error}").into()),
+    }
 }
 
 fn date_only(iso: &str) -> &str {
@@ -884,11 +1272,13 @@ fn date_only(iso: &str) -> &str {
 
 /// One of the author's commit messages.
 struct Commit {
+    sha: String,
+    date: String,
     subject: String,
     body: String,
 }
 
-/// The author's commit subjects + bodies, newest first, capped at `cap`.
+/// The author's commits (SHA, date, subject, body), newest first, capped at `cap`.
 fn collect_commits(
     root: &Path,
     author: &str,
@@ -896,33 +1286,109 @@ fn collect_commits(
     history_ref: &str,
 ) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
     let author = format!("--author={author}");
-    let count = format!("-n{cap}");
-    let out = run_profile_git(
-        root,
-        &[
-            "log",
-            "--no-merges",
-            "--fixed-strings",
-            &author,
-            &count,
-            history_ref,
-            // RS (1e) between commits, US (1f) between subject and body.
-            "--pretty=format:%x1e%s%x1f%b",
-        ],
-        GIT_SAMPLE_OUTPUT_LIMIT,
-        "git commit sample",
-    )?;
-    Ok(parse_commits(&String::from_utf8_lossy(&out)))
+    let mut listed = cap;
+    loop {
+        let count = format!("-n{listed}");
+        let out = run_bounded_git_with_limit(
+            root,
+            &[
+                "log",
+                "--no-merges",
+                "--fixed-strings",
+                &author,
+                &count,
+                history_ref,
+                // RS (1e) between commits, US (1f) between SHA, date, subject and body.
+                "--pretty=format:%x1e%H%x1f%aI%x1f%s%x1f%b",
+            ],
+            None,
+            GIT_SAMPLE_OUTPUT_LIMIT,
+        );
+        match out {
+            Ok(out) if out.success => {
+                return Ok(parse_commits(&String::from_utf8_lossy(&out.stdout)))
+            }
+            Ok(_) => return Err("git commit sample exited unsuccessfully".into()),
+            Err(WorkingTreeDiffError::GitOutputLimit) if listed > 1 => listed /= 2,
+            Err(error) => return Err(format!("git commit sample failed: {error}").into()),
+        }
+    }
 }
 
 fn parse_commits(raw: &str) -> Vec<Commit> {
     raw.split('\u{1e}')
         .filter(|r| !r.trim().is_empty())
         .map(|rec| {
-            let (subject, body) = rec.split_once('\u{1f}').unwrap_or((rec, ""));
+            let mut fields = rec.splitn(4, '\u{1f}');
+            let mut next = || fields.next().unwrap_or("").trim().to_string();
             Commit {
-                subject: subject.trim().to_string(),
-                body: body.trim().to_string(),
+                sha: next(),
+                date: next(),
+                subject: next(),
+                body: next(),
+            }
+        })
+        .collect()
+}
+
+/// Tally each listed commit separately; the store sums them and the gates count
+/// agreeing commits. Every commit contributes its message; `diff.sampled` marks
+/// the ones whose code was measured, and `diff.bulk` the ones left out as bulk.
+fn commit_evidence(
+    commits: &[Commit],
+    shapes: &HashMap<String, CommitShape>,
+    diffs: &CommitDiffs,
+    previous: &HashMap<String, Counts>,
+    (repo_label, first_party): (&str, &range::FirstParty),
+) -> Vec<store::CommitEvidence> {
+    commits
+        .iter()
+        .map(|commit| {
+            let counts = previous.get(&commit.sha).cloned().unwrap_or_else(|| {
+                let lines = diffs.get(&commit.sha);
+                let mut counts = Counts::new();
+                let measured = lines.and_then(Option::as_ref);
+                accumulate(
+                    measured.map(Vec::as_slice).unwrap_or(&[]),
+                    std::slice::from_ref(commit),
+                    &mut counts,
+                );
+                let shape = shapes.get(&commit.sha);
+                if let Some(measured) = measured {
+                    bump(&mut counts, "diff.sampled", 1);
+                    bump(&mut counts, "diff.lines", measured.len() as i64);
+                } else if matches!(lines, Some(None))
+                    || shape.map_or(0, |shape| shape.source_added) > BULK_COMMIT_LINES
+                {
+                    bump(&mut counts, "diff.bulk", 1);
+                }
+                let inline_tests = measured
+                    .map(|lines| lines.iter().any(|line| workflow::declares_test(&line.text)));
+                workflow::tally(&commit.subject, shape, inline_tests, &mut counts);
+                let libraries: BTreeSet<String> = measured
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|line| range::imported_library(line.lang.name()?, &line.text))
+                    .filter(|library| !first_party.contains(library))
+                    .collect();
+                let (languages, areas) = match shape {
+                    Some(shape) => (
+                        shape.languages.clone(),
+                        shape
+                            .areas
+                            .iter()
+                            .map(|area| format!("{repo_label}/{area}"))
+                            .collect(),
+                    ),
+                    None => Default::default(),
+                };
+                range::tally(&languages, &areas, &libraries, &mut counts);
+                counts
+            });
+            store::CommitEvidence {
+                sha: commit.sha.clone(),
+                authored_at: date_only(&commit.date).to_string(),
+                counts,
             }
         })
         .collect()
@@ -934,6 +1400,8 @@ struct AddedLine {
     lang: Lang,
     /// Content with the leading `+` stripped; indentation preserved (detectors rely on it).
     text: String,
+    /// Conventions the repository's formatter or linter decides for this file.
+    governed: Governed,
 }
 
 /// Extract added source lines from a unified-diff dump, tracking the current
@@ -942,9 +1410,14 @@ struct AddedLine {
 /// generated / vendored / lock / snapshot files (which would skew indentation,
 /// line length, comment density) and anything that isn't a real source language.
 fn should_mine_path(path: &str) -> bool {
+    !is_generated_path(path) && !matches!(lang_for_path(path), Lang::Other)
+}
+
+/// Generated, vendored, lock and snapshot files, which no one wrote by hand.
+fn is_generated_path(path: &str) -> bool {
     // Leading slash so top-level dirs (`dist/…`) match the `/dist/` checks too.
     let p = format!("/{}", path.to_ascii_lowercase());
-    let skip = p.contains("/generated/")
+    p.contains("/generated/")
         || p.contains("/dist/")
         || p.contains("/build/")
         || p.contains("/coverage/")
@@ -956,19 +1429,20 @@ fn should_mine_path(path: &str) -> bool {
         || p.ends_with("yarn.lock")
         || p.ends_with("cargo.lock")
         || p.ends_with(".snap")
-        || p.ends_with(".min.js");
-    !skip && !matches!(lang_for_path(path), Lang::Other)
+        || p.ends_with(".min.js")
 }
 
-fn parse_added_lines(raw: &str) -> Vec<AddedLine> {
+fn parse_added_lines(raw: &str, scopes: &[ToolScope]) -> Vec<AddedLine> {
     let mut out = Vec::new();
     let mut lang = Lang::Other;
     let mut mine = false;
+    let mut governed = Governed::default();
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("+++ ") {
             let path = rest.strip_prefix("b/").unwrap_or(rest);
             mine = should_mine_path(path);
             lang = lang_for_path(path);
+            governed = tooling::governed(scopes, path);
             continue;
         }
         if line.starts_with("+++") {
@@ -979,11 +1453,33 @@ fn parse_added_lines(raw: &str) -> Vec<AddedLine> {
                 out.push(AddedLine {
                     lang,
                     text: content.to_string(),
+                    governed,
                 });
             }
         }
     }
     out
+}
+
+/// Split a `git log -p` dump with RS-prefixed SHA lines into each commit's added
+/// source lines. Diff content lines start with a diff marker, so only a header
+/// line can begin with RS.
+fn parse_commit_diffs(raw: &str, scopes: &[ToolScope]) -> HashMap<String, Vec<AddedLine>> {
+    let starts: Vec<usize> = raw
+        .match_indices('\u{1e}')
+        .map(|(index, _)| index)
+        .filter(|&index| index == 0 || raw.as_bytes()[index - 1] == b'\n')
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = starts.get(n + 1).copied().unwrap_or(raw.len());
+            let record = &raw[start + 1..end];
+            let (sha, diff) = record.split_once('\n').unwrap_or((record, ""));
+            (sha.trim().to_string(), parse_added_lines(diff, scopes))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -999,6 +1495,20 @@ enum Lang {
     C,
     Cpp,
     Other,
+}
+
+impl Lang {
+    /// The range name of a language whose imports `range` understands.
+    fn name(self) -> Option<&'static str> {
+        match self {
+            Lang::Rust => Some("Rust"),
+            Lang::Ts => Some("TypeScript"),
+            Lang::Js => Some("JavaScript"),
+            Lang::Py => Some("Python"),
+            Lang::Go => Some("Go"),
+            _ => None,
+        }
+    }
 }
 
 fn lang_for_path(path: &str) -> Lang {
@@ -1018,21 +1528,6 @@ fn lang_for_path(path: &str) -> Lang {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Confidence {
-    High,
-    Medium,
-}
-
-impl Confidence {
-    fn label(self) -> &'static str {
-        match self {
-            Confidence::High => "high",
-            Confidence::Medium => "medium",
-        }
-    }
-}
-
 /// What a rule is about — splits the rendered profile into Code-shape vs Commit
 /// voice sections, and carries the language tag for language-specific rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1046,11 +1541,11 @@ enum RuleScope {
 }
 
 #[derive(Debug, Clone)]
-struct StyleRule {
+pub(super) struct StyleRule {
     id: &'static str,
     statement: String,
     evidence: String,
-    /// The pattern the rule rejects — what the author does NOT do.
+    /// Alternative observed pattern; it is not forbidden or proven absent.
     counter: &'static str,
     confidence: Confidence,
     scope: RuleScope,
@@ -1071,38 +1566,60 @@ struct Provenance {
     latest_sha: Option<String>,
 }
 
-fn bump(c: &mut Counts, key: &str, n: i64) {
-    *c.entry(key.to_string()).or_insert(0) += n;
-}
-fn cget(c: &Counts, key: &str) -> i64 {
-    c.get(key).copied().unwrap_or(0)
-}
-
 /// Tally this repo's signal into `c` — the unit the store accumulates per repo.
 fn accumulate(lines: &[AddedLine], commits: &[Commit], c: &mut Counts) {
-    acc_indentation(lines, c);
-    acc_quotes(lines, c);
-    acc_line_length(lines, c);
-    acc_comment_density(lines, c);
-    acc_brace_style(lines, c);
-    acc_declaration(lines, c);
-    acc_string_build(lines, c);
+    type Detector = fn(&[&AddedLine], &mut Counts);
+    let detectors: [(u8, Detector); 7] = [
+        (tooling::INDENT, acc_indentation),
+        (tooling::QUOTES, acc_quotes),
+        (tooling::LINE_LENGTH, acc_line_length),
+        (0, acc_comment_density),
+        (tooling::BRACE, acc_brace_style),
+        (tooling::DECLARATION, acc_declaration),
+        (0, acc_string_build),
+    ];
+    for (feature, detect) in detectors {
+        let (personal, decided): (Vec<&AddedLine>, Vec<&AddedLine>) = lines
+            .iter()
+            .partition(|line| line.governed.features & feature == 0);
+        detect(&personal, c);
+        if !decided.is_empty() {
+            // Tool-decided tallies keep their keys under `tool.` so they stay
+            // inspectable without feeding the personal rules.
+            let mut tool = Counts::new();
+            detect(&decided, &mut tool);
+            for (key, value) in tool {
+                bump(c, &format!("tool.{key}"), value);
+            }
+        }
+    }
+    let tools = lines
+        .iter()
+        .fold(0, |tools, line| tools | line.governed.tools);
+    for (bit, name) in tooling::TOOLS.iter().enumerate() {
+        if tools & (1 << bit) != 0 {
+            bump(c, &format!("tooling.{name}"), 1);
+        }
+    }
     acc_commits(commits, c);
 }
 
-/// Turn counts (one repo, or the cross-repo aggregate) into rules.
-fn derive_rules(c: &Counts) -> Vec<StyleRule> {
+/// Turn per-commit predicates into observations. Summed line counts provide
+/// descriptive context; they do not choose a commit-vote rule's direction.
+fn derive_rules(c: &Counts, commits: &[store::CommitEvidence]) -> Vec<StyleRule> {
+    let commits: Vec<&Counts> = commits.iter().map(|commit| &commit.counts).collect();
+    let commits = commits.as_slice();
     let mut rules: Vec<StyleRule> = [
-        derive_indentation(c),
-        derive_quotes(c),
-        derive_line_length(c),
-        derive_comment_density(c),
-        derive_brace_style(c),
-        derive_declaration(c),
-        derive_string_build(c),
-        derive_commit_prefix(c),
-        derive_commit_subject_length(c),
-        derive_commit_body(c),
+        derive_indentation(c, commits),
+        derive_quotes(c, commits),
+        derive_line_length(c, commits),
+        derive_comment_density(c, commits),
+        derive_brace_style(c, commits),
+        derive_declaration(c, commits),
+        derive_string_build(c, commits),
+        derive_commit_prefix(c, commits),
+        derive_commit_subject_length(c, commits),
+        derive_commit_body(c, commits),
     ]
     .into_iter()
     .flatten()
@@ -1114,22 +1631,6 @@ fn derive_rules(c: &Counts) -> Vec<StyleRule> {
         _ => a.id.cmp(b.id),
     });
     rules
-}
-
-/// A claim survives only with enough samples AND a clearly dominant share.
-/// Returns the confidence tier, or `None` (→ no rule) if the signal is weak.
-fn gate(dominant: usize, total: usize) -> Option<Confidence> {
-    if total < MIN_SAMPLES {
-        return None;
-    }
-    let ratio = dominant as f64 / total as f64;
-    if ratio >= 0.90 && total >= 50 {
-        Some(Confidence::High)
-    } else if ratio >= 0.70 {
-        Some(Confidence::Medium)
-    } else {
-        None
-    }
 }
 
 fn is_comment_line(lang: Lang, text: &str) -> bool {
@@ -1145,7 +1646,7 @@ fn is_comment_line(lang: Lang, text: &str) -> bool {
 }
 
 /// Tabs vs spaces, and (for spaces) the indent unit.
-fn acc_indentation(lines: &[AddedLine], c: &mut Counts) {
+fn acc_indentation(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if l.text.trim().is_empty() {
             continue;
@@ -1168,31 +1669,21 @@ fn acc_indentation(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_indentation(c: &Counts) -> Option<StyleRule> {
+fn derive_indentation(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let tab = cget(c, "indent.tab");
     let space = cget(c, "indent.space");
     let total = (tab + space) as usize;
-    let (dominant, spaces_win) = if space >= tab {
-        (space as usize, true)
-    } else {
-        (tab as usize, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let (spaces_win, support) = dominant(commits, "indent.space", "indent.tab");
+    let confidence = gate(support)?;
     if spaces_win {
-        // Indent UNIT by divisibility, not raw width — nested 8/12-space lines
-        // would otherwise masquerade as the unit.
-        let wt = cget(c, "indent.w_total");
-        let unit_txt = if wt > 0 && cget(c, "indent.w_div4") * 100 >= wt * 70 {
-            "4-space"
-        } else if wt > 0 && cget(c, "indent.w_div2") * 100 >= wt * 70 {
-            "2-space"
-        } else {
-            "space"
-        };
         Some(StyleRule {
             id: "indent",
-            statement: format!("Observed {unit_txt} indentation across the mined corpus"),
-            evidence: format!("{space}/{total} indented added lines lead with spaces"),
+            // Width divisibility cannot identify the nesting unit.
+            statement: "Observed space indentation across the mined corpus".to_string(),
+            evidence: format!(
+                "{}; {space}/{total} indented added lines lead with spaces",
+                support.label()
+            ),
             counter: "tabs",
             confidence,
             scope: RuleScope::Code,
@@ -1201,7 +1692,10 @@ fn derive_indentation(c: &Counts) -> Option<StyleRule> {
         Some(StyleRule {
             id: "indent",
             statement: "Observed tab indentation across the mined corpus".to_string(),
-            evidence: format!("{tab}/{total} indented added lines lead with a tab"),
+            evidence: format!(
+                "{}; {tab}/{total} indented added lines lead with a tab",
+                support.label()
+            ),
             counter: "spaces",
             confidence,
             scope: RuleScope::Code,
@@ -1210,7 +1704,7 @@ fn derive_indentation(c: &Counts) -> Option<StyleRule> {
 }
 
 /// Single vs double quotes, in languages where both are idiomatic.
-fn acc_quotes(lines: &[AddedLine], c: &mut Counts) {
+fn acc_quotes(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if !matches!(l.lang, Lang::Ts | Lang::Js | Lang::Py) {
             continue;
@@ -1224,23 +1718,23 @@ fn acc_quotes(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_quotes(c: &Counts) -> Option<StyleRule> {
+fn derive_quotes(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let single = cget(c, "quotes.single");
     let double = cget(c, "quotes.double");
     let total = (single + double) as usize;
-    let (dominant, single_wins) = if single >= double {
-        (single as usize, true)
-    } else {
-        (double as usize, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let (single_wins, support) = dominant(commits, "quotes.single", "quotes.double");
+    let dominant = if single_wins { single } else { double };
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "quotes",
         statement: format!(
             "Observed {} quotes across mined TS/JS/Python",
             if single_wins { "single" } else { "double" }
         ),
-        evidence: format!("{dominant}/{total} quote chars in TS/JS/Py added lines"),
+        evidence: format!(
+            "{}; {dominant}/{total} quote chars in TS/JS/Py added lines",
+            support.label()
+        ),
         counter: if single_wins {
             "double quotes"
         } else {
@@ -1252,7 +1746,7 @@ fn derive_quotes(c: &Counts) -> Option<StyleRule> {
 }
 
 /// Whether the author keeps lines short (≤ ~100 chars).
-fn acc_line_length(lines: &[AddedLine], c: &mut Counts) {
+fn acc_line_length(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if l.text.trim().is_empty() {
             continue;
@@ -1264,14 +1758,22 @@ fn acc_line_length(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_line_length(c: &Counts) -> Option<StyleRule> {
+fn derive_line_length(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let total = cget(c, "line.total") as usize;
     let under = cget(c, "line.under") as usize;
-    let confidence = gate(under, total)?;
+    // A commit agrees when at least 90% of its non-blank added lines are short.
+    let support = support(commits, |k| {
+        let total = cget(k, "line.total");
+        (total > 0).then(|| cget(k, "line.under") * 10 >= total * 9)
+    });
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "line_length",
         statement: "Observed predominantly short lines (≤ ~100 chars)".to_string(),
-        evidence: format!("{under}/{total} added lines ≤ 100 chars"),
+        evidence: format!(
+            "{}; {under}/{total} added lines ≤ 100 chars",
+            support.label()
+        ),
         counter: "routinely long lines (>120)",
         confidence,
         scope: RuleScope::Code,
@@ -1280,7 +1782,7 @@ fn derive_line_length(c: &Counts) -> Option<StyleRule> {
 
 /// Whether the author comments sparsely or liberally (only the extremes earn a
 /// rule — a middling density is no signal).
-fn acc_comment_density(lines: &[AddedLine], c: &mut Counts) {
+fn acc_comment_density(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if l.text.trim().is_empty() {
             continue;
@@ -1293,46 +1795,63 @@ fn acc_comment_density(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_comment_density(c: &Counts) -> Option<StyleRule> {
+fn derive_comment_density(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let comment = cget(c, "comment.comment");
     let code = cget(c, "comment.code");
     let total = (comment + code) as usize;
-    if total < MIN_SAMPLES {
+    if total == 0 {
         return None;
     }
     let pct = comment as f64 / total as f64;
-    let (statement, counter) = if pct < 0.08 {
+    let density = |sparse: bool| {
+        support(commits, |k| {
+            let comment = cget(k, "comment.comment");
+            let total = comment + cget(k, "comment.code");
+            (total >= 5).then(|| {
+                if sparse {
+                    comment * 100 < total * 8
+                } else {
+                    comment * 100 > total * 22
+                }
+            })
+        })
+    };
+    let sparse_support = density(true);
+    let dense_support = density(false);
+    let sparse = sparse_support.agree >= dense_support.agree;
+    let support = if sparse {
+        sparse_support
+    } else {
+        dense_support
+    };
+    let (statement, counter) = if sparse {
         (
             "Observed sparse comments across the mined corpus",
             "heavy line-by-line commenting",
         )
-    } else if pct > 0.22 {
+    } else {
         (
             "Observed frequent comments across the mined corpus",
             "near-zero comments",
         )
-    } else {
-        return None;
     };
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "comment_density",
         statement: statement.to_string(),
         evidence: format!(
-            "{comment}/{total} added lines are comments ({:.0}%)",
+            "{}; {comment}/{total} added lines are comments ({:.0}%)",
+            support.label(),
             pct * 100.0
         ),
         counter,
-        confidence: if total >= 200 {
-            Confidence::High
-        } else {
-            Confidence::Medium
-        },
+        confidence,
         scope: RuleScope::Code,
     })
 }
 
 /// Opening-brace placement: same line (K&R) vs its own line (Allman).
-fn acc_brace_style(lines: &[AddedLine], c: &mut Counts) {
+fn acc_brace_style(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if matches!(l.lang, Lang::Py | Lang::Other) {
             continue;
@@ -1346,16 +1865,13 @@ fn acc_brace_style(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_brace_style(c: &Counts) -> Option<StyleRule> {
+fn derive_brace_style(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let same_line = cget(c, "brace.same");
     let own_line = cget(c, "brace.own");
     let total = (same_line + own_line) as usize;
-    let (dominant, kr) = if same_line >= own_line {
-        (same_line as usize, true)
-    } else {
-        (own_line as usize, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let (kr, support) = dominant(commits, "brace.same", "brace.own");
+    let dominant = if kr { same_line } else { own_line };
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "brace_style",
         statement: if kr {
@@ -1363,7 +1879,7 @@ fn derive_brace_style(c: &Counts) -> Option<StyleRule> {
         } else {
             "Observed own-line opening braces (Allman) across the mined corpus".to_string()
         },
-        evidence: format!("{dominant}/{total} opening braces"),
+        evidence: format!("{}; {dominant}/{total} opening braces", support.label()),
         counter: if kr {
             "brace on its own line (Allman)"
         } else {
@@ -1375,7 +1891,7 @@ fn derive_brace_style(c: &Counts) -> Option<StyleRule> {
 }
 
 /// `const` vs `let` for declarations (TS/JS).
-fn acc_declaration(lines: &[AddedLine], c: &mut Counts) {
+fn acc_declaration(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if !matches!(l.lang, Lang::Ts | Lang::Js) {
             continue;
@@ -1389,25 +1905,22 @@ fn acc_declaration(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_declaration(c: &Counts) -> Option<StyleRule> {
+fn derive_declaration(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let konst = cget(c, "decl.const");
     let lett = cget(c, "decl.let");
     let total = (konst + lett) as usize;
-    let (dominant, is_const) = if konst >= lett {
-        (konst as usize, true)
-    } else {
-        (lett as usize, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let (is_const, support) = dominant(commits, "decl.const", "decl.let");
+    let dominant = if is_const { konst } else { lett };
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "declaration",
         statement: format!(
             "Observed `{}` declarations across mined TS/JS",
             if is_const { "const" } else { "let" }
         ),
-        evidence: format!("{dominant}/{total} TS/JS declarations"),
+        evidence: format!("{}; {dominant}/{total} TS/JS declarations", support.label()),
         counter: if is_const {
-            "`let` for bindings that aren't reassigned"
+            "`let` declarations"
         } else {
             "`const`"
         },
@@ -1417,7 +1930,7 @@ fn derive_declaration(c: &Counts) -> Option<StyleRule> {
 }
 
 /// Template literals vs `+` concatenation for strings (TS/JS).
-fn acc_string_build(lines: &[AddedLine], c: &mut Counts) {
+fn acc_string_build(lines: &[&AddedLine], c: &mut Counts) {
     for l in lines {
         if !matches!(l.lang, Lang::Ts | Lang::Js) {
             continue;
@@ -1432,16 +1945,13 @@ fn acc_string_build(lines: &[AddedLine], c: &mut Counts) {
     }
 }
 
-fn derive_string_build(c: &Counts) -> Option<StyleRule> {
+fn derive_string_build(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let template = cget(c, "string.template");
     let concat = cget(c, "string.concat");
     let total = (template + concat) as usize;
-    let (dominant, tpl) = if template >= concat {
-        (template as usize, true)
-    } else {
-        (concat as usize, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let (tpl, support) = dominant(commits, "string.template", "string.concat");
+    let dominant = if tpl { template } else { concat };
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "string_build",
         statement: if tpl {
@@ -1449,7 +1959,10 @@ fn derive_string_build(c: &Counts) -> Option<StyleRule> {
         } else {
             "Observed `+` string concatenation across mined TS/JS".to_string()
         },
-        evidence: format!("{dominant}/{total} string-building lines"),
+        evidence: format!(
+            "{}; {dominant}/{total} string-building lines",
+            support.label()
+        ),
         counter: if tpl {
             "`+` concatenation"
         } else {
@@ -1471,51 +1984,36 @@ fn has_conventional_prefix(subject: &str) -> bool {
 }
 
 /// Commit conventions in one pass — prefix, subject length, body presence.
-/// A squash/PR-merge subject ends with `(#123)` — GitHub/GitLab append the PR
-/// number on merge, so it's the tool's format, not the author's hand-written
-/// voice. Counting these would teach the profile the merge convention.
-fn is_squash_merge(subject: &str) -> bool {
-    let Some(inner) = subject.trim_end().strip_suffix(')') else {
-        return false;
-    };
-    match inner.rfind("(#") {
-        Some(i) => {
-            let digits = &inner[i + 2..];
-            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-        }
-        None => false,
-    }
-}
-
+/// A squash-merged pull request keeps its title, which the author wrote, but
+/// its `(#123)` suffix and generated body listing are the merge tool's.
 fn acc_commits(commits: &[Commit], c: &mut Counts) {
     for cm in commits {
-        // Skip tool-generated squash/merge subjects — commit-voice rules should
-        // reflect commits the person actually wrote, not the merge format.
-        if is_squash_merge(&cm.subject) {
-            continue;
-        }
+        let squash = workflow::pr_title(&cm.subject);
+        let subject = squash.unwrap_or(cm.subject.trim());
         bump(c, "commit.total", 1);
-        if has_conventional_prefix(&cm.subject) {
+        if has_conventional_prefix(subject) {
             bump(c, "commit.prefix_with", 1);
         }
-        if cm.subject.chars().count() <= 60 {
+        if subject.chars().count() <= 60 {
             bump(c, "commit.subj_short", 1);
         }
-        if cm.body.is_empty() {
-            bump(c, "commit.body_none", 1);
+        if squash.is_none() {
+            bump(c, "commit.body_total", 1);
+            if cm.body.is_empty() {
+                bump(c, "commit.body_none", 1);
+            }
         }
     }
 }
 
-fn derive_commit_prefix(c: &Counts) -> Option<StyleRule> {
+fn derive_commit_prefix(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
     let total = cget(c, "commit.total") as usize;
     let with = cget(c, "commit.prefix_with") as usize;
-    let (dominant, uses) = if with * 2 >= total {
-        (with, true)
-    } else {
-        (total - with, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let uses = with * 2 >= total;
+    let support = support(commits, |k| {
+        (cget(k, "commit.total") > 0).then(|| (cget(k, "commit.prefix_with") > 0) == uses)
+    });
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "commit_prefix",
         statement: if uses {
@@ -1523,7 +2021,7 @@ fn derive_commit_prefix(c: &Counts) -> Option<StyleRule> {
         } else {
             "Writes plain commit subjects (no type prefix)".to_string()
         },
-        evidence: format!("{dominant}/{total} commit subjects"),
+        evidence: support.label(),
         counter: if uses {
             "plain subjects"
         } else {
@@ -1534,37 +2032,37 @@ fn derive_commit_prefix(c: &Counts) -> Option<StyleRule> {
     })
 }
 
-fn derive_commit_subject_length(c: &Counts) -> Option<StyleRule> {
-    let total = cget(c, "commit.total") as usize;
-    let short = cget(c, "commit.subj_short") as usize;
-    let confidence = gate(short, total)?;
+fn derive_commit_subject_length(_c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
+    let support = support(commits, |k| {
+        (cget(k, "commit.total") > 0).then(|| cget(k, "commit.subj_short") > 0)
+    });
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "commit_subject_length",
         statement: "Keeps commit subjects short (≤ ~60 chars)".to_string(),
-        evidence: format!("{short}/{total} subjects ≤ 60 chars"),
+        evidence: format!("{} with subjects ≤ 60 chars", support.label()),
         counter: "long subject lines",
         confidence,
         scope: RuleScope::Commits,
     })
 }
 
-fn derive_commit_body(c: &Counts) -> Option<StyleRule> {
-    let total = cget(c, "commit.total") as usize;
+fn derive_commit_body(c: &Counts, commits: &[&Counts]) -> Option<StyleRule> {
+    let total = cget(c, "commit.body_total") as usize;
     let subject_only = cget(c, "commit.body_none") as usize;
-    let (dominant, terse) = if subject_only * 2 >= total {
-        (subject_only, true)
-    } else {
-        (total - subject_only, false)
-    };
-    let confidence = gate(dominant, total)?;
+    let terse = subject_only * 2 >= total;
+    let support = support(commits, |k| {
+        (cget(k, "commit.body_total") > 0).then(|| (cget(k, "commit.body_none") > 0) == terse)
+    });
+    let confidence = gate(support)?;
     Some(StyleRule {
         id: "commit_body",
         statement: if terse {
             "Writes subject-only commits".to_string()
         } else {
-            "Writes commit bodies explaining the why".to_string()
+            "Observed nonempty commit bodies".to_string()
         },
-        evidence: format!("{dominant}/{total} commits"),
+        evidence: support.label(),
         counter: if terse {
             "multi-paragraph bodies"
         } else {
@@ -1791,6 +2289,10 @@ fn diagnostic_excerpt(value: &str) -> String {
     truncate_utf8_bytes(clean.trim(), 4096).to_string()
 }
 
+fn sensitive_deep_sample(value: &str) -> bool {
+    super::feedback::looks_secret(value) || crate::indexer::secret_like_documentation(value)
+}
+
 fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]) -> String {
     let facts = rules
         .iter()
@@ -1800,6 +2302,9 @@ fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]
 
     let commit_sample = commits
         .iter()
+        .filter(|commit| {
+            !sensitive_deep_sample(&commit.subject) && !sensitive_deep_sample(&commit.body)
+        })
         .take(40)
         .map(|c| {
             let subject = truncate_utf8_bytes(c.subject.trim(), DEEP_COMMIT_FIELD_LIMIT);
@@ -1815,7 +2320,10 @@ fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]
         .join("\n");
 
     let mut code = String::new();
-    for l in lines.iter().filter(|l| l.text.trim().len() > 3) {
+    for l in lines
+        .iter()
+        .filter(|l| l.text.trim().len() > 3 && !sensitive_deep_sample(&l.text))
+    {
         if code.len() >= DEEP_CODE_SAMPLE_LIMIT {
             break;
         }
@@ -1826,8 +2334,8 @@ fn synthesis_prompt(rules: &[StyleRule], commits: &[Commit], lines: &[AddedLine]
     }
 
     format!(
-        "You are profiling ONE developer from their git history so an AI coding agent can \
-write code and commits that read as if this person wrote them.\n\n\
+        "You are proposing UNREVIEWED observations about one developer's authored Git history. \
+Describe observable decisions and their limits; do not infer personality, motivation, or expertise.\n\n\
 Write a markdown section titled exactly \"## Design patterns & tendencies (interpreted)\". \
 Cover, ONLY where the evidence supports it: design/structure (function size, early-return \
 vs nesting, error handling, composition vs inheritance, module organization), code-writing \
@@ -1835,6 +2343,8 @@ tendencies not already in the measured facts, and commit voice (subject phrasing
 granularity, what goes in a body).\n\n\
 Hard rules:\n\
 - Ground every claim in the evidence below. If you can't point to a tell, omit it.\n\
+- Author identity and coauthorship are unverified in this sample. State this limitation \
+and do not call an observation a personal rule.\n\
 - Be specific and falsifiable. NO generic praise (\"clean code\", \"best practices\", \
 \"readable\") — banned.\n\
 - At most 8 bullets. Each: the tendency plus the concrete tell.\n\
@@ -1851,6 +2361,9 @@ const MANUAL_START: &str = "<!-- mastermind-style:manual:start -->";
 const MANUAL_END: &str = "<!-- mastermind-style:manual:end -->";
 const MANAGED_START: &str = "<!-- mastermind-style:managed:start -->";
 const MANAGED_END: &str = "<!-- mastermind-style:managed:end -->";
+const INTERPRETED_START: &str = "<!-- mastermind-style:unreviewed-interpreted:start -->";
+const INTERPRETED_END: &str = "<!-- mastermind-style:unreviewed-interpreted:end -->";
+const UNREVIEWED_TEXT: &str = "<!-- mastermind-style:unreviewed-text:v1 -->\n";
 
 fn rule_line(r: &StyleRule) -> String {
     let tag = match r.scope {
@@ -1858,7 +2371,7 @@ fn rule_line(r: &StyleRule) -> String {
         _ => String::new(),
     };
     format!(
-        "- **{}.** {}. _Not: {}._ ({}{})\n",
+        "- **{}.** {}. _Alternative pattern: {}._ (support tier: {}{})\n",
         r.statement,
         r.evidence,
         r.counter,
@@ -1870,9 +2383,78 @@ fn rule_line(r: &StyleRule) -> String {
 /// Pull the inner content of the hand-edited manual block so a re-mine can
 /// preserve it verbatim.
 fn extract_manual(text: &str) -> Option<String> {
-    let start = text.find(MANUAL_START)? + MANUAL_START.len();
-    let end = text[start..].find(MANUAL_END)? + start;
-    Some(text[start..end].trim_matches('\n').to_string())
+    // Only a managed document has a trusted section layout. A bare portrait
+    // can itself discuss manual markers; preserve the entire supplied text.
+    if marker_offset(text, MANAGED_START, 0).is_none() {
+        return Some(text.trim_matches('\n').to_string());
+    }
+    extract_unreviewed(text, MANUAL_START, MANUAL_END)
+}
+
+fn marker_offset(text: &str, marker: &str, after: usize) -> Option<usize> {
+    // HTML markers inside fenced code are text events, so a preserved note
+    // cannot terminate or impersonate an enclosing generated section.
+    for (event, span) in pulldown_cmark::Parser::new(text).into_offset_iter() {
+        if let pulldown_cmark::Event::Html(html) = event {
+            let mut offset = span.start;
+            for line in html.split_inclusive('\n') {
+                if offset >= after
+                    && (offset == 0 || text.as_bytes()[offset - 1] == b'\n')
+                    && text[offset..].starts_with(marker)
+                    && line.trim_end_matches(['\r', '\n']) == marker
+                {
+                    return Some(offset);
+                }
+                offset += line.len();
+            }
+        }
+    }
+    None
+}
+
+fn extract_unreviewed(text: &str, start: &str, end: &str) -> Option<String> {
+    let start = marker_offset(text, start, 0)? + start.len();
+    let end = marker_offset(text, end, start)?;
+    let body = strip_outer_line_endings(&text[start..end]);
+    if let Some((_, wrapped)) = body.split_once('\n').filter(|(marker, _)| {
+        marker.trim_end_matches('\r') == UNREVIEWED_TEXT.trim_end_matches('\n')
+    }) {
+        if let Some((opening, content)) = wrapped.split_once('\n') {
+            let newline = if opening.ends_with('\r') {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            if let Some(fence) = opening.trim_end_matches('\r').strip_suffix("text") {
+                if fence.len() >= 3 && fence.bytes().all(|b| b == b'`') {
+                    if let Some(raw) = content.strip_suffix(&format!("{newline}{fence}")) {
+                        return Some(raw.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Some(body.to_string())
+}
+
+fn strip_outer_line_endings(text: &str) -> &str {
+    let text = text
+        .strip_prefix("\r\n")
+        .or_else(|| text.strip_prefix('\n'))
+        .unwrap_or(text);
+    text.strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text)
+}
+
+fn render_unreviewed(out: &mut String, raw: &str, start: &str, end: &str) {
+    // A fence longer than every run in the preserved text cannot be closed by
+    // embedded Markdown. Decode this envelope on the next publication.
+    let longest = raw.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    out.push_str(&format!(
+        "{start}\n{UNREVIEWED_TEXT}{fence}text\n{raw}\n{fence}\n{end}\n\n"
+    ));
 }
 
 struct ExistingProfile {
@@ -1926,21 +2508,623 @@ fn read_existing_profile(
 /// `--deep` compatibility path and `mastermind-style-deep` own this exact
 /// section; ordinary mining must not erase it.
 fn extract_interpreted(text: &str) -> Option<String> {
+    if let Some(section) = extract_unreviewed(text, INTERPRETED_START, INTERPRETED_END) {
+        return Some(section);
+    }
     const HEADING: &str = "## Design patterns & tendencies (interpreted)";
-    let managed_start = text.find(MANAGED_START)? + MANAGED_START.len();
+    let managed_start = marker_offset(text, MANAGED_START, 0)? + MANAGED_START.len();
     let managed = &text[managed_start..];
-    let start = managed.find(HEADING)?;
+    // The heading must open a line: rendered feedback may quote it mid-line.
+    let start = managed
+        .match_indices(HEADING)
+        .map(|(index, _)| index)
+        .find(|&index| index == 0 || managed.as_bytes()[index - 1] == b'\n')?;
     let tail = &managed[start..];
     let end = tail.find("\n---\n").unwrap_or(tail.len());
     let section = tail[..end].trim();
     (!section.is_empty()).then(|| section.to_string())
 }
 
+/// List length in the agent view; a larger budget does not widen it.
+const VIEW_TOP: usize = 12;
+
+/// The repository a profile view is for: the name range areas use, and the
+/// Claude Code project slug that memory-imported feedback is scoped to.
+pub struct RepoContext {
+    pub label: String,
+    pub slug: String,
+    pub persona_project_id: String,
+}
+
+impl RepoContext {
+    /// Context for the repository checked out at `root`, if it is one.
+    pub fn for_root(root: &Path) -> Option<Self> {
+        let label = repository_key(root)
+            .ok()
+            .map(|key| repository_label(&key))?;
+        let root = root.canonicalize().ok()?;
+        Some(Self {
+            label,
+            slug: super::feedback::claude_project_slug(&root),
+            persona_project_id: persona_project_id(&root)?,
+        })
+    }
+}
+
+/// The part of the user-global profile that applies to this project, paths,
+/// role, and workflow, as a JSON packet for coding agents. Access requires a
+/// server-bound audience grant. Reading never creates an absent store.
+pub fn view(
+    paths: &[String],
+    repo: Option<&RepoContext>,
+    budget_tokens: usize,
+    audience: Option<(&Path, &str)>,
+    role: Option<&str>,
+    workflow: Option<&str>,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let db_path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
+    view_at(
+        &db_path,
+        paths,
+        repo,
+        budget_tokens,
+        audience,
+        role,
+        workflow,
+    )
+}
+
+fn view_at(
+    db_path: &Path,
+    paths: &[String],
+    repo: Option<&RepoContext>,
+    budget_tokens: usize,
+    audience: Option<(&Path, &str)>,
+    role: Option<&str>,
+    workflow: Option<&str>,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut verifier = super::feedback::QuoteSourceVerifier::new();
+    view_at_with_verifier(
+        db_path,
+        paths,
+        repo,
+        budget_tokens,
+        audience,
+        role,
+        workflow,
+        &mut verifier,
+    )
+}
+
+pub(super) trait QuoteVerifier {
+    fn current_observation(&mut self, _candidate: &store::CollectedCandidate) -> bool {
+        false
+    }
+    fn current_collected(
+        &mut self,
+        _candidate: &store::CollectedCandidate,
+        _evidence: &store::HabitEvidence,
+    ) -> bool {
+        false
+    }
+    fn current(
+        &mut self,
+        path: &str,
+        line_no: usize,
+        digest: &str,
+        quote: &str,
+        source: &str,
+    ) -> bool;
+    fn complete(&self) -> bool {
+        true
+    }
+}
+
+impl QuoteVerifier for super::feedback::QuoteSourceVerifier {
+    fn current_observation(&mut self, candidate: &store::CollectedCandidate) -> bool {
+        self.current_observation(candidate)
+    }
+    fn current_collected(
+        &mut self,
+        candidate: &store::CollectedCandidate,
+        evidence: &store::HabitEvidence,
+    ) -> bool {
+        self.current_collected(candidate, evidence)
+    }
+    fn current(
+        &mut self,
+        path: &str,
+        line_no: usize,
+        digest: &str,
+        quote: &str,
+        source: &str,
+    ) -> bool {
+        self.current(path, line_no, digest, quote, source)
+    }
+
+    fn complete(&self) -> bool {
+        !self.incomplete()
+    }
+}
+
+impl<F> QuoteVerifier for F
+where
+    F: FnMut(&str, usize, &str, &str, &str) -> bool,
+{
+    fn current(
+        &mut self,
+        path: &str,
+        line_no: usize,
+        digest: &str,
+        quote: &str,
+        source: &str,
+    ) -> bool {
+        self(path, line_no, digest, quote, source)
+    }
+}
+
+pub(super) fn habit_sources_current(
+    db: &store::ProfileStore,
+    habit: &store::Habit,
+    verify: &mut dyn QuoteVerifier,
+) -> Result<(), &'static str> {
+    let Ok(evidence) = db.habit_evidence(habit.id) else {
+        return Err("habit evidence unavailable");
+    };
+    let active: Vec<_> = evidence
+        .iter()
+        .filter(|item| item.status == "active")
+        .collect();
+    if active.is_empty()
+        || active.len() > 32
+        || !active.iter().all(|item| {
+            match db.habit_candidate_binding(item.id) {
+                Ok(Some(candidate)) => return verify.current_collected(&candidate, item),
+                Err(_) => return false,
+                Ok(None) => {}
+            }
+            usize::try_from(item.line_no).is_ok_and(|line_no| {
+                verify.current(
+                    &item.source_path,
+                    line_no,
+                    &item.record_digest,
+                    &item.quote,
+                    &item.source,
+                )
+            })
+        })
+    {
+        return Err("habit evidence is missing, changed, or too large to verify");
+    }
+    if !db.habit_revision_current(habit).unwrap_or(false) {
+        return Err("habit changed during source verification; inspect habit show again");
+    }
+    Ok(())
+}
+
+pub(super) fn feedback_sources_current(
+    db: &store::ProfileStore,
+    entry: &store::Feedback,
+    verify: &mut dyn QuoteVerifier,
+) -> Result<Vec<store::CollectedCandidate>, &'static str> {
+    let bindings = db
+        .feedback_candidate_bindings(&entry.key)
+        .map_err(|_| "invalid source bindings")?;
+    if bindings.is_empty() {
+        if db
+            .candidate_feedback_history(None, Some(&entry.key))
+            .ok()
+            .is_some_and(|history| {
+                history["items"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            })
+        {
+            return Err(
+                "all preference sources dismissed; collect a new observation before acceptance",
+            );
+        }
+        return Err("legacy-unverifiable: collect and propose an exact source first");
+    }
+    if !bindings
+        .iter()
+        .all(|candidate| verify.current_observation(candidate))
+    {
+        return Err("source unavailable, changed or beyond the verification budget");
+    }
+    if !db.feedback_revision_current(entry).unwrap_or(false) {
+        return Err("preference changed during verification; inspect it again");
+    }
+    Ok(bindings)
+}
+
+fn mark_unavailable_claims(
+    db: &store::ProfileStore,
+    agg: &mut store::Aggregate,
+    verify: &mut dyn QuoteVerifier,
+) -> bool {
+    let mut checked = 0;
+    let mut complete = true;
+    for habit in &mut agg.habits {
+        if let Some(status) = habit.retired_status() {
+            habit.status = status.into();
+            continue;
+        }
+        if habit.status != "observed" {
+            continue;
+        }
+        if habit.observed_revision.as_deref() != Some(habit.review_revision().as_str())
+            || habit.observation_problem().is_some()
+        {
+            habit.status = "stale".into();
+            complete = false;
+            continue;
+        }
+        checked += 1;
+        if checked > MAX_HABITS_TO_REVALIDATE {
+            complete = false;
+            habit.status = "stale".to_string();
+        } else if habit_sources_current(db, habit, verify).is_err() {
+            habit.status = "stale".to_string();
+            complete = false;
+        }
+    }
+    checked = 0;
+    for entry in &mut agg.feedback {
+        if entry.superseded_by.is_some() {
+            entry.status = "superseded".into();
+            continue;
+        }
+        if entry.status != "active" {
+            continue;
+        }
+        if entry.accepted_revision.as_deref() != Some(entry.review_revision().as_str()) {
+            entry.status = if entry.accepted_revision.is_none() {
+                "unverified"
+            } else {
+                "stale"
+            }
+            .into();
+            complete = false;
+            continue;
+        }
+        checked += 1;
+        if checked > 64 {
+            entry.status = "stale".into();
+            complete = false;
+            continue;
+        }
+        match feedback_sources_current(db, entry, verify) {
+            Ok(bindings) => {
+                // Legacy sources remain visible only in local review history.
+                entry.sources = bindings
+                    .iter()
+                    .map(|c| &c.source)
+                    .collect::<BTreeSet<_>>()
+                    .len() as i64;
+                if let Some(latest) = bindings.iter().max_by_key(|c| (&c.observed_at, &c.id)) {
+                    entry.quote = latest.quote.clone();
+                    entry.last_at = latest.observed_at.clone();
+                }
+            }
+            Err(_) => {
+                entry.status = "stale".into();
+                complete = false;
+            }
+        }
+    }
+    complete && verify.complete()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn view_at_with_verifier(
+    db_path: &Path,
+    paths: &[String],
+    repo: Option<&RepoContext>,
+    budget_tokens: usize,
+    audience: Option<(&Path, &str)>,
+    role: Option<&str>,
+    workflow: Option<&str>,
+    verify: &mut dyn QuoteVerifier,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use serde_json::{json, Value};
+    let notes = [
+        "User-global advisory data: the task, repository code and tooling take precedence.",
+        "Only accepted feedback at the reviewed revision with currently verified human sources is exposed. Quotes stay local.",
+        "Habits describe reviewed behavior in independent task episodes; they are not instructions.",
+        "Rules count eligible commits; ties do not support either side. Wilson tiers are descriptive scores, not calibrated confidence in personal traits; commits may share a PR and the sample is not random.",
+        "Range and associations count commits that touched an area; they show exposure, not skill.",
+        "Historical commit totals sum checkouts; listed commits and measured added lines are deduplicated by SHA. Conflicting equally measured contexts are withheld.",
+    ];
+    let denied =
+        || json!({ "schema_version": 2, "status": "access_denied", "precision_notes": notes });
+    let audience = audience
+        .filter(|(_, client)| super::access::valid_client_id(client))
+        .and_then(|(root, client)| {
+            root.canonicalize()
+                .ok()
+                .and_then(|root| root.to_str().map(|root| (root.to_owned(), client)))
+        });
+    let Some((root, client)) = audience else {
+        return Ok(denied());
+    };
+    let Some(db) = store::ProfileStore::open_optional_read_only(db_path)? else {
+        return Ok(denied());
+    };
+    if !db.reader_allowed(&root, client)? {
+        return Ok(denied());
+    }
+    let mut agg = db.aggregate()?;
+    // Keep the canonical SQL revision independent of this request's scope and
+    // source-verification outcome. A selected view has its own revision below.
+    let stored_profile_revision = agg.profile_revision();
+    let rules = derive_rules(&agg.counts, &agg.commits);
+    let languages: BTreeSet<&str> = paths
+        .iter()
+        .filter_map(|path| range::language(path))
+        .collect();
+    let codes: BTreeSet<&str> = languages
+        .iter()
+        .filter_map(|name| language_code(name))
+        .collect();
+
+    // Scope is a retrieval boundary, including the source I/O budget. Never
+    // open another project's or role's transcripts just to discard its claim.
+    agg.feedback.retain(|entry| {
+        feedback_applies(
+            &entry.scope,
+            &languages,
+            &codes,
+            repo,
+            paths,
+            role,
+            workflow,
+        )
+    });
+    agg.habits
+        .retain(|habit| habit_applies(habit, repo, role, workflow));
+    let source_verification_complete = mark_unavailable_claims(&db, &mut agg, verify);
+    let selection_revision = crate::hex::encode(&Sha256::digest(
+        json!([
+            "mastermind-profile-selection-v1",
+            agg.profile_revision(),
+            paths,
+            repo.map(|repo| &repo.persona_project_id),
+            role,
+            workflow,
+            source_verification_complete
+        ])
+        .to_string()
+        .as_bytes(),
+    ));
+
+    let conventions: Vec<Value> = rules
+        .iter()
+        .filter(|rule| match rule.scope {
+            RuleScope::Language(tags) => {
+                codes.is_empty() || tags.split('/').any(|tag| codes.contains(tag))
+            }
+            _ => true,
+        })
+        .take(VIEW_TOP)
+        .map(|rule| {
+            json!({
+                "statement": rule.statement,
+                "evidence": rule.evidence,
+                "counterpattern": rule.counter,
+                "confidence": rule.confidence.label(),
+                "kind": if rule.scope == RuleScope::Commits { "commit_voice" } else { "code_shape" },
+            })
+        })
+        .collect();
+    let feedback: Vec<Value> = agg
+        .feedback
+        .iter()
+        .filter(|entry| entry.status == "active")
+        .take(VIEW_TOP)
+        .map(|entry| {
+            json!({
+                "key": entry.key,
+                "review_revision": entry.review_revision(),
+                "statement": entry.statement,
+                "status": entry.status,
+                "category": entry.category,
+                "scope": entry.scope,
+                "sources": entry.sources,
+                "last": entry.last_at,
+            })
+        })
+        .collect();
+    let habits: Vec<Value> = agg
+        .habits
+        .iter()
+        .filter(|habit| {
+            habit.status == "observed"
+                && habit.episodes >= 2
+                && habit.sources >= 2
+                && habit.contradictions == 0
+                && habit.limitations == 0
+                && (habit.scope.starts_with("project:") || habit.repositories >= 2)
+        })
+        .take(VIEW_TOP)
+        .map(|habit| {
+            json!({
+                "id": habit.id,
+                "review_revision": habit.review_revision(),
+                "when": habit.when,
+                "behavior": habit.behavior,
+                "outcome": habit.outcome,
+                "exception": habit.exception,
+                "scope": habit.scope,
+                "role": habit.role,
+                "workflow": habit.workflow,
+                "status": habit.status,
+                "episodes": habit.episodes,
+            })
+        })
+        .collect();
+    let bullets = |markdown: String| -> Vec<String> {
+        markdown
+            .lines()
+            .map(|line| line.trim_start_matches("- ").to_string())
+            .collect()
+    };
+    let commits: Vec<&Counts> = agg.commits.iter().map(|commit| &commit.counts).collect();
+    let areas: BTreeSet<String> = match repo {
+        Some(repo) => paths
+            .iter()
+            .map(|path| format!("{}/{}", repo.label, range::area(path)))
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    let associations: Vec<Value> = range::associations(&agg.commits, &areas, VIEW_TOP)
+        .into_iter()
+        .map(|(name, commits)| json!({ "name": name, "commits": commits }))
+        .collect();
+    let status = if rules.is_empty() && feedback.is_empty() && habits.is_empty() {
+        "insufficient_evidence"
+    } else {
+        "ok"
+    };
+    let mut packet = json!({
+        "schema_version": 2,
+        "status": status,
+        "selection": { "role": role, "workflow": workflow },
+        "store_revision": stored_profile_revision,
+        "profile_revision": selection_revision,
+        "revision_scope": "selected_claims_and_git_aggregate",
+        "evidence": {
+            "repos": agg.repos,
+            "legacy_repos": agg.legacy_repos,
+            "commits": agg.commits_total,
+            "diff_sampled": agg.commits_sampled,
+            "listed_unique": agg.commits.len(),
+            "context_conflicts": cget(&agg.counts, "evidence.context_conflict"),
+            "git_identity_status": "unverified_author_filter",
+        },
+        "feedback": feedback,
+        "habits": habits,
+        "source_verification": if source_verification_complete { "complete" } else { "incomplete" },
+        "source_verification_scope": "selected_claims",
+        "conventions": conventions,
+        "workflow": bullets(workflow::render(&agg.counts, &commits)),
+        "range": bullets(range::render(&agg.commits)),
+        "associations": associations,
+        "omitted": [],
+        "precision_notes": notes,
+    });
+    // Over budget, the least specific lists go first and are named as omitted.
+    let mut omitted = Vec::new();
+    for key in [
+        "associations",
+        "range",
+        "workflow",
+        "conventions",
+        "habits",
+        "feedback",
+    ] {
+        if serde_json::to_string(&packet)?.len().div_ceil(4) <= budget_tokens {
+            break;
+        }
+        packet[key] = json!([]);
+        omitted.push(key);
+        packet["omitted"] = json!(omitted);
+    }
+    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
+        packet["omitted"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("precision_notes"));
+        while serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens
+            && packet["precision_notes"]
+                .as_array()
+                .is_some_and(|notes| notes.len() > 1)
+        {
+            packet["precision_notes"].as_array_mut().unwrap().pop();
+        }
+    }
+    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
+        // JSON escaping can make a valid 128-character workflow much larger
+        // than 128 bytes. Its exact value remains bound by profile_revision.
+        packet["selection"] = Value::Null;
+        packet["omitted"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("selection"));
+    }
+    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
+        return Err("profile response metadata exceeds the requested budget".into());
+    }
+    Ok(packet)
+}
+
+fn habit_applies(
+    habit: &store::Habit,
+    repo: Option<&RepoContext>,
+    role: Option<&str>,
+    workflow: Option<&str>,
+) -> bool {
+    (habit.scope == "global"
+        || repo.is_some_and(|repo| habit.scope == format!("project:{}", repo.persona_project_id)))
+        && (habit.role.is_empty() || Some(habit.role.as_str()) == role)
+        && (habit.workflow.is_empty() || Some(habit.workflow.as_str()) == workflow)
+}
+
+/// The short tag rule scopes use for a range language (`ts/js/py`).
+fn language_code(language: &str) -> Option<&'static str> {
+    match language {
+        "TypeScript" => Some("ts"),
+        "JavaScript" => Some("js"),
+        "Python" => Some("py"),
+        _ => None,
+    }
+}
+
+/// Whether stated feedback applies to the change: global always; a language
+/// or path scope when the change matches it; repository names, stable project
+/// identities and explicitly supplied legacy slugs only match exactly.
+fn feedback_applies(
+    scope: &str,
+    languages: &BTreeSet<&str>,
+    codes: &BTreeSet<&str>,
+    repo: Option<&RepoContext>,
+    paths: &[String],
+    role: Option<&str>,
+    workflow: Option<&str>,
+) -> bool {
+    match scope.split_once(':') {
+        None => scope == "global",
+        Some(("language", value)) => {
+            languages.is_empty()
+                || languages
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(value))
+                || codes.contains(value.to_ascii_lowercase().as_str())
+        }
+        Some(("path", value)) => {
+            let prefix = value.trim_end_matches('/');
+            paths.iter().any(|path| {
+                path == prefix
+                    || path
+                        .strip_prefix(prefix)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            })
+        }
+        Some(("repo", value)) => repo.is_some_and(|repo| value.eq_ignore_ascii_case(&repo.label)),
+        Some(("project", value)) => {
+            repo.is_some_and(|repo| value == repo.persona_project_id || value == repo.slug)
+        }
+        Some(("role", value)) => role == Some(value),
+        Some(("workflow", value)) => workflow == Some(value),
+        _ => false,
+    }
+}
+
 /// Render `style.md` from the cross-repo aggregate: a preserved manual section
 /// (hand edits win, never regenerated) + a managed section regenerated each mine.
 fn render_profile(
-    _author: &str,
     agg: &store::Aggregate,
+    store_revision: &str,
     rules: &[StyleRule],
     interpreted: Option<&str>,
     manual: Option<&str>,
@@ -1952,39 +3136,142 @@ fn render_profile(
     out.push_str(PROFILE_REVISION_PREFIX);
     out.push_str(&agg.profile_revision());
     out.push_str(" -->");
-    out.push_str("\n\n");
-
-    out.push_str(MANUAL_START);
     out.push('\n');
-    match manual {
-        Some(m) if !m.is_empty() => {
-            out.push_str(m);
-            out.push('\n');
-        }
-        _ => out.push_str(
-            "## Manual overrides\n\n<!-- Add your own rules here. They win over the mined \
-             ones and are never overwritten. -->\n",
-        ),
-    }
-    out.push_str(MANUAL_END);
+    out.push_str(PROFILE_STORE_REVISION_PREFIX);
+    out.push_str(store_revision);
+    out.push_str(" -->");
     out.push_str("\n\n");
+    out.push_str("_Local inspection snapshot. Reviewed claims were source-checked at publication; use mmcg_profile for a live, scoped agent view. The store revision identifies shared SQL inputs; the snapshot revision identifies this publication's verified aggregate. Neither is the live selection revision._\n\n");
+    if manual.is_some_and(|s| !s.is_empty()) || interpreted.is_some_and(|s| !s.is_empty()) {
+        out.push_str("## Unreviewed local notes\n\n_Preserved legacy/manual text, excluded from agent preferences. Inspect original human sources, then collect and candidates propose-preference, or habit propose, followed by explicit review. Unsupported sources stay unreviewed; editing these notes does not accept them._\n\n");
+    }
+    render_unreviewed(&mut out, manual.unwrap_or(""), MANUAL_START, MANUAL_END);
+    if let Some(text) = interpreted.filter(|s| !s.is_empty()) {
+        render_unreviewed(&mut out, text, INTERPRETED_START, INTERPRETED_END);
+    }
 
     out.push_str(MANAGED_START);
     out.push('\n');
     out.push_str(
-        "<!-- Measurements are regenerated by `mastermind miner profile`; the interpreted \
-         section is preserved. Do not hand-edit measurements; use the manual section above \
-         or the mastermind-style-deep skill. -->\n\n",
+        "<!-- Regenerated from SQL by `mastermind miner profile`. Review claims through \
+         miner feedback / habit; edits to Markdown do not change reviewed SQL records. -->\n\n",
     );
     out.push_str(&format!(
         "**Mined from:** {} repo(s), {} commit(s) ({} sampled), {} added source lines\n\n",
         agg.repos, agg.commits_total, agg.commits_sampled, agg.added_lines_sampled
     ));
+    out.push_str("_Historical commit totals sum checkouts; sampled diffs and added lines are distinct by Git SHA. Git author filters do not verify personal ownership._\n\n");
+    let conflicts = cget(&agg.counts, "evidence.context_conflict");
+    if conflicts > 0 {
+        out.push_str(&format!("_{conflicts} listed commit(s) have conflicting measurement contexts; their counters are withheld from all observations._\n\n"));
+    }
+    if agg.legacy_repos > 0 {
+        out.push_str(&format!(
+            "_{} repo(s) mined with the older line-level format contribute nothing until \
+             re-mined._\n\n",
+            agg.legacy_repos
+        ));
+    }
+    let bulk = cget(&agg.counts, "diff.bulk");
+    if bulk > 0 {
+        out.push_str(&format!(
+            "_{bulk} bulk commit(s) over {BULK_COMMIT_LINES} added source lines count for commit \
+             voice only; generated, vendored or moved code is not a code-shape sample._\n\n"
+        ));
+    }
+
+    let stated: Vec<&store::Feedback> = agg
+        .feedback
+        .iter()
+        .filter(|entry| entry.status == "active")
+        .collect();
+    if !stated.is_empty() {
+        out.push_str(
+            "## Session feedback\n\n_Explicitly accepted preferences at the reviewed revision, with human sources verified when this snapshot was published. Candidates, legacy sources without exact provenance and stale preferences remain in the local review queue._\n\n",
+        );
+        let mut ordered = stated;
+        ordered.sort_by(|a, b| {
+            (a.status != "active", -a.sources, &a.key).cmp(&(
+                b.status != "active",
+                -b.sources,
+                &b.key,
+            ))
+        });
+        for entry in ordered {
+            out.push_str(&format!(
+                "- **{}** — {}, {}. \"{}\" ({}; {} source(s); last {}; key {}; review {})\n",
+                entry.statement,
+                entry.category,
+                entry.scope,
+                entry.quote,
+                entry.status,
+                entry.sources,
+                entry.last_at,
+                entry.key,
+                entry.review_revision()
+            ));
+        }
+        out.push('\n');
+    }
+
+    let observed: Vec<&store::Habit> = agg
+        .habits
+        .iter()
+        .filter(|habit| {
+            habit.status == "observed"
+                && habit.episodes >= 2
+                && habit.sources >= 2
+                && habit.contradictions == 0
+                && habit.limitations == 0
+                && (habit.scope.starts_with("project:") || habit.repositories >= 2)
+        })
+        .collect();
+    if !observed.is_empty() {
+        out.push_str("## Observed working habits\n\n_Reviewed descriptions of behavior, not instructions. Each has support from distinct sessions and task episodes._\n\n");
+        for habit in observed {
+            let mut qualifiers = vec![habit.scope.clone()];
+            if !habit.role.is_empty() {
+                qualifiers.push(format!("role:{}", habit.role));
+            }
+            if !habit.workflow.is_empty() {
+                qualifiers.push(format!("workflow:{}", habit.workflow));
+            }
+            let exception = if habit.exception.is_empty() {
+                String::new()
+            } else {
+                format!(" Exception: {}.", habit.exception)
+            };
+            out.push_str(&format!(
+                "- **When {}:** {}. Observed outcome: {}.{} (habit {}; {}; {} episode(s); review {})\n",
+                habit.when,
+                habit.behavior,
+                habit.outcome,
+                exception,
+                habit.id,
+                qualifiers.join(", "),
+                habit.episodes,
+                habit.review_revision()
+            ));
+        }
+        out.push('\n');
+    }
+
+    let range = range::render(&agg.commits);
+    if !range.is_empty() {
+        out.push_str(
+            "## Range\n\n_Where the author has worked, counted in commits; recent means within \
+             six months of the newest mined commit. Range is exposure, not skill._\n\n",
+        );
+        out.push_str(&range);
+        out.push('\n');
+    }
 
     out.push_str("## Observed code-shape conventions\n\n");
+    out.push_str("_Support tiers use a Wilson score with z=1.96 on eligible commit predicates. They are descriptive, not calibrated probabilities: commits can share tasks, selection is not random, and multiple candidate patterns are considered. Ties count as non-support for either strict majority._\n\n");
     out.push_str(
-        "_Diagnostic corpus evidence only. These patterns may come from project tooling or \
-         language mix; do not turn them directly into implementation requirements._\n\n",
+        "_Diagnostic corpus evidence only. Detected formatter and linter settings are \
+         excluded; undetected tooling or language mix may still explain these patterns, so do \
+         not turn them directly into implementation requirements._\n\n",
     );
     let mut any_code = false;
     for r in rules
@@ -1995,10 +3282,30 @@ fn render_profile(
         any_code = true;
     }
     if !any_code {
-        out.push_str(
-            "_No idiom cleared the falsifiability gate yet (needs a dominant pattern over \
-             enough samples)._\n",
-        );
+        out.push_str(&format!(
+            "_Insufficient evidence: a convention needs at least {MIN_COMMITS} commits that \
+             had the opportunity to show it, with clear agreement between them. {} commit(s) \
+             sampled so far._\n",
+            agg.commits.len()
+        ));
+    }
+
+    let mut tools: Vec<(i64, &str)> = tooling::TOOLS
+        .iter()
+        .map(|name| (cget(&agg.counts, &format!("tooling.{name}")), *name))
+        .filter(|(commits, _)| *commits > 0)
+        .collect();
+    tools.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    if !tools.is_empty() {
+        let listed: Vec<String> = tools
+            .iter()
+            .map(|(commits, name)| format!("{name} in {commits} commit(s)"))
+            .collect();
+        out.push_str(&format!(
+            "\n## Repository tooling\n\n_Conventions a repository's formatter or linter decides \
+             are the repository's and stay out of the rules above:_ {}.\n",
+            listed.join(", ")
+        ));
     }
 
     let mut commit_lines = String::new();
@@ -2013,17 +3320,22 @@ fn render_profile(
         out.push_str(&commit_lines);
     }
 
-    if let Some(s) = interpreted {
-        out.push('\n');
-        out.push_str(s.trim());
-        out.push('\n');
+    let commits: Vec<&Counts> = agg.commits.iter().map(|commit| &commit.counts).collect();
+    let process = workflow::render(&agg.counts, &commits);
+    if !process.is_empty() {
+        out.push_str(
+            "\n## Workflow (process)\n\n_How the author delivers changes, measured per commit. \
+             Merge settings, branch protection and CI may explain part of it._\n\n",
+        );
+        out.push_str(&process);
     }
 
     out.push_str(
-        "\n---\nThe planner and executor read relevant parts as advisory input. Precedence: a \
-         task's explicit instructions win, then repository code and tooling, then manual and \
-         interpreted preferences. Commit voice is a fallback when repository policy is silent; \
-         code-shape corpus observations are diagnostic evidence only.\n",
+        "\n---\nAgents retrieve reviewed, applicable claims through mmcg_profile. Precedence: a \
+         task's explicit instructions win, then repository code and tooling, then reviewed \
+         preferences and habits. Unreviewed notes are retained for local inspection only. Commit \
+         voice is a fallback when repository policy is silent; code-shape corpus observations are \
+         diagnostic evidence only.\n",
     );
     out.push_str(MANAGED_END);
     out.push('\n');
@@ -2033,6 +3345,19 @@ fn render_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_remote_id_merges_two_transport_urls_without_merging_ports() {
+        assert_eq!(
+            normalize_git_remote("git@github.com:Owner/Repo.git"),
+            normalize_git_remote("https://github.com/owner/repo.git")
+        );
+        assert_ne!(
+            normalize_git_remote("ssh://git@example.test:2222/org/repo.git"),
+            normalize_git_remote("ssh://git@example.test:2223/org/repo.git")
+        );
+        assert!(normalize_git_remote("/local/checkout").is_none());
+    }
 
     fn fixture_git(root: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
@@ -2076,6 +3401,40 @@ mod tests {
         fixture_git(root, &["rev-parse", "HEAD"])
     }
 
+    fn one_commit(counts: Counts) -> Vec<store::CommitEvidence> {
+        vec![store::CommitEvidence {
+            sha: "c".repeat(40),
+            authored_at: "2026-01-01".into(),
+            counts,
+        }]
+    }
+
+    fn message(subject: &str, body: &str) -> Commit {
+        Commit {
+            sha: String::new(),
+            date: String::new(),
+            subject: subject.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    /// Every measured added line of `author`'s listed commits at `snapshot`.
+    fn sampled_diff_text(root: &Path, author: &str, snapshot: &str) -> String {
+        let shas: Vec<String> = collect_commits(root, author, LISTED_COMMIT_CAP, snapshot)
+            .unwrap()
+            .into_iter()
+            .map(|commit| commit.sha)
+            .collect();
+        fetch_diffs(root, &shas, &[])
+            .unwrap()
+            .into_values()
+            .flatten()
+            .flatten()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn author_substring_is_literal_in_every_history_query() {
         let dir = tempfile::tempdir().unwrap();
@@ -2111,8 +3470,7 @@ mod tests {
         let provenance = collect_provenance(&root, "A. User", &snapshot).unwrap();
         assert_eq!(provenance.commits_total, 1);
         assert_eq!(provenance.identities, vec!["author@example.test"]);
-        let (patch, sampled) = git_log_patch(&root, "A. User", 1, &snapshot).unwrap();
-        assert_eq!(sampled, 1);
+        let patch = sampled_diff_text(&root, "A. User", &snapshot);
         assert!(patch.contains("let sample_0"));
         assert!(!patch.contains("OTHER_AUTHOR_SENTINEL"));
         let commits = collect_commits(&root, "A. User", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
@@ -2148,8 +3506,7 @@ mod tests {
 
         let provenance = collect_provenance(&root, "Alice", &snapshot).unwrap();
         assert_eq!(provenance.commits_total, 1);
-        let (patch, sampled) = git_log_patch(&root, "Alice", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
-        assert_eq!(sampled, 1);
+        let patch = sampled_diff_text(&root, "Alice", &snapshot);
         assert!(patch.contains("let sample_0"));
         assert!(!patch.contains("SNAPSHOT_ESCAPE_SENTINEL"));
         let commits = collect_commits(&root, "Alice", COMMIT_SAMPLE_CAP, &snapshot).unwrap();
@@ -2184,6 +3541,8 @@ mod tests {
             latest_sha: Some(sha),
             latest_date: Some("2026-01-01".into()),
             mined_at_epoch: now_epoch(),
+
+            extractor: String::new(),
         };
         {
             let mut db = store::ProfileStore::open(&db_path).unwrap();
@@ -2192,12 +3551,12 @@ mod tests {
                     &alias.canonicalize().unwrap().to_string_lossy(),
                     &provenance,
                     &["author@example.test".into()],
-                    &Counts::from([("indent.space".into(), 10)]),
+                    &one_commit(Counts::from([("indent.space".into(), 10)])),
                     &[],
                 )
                 .unwrap();
             }
-            assert_eq!(db.aggregate().unwrap().counts["indent.space"], 20);
+            assert_eq!(db.aggregate().unwrap().counts["indent.space"], 10);
             assert!(matches!(
                 staleness_for_repo(&worktree, &db),
                 Staleness::Fresh { .. }
@@ -2217,7 +3576,7 @@ mod tests {
             let db = store::ProfileStore::open(&db_path).unwrap();
             let aggregate = db.aggregate().unwrap();
             assert_eq!(aggregate.counts["indent.space"], 10);
-            assert!(derive_indentation(&aggregate.counts).is_none());
+            assert!(derive_rules(&aggregate.counts, &aggregate.commits).is_empty());
             assert!(matches!(
                 staleness_for_repo(checkout, &db),
                 Staleness::Fresh { .. }
@@ -2285,9 +3644,7 @@ mod tests {
                     .commits_total,
                 2
             );
-            assert!(git_log_patch(&second, "Second Alias", 400, &snapshot)
-                .unwrap()
-                .0
+            assert!(sampled_diff_text(&second, "Second Alias", &snapshot)
                 .contains("SECOND_REPOSITORY_SENTINEL"));
             assert_eq!(
                 collect_commits(&second, "Second Alias", 400, &snapshot)
@@ -2366,9 +3723,11 @@ mod tests {
                         latest_sha: Some(fixture_git(&second, &["rev-parse", "HEAD"])),
                         latest_date: Some("2026-01-01".into()),
                         mined_at_epoch: now_epoch(),
+
+                        extractor: String::new(),
                     },
                     &["author@example.test".into()],
-                    &Counts::from([("foreign.marker".into(), 7)]),
+                    &one_commit(Counts::from([("foreign.marker".into(), 7)])),
                     &[],
                 )
                 .unwrap();
@@ -2445,9 +3804,11 @@ mod tests {
                         latest_sha: None,
                         latest_date: None,
                         mined_at_epoch: if exists { 1 } else { now_epoch() },
+
+                        extractor: String::new(),
                     },
                     &["alice@example.test".into()],
-                    &Counts::from([("indent.tab".into(), 10)]),
+                    &one_commit(Counts::from([("indent.tab".into(), 10)])),
                     &[],
                 )
                 .unwrap();
@@ -2477,6 +3838,8 @@ mod tests {
             .map(|_| AddedLine {
                 lang,
                 text: format!("{}{}", " ".repeat(n), body),
+
+                governed: Governed::default(),
             })
             .collect()
     }
@@ -2507,7 +3870,7 @@ diff --git a/app/bar.ts b/app/bar.ts
 @@ -0,0 +1 @@
 +const y = 'hi';
 ";
-        let lines = parse_added_lines(raw);
+        let lines = parse_added_lines(raw, &[]);
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0].lang, Lang::Rust);
         assert_eq!(lines[0].text, "fn foo() {");
@@ -2529,45 +3892,74 @@ diff --git a/app/bar.ts b/app/bar.ts
 @@ -0,0 +1 @@
 +var a=1;
 ";
-        let lines = parse_added_lines(raw);
+        let lines = parse_added_lines(raw, &[]);
         assert_eq!(lines.len(), 1, "only src/real.rs should survive");
         assert_eq!(lines[0].text, "    let x = 1;");
     }
 
-    #[test]
-    fn gate_thresholds() {
-        assert_eq!(gate(95, 100), Some(Confidence::High)); // dominant + big sample
-        assert_eq!(gate(45, 50), Some(Confidence::High)); // exactly 0.90 at 50 samples
-        assert_eq!(gate(75, 100), Some(Confidence::Medium)); // dominant but <0.90
-        assert_eq!(gate(45, 49), Some(Confidence::Medium)); // ≥0.90 but <50 samples → not High
-        assert_eq!(gate(10, 100), None); // not dominant
-        assert_eq!(gate(19, 19), None); // too few samples
-    }
-
-    /// Accumulate `lines` (no commits) and run a single deriver — the unit the
-    /// detector tests exercise.
-    fn from_lines(
+    /// Spread `lines` over `commits` commits and run one deriver the way the
+    /// profile does: each eligible commit votes on a measured predicate.
+    fn from_commits(
         lines: &[AddedLine],
-        derive: fn(&Counts) -> Option<StyleRule>,
+        commits: usize,
+        derive: fn(&Counts, &[&Counts]) -> Option<StyleRule>,
     ) -> Option<StyleRule> {
-        let mut c = Counts::new();
-        accumulate(lines, &[], &mut c);
-        derive(&c)
+        let per_commit: Vec<Counts> = lines
+            .chunks(lines.len().div_ceil(commits).max(1))
+            .map(|chunk| {
+                let mut c = Counts::new();
+                accumulate(chunk, &[], &mut c);
+                c
+            })
+            .collect();
+        let mut total = Counts::new();
+        for counts in &per_commit {
+            for (key, value) in counts {
+                bump(&mut total, key, *value);
+            }
+        }
+        let refs: Vec<&Counts> = per_commit.iter().collect();
+        derive(&total, &refs)
     }
 
     #[test]
-    fn detect_indentation_spaces_with_width() {
+    fn detect_spaces_without_claiming_an_unmeasured_nesting_unit() {
         let lines = spaces(Lang::Rust, 4, "let x = 1;", 60);
-        let rule = from_lines(&lines, derive_indentation).expect("should detect");
+        let rule = from_commits(&lines, 20, derive_indentation).expect("should detect");
         assert_eq!(rule.id, "indent");
-        assert!(rule.statement.contains("4-space"), "{}", rule.statement);
+        assert!(
+            rule.statement.contains("space indentation"),
+            "{}",
+            rule.statement
+        );
+        assert!(!rule.statement.contains("4-space"));
         assert_eq!(rule.confidence, Confidence::High);
     }
 
     #[test]
     fn detect_indentation_none_when_too_few() {
         let lines = spaces(Lang::Rust, 2, "x", 5);
-        assert!(from_lines(&lines, derive_indentation).is_none());
+        assert!(from_commits(&lines, 5, derive_indentation).is_none());
+    }
+
+    #[test]
+    fn one_large_commit_cannot_manufacture_confidence() {
+        let lines = spaces(Lang::Rust, 4, "let x = 1;", 1065);
+        assert!(from_commits(&lines, 1, derive_indentation).is_none());
+        assert!(from_commits(&lines, 5, derive_indentation).is_none());
+        assert!(from_commits(&lines, 8, derive_indentation).is_some());
+    }
+
+    #[test]
+    fn split_commits_do_not_state_a_convention() {
+        let mut lines = spaces(Lang::Rust, 4, "let x = 1;", 12);
+        lines.extend((0..12).map(|_| AddedLine {
+            lang: Lang::Rust,
+            text: "\tlet y = 2;".to_string(),
+
+            governed: Governed::default(),
+        }));
+        assert!(from_commits(&lines, 24, derive_indentation).is_none());
     }
 
     #[test]
@@ -2576,27 +3968,58 @@ diff --git a/app/bar.ts b/app/bar.ts
             .map(|i| AddedLine {
                 lang: Lang::Ts,
                 text: format!("const v{i} = 'value';"),
+
+                governed: Governed::default(),
             })
             .collect();
-        let rule = from_lines(&lines, derive_quotes).expect("should detect");
+        let rule = from_commits(&lines, 10, derive_quotes).expect("should detect");
         assert!(rule.statement.contains("single"), "{}", rule.statement);
     }
 
     #[test]
+    fn a_large_counterexample_does_not_hide_the_other_commits_majority() {
+        let small = Counts::from([("quotes.single".into(), 2), ("quotes.double".into(), 0)]);
+        let large = Counts::from([("quotes.single".into(), 0), ("quotes.double".into(), 10000)]);
+        let mut commits = vec![&small; 20];
+        commits.push(&large);
+        let total = Counts::from([
+            ("quotes.single".into(), 40),
+            ("quotes.double".into(), 10000),
+        ]);
+        let rule = derive_quotes(&total, &commits).unwrap();
+        assert!(rule.statement.contains("single"));
+        assert!(rule.evidence.starts_with("20/21 commits"));
+        assert!(rule.evidence.contains("40/10040"));
+        assert!(!rule_line(&rule).contains("_Not:"));
+    }
+
+    #[test]
     fn detect_comment_density_sparse() {
-        let mut lines = spaces(Lang::Rust, 0, "let x = compute();", 40);
-        lines.push(AddedLine {
-            lang: Lang::Rust,
-            text: "// one comment".to_string(),
-        });
-        let rule = from_lines(&lines, derive_comment_density).expect("should detect");
+        let mut lines = spaces(Lang::Rust, 0, "let x = compute();", 200);
+        lines.insert(
+            0,
+            AddedLine {
+                lang: Lang::Rust,
+                text: "// one comment".to_string(),
+
+                governed: Governed::default(),
+            },
+        );
+        let rule = from_commits(&lines, 10, derive_comment_density).expect("should detect");
         assert!(rule.statement.contains("sparse"), "{}", rule.statement);
+    }
+
+    #[test]
+    fn middle_comment_density_does_not_support_either_extreme() {
+        let middle = Counts::from([("comment.comment".into(), 1), ("comment.code".into(), 9)]);
+        let total = Counts::from([("comment.comment".into(), 20), ("comment.code".into(), 180)]);
+        assert!(derive_comment_density(&total, &[&middle; 20]).is_none());
     }
 
     #[test]
     fn detect_brace_style_same_line() {
         let lines = spaces(Lang::Rust, 0, "if cond {", 30);
-        let rule = from_lines(&lines, derive_brace_style).expect("should detect");
+        let rule = from_commits(&lines, 10, derive_brace_style).expect("should detect");
         assert!(rule.statement.contains("same-line"), "{}", rule.statement);
     }
 
@@ -2606,9 +4029,11 @@ diff --git a/app/bar.ts b/app/bar.ts
             .map(|i| AddedLine {
                 lang: Lang::Ts,
                 text: format!("const v{i} = 1;"),
+
+                governed: Governed::default(),
             })
             .collect();
-        let rule = from_lines(&lines, derive_declaration).expect("should detect");
+        let rule = from_commits(&lines, 10, derive_declaration).expect("should detect");
         assert!(rule.statement.contains("const"), "{}", rule.statement);
     }
 
@@ -2621,6 +4046,10 @@ diff --git a/app/bar.ts b/app/bar.ts
             added_lines_sampled: 320,
             identities: vec!["me@example.com".to_string()],
             counts: Counts::new(),
+            commits: Vec::new(),
+            legacy_repos: 0,
+            feedback: Vec::new(),
+            habits: Vec::new(),
         };
         let rules = vec![StyleRule {
             id: "indent",
@@ -2630,8 +4059,8 @@ diff --git a/app/bar.ts b/app/bar.ts
             confidence: Confidence::High,
             scope: RuleScope::Code,
         }];
-        let a = render_profile("me@example.com", &agg, &rules, None, None);
-        let b = render_profile("me@example.com", &agg, &rules, None, None);
+        let a = render_profile(&agg, &agg.profile_revision(), &rules, None, None);
+        let b = render_profile(&agg, &agg.profile_revision(), &rules, None, None);
         assert_eq!(a, b);
         assert!(a.contains("# Author style"));
         assert!(a.contains(PROFILE_SCHEMA_MARKER));
@@ -2641,7 +4070,7 @@ diff --git a/app/bar.ts b/app/bar.ts
         )));
         assert!(a.contains("## Observed code-shape conventions"));
         assert!(a.contains("2-space"));
-        assert!(a.contains("_Not: tabs._"));
+        assert!(a.contains("_Alternative pattern: tabs._"));
         assert!(a.contains("1 repo(s), 42 commit(s) (42 sampled), 320 added source lines"));
         assert!(!a.contains("me@example.com"));
     }
@@ -2655,9 +4084,14 @@ diff --git a/app/bar.ts b/app/bar.ts
             added_lines_sampled: 0,
             identities: vec![],
             counts: Counts::new(),
+            commits: Vec::new(),
+            legacy_repos: 2,
+            feedback: Vec::new(),
+            habits: Vec::new(),
         };
-        let md = render_profile("me", &agg, &[], None, None);
-        assert!(md.contains("No idiom cleared"));
+        let md = render_profile(&agg, &agg.profile_revision(), &[], None, None);
+        assert!(md.contains("Insufficient evidence"));
+        assert!(md.contains("2 repo(s) mined with the older line-level format"));
     }
 
     #[test]
@@ -2670,13 +4104,12 @@ diff --git a/app/bar.ts b/app/bar.ts
             confidence: Confidence::High,
             scope: RuleScope::Code,
         }];
-        let commits = vec![Commit {
-            subject: "feat: do thing".to_string(),
-            body: String::new(),
-        }];
+        let commits = vec![message("feat: do thing", "")];
         let lines = vec![AddedLine {
             lang: Lang::Rust,
             text: "    let x = compute();".to_string(),
+
+            governed: Governed::default(),
         }];
         let p = synthesis_prompt(&rules, &commits, &lines);
         assert!(p.contains("Design patterns & tendencies"));
@@ -2687,18 +4120,64 @@ diff --git a/app/bar.ts b/app/bar.ts
 
     #[test]
     fn synthesis_prompt_bounds_individual_untrusted_records() {
-        let commits = vec![Commit {
-            subject: "subject".repeat(20_000),
-            body: "body".repeat(20_000),
-        }];
+        let commits = vec![message(&"subject".repeat(20_000), &"body".repeat(20_000))];
         let lines = vec![AddedLine {
             lang: Lang::Rust,
             text: "é".repeat(20_000),
+
+            governed: Governed::default(),
         }];
         let prompt = synthesis_prompt(&[], &commits, &lines);
         assert!(prompt.len() <= DEEP_PROMPT_LIMIT, "{}", prompt.len());
         assert!(!prompt.contains(&"subject".repeat(100)));
         assert!(!prompt.contains(&"é".repeat(4000)));
+    }
+
+    #[test]
+    fn synthesis_prompt_omits_secret_like_samples() {
+        let commits = vec![
+            message("feat: ordinary change", ""),
+            message("feat: token=realvalue", ""),
+        ];
+        let lines = vec![
+            AddedLine {
+                lang: Lang::Rust,
+                text: "let value = 1;".into(),
+                governed: Governed::default(),
+            },
+            AddedLine {
+                lang: Lang::Rust,
+                text: "api_key = verysecretvalue".into(),
+                governed: Governed::default(),
+            },
+        ];
+        let prompt = synthesis_prompt(&[], &commits, &lines);
+        assert!(prompt.contains("ordinary change"));
+        assert!(prompt.contains("let value = 1"));
+        assert!(!prompt.contains("token=realvalue"));
+        assert!(!prompt.contains("verysecretvalue"));
+    }
+
+    #[test]
+    fn deep_candidate_stays_outside_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("style.md");
+        std::fs::write(&profile, "approved profile").unwrap();
+        let path = write_deep_candidate(
+            &profile,
+            "/repo",
+            "aabbcc",
+            "revision-1",
+            "## Design patterns & tendencies (interpreted)\n\n- Example.",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            "approved profile"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("Unreviewed persona interpretation"));
+        assert!(text.contains("- Example."));
     }
 
     #[test]
@@ -2785,10 +4264,97 @@ diff --git a/app/bar.ts b/app/bar.ts
             added_lines_sampled: 1,
             identities: vec!["private@example.com".into()],
             counts: Counts::new(),
+            commits: Vec::new(),
+            legacy_repos: 0,
+            feedback: Vec::new(),
+            habits: Vec::new(),
         };
-        let rendered = render_profile("private@example.com", &agg, &[], Some(&interpreted), None);
+        let rendered = render_profile(&agg, &agg.profile_revision(), &[], Some(&interpreted), None);
         assert!(rendered.contains("Uses typed boundaries"));
         assert!(!rendered.contains("private@example.com"));
+    }
+
+    #[test]
+    fn publication_quarantines_legacy_prose_without_losing_nested_markers_or_fences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.md");
+        let db_path = dir.path().join("style.db");
+        let legacy = format!(
+            "# Personal portrait\n\n## Manual overrides\nPrefer a pure decision core.\n\n```text\n{MANUAL_END}\n{MANAGED_END}\n{INTERPRETED_START}\n```\n~~~text\nnotes\n~~~\n"
+        );
+        std::fs::write(&path, &legacy).unwrap();
+        publish_profile(&db_path, &path, false, |_| Ok(()), |_| None).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(extract_manual(&first).unwrap(), legacy.trim_matches('\n'));
+        assert!(extract_interpreted(&first).is_none());
+        assert!(first.contains("## Unreviewed local notes"));
+        let headings: Vec<_> = pulldown_cmark::Parser::new(&first)
+            .into_offset_iter()
+            .filter_map(|(event, span)| {
+                matches!(
+                    event,
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading { .. })
+                )
+                .then(|| first[span].to_string())
+            })
+            .collect();
+        assert!(!headings
+            .iter()
+            .any(|heading| heading.contains("Manual overrides")));
+        for _ in 0..2 {
+            publish_profile(&db_path, &path, false, |_| Ok(()), |_| None).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        }
+        let raw = store::ProfileStore::open_read_only(&db_path)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(
+            header_revision(&first, 4, PROFILE_STORE_REVISION_PREFIX).unwrap(),
+            raw.profile_revision()
+        );
+        let interpreted = format!(
+            "{INTERPRETED_HEADING}\n\n```text\n{INTERPRETED_END}\n```\nAn unreviewed inference.\r"
+        );
+        publish_profile(
+            &db_path,
+            &path,
+            false,
+            |_| Ok(()),
+            |_| Some(interpreted.clone()),
+        )
+        .unwrap();
+        let with_interpreted = std::fs::read_to_string(&path).unwrap();
+        for _ in 0..2 {
+            publish_profile(&db_path, &path, false, |_| Ok(()), |_| None).unwrap();
+            let current = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(current, with_interpreted);
+            assert_eq!(extract_interpreted(&current).unwrap(), interpreted);
+            assert_eq!(extract_manual(&current).unwrap(), legacy.trim_matches('\n'));
+        }
+        std::fs::write(&path, with_interpreted.replace('\n', "\r\n")).unwrap();
+        for _ in 0..2 {
+            publish_profile(&db_path, &path, false, |_| Ok(()), |_| None).unwrap();
+            let current = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(current.matches(UNREVIEWED_TEXT).count(), 2);
+            assert_eq!(
+                extract_manual(&current).unwrap(),
+                legacy.trim_matches('\n').replace('\n', "\r\n")
+            );
+            assert_eq!(
+                extract_interpreted(&current).unwrap(),
+                interpreted.replace('\n', "\r\n")
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_quoted_or_listed_markers_cannot_discard_surrounding_portrait() {
+        for prefix in ["> ", "- ", "    "] {
+            let legacy = format!("# Portrait\nKeep this intro.\n\n{prefix}{MANUAL_START}\n{prefix}Keep this example.\n{prefix}{MANUAL_END}\n\nKeep this tail.");
+            assert_eq!(extract_manual(&legacy).unwrap(), legacy);
+            assert!(marker_offset(&legacy, MANUAL_START, 0).is_none());
+        }
     }
 
     #[test]
@@ -2825,6 +4391,74 @@ diff --git a/app/bar.ts b/app/bar.ts
     }
 
     #[test]
+    fn private_preparation_noop_does_not_initialize_or_migrate_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.db");
+        for exists in [false, true] {
+            let original = if exists {
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                conn.execute_batch("CREATE TABLE legacy_fixture(value TEXT)")
+                    .unwrap();
+                drop(conn);
+                Some(std::fs::read(&path).unwrap())
+            } else {
+                None
+            };
+            let result = mutate_private_store(
+                &path,
+                |db| {
+                    assert_eq!(db.is_some(), exists);
+                    Ok(std::ops::ControlFlow::Break("empty page"))
+                },
+                |_, (): ()| panic!("no-op must not open a writable store"),
+            )
+            .unwrap();
+            assert_eq!(result, "empty page");
+            assert_eq!(std::fs::read(&path).ok(), original);
+        }
+    }
+
+    #[test]
+    fn private_collection_does_not_require_a_published_style_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.collect_candidates(&[store::CollectionBatch {
+            source: store::CollectionSource {
+                source: "session:fixture".into(),
+                source_path: "/source".into(),
+                project_root: "/project".into(),
+                project: "fixture".into(),
+                repository: String::new(),
+                snapshot_digest: "a".repeat(64),
+                extractor: "v1".into(),
+                bytes: 100,
+                lines: 1,
+            },
+            candidates: Vec::new(),
+        }])
+        .unwrap();
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &path),
+            Staleness::Absent
+        ));
+        db.record_feedback(&store::NewFeedback {
+            statement: "Review the contract first",
+            category: "code",
+            scope: "global",
+            quote: "Review the contract first",
+            at: "2026-09-26",
+            source: "session:fixture",
+        })
+        .unwrap();
+        assert!(matches!(
+            staleness_at(dir.path(), &profile, &path),
+            Staleness::Invalid { .. }
+        ));
+    }
+
+    #[test]
     fn staleness_distinguishes_unmined_and_unverifiable_history() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
@@ -2835,7 +4469,7 @@ diff --git a/app/bar.ts b/app/bar.ts
         let aggregate = db.aggregate().unwrap();
         std::fs::write(
             &profile,
-            render_profile("Alice", &aggregate, &[], None, None),
+            render_profile(&aggregate, &aggregate.profile_revision(), &[], None, None),
         )
         .unwrap();
         drop(db);
@@ -2855,9 +4489,11 @@ diff --git a/app/bar.ts b/app/bar.ts
                 latest_sha: None,
                 latest_date: Some("2026-01-01".into()),
                 mined_at_epoch: now_epoch(),
+
+                extractor: String::new(),
             },
             &["author@example.test".into()],
-            &Counts::new(),
+            &one_commit(Counts::new()),
             &[],
         )
         .unwrap();
@@ -2871,7 +4507,7 @@ diff --git a/app/bar.ts b/app/bar.ts
         let aggregate = db.aggregate().unwrap();
         std::fs::write(
             &profile,
-            render_profile("Alice", &aggregate, &[], None, None),
+            render_profile(&aggregate, &aggregate.profile_revision(), &[], None, None),
         )
         .unwrap();
         drop(db);
@@ -3030,9 +4666,11 @@ diff --git a/app/bar.ts b/app/bar.ts
                 latest_sha: None,
                 latest_date: None,
                 mined_at_epoch: 1,
+
+                extractor: String::new(),
             },
             &["alice@example.com".into()],
-            &Counts::new(),
+            &one_commit(Counts::new()),
             &[],
         )
         .unwrap();
@@ -3054,45 +4692,71 @@ diff --git a/app/bar.ts b/app/bar.ts
     }
 
     #[test]
-    fn squash_merge_subjects() {
-        assert!(is_squash_merge("KSK-5781 workbench: rename (#13)"));
-        assert!(is_squash_merge("feat: thing (#48866)"));
-        assert!(is_squash_merge("trailing space (#9) "));
-        assert!(!is_squash_merge("feat: add x"));
-        assert!(!is_squash_merge("fix: handle (#) empty"));
-        assert!(!is_squash_merge("note (#12) mid-subject"));
-    }
-
-    #[test]
-    fn acc_commits_skips_squash_merges() {
+    fn acc_commits_reads_pr_titles_but_not_generated_bodies() {
         let commits = vec![
-            Commit {
-                subject: "feat: hand-written".to_string(),
-                body: String::new(),
-            },
-            Commit {
-                subject: "KSK-1 squashed (#42)".to_string(),
-                body: String::new(),
-            },
+            message("feat: hand-written", ""),
+            message(
+                "fix: a squashed title that fits in sixty characters (#42)",
+                "* commit one\n* commit two",
+            ),
         ];
         let mut c = Counts::new();
         acc_commits(&commits, &mut c);
         assert_eq!(
             cget(&c, "commit.total"),
-            1,
-            "only the hand-written commit counts"
+            2,
+            "a pull-request title is the author's"
         );
+        assert_eq!(cget(&c, "commit.prefix_with"), 2);
+        assert_eq!(
+            cget(&c, "commit.subj_short"),
+            2,
+            "the (#42) suffix is not measured"
+        );
+        assert_eq!(
+            cget(&c, "commit.body_total"),
+            1,
+            "a squash body is generated"
+        );
+        assert_eq!(cget(&c, "commit.body_none"), 1);
     }
 
     #[test]
     fn parse_commits_splits_records() {
-        let raw = "\u{1e}feat: a\u{1f}body line\u{1e}fix: b\u{1f}";
+        let raw = "\u{1e}aaa\u{1f}2026-01-01T10:00:00+03:00\u{1f}feat: a\u{1f}body line\
+                   \u{1e}bbb\u{1f}2026-01-02T10:00:00+03:00\u{1f}fix: b\u{1f}";
         let c = parse_commits(raw);
         assert_eq!(c.len(), 2);
+        assert_eq!((c[0].sha.as_str(), c[1].sha.as_str()), ("aaa", "bbb"));
+        assert_eq!(date_only(&c[1].date), "2026-01-02");
         assert_eq!(c[0].subject, "feat: a");
         assert_eq!(c[0].body, "body line");
         assert_eq!(c[1].subject, "fix: b");
         assert!(c[1].body.is_empty());
+    }
+
+    #[test]
+    fn parse_commit_diffs_attributes_lines_to_their_commit() {
+        let raw = "\u{1e}aaa\n\
+diff --git a/src/a.rs b/src/a.rs
++++ b/src/a.rs
+@@ -0,0 +1 @@
++    let a = 1;
+
+\u{1e}bbb
++++ b/src/b.ts
+@@ -0,0 +1,2 @@
++const b = '\u{1e}';
++const c = 2;
+";
+        let diffs = parse_commit_diffs(raw, &[]);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs["aaa"].len(), 1);
+        assert_eq!(
+            diffs["bbb"].len(),
+            2,
+            "an RS inside content is not a header"
+        );
     }
 
     #[test]
@@ -3105,34 +4769,1046 @@ diff --git a/app/bar.ts b/app/bar.ts
         assert!(parse_shortlog_identities("1\tmissing-email").is_err());
     }
 
+    fn listed(sha: &str, date: &str) -> Commit {
+        Commit {
+            sha: sha.to_string(),
+            date: date.to_string(),
+            subject: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn select_sample_spreads_across_months_and_skips_bulk() {
+        let commits = [
+            listed("c1", "2026-03-20T10:00:00+00:00"),
+            listed("c2", "2026-03-10T10:00:00+00:00"),
+            listed("c3", "2026-03-01T10:00:00+00:00"),
+            listed("c4", "2026-02-15T10:00:00+00:00"),
+            listed("c5", "2026-01-15T10:00:00+00:00"),
+            listed("c6", "2026-01-10T10:00:00+00:00"),
+        ];
+        let sizes: HashMap<String, CommitShape> = [
+            ("c1", 10),
+            ("c2", 10),
+            ("c3", 10),
+            ("c4", 10),
+            ("c5", BULK_COMMIT_LINES + 1),
+            ("c6", 0),
+        ]
+        .into_iter()
+        .map(|(sha, source_added)| {
+            let shape = CommitShape {
+                source_added,
+                ..CommitShape::default()
+            };
+            (sha.to_string(), shape)
+        })
+        .collect();
+        assert_eq!(select_sample(&commits, &sizes), ["c1", "c4", "c2", "c3"]);
+    }
+
+    #[test]
+    fn renamed_clones_preserve_measurements_and_distinct_area_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let copy = dir.path().join("repo-copy");
+        fixture_repository(&root, "Alice");
+        fixture_git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                root.to_str().unwrap(),
+                copy.to_str().unwrap(),
+            ],
+        );
+        let db = dir.path().join("style.db");
+        let style = dir.path().join("style.md");
+        mine_to_paths(&root, Some("Alice".into()), false, false, &db, &style).unwrap();
+        let single = store::ProfileStore::open_read_only(&db)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        mine_to_paths(&copy, Some("Alice".into()), false, false, &db, &style).unwrap();
+        let combined = store::ProfileStore::open_read_only(&db)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(combined.commits_sampled, single.commits_sampled);
+        assert_eq!(combined.added_lines_sampled, single.added_lines_sampled);
+        assert_eq!(cget(&combined.counts, "evidence.context_conflict"), 0);
+        let measurements = |counts: &Counts| {
+            counts
+                .iter()
+                .filter(|(key, _)| !key.starts_with("range.area."))
+                .map(|(key, value)| (key.clone(), *value))
+                .collect::<Counts>()
+        };
+        assert_eq!(measurements(&combined.counts), measurements(&single.counts));
+        assert!(combined
+            .counts
+            .keys()
+            .any(|key| key.starts_with("range.area.repo/")));
+        assert!(combined
+            .counts
+            .keys()
+            .any(|key| key.starts_with("range.area.repo-copy/")));
+    }
+
+    #[test]
+    fn cache_revalidates_import_classification_when_local_modules_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fixture_repository(&root, "Alice");
+        std::fs::write(root.join("src/consumer.py"), "import future_component\n").unwrap();
+        fixture_git(&root, &["add", "src/consumer.py"]);
+        fixture_git(&root, &["commit", "-qm", "feat: consume module"]);
+        let warm = dir.path().join("warm.db");
+        let cold = dir.path().join("cold.db");
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &warm,
+            &dir.path().join("warm.md"),
+        )
+        .unwrap();
+        std::fs::write(root.join("src/future_component.py"), "VALUE = 1\n").unwrap();
+        fixture_git(&root, &["add", "src/future_component.py"]);
+        fixture_git(&root, &["commit", "-qm", "feat: own module"]);
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &warm,
+            &dir.path().join("warm.md"),
+        )
+        .unwrap();
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &cold,
+            &dir.path().join("cold.md"),
+        )
+        .unwrap();
+        let warm = store::ProfileStore::open_read_only(&warm)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        let cold = store::ProfileStore::open_read_only(&cold)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(warm.profile_revision(), cold.profile_revision());
+    }
+
+    #[test]
+    fn incremental_and_cold_mines_agree_when_the_sample_cap_is_full() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let base = fixture_repository(&root, "Alice");
+        let branch = fixture_git(&root, &["symbolic-ref", "HEAD"]);
+        let mut input = String::new();
+        for i in 0..405 {
+            let message = format!("feat: step {i}\n");
+            let source = format!("def sample():\n    return 'value-{i}'\n");
+            input.push_str(&format!("commit {branch}\ncommitter Alice <author@example.test> {} +0000\ndata {}\n{message}", 1800000000 + i * 86400, message.len()));
+            if i == 0 {
+                input.push_str(&format!("from {base}\n"));
+            }
+            input.push_str(&format!(
+                "M 100644 inline src/sample.py\ndata {}\n{source}\n",
+                source.len()
+            ));
+        }
+        let mut import = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        import
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = import.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let tip = fixture_git(&root, &["rev-parse", "HEAD"]);
+        let previous_tip = fixture_git(&root, &["rev-parse", "HEAD~5"]);
+        fixture_git(&root, &["update-ref", &branch, &previous_tip]);
+        let warm = dir.path().join("warm.db");
+        let cold = dir.path().join("cold.db");
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &warm,
+            &dir.path().join("warm.md"),
+        )
+        .unwrap();
+        fixture_git(&root, &["update-ref", &branch, &tip]);
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &warm,
+            &dir.path().join("warm.md"),
+        )
+        .unwrap();
+        mine_to_paths(
+            &root,
+            None,
+            false,
+            false,
+            &cold,
+            &dir.path().join("cold.md"),
+        )
+        .unwrap();
+        let warm = store::ProfileStore::open_read_only(&warm)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        let cold = store::ProfileStore::open_read_only(&cold)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(warm.commits_sampled, COMMIT_SAMPLE_CAP as i64);
+        assert_eq!(warm.profile_revision(), cold.profile_revision());
+        assert!(warm
+            .commits
+            .iter()
+            .any(|c| c.sha == tip && cget(&c.counts, "diff.sampled") == 1));
+    }
+
+    #[test]
+    fn incremental_mine_reuses_measured_commits_and_measures_new_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let first = fixture_repository(&root, "Alice");
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        mine_to_paths(&root, None, false, false, &db_path, &profile).unwrap();
+        let key = repository_key(&root).unwrap();
+        // Mark the stored tally so that reuse, rather than a new measurement, is visible.
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "UPDATE commit_counter SET value = 999 WHERE sha = ?1 AND key = 'indent.space'",
+                [&first],
+            )
+            .unwrap();
+
+        // Keep the local-module set unchanged: adding next.rs would correctly
+        // invalidate import classification for every cached measurement.
+        std::fs::write(
+            root.join("src/sample.rs"),
+            "fn next() {\n    let y = 1;\n}\n",
+        )
+        .unwrap();
+        fixture_git(&root, &["add", "src/sample.rs"]);
+        fixture_git(&root, &["commit", "-qm", "feat: next"]);
+        mine_to_paths(&root, None, false, false, &db_path, &profile).unwrap();
+        let stored = store::ProfileStore::open(&db_path)
+            .unwrap()
+            .repo_evidence(&key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.commits.len(), 2);
+        assert!(stored
+            .commits
+            .iter()
+            .all(|commit| cget(&commit.counts, "diff.sampled") == 1));
+        let reused = stored.commits.iter().find(|c| c.sha == first).unwrap();
+        assert_eq!(reused.counts["indent.space"], 999);
+
+        mine_to_paths(&root, None, true, false, &db_path, &profile).unwrap();
+        let stored = store::ProfileStore::open(&db_path)
+            .unwrap()
+            .repo_evidence(&key)
+            .unwrap()
+            .unwrap();
+        let remeasured = stored.commits.iter().find(|c| c.sha == first).unwrap();
+        assert_eq!(
+            remeasured.counts["indent.space"], 10,
+            "--force measures again"
+        );
+    }
+
+    #[test]
+    fn bulk_commits_keep_their_message_but_not_their_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fixture_repository(&root, "Alice");
+        let generated: String = (0..=BULK_COMMIT_LINES)
+            .map(|i| format!("    let g{i} = {i};\n"))
+            .collect();
+        std::fs::write(root.join("src/generated_table.rs"), generated).unwrap();
+        fixture_git(&root, &["add", "src/generated_table.rs"]);
+        fixture_git(&root, &["commit", "-qm", "chore: vendor table"]);
+        let bulk = fixture_git(&root, &["rev-parse", "HEAD"]);
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        mine_to_paths(&root, None, false, false, &db_path, &profile).unwrap();
+
+        let stored = store::ProfileStore::open(&db_path)
+            .unwrap()
+            .repo_evidence(&repository_key(&root).unwrap())
+            .unwrap()
+            .unwrap();
+        let vendored = stored.commits.iter().find(|c| c.sha == bulk).unwrap();
+        assert_eq!(cget(&vendored.counts, "diff.bulk"), 1);
+        assert_eq!(cget(&vendored.counts, "diff.sampled"), 0);
+        assert_eq!(cget(&vendored.counts, "indent.space"), 0);
+        assert_eq!(cget(&vendored.counts, "commit.total"), 1);
+    }
+
+    #[test]
+    fn tool_decided_lines_stay_out_of_personal_rules() {
+        let formatted = Governed {
+            features: tooling::INDENT | tooling::BRACE | tooling::LINE_LENGTH | tooling::QUOTES,
+            tools: 1 << 1,
+        };
+        let lines: Vec<AddedLine> = (0..6)
+            .map(|i| AddedLine {
+                lang: Lang::Rust,
+                text: format!("    fn f{i}() {{"),
+                governed: if i < 4 {
+                    formatted
+                } else {
+                    Governed::default()
+                },
+            })
+            .collect();
+        let mut c = Counts::new();
+        accumulate(&lines, &[], &mut c);
+        assert_eq!(
+            cget(&c, "indent.space"),
+            2,
+            "only unformatted lines are personal"
+        );
+        assert_eq!(cget(&c, "tool.indent.space"), 4);
+        assert_eq!(cget(&c, "brace.same"), 2);
+        assert_eq!(cget(&c, "tool.brace.same"), 4);
+        assert_eq!(
+            cget(&c, "comment.code"),
+            6,
+            "comment density is never tool-decided"
+        );
+        assert_eq!(cget(&c, &format!("tooling.{}", tooling::TOOLS[1])), 1);
+    }
+
+    #[test]
+    fn repository_formatter_moves_conventions_into_repository_tooling() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fixture_repository(&root, "Alice");
+        std::fs::write(root.join("rustfmt.toml"), "edition = \"2021\"\n").unwrap();
+        fixture_git(&root, &["add", "rustfmt.toml"]);
+        fixture_git(&root, &["commit", "-qm", "chore: format with rustfmt"]);
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        mine_to_paths(&root, None, false, false, &db_path, &profile).unwrap();
+
+        let aggregate = store::ProfileStore::open(&db_path)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(cget(&aggregate.counts, "indent.space"), 0);
+        assert_eq!(cget(&aggregate.counts, "tool.indent.space"), 10);
+        let rendered = std::fs::read_to_string(&profile).unwrap();
+        assert!(rendered.contains("## Repository tooling"), "{rendered}");
+        assert!(rendered.contains("rustfmt in 1 commit(s)"), "{rendered}");
+    }
+
+    #[test]
+    fn interpreted_heading_quoted_in_feedback_is_not_extracted() {
+        let profile = format!(
+            "{MANAGED_START}\n## Session feedback\n\n- **Stop writing ## Design patterns & tendencies (interpreted) sections** \
+             — code, global.\n\n## Design patterns & tendencies (interpreted)\n\nThe real portrait.\n\n---\nFooter\n{MANAGED_END}\n"
+        );
+        assert_eq!(
+            extract_interpreted(&profile).as_deref(),
+            Some("## Design patterns & tendencies (interpreted)\n\nThe real portrait.")
+        );
+    }
+
+    #[test]
+    fn legacy_feedback_does_not_exhaust_verified_preference_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = store::ProfileStore::open(&dir.path().join("style.db")).unwrap();
+        for i in 0..64 {
+            let entry = db
+                .record_feedback(&store::NewFeedback {
+                    statement: &format!("A legacy preference {i}"),
+                    category: "code",
+                    scope: "global",
+                    quote: "Legacy quote",
+                    at: "2026-09-01",
+                    source: "session:legacy",
+                })
+                .unwrap();
+            db.set_feedback_status(&entry.key, "active").unwrap();
+        }
+        store::fixture_preference(&mut db, "Z verified preference", "global");
+        let entry = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.statement == "Z verified preference")
+            .unwrap();
+        db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+            .unwrap();
+        struct Current(usize);
+        impl QuoteVerifier for Current {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                self.0 += 1;
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                false
+            }
+        }
+        let mut aggregate = db.aggregate().unwrap();
+        let mut verifier = Current(0);
+        assert!(
+            !mark_unavailable_claims(&db, &mut aggregate, &mut verifier),
+            "legacy verification is still incomplete"
+        );
+        assert_eq!(verifier.0, 1);
+        let active: Vec<_> = aggregate
+            .feedback
+            .iter()
+            .filter(|e| e.status == "active")
+            .collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key, entry.key);
+    }
+
+    #[test]
+    fn agent_view_filters_by_language_scope_and_budget() {
+        struct Current;
+        impl QuoteVerifier for Current {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                false
+            }
+        }
+        fn fixture_view(
+            db: &Path,
+            paths: &[String],
+            repo: Option<&RepoContext>,
+            budget: usize,
+            audience: Option<(&Path, &str)>,
+            role: Option<&str>,
+            workflow: Option<&str>,
+        ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+            view_at_with_verifier(
+                db,
+                paths,
+                repo,
+                budget,
+                audience,
+                role,
+                workflow,
+                &mut Current,
+            )
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("style.db");
+        assert_eq!(
+            fixture_view(&db_path, &[], None, 1500, None, None, None).unwrap()["status"],
+            "access_denied"
+        );
+        assert_eq!(
+            fixture_view(
+                &db_path,
+                &[],
+                None,
+                1500,
+                Some((dir.path(), "test")),
+                None,
+                None
+            )
+            .unwrap()["status"],
+            "access_denied"
+        );
+        assert!(!db_path.exists(), "a view never creates the store");
+
+        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        for (statement, scope) in [
+            ("Keep commits small and focused", "global"),
+            ("Prefer typed errors in library code", "language:rust"),
+            ("Use the shared http client", "repo:edge-ai"),
+            ("Check component contracts before review", "role:auditor"),
+            ("Run the release checklist", "workflow:release"),
+            ("Deploys are run by the author", "project:remote:edge-ai"),
+            (
+                "Never deploy from the agent",
+                "project:-Users-a-canary-edge-ai",
+            ),
+        ] {
+            store::fixture_preference(&mut db, statement, scope);
+            let entry = db
+                .feedback()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.statement == statement)
+                .unwrap();
+            db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+                .unwrap();
+        }
+        let evidence: Vec<store::CommitEvidence> = (0..3)
+            .map(|i| store::CommitEvidence {
+                sha: format!("{i:040}"),
+                authored_at: "2026-09-01".into(),
+                counts: [
+                    ("range.area.edge-ai/mcp", 1),
+                    ("range.lib.Rust:tokio", 1),
+                    ("range.lang.Rust", 1),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+            })
+            .collect();
+        db.upsert_repo(
+            "/edge-ai",
+            &store::RepoProvenance {
+                author: "Alice".into(),
+                commits_total: 3,
+                commits_sampled: 3,
+                added_lines_sampled: 30,
+                latest_sha: None,
+                latest_date: None,
+                mined_at_epoch: 1,
+                extractor: String::new(),
+            },
+            &[],
+            &evidence,
+            &[],
+        )
+        .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        drop(db);
+
+        let paths = vec!["mcp/src/server.rs".to_string()];
+        let repo = RepoContext {
+            label: "edge-ai".to_string(),
+            slug: "-Users-a-edge-ai".to_string(),
+            persona_project_id: "remote:edge-ai".to_string(),
+        };
+        assert_eq!(
+            fixture_view(&db_path, &paths, Some(&repo), 4000, None, None, None).unwrap()["status"],
+            "access_denied"
+        );
+        assert_eq!(
+            fixture_view(
+                &db_path,
+                &paths,
+                Some(&repo),
+                4000,
+                Some((&root, "other")),
+                None,
+                None
+            )
+            .unwrap()["status"],
+            "access_denied"
+        );
+        let packet = fixture_view(
+            &db_path,
+            &paths,
+            Some(&repo),
+            4000,
+            Some((&root, "test")),
+            None,
+            None,
+        )
+        .unwrap();
+        let stated: Vec<&str> = packet["feedback"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["statement"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                "Deploys are run by the author",
+                "Keep commits small and focused",
+                "Prefer typed errors in library code",
+                "Use the shared http client",
+            ],
+            "another project's feedback does not apply, even with a shared suffix"
+        );
+        assert!(
+            packet["feedback"][0].get("quote").is_none(),
+            "quotes stay local"
+        );
+        assert_eq!(packet["associations"][0]["name"], "Rust:tokio");
+        assert_eq!(packet["associations"][0]["commits"], 3);
+
+        let selected = fixture_view(
+            &db_path,
+            &paths,
+            Some(&repo),
+            4000,
+            Some((&root, "test")),
+            Some("auditor"),
+            Some("release"),
+        )
+        .unwrap();
+        let selected_feedback = selected["feedback"].as_array().unwrap();
+        assert!(selected_feedback
+            .iter()
+            .any(|item| item["statement"] == "Check component contracts before review"));
+        assert!(selected_feedback
+            .iter()
+            .any(|item| item["statement"] == "Run the release checklist"));
+
+        let tight = fixture_view(
+            &db_path,
+            &paths,
+            Some(&repo),
+            256,
+            Some((&root, "test")),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(serde_json::to_string(&tight).unwrap().len().div_ceil(4) <= 256);
+        assert!(tight["omitted"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("associations")));
+        for workflow in ["\\".repeat(128), "\"".repeat(128), "🦀".repeat(128)] {
+            let bounded = fixture_view(
+                &db_path,
+                &paths,
+                Some(&repo),
+                256,
+                Some((&root, "test")),
+                Some("auditor"),
+                Some(&workflow),
+            )
+            .unwrap();
+            assert!(serde_json::to_vec(&bounded).unwrap().len() <= 1024);
+            assert_eq!(bounded["store_revision"], selected["store_revision"]);
+            assert!(bounded["profile_revision"].as_str().is_some());
+            assert!(bounded["selection"].is_null());
+            assert!(bounded["omitted"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("selection")));
+        }
+    }
+
+    #[test]
+    fn selected_claims_are_filtered_before_any_source_io_or_verification_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for i in 0..66 {
+            let habit = store::fixture_habit(&mut db, &format!("Unrelated behavior {i}"));
+            let (scope, role, workflow) = match i % 3 {
+                0 => ("project:other", "auditor", "strict"),
+                1 => ("project:fixture", "executor", "strict"),
+                _ => ("project:fixture", "auditor", "release"),
+            };
+            conn.execute(
+                "UPDATE persona_claim SET scope=?2,role=?3,workflow=?4 WHERE id=?1",
+                rusqlite::params![habit.id, scope, role, workflow],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE persona_claim_evidence SET source_path='unrelated.jsonl' WHERE claim_id=?1",
+                [habit.id],
+            )
+            .unwrap();
+            let habit = db.habit(habit.id).unwrap().unwrap();
+            db.review_habit(habit.id, "observed", Some(&habit.review_revision()))
+                .unwrap()
+                .unwrap();
+
+            let scope = [
+                "project:other",
+                "role:executor",
+                "workflow:release",
+                "language:python",
+                "path:frontend",
+                "repo:other",
+            ][i % 6];
+            let statement = format!("Unrelated preference {i}");
+            store::fixture_preference(&mut db, &statement, scope);
+            let entry = db
+                .feedback()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.statement == statement)
+                .unwrap();
+            db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+                .unwrap();
+        }
+        let habit = store::fixture_habit(&mut db, "Selected reviewed behavior");
+        db.review_habit(habit.id, "observed", Some(&habit.review_revision()))
+            .unwrap()
+            .unwrap();
+        let candidate = store::fixture_preference(&mut db, "Selected preference", "global");
+        let preference = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.statement == "Selected preference")
+            .unwrap();
+        db.review_feedback(
+            &preference.key,
+            "active",
+            Some(&preference.review_revision()),
+        )
+        .unwrap();
+        let revision = db.aggregate().unwrap().profile_revision();
+        let repo = RepoContext {
+            label: "fixture".into(),
+            slug: "fixture".into(),
+            persona_project_id: "fixture".into(),
+        };
+        struct OnlySelected {
+            candidate: String,
+            reads: usize,
+            current: bool,
+        }
+        impl QuoteVerifier for OnlySelected {
+            fn current_observation(&mut self, candidate: &store::CollectedCandidate) -> bool {
+                assert_eq!(
+                    candidate.id, self.candidate,
+                    "irrelevant preference source was opened"
+                );
+                self.reads += 1;
+                self.current
+            }
+            fn current(&mut self, path: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                assert_eq!(path, "fixture.jsonl", "irrelevant habit source was opened");
+                self.reads += 1;
+                self.current
+            }
+        }
+        let mut verify = OnlySelected {
+            candidate: candidate.id,
+            reads: 0,
+            current: true,
+        };
+        let view = view_at_with_verifier(
+            &path,
+            &["src/lib.rs".into()],
+            Some(&repo),
+            4000,
+            Some((&root, "test")),
+            Some("auditor"),
+            Some("strict"),
+            &mut verify,
+        )
+        .unwrap();
+        assert_eq!(verify.reads, 3);
+        assert_eq!(view["habits"].as_array().unwrap().len(), 1);
+        assert_eq!(view["habits"][0]["id"], habit.id);
+        assert_eq!(view["feedback"].as_array().unwrap().len(), 1);
+        assert_eq!(view["source_verification"], "complete");
+        assert_eq!(view["store_revision"], revision);
+        assert_eq!(view["source_verification_scope"], "selected_claims");
+
+        verify.current = false;
+        verify.reads = 0;
+        let unavailable = view_at_with_verifier(
+            &path,
+            &["src/lib.rs".into()],
+            Some(&repo),
+            4000,
+            Some((&root, "test")),
+            Some("auditor"),
+            Some("strict"),
+            &mut verify,
+        )
+        .unwrap();
+        assert_eq!(unavailable["habits"], serde_json::json!([]));
+        assert_eq!(unavailable["feedback"], serde_json::json!([]));
+        assert_eq!(unavailable["source_verification"], "incomplete");
+        assert_eq!(unavailable["store_revision"], revision);
+        assert_ne!(unavailable["profile_revision"], view["profile_revision"]);
+        assert_eq!(db.aggregate().unwrap().profile_revision(), revision);
+    }
+
+    #[test]
+    fn unpinned_habits_do_not_spend_source_verification_quota() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        for i in 0..66 {
+            store::fixture_habit(&mut db, &format!("Checks legacy contract {i}"));
+        }
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE persona_claim SET status='observed'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO persona_habit_observation VALUES (1,'wrong-pin')",
+            [],
+        )
+        .unwrap();
+        let valid = store::fixture_habit(&mut db, "Checks a freshly reviewed contract");
+        db.review_habit(valid.id, "observed", Some(&valid.review_revision()))
+            .unwrap()
+            .unwrap();
+        let mut agg = db.aggregate().unwrap();
+        let mut reads = 0;
+        let mut verify = |_: &str, _: usize, _: &str, _: &str, _: &str| {
+            reads += 1;
+            true
+        };
+        assert!(!mark_unavailable_claims(&db, &mut agg, &mut verify));
+        assert_eq!(reads, 2);
+        let published: Vec<_> = agg
+            .habits
+            .iter()
+            .filter(|h| h.status == "observed")
+            .collect();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].id, valid.id);
+        assert!(
+            render_profile(&agg, &agg.profile_revision(), &[], None, None)
+                .contains(&valid.behavior)
+        );
+        assert!(
+            !render_profile(&agg, &agg.profile_revision(), &[], None, None)
+                .contains("legacy contract")
+        );
+    }
+
+    #[test]
+    fn habit_source_checks_detect_a_concurrent_reject_with_unchanged_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        let habit = store::fixture_habit(&mut db, "Checks the contract before delivery");
+        db.review_habit(habit.id, "observed", Some(&habit.review_revision()))
+            .unwrap()
+            .unwrap();
+        let current = db.habit(habit.id).unwrap().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut raced = false;
+        let mut verify = |_: &str, _: usize, _: &str, _: &str, _: &str| {
+            if !raced {
+                conn.execute(
+                    "UPDATE persona_claim SET status='rejected' WHERE id=?1",
+                    [habit.id],
+                )
+                .unwrap();
+                raced = true;
+            }
+            true
+        };
+        assert!(habit_sources_current(&db, &current, &mut verify)
+            .unwrap_err()
+            .contains("changed during"));
+        assert!(db
+            .review_habit(habit.id, "observed", Some(&current.review_revision()))
+            .unwrap()
+            .is_err());
+        let mut agg = db.aggregate().unwrap();
+        let mut verify = |_: &str, _: usize, _: &str, _: &str, _: &str| {
+            panic!("rejected sources must not be read")
+        };
+        assert!(mark_unavailable_claims(&db, &mut agg, &mut verify));
+        assert_eq!(agg.habits[0].status, "rejected");
+    }
+
+    #[test]
+    fn reviewed_habits_are_scoped_and_withheld_after_counterevidence() {
+        fn fixture_source_current(_: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+            true
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("style.db");
+        let root = dir.path().canonicalize().unwrap();
+        let mut db = store::ProfileStore::open(&db_path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        let habit = db
+            .record_habit(
+                &store::NewHabit {
+                    when: "a change crosses two services",
+                    behavior: "checks each contract before delivery",
+                    outcome: "reports unverified delivery stages",
+                    exception: "",
+                    scope: "project:alpha",
+                    role: "auditor",
+                    workflow: "strict",
+                },
+                &store::NewHabitEvidence {
+                    source: "session:a",
+                    source_path: "fixture-a.jsonl",
+                    line_no: 1,
+                    record_digest:
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    episode: "task-a",
+                    project: "alpha",
+                    repository: "remote-alpha",
+                    quote: "check the contract before delivery",
+                    at: "2026-09-20",
+                    relation: "supports",
+                },
+            )
+            .unwrap();
+        db.add_habit_evidence(
+            habit.id,
+            &store::NewHabitEvidence {
+                source: "session:b",
+                source_path: "fixture-b.jsonl",
+                line_no: 1,
+                record_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                episode: "task-b",
+                project: "alpha",
+                repository: "remote-alpha",
+                quote: "check the contract before delivery",
+                at: "2026-09-21",
+                relation: "supports",
+            },
+        )
+        .unwrap();
+        let repo = RepoContext {
+            label: "alpha".into(),
+            slug: "alpha".into(),
+            persona_project_id: "alpha".into(),
+        };
+        let read = |role, workflow| {
+            view_at_with_verifier(
+                &db_path,
+                &[],
+                Some(&repo),
+                4000,
+                Some((&root, "test")),
+                role,
+                workflow,
+                &mut fixture_source_current,
+            )
+            .unwrap()
+        };
+        assert!(read(Some("auditor"), Some("strict"))["habits"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        db.review_habit(
+            habit.id,
+            "observed",
+            Some(&db.habit(habit.id).unwrap().unwrap().review_revision()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            read(Some("auditor"), Some("strict"))["habits"][0]["id"],
+            habit.id
+        );
+        assert!(view_at(
+            &db_path,
+            &[],
+            Some(&repo),
+            4000,
+            Some((&root, "test")),
+            Some("auditor"),
+            Some("strict"),
+        )
+        .unwrap()["habits"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(read(Some("executor"), Some("strict"))["habits"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(read(Some("auditor"), None)["habits"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        db.add_habit_evidence(
+            habit.id,
+            &store::NewHabitEvidence {
+                source: "session:c",
+                source_path: "fixture-c.jsonl",
+                line_no: 1,
+                record_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                episode: "task-c",
+                project: "alpha",
+                repository: "remote-alpha",
+                quote: "this time the contract was not checked",
+                at: "2026-09-22",
+                relation: "contradicts",
+            },
+        )
+        .unwrap();
+        assert!(read(Some("auditor"), Some("strict"))["habits"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
     // Golden corpus: a fixed multi-language fixture must yield a stable, specific
     // set of rules — the profiler's structural contract, not exact prose.
     #[test]
     fn golden_profile_from_fixture() {
-        let mut lines: Vec<AddedLine> = (0..60)
-            .map(|i| AddedLine {
-                lang: Lang::Rust,
-                text: format!("    let x{i} = compute();"),
-            })
-            .collect();
-        lines.extend((0..30).map(|i| AddedLine {
-            lang: Lang::Ts,
-            text: format!("    const v{i} = \"value\";"),
-        }));
-        lines.extend((0..30).map(|i| AddedLine {
-            lang: Lang::Rust,
-            text: format!("    fn helper{i}() {{"),
-        }));
+        let evidence: Vec<store::CommitEvidence> = (0..30)
+            .map(|i| {
+                let mut lines = spaces(Lang::Rust, 4, &format!("let x{i} = compute();"), 3);
+                lines.push(AddedLine {
+                    lang: Lang::Ts,
+                    text: format!("    const v{i} = \"value\";"),
 
-        let commits: Vec<Commit> = (0..30)
-            .map(|i| Commit {
-                subject: format!("feat: add thing {i}"),
-                body: String::new(),
+                    governed: Governed::default(),
+                });
+                lines.push(AddedLine {
+                    lang: Lang::Rust,
+                    text: format!("    fn helper{i}() {{"),
+
+                    governed: Governed::default(),
+                });
+                let mut counts = Counts::new();
+                accumulate(
+                    &lines,
+                    &[message(&format!("feat: add thing {i}"), "")],
+                    &mut counts,
+                );
+                store::CommitEvidence {
+                    sha: format!("{i:040}"),
+                    authored_at: "2026-01-01".into(),
+                    counts,
+                }
             })
             .collect();
         let mut c = Counts::new();
-        accumulate(&lines, &commits, &mut c);
-        let rules = derive_rules(&c);
+        for commit in &evidence {
+            for (key, value) in &commit.counts {
+                bump(&mut c, key, *value);
+            }
+        }
+        let rules = derive_rules(&c, &evidence);
 
         let ids: Vec<&str> = rules.iter().map(|r| r.id).collect();
         for want in [
@@ -3148,17 +5824,24 @@ diff --git a/app/bar.ts b/app/bar.ts
         ] {
             assert!(ids.contains(&want), "missing {want}: {ids:?}");
         }
+        assert!(rules
+            .iter()
+            .all(|r| r.evidence.starts_with("30/30 commits")));
 
         let agg = store::Aggregate {
             repos: 1,
+            legacy_repos: 0,
+            feedback: Vec::new(),
+            habits: Vec::new(),
             commits_total: 100,
             commits_sampled: 100,
             added_lines_sampled: 120,
             identities: vec!["fixture@example.com".to_string()],
             counts: c,
+            commits: evidence,
         };
-        let md = render_profile("fixture@example.com", &agg, &rules, None, None);
-        assert!(md.contains("Observed 4-space indentation"));
+        let md = render_profile(&agg, &agg.profile_revision(), &rules, None, None);
+        assert!(md.contains("Observed space indentation"));
         assert!(md.contains("Observed double quotes"));
         assert!(md.contains("Observed same-line opening braces"));
         assert!(md.contains("Observed `const` declarations"));

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The style miner now counts evidence per commit instead of per line. Each
+  sampled commit votes once on each convention, and a rule needs at least eight
+  commits with the opportunity plus a Wilson-bounded majority, so one large or
+  formatter-rewritten commit can no longer produce a `high` rule. Small samples
+  render as insufficient evidence, and repositories mined by the older
+  line-level store stay listed as legacy until re-mined.
+- Style mining samples diffs across the author's history instead of only the
+  newest commits: up to 400 non-bulk commits are drawn round-robin across
+  months from the 2000 newest, and commits over 2000 added source lines count
+  only for commit voice. Re-mining reuses stored commit tallies for the same
+  author and detector contract and measures only new commits.
+- Style mining no longer credits the author with conventions a repository's
+  own tooling decides. Formatter and linter configuration at the mined
+  snapshot, plus tools run from CI or task files, route those lines to a
+  Repository tooling summary instead of the personal rules.
+- The style profile gains a Workflow (process) section measured per commit:
+  delivery through squash-merged pull requests, tests and documentation
+  changed with source, tracker keys in subjects, typical change size, and
+  reverts. Commit voice now reads squash-merged pull-request titles without
+  their `(#123)` suffix instead of skipping them, and leaves their generated
+  bodies out of the body rule.
+- The style profile gains a Range section: languages (including SQL, HCL,
+  Shell and PowerShell), repository areas and libraries from added imports,
+  each counted in commits with the number of recent commits and the last
+  month active. Imports of the repository's own crates, packages and Go
+  modules, standard libraries and path aliases are left out.
+
+### Added
+- `mastermind miner feedback` records preferences the author stated to coding
+  agents in the same profile: `scan` prints the human turns of a Claude Code
+  session transcript under `~/.claude/projects`, `add` stores one preference
+  whose quote must appear verbatim in a human turn, `import-memory` imports
+  Claude Code memory files of type `feedback` or `user`, and `list`, `accept`
+  and `reject` review them. Every recorded or imported statement is a
+  candidate; only `accept` in an interactive terminal makes it active, and
+  only active feedback outranks mined preferences in the rendered profile.
+- `mastermind-feedback-collector` subagent collects those preferences at the
+  end of a session and records them through the CLI.
+- `mmcg_profile` read-only MCP tool returns the part of the user's own profile
+  that applies to the paths being changed: session feedback whose scope
+  matches exactly (without the local quotes), personal rules for their languages, workflow habits, range, and the
+  libraries that co-occurred with the changed areas in the author's commits,
+  within a token budget. The task executor is granted it; independent
+  reviewers are not.
+
 ## [2.1.1] - 2026-09-19
 
 ### Added

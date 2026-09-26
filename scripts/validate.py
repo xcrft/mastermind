@@ -477,10 +477,10 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 # without forcing the same long inventory into every user-facing README.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
-MMCG_EXPECTED_LAST_TOOL = "mmcg_concept"
+MMCG_EXPECTED_LAST_TOOL = "mmcg_profile"
 MMCG_EXPECTED_BEHAVIOR_COUNTS = {
     "refreshable_tool": 21,
-    "read_only_tool": 8,
+    "read_only_tool": 11,
     "additive_tool": 1,
 }
 

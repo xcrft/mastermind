@@ -8,8 +8,8 @@ the source of truth for the `mmcg` engine. Start with
 `mmcg` is a Rust binary that builds a local structural index for Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
 It exposes the same indexed state through CLI, Lens, and MCP. The MCP surface
-contains 30 tools: 21 non-destructive queries that may refresh the managed
-derived index, 8 read-only queries, and one additive local scratchpad write.
+contains 33 tools: 21 non-destructive queries that may refresh the managed
+derived index, 11 read-only queries, and one additive local scratchpad write.
 The binary also provides spec gates, client setup, evidence ingestion, review
 export, and style mining.
 
@@ -104,8 +104,8 @@ bounded query surface instead of repeatedly rescanning source text.
   syntactic graph.
 - External producers submit validated facts; they cannot execute inside the
   process or write SQLite.
-- MCP exposes 30 bounded tools: 21 non-destructive queries that may refresh the
-  managed derived index, 8 read-only queries, and the additive, gitignored
+- MCP exposes 33 bounded tools: 21 non-destructive queries that may refresh the
+  managed derived index, 11 read-only queries, and the additive, gitignored
   `mmcg_scratchpad_append` write.
 
 ## Performance model
@@ -280,22 +280,429 @@ mmcg init
 mmcg init --no-claude      # skip Claude-assisted context drafting
 mmcg init --no-index       # scaffold without building the graph
 mmcg init --no-global      # do not reconcile the npm Claude workflow bundle
-mmcg init --no-seed-style  # do not enrich ~/.mastermind/style.md
+mmcg init --seed-style     # opt in to enriching ~/.mastermind/style.md
+
+```
+
+For local client capture, semantic draft review, and profile delivery, see
+[Mine working habits from client interactions](../guides/persona-hooks.md).
+
+```bash
 
 # Build or refresh the user-global personal style profile. No init required.
 mmcg miner profile .
 mmcg miner profile . --author "Ada Lovelace"  # literal substring of author name/email
-mmcg miner profile . --deep                    # explicit claude -p compatibility path
+mmcg miner profile . --deep                    # explicit claude -p candidate generation
+mmcg miner access grant . --client claude      # expose the full profile to this project/client
+mmcg miner access revoke . --client claude
+mmcg miner access list
+# Set MMCG_PROFILE_CLIENT=claude in this project's MCP server environment.
+# Without both the server-side client ID and a matching grant, mmcg_profile
+# returns access_denied. The grant covers the whole global profile.
 # --force intentionally replaces the whole profile, including preserved prose;
 # it is not refresh.
 # Existing profiles are capped at 1 MiB and must be regular, no-follow files.
 # Publication is serialized and atomic; concurrent mines cannot lose a contribution.
 # A manual edit is rebased with bounded retries and is never silently overwritten.
-# Git history reads are bounded; an oversized patch sample shrinks by whole commits.
-# --deep caps its prompt/output, rejects malformed sections, and times out after 180s.
+# Schema-5 style.md is a local inspection snapshot. Legacy manual/interpreted
+# prose is preserved in fenced unreviewed notes; Markdown edits never accept it.
+# Agents use mmcg_profile with role, workflow and paths and do not fall back to
+# style.md on access denial, unavailable sources or an empty selection.
+# Both views carry claim IDs and review revisions. The Markdown store-revision
+# matches MCP store_revision for the same SQL inputs; snapshot-revision binds
+# the publication's source-checked aggregate, not the live MCP selection.
+# To migrate notes, inspect original human evidence and use collect ->
+# candidates propose-preference -> feedback accept, or habit propose -> observe.
+# Unsupported evidence stays unreviewed; legacy feedback add is not this path.
+# Git history reads are bounded. Up to 2000 newest authored commits feed commit
+# voice; up to 400 of them feed code shape, spread round-robin across months.
+# Commits over 2000 added source lines are bulk and keep only their message.
+# Re-mining reuses stored commit tallies while author and detector contract match.
+# Conventions decided by the repository's own formatter or linter at the mined
+# snapshot (rustfmt, prettier, biome, dprint, black, ruff, clang-format, dotnet
+# format, editorconfig, eslint; gofmt for Go) are reported under Repository
+# tooling and never become personal rules. Config files govern their directory;
+# tools run from CI or task files govern the whole repository.
+# Workflow (process) measures delivery per commit: squash-merged pull requests,
+# tests and docs changed with source, tracker keys in subjects, change size and
+# reverts. A squash-merged title counts for commit voice without its (#123)
+# suffix; its generated body does not.
+# Range lists languages, repository areas and libraries from added imports,
+# counted in commits with recency relative to the newest mined commit. The
+# repository's own packages (Cargo, package.json, Python packages, Go modules)
+# are not libraries. Range is exposure, not skill.
+
+# Collect possible persona signals from explicitly selected local sessions.
+# The v2 detector adds first-person engineering and conditional cues. See
+# persona-quality.md for its synthetic corpus, regression command and limits.
+# An extractor change requires recollection and review of changed bindings.
+mmcg miner collect --project-root . --transcript <session.jsonl> --dry-run
+mmcg miner collect --project-root . --transcript <session.jsonl>
+# Repeat --transcript for several files. Re-run the same command to collect changes.
+# Inspect previous selections for this exact canonical project root. This lists
+# stored checkpoint metadata only; freshness is not_checked, even for missing files.
+mmcg miner sources list --project-root . --limit 50
+mmcg miner sources list --project-root . --after <full-source-id>
+# Pause or resume future sync of one registered source (full ID from sources list).
+mmcg miner sources exclude <full-source-id> --project-root .
+mmcg miner sources include <full-source-id> --project-root .
+# List includes excluded sources with sync_enabled=false. Exclusion preserves
+# evidence and review history, requires no transcript I/O, and applies before
+# sync pagination. Explicit collect can update a source but never reenables it.
+# These commands neither dismiss claims nor publish the profile.
+# Reread one page of previously collected sessions, without supplying paths again.
+mmcg miner sync --project-root . --dry-run
+mmcg miner sync --project-root . --limit 16
+mmcg miner sync --project-root . --limit 16 --after <next-cursor-from-sync>
+# Both commands return next_cursor and coverage=page. The cursor is a position,
+# not a permanent mining checkpoint. Start each NEW pass without --after: earlier
+# sources may have appended, and newly collected IDs may sort before the cursor.
+# Pages are not a frozen registry snapshot. Source list pages allow 1..100 rows;
+# sync pages allow 1..16 files and share all collection byte/line/candidate caps.
+# The lookahead row is metadata only; sync reads no transcripts beyond its page.
+# Sync selects checkpoints under the profile writer lock and checks each stored
+# session ID and canonical source path BEFORE deduplication. Missing files,
+# redirected paths, changed session/project identities, invalid attribution,
+# budget errors or SQL failures abort the whole page without advancing checkpoints.
+# Use explicit collect to select new sessions or register a known archive location.
+# Sync does not search for relocated files or discover new sessions. Stored
+# checkpoints are prior selections, not a persistent permission/discovery policy.
+# File snapshots are read in sequence; SQL atomicity is not a simultaneous view
+# of all transcripts. A dry run does not pin the inputs of the next write.
+# Empty selections and stores without collection tables return an empty page
+# without creating or migrating the database. Collection and sync leave curation
+# receipts and the published profile alone; a relocated citation still needs
+# explicit rebinding and review. Inspect candidates separately below.
+mmcg miner candidates list --status pending --limit 50
+mmcg miner candidates list --status all --after <full-candidate-id>
+mmcg miner candidates show <full-candidate-id>
+# Private literal, Unicode case-insensitive search of retained inbox quotes.
+mmcg miner candidates search "review" --project-root . --status all --limit 20
+mmcg miner candidates search "ответ" --source <full-source-id> --after <full-candidate-id>
+# Project/source/status filters precede source I/O. At most 10000 metadata rows
+# are examined per page; selected citations share the usual 16-source/64 MiB
+# verification cap. Results retain exact line/segment/digest, freshness and up
+# to eight proposal receipt links for feedback show / habit show.
+# Coverage is only saved detector-selected inbox observations, not all turns,
+# Markdown, Git or claim definitions. No match does not establish absence.
+# Manually proposed habits remain accessible separately through habit list/show.
+# The search writes nothing and cannot accept, observe or promote a claim.
+mmcg miner candidates dismiss <full-candidate-id> --revision <full-revision>
+# Interpret one exact inbox observation as a habit candidate with retained provenance.
+mmcg miner candidates propose-habit <full-candidate-id> --revision <full-revision> \
+  --episode <issue-or-pr-id> --when "<situation>" --behavior "<action>" \
+  --outcome "<observed result>" --role auditor --workflow strict
+# Optional: --exception "<limitation>" and --global. Scope defaults to the
+# observation's verified project. These fields are supplied by the curator;
+# --habit <id> selects an existing candidate generation explicitly. Every
+# definition field, scope, role and workflow must match it exactly. Without
+# this option, a new proposal addresses generation 1 only. It never redirects
+# to a renewed claim with the same wording. The selected ID is part of the
+# request digest; old requests without a target keep their original format.
+# An existing receipt always identifies its original claim, including after a
+# source relocation. Reusing that observation with another --habit is refused.
+# the command does not infer a motive, outcome, durable trait, or independence.
+# It verifies the exact stored line/segment/digest and current project identity
+# under the profile writer lock. It never re-finds the quote in another message.
+# A changed, removed, dismissed or unsupported candidate must be inspected again.
+# Claim, evidence, immutable transfer receipt and proposal event commit together.
+# The receipt binds every normalized draft field, episode and repository.
+# An exact retry returns the same habit/evidence IDs and their current status;
+# changing the draft fields or episode is not a retry. Rejected or superseded habits and
+# dismissed citations cannot be restored by replaying a proposal.
+# A first transfer cannot add support to an already reviewed habit. Re-collecting
+# a relocated source allows the SAME candidate/draft to rebind its own citation;
+# an observed habit then becomes stale and needs another habit observe review.
+# candidate show and habit show include bounded transfer history. A linked inbox
+# observation is retained; dismiss its citation with habit dismiss <habit> <evidence>.
+# Strict full-session checks persist through observe, refresh and mmcg_profile.
+# Legacy and transferred evidence share file/byte/line/record-work budgets.
+# Provenance receipts participate in the profile revision and have a 20000-row
+# cap. A SQL failure rolls back the transfer. If Markdown publication fails after
+# SQL commit, retry the same revision and fields to publish without duplicates.
+# New proposals remain unobserved. Use habit show and the separate observe gate.
+# The private inbox lives in style.db, outside style.md, the profile revision,
+# and mmcg_profile. Collection never accepts preferences or observes habits.
+# persona-explicit-v1 detects short, complete RU/EN human segments such as
+# "I prefer ...", "Я обычно ...", and "From now on ...", with work vocabulary.
+# Quotes keep the whole segment, with whitespace normalized. Questions, copied
+# material, recognizable secrets and oversized segments are excluded. This
+# cue detector has limited recall; it does not establish a durable trait.
+# Scope and episode remain unresolved. No rationale or outcome is inferred.
+# Claude collection requires explicit human origin, a valid sessionId, and an
+# absolute cwd matching the supplied root. Every supplied cwd is checked,
+# including oversized records without sessionId. Legacy manual feedback import
+# is less strict. Codex uses the attributed adapter described below.
+# Changed snapshots are rescanned completely, so late Codex turn_context records
+# are handled. Unchanged source snapshots do not rewrite inbox rows. A dry run
+# previews only new/changed snapshots and retains existing dismissal status.
+# Identical statements within one session collapse to one observation; copied
+# or archived sessions retain their source identity. Re-collect an archive to
+# update its locator. Distinct sessions do not prove independent task episodes.
+# Source checkpoints, observations and evidence revisions commit atomically.
+# A failed batch leaves successful checkpoints intact; invalid input on the
+# first collection does not create a profile database. Removed observations
+# remain visible as removed. Dismissal survives rescans and extractor changes.
+# list/show recheck source bytes and attribution: freshness may be current,
+# changed, removed, unavailable, unchecked or extractor_changed. Retained quotes
+# are local review data, including stale ones. source_verification=incomplete
+# means at least one required source could not be checked within the bounds.
+# Dismissal requires an interactive terminal and the full current revision;
+# this is a local workflow check, not proof of operator identity.
+# Per collection: 16 files, 32 MiB/file, 64 MiB total, 1 million JSONL lines,
+# 8192 eligible human segments/file, 512 observations from new/changed sources.
+# Human records are bounded to 64 KiB; timestamps to 64 printable ASCII bytes.
+# The inbox caps sources at 2000, candidates at 10000 and revisions at 20000.
+# Metadata fields are bounded; writes roll back before exceeding the profile
+# store's 64 MiB limit. No background discovery or external LLM is invoked.
+# Curate an explicit preference separately from a conditional habit.
+mmcg miner candidates propose-preference <full-candidate-id> --revision <full-revision> \
+  --statement "<reviewable preference>" --category communication
+# Default scope is project:<stable-persona-project-id>. Explicit --scope accepts
+# global, language:<name>, repo:<name>, path:<prefix>, project:<id>,
+# role:planner|executor|auditor or workflow:<name>. Scope is a curator decision.
+# The exact source and project are verified under the profile writer lock.
+# Statement, evidence, immutable receipt and migration/proposal event commit
+# together. This creates an unreviewed preference. It never accepts it.
+# Retry the same candidate revision and fields after a publication failure.
+# A re-collected locator can rebind the same candidate with the same fields,
+# returning its preference to candidate and requiring a new accept revision.
+# Rejected and superseded preferences remain terminal. A new candidate cannot silently attach
+# support to an accepted source-bound preference. New support must also pass a
+# shared verifier for the complete prospective source set before SQL commit.
+# Known citations may be rebound individually when several sources moved;
+# acceptance still requires verification of the entire current set.
+# At most 32 active inbox bindings per preference and 20000 receipts are retained; a write
+# that would exceed a limit is rolled back. A rebind does not consume a new slot.
+# candidates show and feedback show expose both sides of the transfer history.
+# Once linked, use feedback reject to withdraw the whole preference, or dismiss
+# a specific source after inspecting feedback show:
+mmcg miner feedback dismiss-source <key-prefix> <full-candidate-id> \
+  --revision <review-revision-from-show>
+# This requires an interactive terminal, retains quotes/receipts in history,
+# and invalidates acceptance. Review the remaining sources before accepting.
+# The same dismissal is an idempotent retry; re-proposing its candidate cannot
+# restore it. This also recovers a set whose sources later exceed read budgets.
+# Inbox dismissal cannot leave a linked preference published.
+
+# Manually record what you told coding agents, quoted from local transcripts.
+mmcg miner feedback scan                 # this project's newest Claude Code session
+mmcg miner feedback scan --transcript <codex-rollout.jsonl>  # explicit Codex history file
+mmcg miner feedback add --transcript <session.jsonl> --quote "<exact words>" \
+  --statement "<one imperative sentence>" --category code --scope global
+# Scope may also be role:auditor or workflow:release for accepted preferences.
+mmcg miner feedback import-memory        # Claude Code memory of type feedback or user
+mmcg miner feedback list                 # keys, status and sources
+mmcg miner feedback show <key-prefix>    # inspect retained source quotes
+mmcg miner feedback accept <key-prefix> --revision <review-revision-from-show>
+mmcg miner feedback reject <key-prefix>
+mmcg miner feedback refresh              # verify current sources and publish a fresh snapshot
+# Review both entries before replacing an obsolete preference:
+mmcg miner feedback show <old-key-prefix>
+mmcg miner feedback show <new-key-prefix>
+mmcg miner feedback supersede <old-key-prefix> --with <new-key-prefix> \
+  --old-revision <old-review-revision> --new-revision <new-review-revision>
+# supersede requires an interactive terminal and matching category/scope. Both
+# entries must be candidate or active. Only the successor needs current strict
+# sources: a legacy feedback entry in a supported category, or one whose source
+# became unavailable, can be explicitly withdrawn. import-memory uses category
+# memory, which strict proposals do not support; replacing these imports needs
+# a separate classification/migration step that is not implemented yet.
+# One SQL transaction records an immutable relation and both review events,
+# marks the predecessor superseded, removes its acceptance, and accepts the
+# exact successor revision. Review includes meaning and whether this scope
+# really replaces the old preference. Similarity and timestamps imply no edge.
+# feedback show includes at most 20 adjacent relations (with a truncation flag).
+# At most 20000 relations are retained, within the 64 MiB profile store bound.
+# A predecessor has one successor; multiple reviewed predecessors may converge
+# on the same successor. Self-links, cycles and competing replacements fail.
+# A superseded entry cannot be proposed, accepted or rejected back into service;
+# source dismissal still retains its terminal status and evidence history.
+# If Markdown publication fails after SQL commit, repeat the exact same request.
+# A committed retry republishes current state and preserves a successor's later
+# rejection, replacement, source rebind or withdrawal. It adds no review events.
+# Missing successor sources withhold it from Markdown/MCP and never restore the
+# predecessor. Relation history stays local; MCP never follows it to old text.
+# Relation revisions affect the aggregate independently of source review pins.
+# An interactive terminal is a local workflow check, not operator identity proof.
+# Claude transcripts are read only from ~/.claude/projects/<project>/*.jsonl.
+# Codex requires an explicit path under CODEX_HOME (default ~/.codex), either
+# sessions/YYYY/MM/DD/rollout-*.jsonl or archived_sessions/rollout-*.jsonl.
+# A quote must appear verbatim in a human turn; tool output, reminders, pasted
+# material and subagent threads are not human turns. Every recorded or imported statement is a
+# candidate; repeats from other sessions only raise its source count. Only
+# `accept` or explicit `supersede` in an interactive terminal makes it active.
+# Rejected and superseded entries remain terminal.
+# Acceptance pins the exact statement/category/scope and all retained evidence
+# and provenance receipts. The accepted revision is retained in review history.
+# accept, profile publication, refresh, doctor and mmcg_profile recheck the same
+# strict source bindings. Changed source bytes or attribution withhold the rule.
+# Only active feedback whose pin matches the current review revision and whose
+# sources verify reaches style.md and MCP. Quotes and source paths stay local.
+# Published quote, date and source count come only from verified inbox bindings.
+# A stated preference can be accepted from one source; habit episode thresholds
+# do not apply. Review must still confirm meaning, attribution and intended scope.
+# Legacy add/import-memory rows retain their status and quotes but have no exact
+# locator and cannot be accepted or published. feedback show labels them
+# legacy-unverifiable. For supported categories, collect and propose-preference
+# can add a strict binding, making an old active entry a candidate and recording
+# why. Category memory imports need separate curation in a supported category;
+# no automatic classification or in-place category migration is implemented.
+# Adding legacy evidence to an accepted preference invalidates its review pin;
+# it never counts as verified support. Key collisions such as C/C++ are refused.
+# Candidate, rejected, superseded, unverifiable and stale preferences remain local review data.
+# Describe an observed habit as a situation, behavior, and outcome. The first
+# quote creates a candidate scoped to the transcript's project by default.
+mmcg miner habit propose --project-root . --transcript <session.jsonl> --quote "<exact words>" \
+  --episode <task-or-pr-id> --when "<situation>" --behavior "<action>" \
+  --outcome "<observed result>" --role auditor --workflow strict
+mmcg miner habit cite <id> --project-root . --transcript <another-session.jsonl> \
+  --quote "<exact words>" --episode <another-task-or-pr-id>
+mmcg miner habit show <id>             # review quotes, episodes and counterexamples
+mmcg miner habit observe <id> --revision <review-revision-from-show>
+mmcg miner habit reject <id>
+mmcg miner habit dismiss <id> <evidence-id>  # keep incorrect citation in audit history
+mmcg miner habit refresh               # recheck sources and regenerate style.md
+# Review both descriptions before explicitly replacing an existing habit.
+mmcg miner habit show <old-id>
+mmcg miner habit show <new-id>
+mmcg miner habit supersede <old-id> --with <new-id> \
+  --old-revision <old-review-revision> --new-revision <new-review-revision>
+# supersede requires an interactive terminal, positive full IDs, exact review
+# revisions, and matching scope, role and workflow. Both endpoints must be
+# candidate, stale or observed and have no outgoing replacement. The successor
+# must pass current source checks and all observation thresholds below. The old
+# description may have unavailable sources or unresolved counterevidence: retiring
+# it does not require treating its evidence as current support.
+# One SQL transaction records persona_habit_supersession and two review events,
+# removes the old observation pin, marks it superseded, and observes the exact
+# reviewed revision of the successor. Failure or store-size overflow rolls back
+# all changes. Existing databases migrate the habit status constraint atomically,
+# retaining claim IDs, evidence, candidate receipts, pins and review history.
+# One predecessor has one successor; several predecessors may share a successor.
+# Self-links, cycles and competing replacements are rejected. show returns up to
+# 20 adjacent relations with a truncation flag; total relation history is capped
+# at 20000 rows within the 64 MiB store cap. reset removes relations and receipts.
+# Relations affect the overall profile revision separately from source review
+# revisions, so a new relation does not invalidate the successor's observation.
+# A committed exact retry (both IDs and original revisions) is recognized before
+# current source/revision/status gates. It only republishes current state, adding
+# no events or pins. It cannot revive a rejected, replaced, rebound or dismissed
+# successor. After source loss, live retrieval and refresh hide the new habit;
+# the predecessor never returns automatically. This also permits retry after a
+# SQL commit followed by a Markdown publication failure.
+# Superseded habits cannot be proposed, cited, observed or rejected again, even
+# when an older writer resets their raw status. Citation dismissal preserves
+# retirement. Retired descriptions and relations remain local review history.
+# Start another generation of a retired description with its own identity.
+mmcg miner habit show <retired-id>
+mmcg miner habit renew <retired-id> --revision <review-revision>
+# renew requires an interactive terminal and an exact reviewed rejected or
+# superseded parent. Source availability is not required: only the description,
+# scope, role and workflow are copied. The new ID starts as candidate with zero
+# evidence and no observation pin. No quotes, counters, counterexamples, review
+# acceptance or candidate receipts are inherited. The parent's history remains
+# accessible from show, which prints generation/root/parent and up to 20 lineage
+# records with an explicit truncation flag. Renewal is reconsideration of a
+# description; it does not demonstrate a temporal return of the behavior.
+# Cite evidence by the new ID, or use candidates propose-habit --habit <new-id>
+# with a separate inbox observation, then review normally. Episode independence
+# and the relevance of earlier counterexamples still need human review. A -> B
+# followed by renew A creates A' but leaves B unchanged. Use an explicit reviewed
+# supersede B --with A' to replace B after A' meets observation thresholds.
+# There is one immutable child per parent. An exact renew retry returns its
+# current stored state before current parent revision/status gates; it does not
+# change the child, add evidence/events, or restore a pin. This permits retry
+# after SQL commit and Markdown failure, even if the child was later rejected,
+# replaced or its sources changed. To reconsider a retired child, renew that ID.
+# An outgoing renewal preserves the parent's terminal state even after an older
+# writer resets its status or pin. Default propose and old inbox receipts never
+# add evidence to the new generation. Prior review digests cannot observe it.
+# Generation 1 and its pins/receipts survive an atomic schema/index migration.
+# New generations bind their generation/root/parent identity in the review
+# digest. Outgoing lineage remains separate from reviewed source content.
+# Creation, lineage and review events commit together within the 64 MiB cap;
+# lineage has a 20000-row cap. Concurrent exact retries yield one child. reset
+# clears lineage before claim IDs can be reused. Read-only legacy access does
+# not migrate the database and treats existing claims as generation 1.
+# --global requests a cross-project habit. Observation requires support from
+# two distinct sessions and task episodes, and from two distinct configured Git
+# origin URLs when global. Different checkout paths alone do not count.
+# show prints the review revision, observed revision, source verification and
+# up to 20 review events with a truncation flag. observe requires the exact
+# 64-character revision: it binds the definition, scope, role/workflow, all
+# retained evidence, candidate receipts and source relocation history. The SQL
+# status, observation pin and review event commit atomically within the store's
+# 64 MiB limit. Source checks and SQL recheck the inspected snapshot and reject
+# concurrent changes. The claim's review status and review timestamps do not change the digest.
+# Every changed citation, including new supports, a rebind or a dismissal,
+# revokes the pin and makes an observed habit stale. An exact duplicate citation
+# preserves it. Returning a source to an earlier locator does not reuse an old
+# review revision. After a change, use show and observe with the new revision.
+# An unchanged, currently verifiable observe retry adds no review event. After
+# SQL success and Markdown failure, retry while sources are current, or refresh
+# to publish the current available state without another review. Missing or
+# changed sources never count as verified support, even for a pinned retry.
+# Legacy observed entries without a pin retain history but stay out of generated
+# Markdown and MCP until explicitly reviewed again. Old review events keep a
+# null reviewed_revision; migration does not invent one. Rejection stays terminal.
+# Claude habit citations require a valid sessionId on the quoted human record.
+# Codex requires one initial session_meta with source=cli|vscode and
+# thread_source=user, plus an exact matching turn_context and canonical cwd.
+# Only response_item messages with role=user and explicitly aligned user.text
+# content kinds are admitted. Unknown/older attribution schemas, declared forks,
+# conflicting contexts and sessions that change cwd are unsupported. Compacted
+# histories, attachments and service content never supply human quotes.
+# Profile reads verify the stored source identity, including older citations. Name
+# all sessions of the same task with one episode ID. `cite` accepts --relation
+# contradicts|limits as well as supports. Unresolved counterexamples and limits
+# block observation even when the definition revision matches.
+# The quote must bind to the exact project cwd. Its JSONL line and digest are
+# kept locally. Codex digests also bind the session and turn context payloads;
+# changing either invalidates the citation even if its message is unchanged.
+# Codex source IDs use session:codex:<id>; copied or archived files remain one
+# source. Re-cite an archived file to update its locator before reviewing again.
+# All transcript reads require valid UTF-8. propose/cite reject citations that
+# cannot pass the per-source verification limits; mmcg_profile checks that the record still exists and
+# matches before returning a habit. Verification is bounded to 32 MiB per
+# transcript, 64 MiB / 16 files / 1 million JSONL lines / 64 observed habits
+# with matching review pins per read, with at most 32 active citations each.
+# Legacy or mismatched pins do not spend that quota. Parsing cited records has a separate 64 KiB per record and 8 MiB
+# total work cap. Preferences share these budgets with habits and are additionally
+# capped at 64 accepted preferences per read. Unchecked claims are withheld and
+# source_verification is incomplete. style.md is a generated snapshot; run feedback refresh after source
+# changes to refresh its text.
+# Codex parses provenance once per cached file, with an additional 4096-context
+# limit and 64 KiB per metadata/context/message record. Oversized messages are
+# not mined. Transcript scan/add read at most 256 MiB; habit citations use the
+# stricter limits above. The adapter does not discover or ingest all sessions.
+# Repeating cite after the same source quote moves to another JSONL line updates
+# its locator, records the old one for habit show, and makes an observed habit
+# stale until observe is repeated. It cannot change the episode or project.
+# The profile revision includes habit definitions, evidence history, observation pins and relations.
+# Observation requires an interactive terminal; that is a local workflow check,
+# not proof of the operator's identity against a shell-enabled agent. Episode
+# IDs and attribution of words inside a human turn still need manual review.
+# Candidate, rejected and superseded habits stay outside style.md and MCP.
+# The mastermind-feedback-collector subagent uses collect for the private inbox;
+# unreviewed feedback and inbox observations both stay outside style.md and MCP.
+# Support counts commits, not lines: a convention needs at least 8 commits that
+# had the opportunity and a Wilson-score tier; smaller samples render as
+# insufficient evidence. Ties support neither strict majority. These tiers are
+# descriptive, not calibrated probabilities of personal traits. See
+# docs/reference/persona-mining-contract.md for the algebra and replay contract.
+# mmcg_profile schema v2 exposes counterpattern instead of not for conventions.
+# Repositories mined by the older line-level store stay
+# listed as legacy until re-mined.
+# --deep caps its prompt/output, screens recognizable secrets, and times out
+# after 180s. It writes style.deep-candidate-*.md for review and never injects
+# its unverified interpretation into style.md or mmcg_profile.
 # Subdirectories and linked worktrees share one repository contribution.
 # Git common-directory keys require an exact UTF-8 canonical path.
-# Independent clones remain separate; repeated samples do not prove quality.
+# Independent clones retain separate provenance; repeated commit SHAs count
+# once for sampled pattern support. Total historical commits can still repeat.
+# Conflicting measurement contexts are withheld; checkout area aliases are
+# retained once per SHA. diff_sampled counts actual measured, unique diffs.
 
 # Preview or apply one supported MCP client target.
 mmcg setup claude --scope user                            # dry-run via native `claude mcp`
@@ -1361,10 +1768,13 @@ including embedded newlines. Watcher removals use the same identity rule.
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct static candidates, deeper graph tests are transitive, and same-component candidates without graph evidence in this response are heuristic. The classification ranks source-level candidates; it does not establish a test run, line coverage, assertion quality, or runtime reachability. Explicit supported test attributes identify candidates independently of filename, including inline Rust `test`, `tokio::test`, and `async_std::test`. Name heuristics still require test-like paths; fixtures and lifecycle hooks remain excluded. Fallback evidence is `same_component_test_filename` for test-like paths or `same_component_test_attribute` otherwise. Focused candidates never replace the repository's full required gate. |
 | `mmcg_tasks` | `query`, optional `top` (default 10, max 50) | Full-text search canonical task specs (`.mastermind/tasks/<NNN>-<name>/spec.md`) through the same deterministic inventory as `mmcg_history`. FTS5 MATCH syntax accepts bare AND-joined words, `"phrases"`, and `OR`/`NOT`. Returns ranked paths, titles, excerpts, exact indexed-match coverage, page and corpus truncation, skipped-artifact count, live history `freshness`, `freshness_error` when the live scan was unavailable, and the same retrieval precision notes. A match is retrieval evidence rather than proof of current behavior or an accepted decision, and zero matches do not prove no relevant prior task exists; the returned Markdown remains authoritative. Top-level `_` files and bare legacy `.md` files under `tasks/` are excluded. |
 | `mmcg_history` | `query`, optional `kind`, `top` (default 10, max 50), `document_graph` | Searches `CONTEXT.md`, `CONTEXT-archive-*.md`, canonical task specs, executor reports, audits, `.mastermind/releases/*.md`, legacy task-local release notes, lessons, and Markdown architecture decisions under conventional ADR directories. `architecture_decision` is an exact `kind` filter. `candidate` lessons are unresolved signals, not active guidance. Returns `indexed_total`, `count`, `result_truncated`, `row_limit`, observed matches, `skipped_artifacts`, `corpus_truncated`, overall `truncated`, `freshness` (`fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`), optional `freshness_error`, precision notes, and an explicit retrieval-only epistemic contract. Those notes retain that FTS matches do not establish semantic/current truth and zero matches do not prove no relevant decision exists. An unavailable, interrupted, or repository-mismatched live scan is `unknown`; a bounded work-cap omission remains `incomplete`. `indexed_total` is exact only for the admitted FTS corpus; skipped or corpus-truncated Markdown stays outside it. Markdown remains authoritative. The deterministic inventory binds path, kind, length, content digest, skipped state, and truncation state. Limits are 1 MiB per artifact, 5,000 artifacts, and 32 MiB of admitted text. When `document_graph` names a root-contained packet under `.mastermind/research`, the response also includes a separate live, no-follow `document_graph` check. It writes nothing to SQLite and never upgrades `verification: unverified`; its content status is independent of history-index freshness. The CLI equivalents are `mastermind history <query> --document-graph <path>` and `mastermind query history ...`. |
+| `mmcg_docs` | `query`, optional `top` (default 10, max 50) | Searches Markdown sections from the admitted project-history corpus, root `README.md`, and `docs/**/*.md`. Returns heading chains, source line ranges, excerpts, indexed match counts, omitted-artifact and section limits, and live document freshness. Markdown headings inside comments, raw HTML blocks, fenced/indented code, and blockquotes do not split sections. An index from the older section parser reports `section_extractor_current: false` and withholds excerpts until `mastermind index .` runs. New README/docs inputs with detected secret patterns are skipped by a bounded heuristic; existing history kinds retain their prior admission policy. Text matches are retrieval evidence, not reviewed project claims or verified links to code. |
+| `mmcg_project_profile` | optional `query` (FTS5, max 256 characters), `top` (default 12, max 32) | Read-only projection from indexed root `CONTEXT.md`. Returns bounded section excerpts and headings with full-section line-range citations. It also returns separately bounded `claim_candidates` extracted only from one-line `Decision` and `Status` fields in decision-log entries, with exact decision-line citations, record and file digests, extractor version, and `status: candidate`. `source_status` repeats the Markdown value and does not establish human review: `review_status` stays `unknown`. A search snippet may cover only part of its cited section; `excerpt_truncated` and `heading_truncated` flag shortened text. The tool withholds all text when the history, section, or claim extraction index is stale or incomplete; upgrading an existing index requires `mastermind index .`. Secret-like or malformed decision entries make extraction incomplete, and a heuristic cannot guarantee all secrets are found. Markdown is the source of truth; code links are unverified. The person's global profile remains separate in `mmcg_profile`. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists; a cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges; above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Name-based import resolution can over-approximate, so verify before refactoring. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root`, `top` (default 100, max 500) | Symbol-level diff between a git ref and the current index. The existing flat arrays remain available, while `coverage` reports exact observed totals, returned counts, and per-collection truncation. MCP returns at most `top` items from each of `files_in_diff`, `added`, `removed`, `signature_changed`, and `errors`; the CLI stays complete. Re-parses old blobs using the same extractor. Git subprocesses are time-bounded and the file loop stops at 10,000; when that source cap is reached, complete totals are null and `source_truncated` prevents treating the observed prefix as the full change set. |
 | `mmcg_status` | — | Exact UTF-8 index path when JSON can represent it, file/symbol counts, separate `extractor_contract_current` and `concept_contract_current` signals, live `history_freshness`, and source freshness from one checked SQLite snapshot. A native non-UTF-8 path returns `db_path: null` and `db_path_error: non_utf8_path` instead of a lossy alias. History is reported independently as `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; `history_freshness_error` identifies a failed or work-limited scan. The concept flag is false after an interrupted/failed derived-corpus update or a normalization change, even when the structural graph is current. `freshness_basis: path_and_mtime` makes the metadata contract explicit: added, deleted, older, and newer mtimes are stale; content changed while preserving the exact mtime requires `mmcg index --force`. `stale_files` counts up to 100 paths, while `stale_files_truncated` marks a larger set. `freshness_error` is present when the structural scan could not establish the count; the compatibility value `stale_files: 1` keeps older clients fail-closed. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
 | `mmcg_concept` | `query`, optional `top` (default 10, max 50) | Deterministic schema-v2 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Plain terms are escaped and fixed-AND joined; no raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. The response reports exact indexed-match coverage, bounded-page truncation, and observed safety omissions from one SQLite snapshot. BM25 score is query-local and lower-is-better, not confidence. Managed drift gets at most one refresh/retry; custom indexes remain read-only and fail closed. |
+| `mmcg_profile` | optional `paths` (max 64), `role` (`planner`, `executor`, `auditor`), `workflow`, `budget_tokens` (default 1500, 256–8000) | Read-only view of the user's global mined profile (`~/.mastermind/style.db`). Requires `MMCG_PROFILE_CLIENT` in this MCP server's environment and an explicit `miner access grant` for that client and canonical served project root. Missing access or store returns `access_denied` without profile data or creating a store. Active feedback and locally reviewed habits with current source records are exposed; quotes stay local. Episode independence is user asserted. Project, path/language, role and workflow applicability is evaluated before source I/O. `source_verification` covers selected claims only, so unrelated sources cannot spend the read budget or mark this selection incomplete; unchecked selected claims are withheld. This grant still exposes aggregate Git observations across all mined repositories; source-level access is not implemented. Git-derived rules, workflow, range, and associations carry an unverified author-filter label and are advisory. The response includes `store_revision` for canonical SQL inputs and `profile_revision` for the live verified selection, with `revision_scope=selected_claims_and_git_aggregate`. The latter changes when a selected source becomes unavailable and is not the static Markdown publication hash. Over budget, omitted lists are named in `omitted`; an oversized role/workflow echo can also be omitted as `selection`, while its exact input remains bound by `profile_revision`. |
 
 Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata; status and workflow responses use named fields.

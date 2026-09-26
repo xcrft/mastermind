@@ -2829,9 +2829,9 @@ fn view_at_with_verifier(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use serde_json::{json, Value};
     let notes = [
-        "User-global advisory data: the task, repository code and tooling take precedence.",
-        "Only accepted feedback at the reviewed revision with currently verified human sources is exposed. Quotes stay local.",
-        "Habits describe reviewed behavior in independent task episodes; they are not instructions.",
+        "Advisory only; task, code and tooling take precedence.",
+        "Returned feedback and habits have current source bindings and revision-pinned reviews. Quotes stay local; human authorship is not proven.",
+        "Distinct declared task IDs count toward habit admission; they do not establish statistical independence. Habits remain advisory.",
         "Rules count eligible commits; ties do not support either side. Wilson tiers are descriptive scores, not calibrated confidence in personal traits; commits may share a PR and the sample is not random.",
         "Range and associations count commits that touched an area; they show exposure, not skill.",
         "Historical commit totals sum checkouts; listed commits and measured added lines are deduplicated by SHA. Conflicting equally measured contexts are withheld.",
@@ -3001,6 +3001,17 @@ fn view_at_with_verifier(
             "listed_unique": agg.commits.len(),
             "context_conflicts": cget(&agg.counts, "evidence.context_conflict"),
             "git_identity_status": "unverified_author_filter",
+        },
+        // This contract applies only to returned personal claims, not the Git
+        // aggregate. Keep it even when the prose notes or claims are omitted.
+        "evidence_basis": {
+            "scope": "feedback_and_habits",
+            "source_binding": "current",
+            "review": "revision_pinned",
+            "habit_tasks": "declared_ids",
+            "authorship": "unproven",
+            "independence": "unproven",
+            "semantic_accuracy": "unknown",
         },
         "feedback": feedback,
         "habits": habits,
@@ -5418,6 +5429,116 @@ diff --git a/src/a.rs b/src/a.rs
                 .unwrap()
                 .contains(&serde_json::json!("selection")));
         }
+    }
+
+    #[test]
+    fn agent_view_evidence_basis_retains_limits_without_exposing_private_sources() {
+        struct Current;
+        impl QuoteVerifier for Current {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                true
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        let habit = store::fixture_habit(&mut db, "Reviewed descriptive behavior");
+        db.review_habit(habit.id, "observed", Some(&habit.review_revision()))
+            .unwrap()
+            .unwrap();
+        let habit_evidence = db.habit_evidence(habit.id).unwrap();
+        let candidate = store::fixture_preference(&mut db, "Reviewed preference", "global");
+        let preference = db.feedback().unwrap().remove(0);
+        db.review_feedback(
+            &preference.key,
+            "active",
+            Some(&preference.review_revision()),
+        )
+        .unwrap();
+        drop(db);
+        let repo = RepoContext {
+            label: "fixture".into(),
+            slug: "fixture".into(),
+            persona_project_id: "fixture".into(),
+        };
+
+        for budget in [256, 4000] {
+            let packet = view_at_with_verifier(
+                &path,
+                &[],
+                Some(&repo),
+                budget,
+                Some((&root, "test")),
+                None,
+                None,
+                &mut Current,
+            )
+            .unwrap();
+            let wire = serde_json::to_string(&packet).unwrap();
+            assert!(wire.len() <= budget * 4);
+            let decoded: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(
+                decoded["evidence_basis"],
+                serde_json::json!({
+                    "scope": "feedback_and_habits",
+                    "source_binding": "current",
+                    "review": "revision_pinned",
+                    "habit_tasks": "declared_ids",
+                    "authorship": "unproven",
+                    "independence": "unproven",
+                    "semantic_accuracy": "unknown",
+                })
+            );
+            for private in [
+                candidate.quote.as_str(),
+                candidate.source.as_str(),
+                candidate.source_path.as_str(),
+                candidate.record_digest.as_str(),
+                habit_evidence[0].quote.as_str(),
+                habit_evidence[0].source.as_str(),
+                habit_evidence[0].episode.as_str(),
+                root.to_str().unwrap(),
+            ] {
+                assert!(
+                    !wire.contains(private),
+                    "private evidence leaked: {private}"
+                );
+            }
+            if budget == 4000 {
+                assert_eq!(decoded["feedback"][0]["key"], preference.key);
+                assert_eq!(decoded["habits"][0]["id"], habit.id);
+            } else {
+                assert!(decoded["omitted"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("precision_notes")));
+            }
+        }
+
+        let denied = view_at_with_verifier(
+            &path,
+            &[],
+            Some(&repo),
+            4000,
+            None,
+            None,
+            None,
+            &mut |_: &str, _: usize, _: &str, _: &str, _: &str| {
+                panic!("denied access must not verify sources")
+            },
+        )
+        .unwrap();
+        assert_eq!(denied["status"], "access_denied");
+        assert!(denied.get("evidence_basis").is_none());
+        assert!(denied.get("feedback").is_none());
+        assert!(denied.get("habits").is_none());
     }
 
     #[test]

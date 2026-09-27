@@ -333,7 +333,7 @@ fn aws_access_key_like(value: &str) -> bool {
     false
 }
 
-fn secret_like_documentation(value: &str) -> bool {
+pub(crate) fn secret_like_documentation(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     (lower.contains("-----begin ") && lower.contains("private key-----"))
         || aws_access_key_like(value)
@@ -1187,6 +1187,11 @@ impl Indexer {
                     continue;
                 }
             };
+            if kind == "documentation" && secret_like_documentation(&body) {
+                skipped = skipped.saturating_add(1);
+                digest.update(b"secret_like_documentation_omitted\0");
+                continue;
+            }
             aggregate_bytes = next_aggregate;
             let fallback = path
                 .file_stem()
@@ -1501,6 +1506,68 @@ fn collect_project_history_candidates(
                     .is_some_and(|value| value.eq_ignore_ascii_case("md"))
             {
                 candidates.push((path, "architecture_decision"));
+            }
+        }
+        child_directories.sort();
+        child_directories.reverse();
+        pending.extend(child_directories);
+    }
+    add_history_candidate(
+        root,
+        &mut candidates,
+        root_path.join("README.md"),
+        "documentation",
+        control,
+    )?;
+    let mut known: BTreeSet<PathBuf> = candidates.iter().map(|(path, _)| path.clone()).collect();
+    let mut pending = vec![root_path.join("docs")];
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        control.check().map_err(index_error_from_read)?;
+        if candidates.len() >= MAX_HISTORY_ENTRIES
+            || visited >= MAX_HISTORY_ENTRIES
+            || directory_entries >= MAX_HISTORY_DIRECTORY_ENTRIES
+        {
+            truncated = true;
+            break;
+        }
+        if history_path_kind(root, &directory, control)? != Some(BoundedPathKind::Directory) {
+            continue;
+        }
+        let Some(names) = history_directory_names(
+            root,
+            &directory,
+            MAX_HISTORY_DIRECTORY_ENTRIES.saturating_sub(directory_entries),
+            control,
+        )?
+        else {
+            truncated = true;
+            continue;
+        };
+        visited += 1;
+        directory_entries = directory_entries.saturating_add(names.len());
+        let mut child_directories = Vec::new();
+        for name in names {
+            let Some(label) = name.to_str() else { continue };
+            if label.starts_with('.')
+                || is_skipped_dir(label)
+                || matches!(label, "vendor" | "vendored" | "generated" | "_generated")
+            {
+                continue;
+            }
+            let path = directory.join(name);
+            match history_path_kind(root, &path, control)? {
+                Some(BoundedPathKind::Directory) => child_directories.push(path),
+                Some(BoundedPathKind::RegularFile)
+                    if path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+                        && known.insert(path.clone()) =>
+                {
+                    candidates.push((path, "documentation"));
+                }
+                _ => {}
             }
         }
         child_directories.sort();
@@ -2927,6 +2994,76 @@ def placeholder():
             .search_project_history("runtime boundary", Some("audit"), 10)
             .unwrap()
             .is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn markdown_docs_sections_are_searchable_and_refresh_on_edit() {
+        let (dir, db) = setup("markdown_docs_sections");
+        fs::create_dir_all(dir.join("docs/guide")).unwrap();
+        fs::write(
+            dir.join("README.md"),
+            "# Overview\n\nRepository entrance.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("docs/guide/runtime.md"),
+            "# Guide\n\n## Runtime\nExact runtime boundary.\n\n## Delivery\nRelease lane.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("docs/guide/private.md"),
+            "# Example\napi_key = verysecretvalue\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let indexer = Indexer::new(&dir);
+        let stats = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!(stats.history_entries_skipped, 1);
+        let hits = store
+            .search_document_sections("runtime boundary", 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "docs/guide/runtime.md");
+        assert_eq!(hits[0].heading, "Guide > Runtime");
+        assert_eq!((hits[0].start_line, hits[0].end_line), (3, 5));
+        assert!(store
+            .search_project_history("runtime boundary", None, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .search_document_sections("repository entrance", 10)
+                .unwrap()[0]
+                .path,
+            "README.md"
+        );
+        assert!(store
+            .search_document_sections("verysecretvalue", 10)
+            .unwrap()
+            .is_empty());
+
+        fs::write(
+            dir.join("docs/guide/runtime.md"),
+            "# Guide\n\n## Runtime\nNew contract wording.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            indexer.project_history_freshness(&store).unwrap(),
+            ProjectHistoryFreshness::Stale
+        );
+        indexer.index_project_history(&mut store).unwrap();
+        assert!(store
+            .search_document_sections("runtime boundary", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .search_document_sections("contract wording", 10)
+                .unwrap()
+                .len(),
+            1
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

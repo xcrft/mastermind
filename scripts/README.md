@@ -1,135 +1,81 @@
 # Scripts
 
-Find the gate that matches your change, run it from the repository root, and
-keep the result replayable. This directory owns repository validation,
-packaging, release controls, and registry smoke tests.
+Run commands from the repository root. The [justfile](../justfile) provides the
+main developer interface:
 
-## Start with the narrowest useful gate
-
-| Goal | Command |
+| Purpose | Command |
 |---|---|
 | Full deterministic gate | `just check` |
-| Repository contracts only | `just validate` |
-| Research evidence and eval harnesses, without a build or model | `just eval-harness` |
+| Repository contracts | `just validate` |
+| Evidence and eval harnesses, without a build or model | `just eval-harness` |
 | Native npm tarball smoke | `just npm-smoke-native` |
 | Index benchmark | `just benchmark-index` |
 
-The `just` recipes are the canonical developer interface. Reach for an
-individual script only when you are diagnosing that script or its contract.
+## Repository validator
 
-## `validate.py`: catch cross-surface drift
+`validate.py` checks:
 
-Runs the deterministic repository-level checks that do not belong in the Rust,
-npm, or model-backed test suites. CI executes it on every change.
-
-### Contracts it protects
-
-- artifact frontmatter, names, versions, domains, links, and template mirrors;
-- bounded subagent runtime contracts: explicit model, tools, turn/effort limits,
-  MCP scoping, exact known grants, and every mmcg tool referenced by the prompt;
-- exact MCP tool count plus read/write annotations, and parity of the public
-  declarative-fact schema with its CLI/MCP/Lens ingestion boundary;
-- portable skill adapters and one behavioral eval case per shipped skill;
-- planner/executor/auditor ownership and structured-report schema parity;
-- GitHub Action SHA pins, required-check routing, Docker runtime packaging, and
-  the audit publication security contract;
-- npm package/version/platform shape, README badge alignment, and workflow-bundle staging parity;
-- answer-leak clues in adversarial eval fixture source trees.
-
-### Run it directly
+- artifact metadata, links, template mirrors and workflow bundle staging.
+- subagent model/tool/turn contracts and MCP grants.
+- public tool documentation, schemas and report ownership.
+- skill adapters and their evaluation cases.
+- Action pins, required-check routing and publication workflow structure.
+- npm versions, platform packages and README badges.
 
 ```bash
-# One-time setup
-python3 -m venv .venv
-.venv/bin/pip install --require-hashes -r scripts/requirements.txt
-
-# Run
-.venv/bin/python scripts/validate.py
+just bootstrap  # install pinned Python dependencies once
+just validate
 ```
 
-Exit code is `0` on clean and `1` when errors exist. Warnings do not fail the
-run.
+Exit `0` means no errors. Warnings do not fail the run. The validator does not
+compile Rust, run npm, invoke models or establish the runtime behavior of an
+agent prompt. Those checks have separate suites.
 
-### What it cannot prove
+Artifact discovery excludes template placeholders and build/local-state
+paths. New checks belong in `validate.py` and report `Issue` values with an
+`error` or `warning` level. Fix newly detected repository violations in the same
+change.
 
-- It does not compile Rust, execute npm, or call a model.
-- It cannot prove that a prompt behaves correctly; `evals/runner.py` covers
-  selected adversarial behaviors.
-- It validates configured workflow structure and Docker packaging invariants;
-  the CI image smoke supplies the hosted container proof.
+## Document evidence
 
-### Excluded paths
+`test_document_graph.py` tests the portable history helper in temporary Git
+repositories: schema and path validation, bounded reads, changed or deleted
+sources and snapshot invalidation. It uses Python's standard library and Git.
 
-- `_template/` directories — they show example syntax, not real references
-- Build artifacts and local state (`target/`, `node_modules/`, `.mastermind/`,
-  virtual environments, and caches).
-- Templates are excluded from artifact discovery where they intentionally show
-  placeholder syntax.
+The runtime helper and its contract live in
+[the project-history skill](../skills/workflow/mastermind-project-history/SKILL.md).
+These tests establish source identity and freshness behavior. They do not judge
+the meaning of a declared relation.
 
-### Adding a new check
+## GitHub release controls
 
-Edit `scripts/validate.py`. The validator collects `Issue` objects with `level: "error" | "warning"` and a message. The pattern is:
-
-```python
-def validate_artifact(a: Artifact) -> list[Issue]:
-    issues = []
-    # ... add your check ...
-    if some_problem:
-        issues.append(Issue(a.path, "error", "what's wrong"))
-    return issues
-```
-
-When you add a check that flags many existing artifacts, **fix them in the same PR** so CI stays green.
-
-## `test_document_graph.py`: research evidence freshness
-
-Exercises the portable history skill's snapshot/check CLI in temporary Git
-repositories: explicit relations, content drift, deleted endpoints, schema
-validation, bounded reads, and path confinement. It uses Python's standard
-library and Git, without compiling mmcg or calling a model.
-
-The runtime helper ships inside
-[`mastermind-project-history`](../skills/workflow/mastermind-project-history/SKILL.md),
-including its [commands and limits](../skills/workflow/mastermind-project-history/references/document-evidence-graph.md).
-The suite checks file identity and invalidation, not the meaning of a declared
-relation or the quality of model reasoning.
-
-## `configure-github-protections.sh` — live release controls
-
-Prints the required `main`, `npm-v*`, and `npm-prod` settings by default. An
-admin-authenticated maintainer can apply them explicitly:
+`configure-github-protections.sh` previews settings by default. Applying them
+requires an admin-authenticated `gh` session:
 
 ```bash
 scripts/configure-github-protections.sh
 scripts/configure-github-protections.sh --apply
 ```
 
-The script never reads or replaces environment secrets. It configures the npm
-reviewer/tag boundary and ensures every unfiltered required workflow is present
-in the active `main` ruleset. Self-review prevention stays disabled by default
-so a single maintainer cannot deadlock a release. Enable it only with a distinct
-eligible reviewer:
+It configures the `main` ruleset, `npm-v*` tag boundary and `npm-prod` environment
+reviewer. It does not replace environment secrets. Self-review prevention is
+disabled by default. Enable it with a distinct eligible reviewer:
 
 ```bash
 scripts/configure-github-protections.sh \
-  --reviewer another-maintainer \
-  --prevent-self-review \
-  --apply
+  --reviewer another-maintainer --prevent-self-review --apply
 ```
 
-## Registry release smoke
+## Registry smoke tests
 
-The publish workflows run two post-publication checks against the public
-registries, not the workspace build:
+Publish workflows run these against public packages after publication:
 
-- `smoke-installed-npm-release.sh` installs the exact root npm package version
-  into an isolated temporary project, verifies the selected native package and
-  binary version, then exercises index, third-party adaptation, key generation,
-  signed import/query, and a two-repository team map;
-- `smoke-installed-crate-release.sh` installs the exact crate version into an
-  isolated Cargo root and verifies the shipped binary plus the `facts`, `team`,
-  and `review` command surfaces.
+| Script | What it checks |
+|---|---|
+| `smoke-installed-npm-release.sh` | Exact npm version, platform binary, indexing, facts adaptation/signing/import and a two-repository team map |
+| `smoke-installed-crate-release.sh` | Exact crates.io version, binary version and the shipped facts/team/review command surfaces |
 
-Both scripts retry registry propagation for a bounded period and fail the
-release workflow if the public version cannot be installed or exercised. They
-are release gates only; local validation never publishes a package.
+Both install into temporary locations, retry registry propagation for a bounded
+period and fail when the package cannot be installed or exercised. They do not
+publish packages. The local `npm-smoke-native` recipe instead uses workspace
+tarballs and does not establish public-registry availability.

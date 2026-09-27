@@ -12,7 +12,21 @@ canonical frontmatter and headings. Fill this compact contract:
 ---
 verify:
   - cmd: "<focused test>"
+    run:
+      id: focused
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
   - cmd: "<repository-required gate>"
+    run:
+      id: gate
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
+acceptance:
+  - id: outcome
+    statement: "<observable behavior this task must achieve>"
+    checks: [focused, gate]
 ---
 
 # Task NNN: <title>
@@ -56,6 +70,15 @@ belongs in `expected_docs`. Existing drafts allow another preflight, but an old
 baseline file cannot be relabeled as a creation. Mirror every required Final Verification
 command in `verify[].cmd`, including its arguments. Legacy `VERIFY:` command
 lines are also machine-checked; labels and ordinary shell fences are not.
+
+The planner must replace the generated `acceptance` placeholders and map every
+criterion to relevant `verify[].run.id` checks before preflight. Each command
+label must match its displayed argv. All checks listed for a criterion are
+required. Run them through `mastermind verification run <spec> --id <id>` after
+implementation, then inspect `mastermind acceptance status <spec> --json`.
+Markdown checkboxes and executor pass claims do not satisfy these requirements.
+Review whether the chosen tests actually cover the criterion: a current passing
+run establishes the declared evidence requirement, not semantic entailment.
 
 ## Strict additions
 

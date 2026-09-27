@@ -1,68 +1,64 @@
 # Claude Code integration
 
-Give Claude Code the local graph without hand-editing its MCP configuration.
-Use user scope for one installation across repositories or project scope when
-the repository should carry its own `.mcp.json` entry.
+Connect the local graph through MCP. Install the workflow bundle for skills
+and Claude's named subagents.
 
-## Fastest path: user scope
-
-Install Mastermind, index the repository, and preview registration:
+## Install the workflow
 
 ```bash
 npm install -g @xcraftmind/mastermind
+mastermind install --client claude
 cd your-project
-mastermind init
-mastermind setup claude --scope user
+mastermind index .
+mastermind doctor --workflow --client claude
 ```
 
-The preview resolves the trusted current Mastermind command and shows only a redacted command summary. Apply it with:
+| Option | Result |
+|---|---|
+| Default | `core` skills |
+| `--profile frontend`, `security`, `full` | Expanded skill selection |
+| Restart Claude Code | Load the installed workflow |
+
+## Register MCP only
+
+| Scope | Storage |
+|---|---|
+| User | Native `claude mcp` registration |
+| Project | Repository `.mcp.json` |
 
 ```bash
+mastermind setup claude --scope user
 mastermind setup claude --scope user --write
 ```
 
-User scope uses the bounded native `claude mcp` contract. Mastermind compares
-the exact trimmed `Command:` and `Args:` fields, rejects truncated inspection
-output, and rechecks executable identity before later inspection or mutation.
-The process runs without a shell, has a ten-second limit, and does not print raw
-output.
-
-## Repository-owned path: project scope
+For project scope:
 
 ```bash
-npm install -D @xcraftmind/mastermind
-mastermind setup claude --scope project --root .          # dry-run
+mastermind setup claude --scope project --root .
 mastermind setup claude --scope project --root . --write
 ```
 
-Project scope merges the canonical `mmcg` entry into `.mcp.json` while
-preserving unrelated root fields and servers. The legacy spelling
-`--project . --write-mcp` remains compatible.
+The command without `--write` previews the change. Setup preserves unrelated
+entries. MCP does not require `mastermind init`.
 
-## Change or undo safely
-
-A matching entry is an idempotent no-op. A customized entry requires `--force`;
-`--force` never implies `--write`. Before forced file-backed replacement or
-removal, Mastermind stores the previous bytes under
-`~/.mastermind/setup-backups/`.
-
-```bash
-mastermind setup claude --scope project --root . --remove          # dry-run
-mastermind setup claude --scope project --root . --remove --write
-```
-
-## Verify the result
+## Verify or remove
 
 ```bash
 mastermind doctor
+mastermind setup claude --scope project --root . --remove
+mastermind setup claude --scope project --root . --remove --write
 ```
 
-Doctor parses supported configuration locations as bounded data, rejects
-symlinked config files or existing path ancestors, and reports only client
-labels and structural status. It does not execute commands from configuration;
-the separate MCP handshake starts only the trusted current Mastermind binary.
-For installed `mastermind-*` agents it also verifies the full runtime chain:
-explicit model, tools, `maxTurns`, and effort; registered MCP servers; exact
-known mmcg grants; and every mmcg tool named by the prompt.
+| Condition | Behavior |
+|---|---|
+| Removal | Use the installation scope |
+| Matching registration | No change needed |
+| Customized entry | Replacement requires `--force` and `--write` |
+| Forced file change | Backup under `~/.mastermind/setup-backups/` |
+| Doctor | Reads configuration and reports project health |
 
-Restart Claude Code after changing registration.
+## Use it
+
+[Workflow](../workflow.md) covers handoff and `run-task --exec` with existing
+Claude authentication and permissions. [Persona hooks](../guides/persona-hooks.md)
+separately enables capture and profile delivery.

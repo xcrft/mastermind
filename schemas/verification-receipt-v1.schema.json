@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/verification-receipt-v1.schema.json",
+  "title": "Local verification runner receipt v1",
+  "description": "Owner-writable local execution record. Hash bindings are not signatures or independent attestations. This format does not claim sandboxing or semantic correctness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "check_id", "attempt", "status", "reason", "binding", "declaration_sha256", "command", "declaration", "executable", "snapshot_version", "snapshot_before", "snapshot_after", "started_at", "duration_ms", "exit_code", "signal", "stdout", "stderr", "runner_version", "platform", "provenance"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "check_id": {"$ref": "#/$defs/id"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["pending", "passed", "failed", "timeout", "interrupted", "output_limit", "input_changed", "spawn_failed", "io_failed"]},
+    "reason": {"type": ["string", "null"]},
+    "binding": {"$ref": "#/$defs/binding"},
+    "declaration_sha256": {"$ref": "#/$defs/sha256"},
+    "command": {"type": "string", "minLength": 1},
+    "declaration": {"$ref": "#/$defs/declaration"},
+    "executable": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/executable"}]},
+    "snapshot_version": {"const": 1},
+    "snapshot_before": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "snapshot_after": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "started_at": {"type": "integer", "minimum": 0},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "exit_code": {"type": ["integer", "null"]},
+    "signal": {"type": ["integer", "null"]},
+    "stdout": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/stream"}]},
+    "stderr": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/stream"}]},
+    "runner_version": {"type": "string", "minLength": 1},
+    "platform": {"type": "string", "minLength": 1},
+    "provenance": {"const": "local_runner_unsigned"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_identity", "spec_path", "spec_sha256", "baseline_oid", "iteration", "preflight_started_at"],
+      "properties": {
+        "repository_identity": {"type": "string", "minLength": 1},
+        "spec_path": {"type": "string", "minLength": 1},
+        "spec_sha256": {"$ref": "#/$defs/sha256"},
+        "baseline_oid": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
+        "iteration": {"type": "integer", "minimum": 1},
+        "preflight_started_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "declaration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "argv", "cwd", "timeout_secs"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 8192}},
+        "cwd": {"type": "string", "minLength": 1},
+        "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 3600}
+      }
+    },
+    "executable": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invocation_path", "resolved_path", "sha256"],
+      "properties": {
+        "invocation_path": {"type": "string", "minLength": 1},
+        "resolved_path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "stream": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

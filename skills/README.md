@@ -1,78 +1,74 @@
 # Skills
 
-Portable, client-neutral capabilities for taking a task from intent to
-evidence. Pick the smallest skill that owns the job; combine them only when the
-task genuinely crosses research, implementation, review, or security
-boundaries.
+Portable task capabilities included in the npm workflow bundle. Use the skill
+that matches the work. Claude Code-specific roles are listed in
+[agents](../agents/). Install with the [client setup guides](../docs/integrations/generic-mcp.md).
 
-Every `SKILL.md` in this tree is staged into the npm workflow bundle;
-`scripts/validate.py` fails if this index or the staged copy drifts.
-
-Skills define task behavior. Claude Code-specific spawnable roles live under
-[`agents/`](../agents/).
+`just validate` checks this catalogue and bundle staging against the shipped
+`SKILL.md` files.
 
 ## Move a task from request to evidence
 
 | Skill | Description |
 |---|---|
-| [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | Chooses Direct, Verified, or Strict and creates the lightest evidence-grounded delegation contract that fits the risk. |
-| [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Executes an approved contract by outcomes and acceptance criteria, uses bounded repair, and writes `executor-report.md`. |
-| [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Routes bounded orientation, concept discovery, and structural lookup through mmcg before literal fallbacks while preserving precision and runtime-proof limits. |
-| [`mastermind-component-research`](workflow/mastermind-component-research/SKILL.md) | Answers whether a React or Vue component already exists, who renders it, and what its props contract is, before the change is written. |
-| [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the file-backed executor report consumed by post-flight and the advisory Strict auditor tail. |
-| [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Stress-test a design, spec, plan, or report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. |
-| [`mastermind-product-intake`](workflow/mastermind-product-intake/SKILL.md) | Converts a PRD or ticket into criteria that can fail, resolves product nouns to symbols, surfaces unspecified cases, and parks outcome metrics. |
-| [`mastermind-runtime-research`](workflow/mastermind-runtime-research/SKILL.md) | Gathers consumers, state writers, and boundary crossings before a service change, and names the runtime gaps the graph cannot span. |
-| [`mastermind-architecture-review`](workflow/mastermind-architecture-review/SKILL.md) | Reviews runtime paths, state ownership, retry behavior, and compatibility against concrete system invariants. |
-| [`mastermind-project-history`](workflow/mastermind-project-history/SKILL.md) | Explains prior decisions from durable evidence while separating observation, inference, provenance, and technical proof. |
-| [`mastermind-project-map`](workflow/mastermind-project-map/SKILL.md) | Builds a bounded architecture map from the live codegraph, including collision and truncation evidence. |
-| [`mastermind-change-impact`](workflow/mastermind-change-impact/SKILL.md) | Reports changed files, symbols, structural impact, and risk from a live diff. |
-| [`mastermind-test-impact`](workflow/mastermind-test-impact/SKILL.md) | Selects tests from changed symbols and graph evidence without claiming runtime certainty. |
-| [`mastermind-cross-client-setup`](workflow/mastermind-cross-client-setup/SKILL.md) | Installs or previews portable setup across supported clients with explicit write and force boundaries. |
-| [`mastermind-audit-attestation`](workflow/mastermind-audit-attestation/SKILL.md) | Separates content integrity, signer provenance, and policy acceptance for audit evidence. |
-| [`mastermind-style-deep`](workflow/mastermind-style-deep/SKILL.md) | Adds a grounded qualitative coding portrait consumed as advisory planner/executor input. |
+| [`mastermind-task-planning`](workflow/mastermind-task-planning/SKILL.md) | Selects Direct, Verified or Strict and writes the task contract. |
+| [`mastermind-task-executor`](workflow/mastermind-task-executor/SKILL.md) | Implements the approved contract and writes `executor-report.md`. |
+| [`mastermind-codegraph-research`](workflow/mastermind-codegraph-research/SKILL.md) | Uses mmcg to discover symbols and inspect repository structure. |
+| [`mastermind-component-research`](workflow/mastermind-component-research/SKILL.md) | Finds existing React/Vue components, their consumers and props contracts. |
+| [`mastermind-structured-report-contract`](workflow/mastermind-structured-report-contract/SKILL.md) | Defines the executor report consumed by postflight. |
+| [`mastermind-critical-review`](workflow/mastermind-critical-review/SKILL.md) | Reviews assumptions, scope, evidence and failure modes in a design or report. |
+| [`mastermind-product-intake`](workflow/mastermind-product-intake/SKILL.md) | Turns a PRD or ticket into testable criteria and unresolved product questions. |
+| [`mastermind-runtime-research`](workflow/mastermind-runtime-research/SKILL.md) | Traces service consumers, state writers and runtime evidence gaps. |
+| [`mastermind-architecture-review`](workflow/mastermind-architecture-review/SKILL.md) | Reviews runtime paths, state ownership, retries and compatibility. |
+| [`mastermind-project-history`](workflow/mastermind-project-history/SKILL.md) | Retrieves prior decisions with sources and evidence limits. |
+| [`mastermind-project-map`](workflow/mastermind-project-map/SKILL.md) | Maps components and dependencies with explicit graph limits. |
+| [`mastermind-change-impact`](workflow/mastermind-change-impact/SKILL.md) | Traces changed files and symbols to potential downstream impact. |
+| [`mastermind-test-impact`](workflow/mastermind-test-impact/SKILL.md) | Finds candidate tests from changed symbols and graph evidence. |
+| [`mastermind-cross-client-setup`](workflow/mastermind-cross-client-setup/SKILL.md) | Previews and installs workflows for supported clients. |
+| [`mastermind-audit-attestation`](workflow/mastermind-audit-attestation/SKILL.md) | Checks audit integrity, signer provenance and acceptance policy separately. |
+| [`mastermind-style-deep`](workflow/mastermind-style-deep/SKILL.md) | Drafts a qualitative coding profile for evidence review. |
 
 ## Keep implementation clean
 
 | Skill | Description |
 |---|---|
-| [`no-ai-slop-comments`](coding/no-ai-slop-comments/SKILL.md) | Keeps useful comments and removes narration introduced by the current change without widening scope. |
+| [`no-ai-slop-comments`](coding/no-ai-slop-comments/SKILL.md) | Reviews new comments while preserving useful rationale. |
 
 ## Review what actually changed
 
 | Skill | Description |
 |---|---|
-| [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Reviews the comment delta of a finished change with quoted evidence, names what it kept, and reports deleted rationale. |
-| [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether a change's tests prove its behaviour: uncovered symbols, a test on the wrong path, an assertion moved with the code, and non-asserting tests. |
-| [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Checks a finished UI change against the codegraph: unrendered components, props contracts changed without their callers, duplicates, and raw values shadowing tokens. |
+| [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Audits changed comments and deleted rationale with quotations. |
+| [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether tests exercise and assert the changed behavior. |
+| [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Reviews changed component usage, props, duplication and design tokens. |
 
 ## Turn design intent into a contract
 
 | Skill | Description |
 |---|---|
-| [`mastermind-design-intake`](design/mastermind-design-intake/SKILL.md) | Converts a design handoff into named components, token names, and criteria that can fail, parking visual fidelity explicitly. |
+| [`mastermind-design-intake`](design/mastermind-design-intake/SKILL.md) | Turns a design handoff into components, tokens and acceptance criteria. |
 
-## Record browser evidence honestly
+## Verify in a browser
 
 | Skill | Description |
 |---|---|
-| [`mastermind-browser-verification`](testing/mastermind-browser-verification/SKILL.md) | Records browser checks as evidence — accessibility tree over screenshot, console and network errors, viewports as a checklist, unchecked marked unchecked. |
+| [`mastermind-browser-verification`](testing/mastermind-browser-verification/SKILL.md) | Records browser, accessibility, console, network and viewport observations. |
 
 ## Investigate before declaring a cause
 
 | Skill | Description |
 |---|---|
-| [`mastermind-investigation-ledger`](debugging/mastermind-investigation-ledger/SKILL.md) | Diagnoses unknown bugs with competing hypotheses, evidence for/against, and bounded decision-changing probes. |
+| [`mastermind-investigation-ledger`](debugging/mastermind-investigation-ledger/SKILL.md) | Tracks competing bug hypotheses, evidence and focused probes. |
 
 ## Map trust boundaries and reachable risk
 
 | Skill | Description |
 |---|---|
-| [`mastermind-security-research`](security/mastermind-security-research/SKILL.md) | Enumerates reachable privileged operations, the sites that statically apply a guard, and secret readers — reporting the difference as unestablished rather than as a verdict. |
-| [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | Portable security review protocol for agent/tool trust boundaries, with optional evidence-based OWASP mapping. |
+| [`mastermind-security-research`](security/mastermind-security-research/SKILL.md) | Traces privileged operations, guards, secret readers and unresolved boundaries. |
+| [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | Reviews agent/tool trust boundaries with optional OWASP mapping. |
 
 ## Refine the request without replacing it
 
 | Skill | Description |
 |---|---|
-| [`mastermind-prompt-refiner`](prompt-engineering/mastermind-prompt-refiner/SKILL.md) | Rewrites explicit prompts or cold-agent handoffs while preserving the original request verbatim. |
+| [`mastermind-prompt-refiner`](prompt-engineering/mastermind-prompt-refiner/SKILL.md) | Rewrites prompts or handoffs while preserving the original request. |

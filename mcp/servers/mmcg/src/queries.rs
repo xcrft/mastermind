@@ -813,6 +813,7 @@ pub struct HistorySearchResponse {
     /// Static epistemic contract: the query engine performs retrieval, not reasoning.
     pub inference: &'static str,
     pub source_of_truth: &'static str,
+    pub review_status: &'static str,
     /// Candidate files omitted because of admission errors or size limits.
     pub skipped_artifacts: u32,
     /// True when a corpus work limit omitted candidate artifacts.
@@ -830,6 +831,319 @@ pub struct HistorySearchResponse {
     /// Retrieval caveats that every history consumer must retain, including
     /// when the FTS page is empty.
     pub precision_notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DocumentSearchResponse {
+    pub query: String,
+    pub indexed_documents: u32,
+    pub indexed_sections: u32,
+    pub indexed_total: u32,
+    pub count: u32,
+    pub result_truncated: bool,
+    pub row_limit: u32,
+    pub observed: Vec<crate::store::DocumentSectionHit>,
+    pub skipped_artifacts: u32,
+    pub corpus_truncated: bool,
+    pub sections_truncated: bool,
+    pub section_extractor_current: bool,
+    pub freshness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_error: Option<&'static str>,
+    pub source_of_truth: &'static str,
+    pub inference: &'static str,
+    pub review_status: &'static str,
+}
+
+pub fn documents(store: &Store, query: &str, top: u32) -> rusqlite::Result<DocumentSearchResponse> {
+    let data_version_before = store.data_version()?;
+    store.begin_read_snapshot()?;
+    let snapshot = (|| {
+        let (indexed_total, observed) = store.search_document_sections_bounded(query, top)?;
+        let indexed_documents = store
+            .meta_value("document_files_indexed")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let indexed_sections = store
+            .meta_value("document_sections_indexed")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let skipped_artifacts = store
+            .meta_value("project_history_skipped")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let corpus_truncated =
+            store.meta_value("project_history_truncated")?.as_deref() == Some("true");
+        let sections_truncated =
+            store.meta_value("document_sections_truncated")?.as_deref() == Some("true");
+        let section_extractor_current = store
+            .meta_value("document_section_extractor_version")?
+            .as_deref()
+            == Some(crate::document_sections::EXTRACTOR_VERSION);
+        let (freshness, freshness_error) = project_history_freshness_status(store)?;
+        Ok::<_, rusqlite::Error>((
+            indexed_documents,
+            indexed_sections,
+            indexed_total,
+            observed,
+            skipped_artifacts,
+            corpus_truncated,
+            sections_truncated,
+            section_extractor_current,
+            freshness,
+            freshness_error,
+        ))
+    })();
+    let end_result = store.end_read_snapshot();
+    let (
+        indexed_documents,
+        indexed_sections,
+        indexed_total,
+        mut observed,
+        skipped_artifacts,
+        corpus_truncated,
+        sections_truncated,
+        section_extractor_current,
+        mut freshness,
+        mut freshness_error,
+    ) = snapshot?;
+    end_result?;
+    if store.data_version()? != data_version_before {
+        freshness = "snapshot_changed";
+        freshness_error = None;
+    }
+    if !section_extractor_current {
+        observed.clear();
+        if freshness == "fresh" {
+            freshness = "incomplete";
+            freshness_error = Some("document_section_extractor_outdated");
+        }
+    }
+    let count = observed.len() as u32;
+    Ok(DocumentSearchResponse {
+        query: query.to_owned(),
+        indexed_documents,
+        indexed_sections,
+        indexed_total,
+        count,
+        result_truncated: section_extractor_current && count < indexed_total,
+        row_limit: top,
+        observed,
+        skipped_artifacts,
+        corpus_truncated,
+        sections_truncated,
+        section_extractor_current,
+        freshness,
+        freshness_error,
+        source_of_truth: "Markdown at the returned path and lines; this FTS index is derived",
+        inference: "none; text matches do not establish a project decision or a code relationship",
+        review_status: "unknown; indexing does not prove human review",
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectProfileResponse {
+    pub schema_version: u32,
+    pub scope: &'static str,
+    pub status: &'static str,
+    pub source: &'static str,
+    pub query: Option<String>,
+    pub indexed_sections: u32,
+    pub matched_total: u32,
+    pub count: u32,
+    pub unsafe_sections_omitted: u32,
+    pub result_truncated: bool,
+    pub row_limit: u32,
+    pub observed: Vec<crate::store::ProjectContextSection>,
+    pub claim_candidates_total: u32,
+    pub claim_candidates_count: u32,
+    pub claim_candidates_truncated: bool,
+    pub claim_candidates_omitted: u32,
+    pub claim_extraction_status: &'static str,
+    pub claim_candidates: Vec<crate::project_claims::ProjectClaimCandidate>,
+    pub skipped_artifacts: u32,
+    pub corpus_truncated: bool,
+    pub sections_truncated: bool,
+    pub section_extractor_current: bool,
+    pub freshness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted_reason: Option<&'static str>,
+    pub repository_content_untrusted: bool,
+    pub review_status: &'static str,
+    pub source_of_truth: &'static str,
+    pub inference: &'static str,
+}
+
+/// The project profile is a bounded projection of indexed CONTEXT.md sections.
+/// It does not promote Markdown sentences into accepted project claims.
+pub fn project_profile(
+    store: &Store,
+    query: Option<&str>,
+    top: u32,
+) -> rusqlite::Result<ProjectProfileResponse> {
+    let data_version_before = store.data_version()?;
+    store.begin_read_snapshot()?;
+    let snapshot = (|| {
+        let (indexed_sections, matched_total, unsafe_sections_omitted, observed) =
+            store.project_context_sections(query, top)?;
+        let extractor_version_current = store
+            .meta_value("project_claim_extractor_version")?
+            .as_deref()
+            == Some(crate::project_claims::EXTRACTOR_VERSION);
+        let claim_candidates_omitted_meta = store
+            .meta_value("project_claim_candidates_omitted")?
+            .and_then(|value| value.parse::<u32>().ok());
+        let claims_contract_current =
+            extractor_version_current && claim_candidates_omitted_meta.is_some();
+        let claim_candidates_omitted = claim_candidates_omitted_meta.unwrap_or(0);
+        let (claim_candidates_total, claim_candidates) = if claims_contract_current {
+            store.project_claim_candidates(query, top)?
+        } else {
+            (0, Vec::new())
+        };
+        let skipped_artifacts = store
+            .meta_value("project_history_skipped")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let corpus_truncated =
+            store.meta_value("project_history_truncated")?.as_deref() == Some("true");
+        let sections_truncated =
+            store.meta_value("document_sections_truncated")?.as_deref() == Some("true");
+        let section_extractor_current = store
+            .meta_value("document_section_extractor_version")?
+            .as_deref()
+            == Some(crate::document_sections::EXTRACTOR_VERSION);
+        let (freshness, freshness_error) = project_history_freshness_status(store)?;
+        Ok::<_, rusqlite::Error>((
+            indexed_sections,
+            matched_total,
+            unsafe_sections_omitted,
+            observed,
+            claims_contract_current,
+            claim_candidates_omitted,
+            claim_candidates_total,
+            claim_candidates,
+            skipped_artifacts,
+            corpus_truncated,
+            sections_truncated,
+            section_extractor_current,
+            freshness,
+            freshness_error,
+        ))
+    })();
+    let end_result = store.end_read_snapshot();
+    let (
+        indexed_sections,
+        matched_total,
+        unsafe_sections_omitted,
+        mut observed,
+        claims_contract_current,
+        claim_candidates_omitted,
+        claim_candidates_total,
+        mut claim_candidates,
+        skipped_artifacts,
+        corpus_truncated,
+        sections_truncated,
+        section_extractor_current,
+        mut freshness,
+        mut freshness_error,
+    ) = snapshot?;
+    end_result?;
+    if store.data_version()? != data_version_before {
+        freshness = "snapshot_changed";
+        freshness_error = None;
+    }
+    let section_limit_exceeded =
+        indexed_sections > crate::document_sections::MAX_SECTIONS_PER_DOCUMENT as u32;
+    if (sections_truncated
+        || section_limit_exceeded
+        || !section_extractor_current
+        || !claims_contract_current
+        || claim_candidates_omitted > 0)
+        && freshness == "fresh"
+    {
+        freshness = "incomplete";
+    }
+    let status = if freshness != "fresh" {
+        observed.clear();
+        claim_candidates.clear();
+        "index_not_fresh"
+    } else if indexed_sections == 0 {
+        "missing_context"
+    } else if matched_total == 0 {
+        "no_match"
+    } else if unsafe_sections_omitted > 0 {
+        "partial"
+    } else {
+        "ok"
+    };
+    let count = observed.len() as u32;
+    let claim_candidates_count = claim_candidates.len() as u32;
+    let claim_extraction_status = if !claims_contract_current {
+        "not_indexed"
+    } else if claim_candidates_omitted > 0 {
+        "extraction_incomplete"
+    } else if freshness != "fresh" {
+        "index_not_fresh"
+    } else if claim_candidates_total == 0 {
+        "no_candidates"
+    } else {
+        "candidates"
+    };
+    Ok(ProjectProfileResponse {
+        schema_version: 1,
+        scope: "project",
+        status,
+        source: "CONTEXT.md",
+        query: query.map(str::to_owned),
+        indexed_sections,
+        matched_total,
+        count,
+        unsafe_sections_omitted,
+        result_truncated: matches!(status, "ok" | "partial") && count < matched_total,
+        row_limit: top,
+        observed,
+        claim_candidates_total,
+        claim_candidates_count,
+        claim_candidates_truncated: status != "index_not_fresh"
+            && claim_candidates_count < claim_candidates_total,
+        claim_candidates_omitted,
+        claim_extraction_status,
+        claim_candidates,
+        skipped_artifacts,
+        corpus_truncated,
+        sections_truncated,
+        section_extractor_current,
+        freshness,
+        freshness_error,
+        omitted_reason: match status {
+            "index_not_fresh" if !section_extractor_current && freshness == "incomplete" => {
+                Some("document_section_index_outdated")
+            }
+            "index_not_fresh" if !claims_contract_current && freshness == "incomplete" => {
+                Some("project_claim_index_missing")
+            }
+            "index_not_fresh" if claim_candidates_omitted > 0 && freshness == "incomplete" => {
+                Some("project_claim_extraction_incomplete")
+            }
+            "index_not_fresh" if section_limit_exceeded && freshness == "incomplete" => {
+                Some("context_section_limit_exceeded")
+            }
+            "index_not_fresh" if sections_truncated && freshness == "incomplete" => {
+                Some("document_sections_truncated")
+            }
+            "index_not_fresh" => Some("project_history_not_fresh"),
+            "partial" => Some("secret_like_section_omitted"),
+            _ => None,
+        },
+        repository_content_untrusted: true,
+        review_status: "unknown; indexing does not prove human review",
+        source_of_truth: "repository CONTEXT.md at the cited lines; this SQL index is derived",
+        inference:
+            "none; sections are source text, not accepted project claims or verified code links",
+    })
 }
 
 fn history_precision_notes() -> Vec<&'static str> {
@@ -1078,6 +1392,7 @@ pub fn history(
         observed,
         inference: "none; rank and co-occurrence do not establish causality or correctness",
         source_of_truth: "Markdown artifacts at the returned paths; this FTS index is derived",
+        review_status: "unknown; indexing does not prove human review",
         skipped_artifacts,
         corpus_truncated,
         truncated,

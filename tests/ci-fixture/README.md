@@ -1,41 +1,17 @@
-# tests/ci-fixture/
+# CLI platform smoke fixture
 
-Minimal committed fixture for CI smoke tests of `mmcg verify-spec` and
-`mmcg audit-spec`. Used by `.github/workflows/ci-mmcg.yml` on every PR
-across the 7-target build matrix.
+This small Python repository exercises `verify-spec` and `audit-spec` in the
+[mmcg CI matrix](../../.github/workflows/ci-mmcg.yml).
 
-## Layout
+The workflow copies the fixture into a temporary directory, initializes Git,
+records a baseline and indexes it. `verify-spec spec.md` must pass. It then adds
+a helper, records and indexes the change, and runs `audit-spec --since baseline`.
+The audit accepts Held or Drift through its exit-code contract. This fixture's
+planned-test heuristic is warning-only.
 
-```
-tests/ci-fixture/
-├── README.md   ← this file
-├── src/
-│   └── lib.py  ← tiny Python source — small enough to index instantly
-└── spec.md     ← spec with YAML frontmatter exercising the gate paths
-```
+The smoke exercises the built binary, SQLite, Python extraction, frontmatter,
+symbol lookup and Git subprocesses on each configured platform. A separate CI
+step checks `init` and the JSON doctor handshake.
 
-## What the smoke does
-
-The CI step copies this directory into a tmpdir, initializes a git repo,
-commits the baseline, runs `mmcg init`, indexes, runs `verify-spec`,
-introduces a change (adds `def new_helper`), commits HEAD, re-indexes,
-runs `audit-spec --since baseline`.
-
-The smoke proves on each target platform that:
-
-1. The mmcg binary launches and parses CLI args
-2. The indexer can write to SQLite + parse Python with tree-sitter
-3. The YAML frontmatter parser works
-4. `verify-spec` resolves frontmatter-scoped symbol checks against the index
-5. `audit-spec` can shell out to `git`, parse old blobs via `git show`,
-   and produce a verdict
-
-A failure on any target = a real platform regression. Don't relax assertions
-to make CI green — fix the regression.
-
-## Don't extend this fixture casually
-
-This file is platform-cross-product cost: every line of every file here
-runs through the indexer on 7 OSes/architectures. Keep it minimal. If you
-need a richer fixture for a specific test, put it in `evals/fixtures/`
-where the eval runner uses it once per run.
+Keep `src/lib.py` and `spec.md` small. Rich behavioral cases belong in
+[`evals/fixtures`](../../evals/README.md), where the expected contract is explicit.

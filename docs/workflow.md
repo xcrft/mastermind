@@ -1,107 +1,308 @@
 # Workflow
 
-Mastermind separates repository facts from agent judgment. The codegraph
-establishes what exists and what a diff can affect; task artifacts record scope,
-claims, checks, and review decisions. Use only the depth justified by the risk.
+The controller checks current task evidence and review decisions before completion.
+
+```mermaid
+flowchart LR
+  A["Approved criteria"] --> B["Implementation"]
+  B --> C["Observed checks"]
+  C --> D["Audit"]
+  D -->|held| E["Review"]
+  D -->|drift or broken| B
+  E -->|resolved| F["Complete"]
+  E -->|unresolved| G["Feedback"]
+  G --> B
+  G --> E
+```
+
+Feedback may require inspection or a project-history update. Scope changes need
+a new approved contract.
 
 ## Choose a mode
 
-| Mode | Use for | Required artifacts |
+| Mode | Use for | Required process |
 |---|---|---|
-| **Direct** | Small, reversible, clearly scoped work | None |
-| **Verified** | Normal multi-file or delegated work | Spec, executor report, audit, task state |
-| **Strict** | Auth, billing, migrations, public API, data loss, supply chain, hard rollback | Verified artifacts plus risk, rollback, and independent review evidence |
+| Direct | Small reversible changes | Implementation and repository-required checks |
+| Verified | Explicit contract or delegated execution | Spec, preflight, checks, audit, review |
+| Strict | High impact or difficult rollback | Verified plus risk, alternatives, rollback, and independent review |
 
-`lite` and `standard` remain readable for compatibility. New task specs should
-use `verified` or `strict`.
+New specs use `verified` or `strict`. Legacy `lite` and `standard` remain readable.
 
 ## Direct
 
 ```bash
 mastermind index .
 mastermind impact --since main
-# implement the change and run focused + repository-required checks
-mastermind impact --since main
 ```
 
-Direct work has no task folder or controller state. The implementation and
-verification record live in the normal commit/PR. Use this path when rollback
-is easy and the change does not need delegated ownership.
+Implement, run relevant checks, and review the diff. Direct work creates no
+controller state.
 
 ## Verified
 
-### 1. Create and verify the contract
+### 1. Define and approve the task
 
 ```bash
 mastermind new-spec "Add account recovery"
-mastermind verify-spec .mastermind/tasks/001-add-account-recovery/spec.md
 ```
 
-Review the scope, acceptance criteria, and verification commands before
-approval. Then record the baseline:
+Use the printed path. Examples below use:
 
 ```bash
-mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --pre-only
+TASK_SPEC=.mastermind/tasks/001-add-account-recovery/spec.md
 ```
 
-When product writing initiated the task, run product intake before completing
-the spec. Preserve its stable source and parked outcome in `## Product Context`.
-Only observable behaviour belongs in Goals and Acceptance Criteria; the outcome
-guides semantic review and is never a merge-time claim.
+| Spec input | Required content |
+|---|---|
+| Goal | Observable requested behavior |
+| Scope | Allowed files and symbols |
+| Acceptance | Criteria mapped to checks |
+| Verification | Commands and expected outcomes |
+| Product/design context | Sources the reviewer can inspect |
 
-When a design handoff initiated the task, run design intake before completing
-the spec. Preserve its frame source and the named human visual review in
-`## Design Context`. Components, tokens, states, and observable behaviour can
-be acceptance criteria; visual fidelity and motion remain observations to record
-through browser verification or mark as not checked.
+#### Acceptance requirements
 
-### 2. Implement against the approved spec
+```yaml
+verify:
+  - cmd: python3 -m unittest discover -s tests
+    run:
+      id: unit
+      argv: [python3, -m, unittest, discover, -s, tests]
+      cwd: .
+      timeout_secs: 300
+acceptance:
+  - id: expired-token
+    statement: An expired recovery token is rejected without changing the account.
+    checks: [unit]
+```
 
-Give `spec.md` to the implementation agent. The executor may change only the
-approved product files and must write `executor-report.md`. It must not edit
-`state.json`, `audit.md`, or controller-owned history files.
-
-For a runnable UI change, the executor records browser observations in that
-report before post-flight, or writes `not checked` with the blocker. These are
-review evidence for accessibility, errors, and viewport coverage; they do not
-certify visual fidelity or replace declared verification commands.
-
-### 3. Audit the real diff
+Replace this example with the project's checks. Every mapped check is required.
+The reviewer assesses whether the assertions actually support each criterion.
 
 ```bash
-mastermind run-task .mastermind/tasks/001-add-account-recovery/spec.md --post-only
+mastermind verify-spec "$TASK_SPEC"
+mastermind run-task "$TASK_SPEC" --pre-only
 ```
 
-Post-flight compares the approved spec, executor claims, current index, and Git
-diff. Uncommitted and untracked files count because this gate normally runs
-before commit.
+Preflight binds the spec, baseline, and iteration. Contract edits require
+approval and another preflight. Retries keep the original baseline.
 
-Workflow specs are parsed from one bounded regular-file snapshot with a 16 MiB
-limit. A changed path, symlink substitution, or special file fails before
-verify, CI, or post-flight uses the contract.
+### 2. Implement and record checks
 
-| Verdict | Meaning | Next action |
+Give the approved spec to an implementation client. The executor writes
+`executor-report.md` with changed files, observed results, defects, and gaps.
+For UI work, include browser observations or the reason they were not collected.
+
+#### Observed verification commands (opt-in)
+
+```bash
+mastermind verification run "$TASK_SPEC" --id=unit --json
+mastermind acceptance status "$TASK_SPEC" --json
+```
+
+| Contract | Behavior |
+|---|---|
+| `verify[].run` | Runner executes the declared argv and writes a receipt |
+| Legacy `verify[].cmd` without `run` | Reported result only |
+| Fresh successful receipt | Bound to task, files, Git state, and executable |
+| Missing, pending, failed, or stale receipt | Blocks the requirement |
+| Repeated run | Replaces the receipt and may invalidate unfinished review |
+
+The report must agree with observed results. Argument arrays do not imply a shell.
+
+| Runner limit | Value |
+|---|---:|
+| Checks per spec | 32 |
+| Timeout per check | 1–3,600 seconds |
+| Captured output | 1 MiB per stream |
+
+Source: [runner contract](reference/task-runtime.md#observed-verification).
+Execution requires macOS or Linux and retains normal filesystem/network permissions.
+
+### 3. Audit the implementation
+
+```bash
+mastermind run-task "$TASK_SPEC" --post-only
+```
+
+Postflight compares the contract, report, receipts, and actual diff, including
+staged, unstaged, and untracked work. Inspection does not launch checks.
+
+| Result | Next action |
+|---|---|
+| Held / `history_review_required` | Review the result and project knowledge |
+| Drift | Resolve the scope difference |
+| Broken | Repair missing or inconsistent evidence, then re-audit |
+
+<a id="semantic-history-review"></a>
+<a id="review-the-task-result"></a>
+
+## Review and complete
+
+### Prepare an assessment
+
+```bash
+mastermind review-task prepare "$TASK_SPEC" --json
+```
+
+A human or LLM reviewer fills the returned `draft` after inspecting evidence.
+
+| Assessment | Review question |
+|---|---|
+| Each criterion | Does the implementation satisfy the statement? |
+| Verification quality | Do the assertions support the behavior? |
+| Scope control | Are changes within the approved contract? |
+| Proportionality | Is the solution appropriate for this task? |
+
+Use concrete reasons and evidence references. Leave unsupported judgments
+unknown. Save the completed draft as repository-contained JSON:
+
+```bash
+mastermind review-task submit "$TASK_SPEC" \
+  --report .mastermind/tasks/001-add-account-recovery/review-input.json --json
+mastermind review-task status "$TASK_SPEC" --json
+```
+
+These commands do not call a model. Submission checks the target and previous
+review revision. A new negative or unknown assessment replaces prior approval.
+
+### Resolve project knowledge
+
+Review `CONTEXT.md` and `.mastermind/tasks/_lessons.md` separately.
+
+| Decision | Meaning | Completion |
 |---|---|---|
-| `held` | Mechanical contract is satisfied | Perform semantic review and delivery gates |
-| `drift` | Work differs from the approved contract | Planner reviews and updates or rejects the drift |
-| `broken` | Required evidence or behavior is missing | Executor fixes the change before another audit |
+| `no_change` | Current file needs no further update | Eligible |
+| `update_required` | Record a durable decision or lesson | Blocked |
+| `unknown` | More inspection needed | Blocked |
 
-Post-flight fails closed when the executor report is absent or malformed, or
-the spec differs from the approved pre-flight bytes. Review a changed contract,
-then explicitly repeat `run-task <task>/spec.md --pre-only` before another audit.
-The report is read as one bounded regular-file snapshot; path retargeting and
-special files are rejected before its claims or completion status are used.
-Both `--pre-only` and `--reset` retain the task's original Git baseline, prior
-strict/index options, and iteration count. Already committed implementation
-therefore remains in the audit diff. Failed retries revoke approval and keep
-the counter; `--force-iteration` overrides only that budget. Use a new task for
-a new baseline. Controller state transitions require an atomic `state.json`
-write; a failed fallback write is reported and cannot be described as a kept
-Drift/Broken state.
+Both decisions must be `no_change` and cite their own `knowledge:context` or
+`knowledge:lessons` reference. An already adequate update qualifies.
 
-Pre-flight also stops when graph queries fail or dependency-cycle analysis hits
-its work limit. An incomplete result cannot establish zero risk. Cycle analysis
-covers the indexed project, so narrowing the spec alone does not remove this limit.
+| Change after review | Required follow-up |
+|---|---|
+| Either canonical knowledge file | Fresh review |
+| Tracked inputs or check executable | Fresh checks and audit |
+| Only ignored `_lessons.md` | Fresh review without automatically rerunning checks |
+
+Standalone submit or native review can return exit 0 with `status: accepted`
+and unresolved `history_status`. That record does not complete the task.
+
+### Close the reviewed task
+
+```bash
+mastermind run-task "$TASK_SPEC"
+```
+
+The controller rechecks receipts, executables, audit, and review before
+`learned`. Resume, auto-review, and repeated postflight share this gate.
+
+| Contract | Completion evidence |
+|---|---|
+| Structured task | Current typed assessment and resolved history decisions |
+| Legacy task | Bound **Audit snapshot**, Context/Lesson marked `updated` or `not applicable`, concrete reason |
+
+`history-review.md` cannot override a structured assessment. `learned` records
+the reviewed iteration, not deployment or future correctness.
+Use `--post-only` to audit current work again.
+
+<a id="continue-from-review-feedback"></a>
+
+## Continue from feedback
+
+```bash
+mastermind review-task follow-up "$TASK_SPEC" --json
+```
+
+The read-only packet contains the active review, source revisions, and next action.
+`next` and `resume` route unresolved pinned reviews here.
+
+| First unresolved item | Action | Owner |
+|---|---|---|
+| Unsatisfied assessment | `revise_solution` | Planner |
+| Unknown assessment | `inspect_review` | Reviewer |
+| Required knowledge update | `update_project_history` | Planner |
+| Unknown knowledge decision | `inspect_project_history` | Reviewer |
+| All resolved | `complete` | Controller |
+
+Continuation commands are conditional. Changed check inputs need verification,
+changed audit inputs need postflight, and new knowledge or inspection needs
+review. Stale or unavailable evidence produces no actionable packet.
+Review reasons grant no permission to expand scope.
+
+## Recorded native execution
+
+`--exec` invokes Claude Code. Other clients use handoff and postflight.
+
+```bash
+mastermind run-task "$TASK_SPEC" --exec \
+  --exec-timeout 1800 --exec-max-turns 40
+```
+
+| Property | Executor behavior |
+|---|---|
+| Iteration | New preflight with the original baseline |
+| Context | Task-bound packet offered on stdin |
+| Personal profile | Only through an existing `--profile-client` grant |
+| Record | `invocation.json` stores hashes and outcomes, no raw prompt |
+| Permissions | Native edit mode, no permission prompts or blanket Bash grant |
+| Native configuration | Authentication, MCP, hooks, and local rules inherited |
+
+Unsupported or denied native runs block postflight. `offered_to_process`
+records a stdin write, not proof of model use. Native policies are not an OS sandbox.
+
+<a id="run-a-native-semantic-reviewer"></a>
+
+### Native review
+
+```bash
+mastermind review-task run "$TASK_SPEC" --timeout 600 --max-turns 20 --json
+```
+
+The reviewer requests `Read,Grep,Glob`, no permission prompts, empty MCP, and
+supported native restrictions. It injects no personal profile.
+`review-invocation.json` records the attempt separately.
+
+```bash
+mastermind run-task "$TASK_SPEC" --exec --auto-review
+mastermind run-task "$TASK_SPEC" --auto-review
+```
+
+| Mode | Runs | Completion |
+|---|---|---|
+| `review-task run` | Reviewer only | Stores assessment |
+| `--exec --auto-review` | Executor, audit, then one reviewer | Closes if all gates pass |
+| `--auto-review` without `--exec` | One reviewer for an existing held task | Preserves baseline, iteration, options, and executor receipt |
+
+Review resume runs no executor or checks. It rejects missing, unheld, completed,
+or mechanically stale tasks, and conflicts with `--reset` and `--force-iteration`.
+Negative, unknown, unresolved-history, or failed review stops with a nonzero result.
+
+| Native limit | Executor | Reviewer |
+|---|---:|---:|
+| Default process time | 1,800 s | 600 s |
+| Allowed process time | 1–7,200 s | 1–7,200 s |
+| Default turns | 40 | 20 |
+| Allowed turns | 1–100 | 1–100 |
+
+Sources: [CLI definitions](../mcp/servers/mmcg/src/main.rs) and
+[runtime contract](reference/task-runtime.md). Preparation has separate bounds.
+
+### Bounded automatic repair
+
+```bash
+mastermind run-task "$TASK_SPEC" --exec --auto-repair --max-iterations 3 --auto-review
+```
+
+| Condition | Action |
+|---|---|
+| Fresh ordinary check failure, honest partial report, implementation defect, approved scope | Retry within the iteration budget |
+| Missing/stale evidence, infrastructure failure, scope drift, runtime denial/failure, changed executable | Stop |
+| Negative or unresolved reviewer judgment | Stop without another repair |
+
+Requires structured acceptance and observed checks. The allowed budget is
+1–20 iterations, defined in [auto_repair.rs](../mcp/servers/mmcg/src/auto_repair.rs).
+Review runs once after a held audit.
 
 ## Strict
 
@@ -109,235 +310,55 @@ covers the indexed project, so narrowing the spec alone does not remove this lim
 mastermind new-spec "Rotate signing keys" --mode strict
 ```
 
-Strict retains the Verified contract (Goals, Scope, Acceptance Criteria, Tests
-Plan, and Final Verification) and the same state machine. It adds the evidence
-that high-risk work needs: explicit alternatives, threat/failure cases,
-rollback or migration, design criticism, and independent review. A security
-review is required when the change crosses authentication, authorization,
-secrets, tool permissions, agent delegation, or the supply chain.
-
-The declared `mode: strict` enables strict pre-flight checks automatically in
-both `verify-spec` and `run-task`; a separate `--strict` flag is only needed to
-apply those checks to a contract that does not declare strict mode.
-
-A held strict code task must persist an exact architecture-policy snapshot of
-every declared touch file. If that bounded snapshot cannot be created,
-post-flight is broken and semantic review, release notes, and task completion
-remain blocked.
-
-Strict is not a larger template for ordinary work. If no material failure mode
-or difficult rollback exists, Verified is the clearer contract.
+Add alternatives, threat/failure cases, rollback or migration, and independent
+review. Security review covers auth, secrets, permissions, delegation, and
+supply-chain changes. `mode: strict` enables strict preflight checks.
 
 ## Task artifacts and ownership
 
-Each canonical task lives under `.mastermind/tasks/<NNN>-<slug>/`.
-
-| Artifact | Writer | Contract |
+| Artifact | Writer | Purpose |
 |---|---|---|
-| `spec.md` | Planner | Goal, scope, acceptance criteria, verification, mode-specific risk evidence |
-| `executor-report.md` | Executor | Changed files, observed checks, claims, defects, and gaps |
-| `audit.md` | Controller | Mechanical verdict plus complete bounded symbol-diff, claim-check, and checked-report evidence |
-| `state.json` | Controller | One task-local lifecycle record |
-| `history-review.md` | Controller, then planner | Explicit Context and Lesson disposition after semantic review |
+| `spec.md` | Planner | Goal, scope, criteria, checks, risk |
+| `executor-report.md` | Executor | Observations and gaps |
+| `verification/*.json` | Runner | Latest check results |
+| `audit.md`, `state.json` | Controller | Mechanical findings and lifecycle |
+| `invocation.json` | Executor runner | Execution record |
+| `review-invocation.json` | Reviewer runner | Review execution record |
+| `semantic-review.json` | Review command | Judgments and active revision |
+| `history-review.md` | Controller, planner for legacy tasks | History pointer or legacy decisions |
 
-A held audit may also write a release-note candidate under
-`.mastermind/releases/`. Markdown remains the durable source of truth;
-`state.json` and the SQLite history index are coordination/retrieval layers.
-Repository-contained specs outside the canonical task layout use exact-path
-keys in `.noncanonical/` subdirectories so equal filenames remain independent;
-their release candidates remain part of the history inventory.
-Status, next-action, and resume read task inventories and lifecycle state
-through bounded, no-follow repository capabilities. An unreadable, malformed,
-oversized, unknown, or special-file state is shown as held, and an ambiguous or
-changing inventory blocks resume instead of being treated as a new ready task.
-Generated `status`, `next`, and `resume` commands quote each filesystem path as
-one shell argument. Paths containing terminal-control or bidi characters remain
-visible in escaped form but do not produce a copy/paste command.
-Controller updates replace `state.json` atomically through the retained task
-directory after syncing the private temporary file. A process interruption
-therefore leaves either the previous complete state or the next complete state.
-The controller rejects unknown state fields and unsupported lifecycle statuses
-instead of applying legacy defaults or continuing from a misspelled or newer
-contract. It also rejects unsupported risk values and incompatible
-`status`/`next_step` pairs. The same validation runs before writing state and in
-every workflow evidence reader. `status`, `next`, and `resume` project display
-fields only after that complete controller contract has been validated. Context
-health checks use the full state contract too, so partial completion records
-cannot enter the semantic review queue.
-Task-like inventory entries must be no-follow directories containing `spec.md`;
-malformed entries are surfaced as blocked workflow state instead of disappearing.
-Architecture policy applies the same task-entry rule and marks malformed evidence
-inventories incomplete even when another task covers the changed file.
-The same repository-bound replacement protects controller-written `audit.md`,
-release-note drafts, `history-review.md`, and review archives. History snapshots
-and review evidence use exact canonical repository-relative paths. Non-UTF-8
-names and Unix backslash aliases fail before an output directory or archive is
-created.
+Project knowledge belongs in CONTEXT and reviewed lessons. Personal habits
+belong in the global [profile](guides/persona-hooks.md).
 
-## What the gates prove
+## When progress stops
 
-Pre-flight checks:
+| Problem | Action |
+|---|---|
+| Index missing or stale | `mastermind index .`, then `mastermind status` |
+| Spec changed | Approve the revision and repeat preflight |
+| Check missing, failed, or stale | Run it for final inputs, then postflight |
+| Review target changed | Prepare a fresh assessment |
+| Knowledge update required | Write useful knowledge, then review |
+| Native failure | Inspect the receipt reason and correct the blocker |
+| Controller busy | Wait for that task's active controller |
+| Evidence malformed or unavailable | Restore or regenerate it |
 
-- mandatory sections and mode requirements;
-- referenced files and indexed symbols;
-- pre-edit caller-count snapshots;
-- literal FIND blocks when supplied;
-- declared verification commands.
-
-Post-flight checks:
-
-- actual changed files against approved scope;
-- required report shape and executed-command claims;
-- planned tests and zero-test/vacuous claims;
-- symbol removal or signature drift;
-- index and snapshot consistency.
-
-A held strict task also records a versioned snapshot for architecture-policy
-checks. New v2 snapshots survive staging, commits and CI checkouts when the
-declared files keep the same bytes and Git modes. Export the task directory with
-its `spec.md`, `state.json` and `audit.md`; see the
-[workflow evidence contract](reference/mmcg.md#architecture-policy-as-code-mmcg-policy-check) for
-limits and compatibility.
-
-They do not prove runtime behavior, product quality, visual correctness,
-security, or architectural soundness. Those require tests and human/domain
-review.
-
-## Optional review disciplines
-
-Load a discipline because the changed paths or risk require it, not because a
-large checklist looks thorough.
-
-| Need | Before implementation | After implementation |
-|---|---|---|
-| Unknown code structure | `mastermind-codegraph-research` | — |
-| Service/state/retry boundary | `mastermind-runtime-research` | `mastermind-architecture-review` |
-| UI component reuse and callers | `mastermind-component-research` | `mastermind-frontend-audit` + browser verification |
-| Test relevance | `mastermind-test-impact` | `mastermind-test-audit` |
-| Security/tool boundary | `mastermind-security-research` | `mastermind-agent-security-review` |
-| Changed comments | — | `mastermind-comment-audit` |
-| Product prose to task contract | `mastermind-product-intake` | — |
-
-The installed [skill catalog](../skills/README.md) defines each contract. These
-reviews are read-only and do not replace the controller audit.
-
-For structural discovery, take one bounded `mmcg_brief`, use `mmcg_concept` when
-the exact symbol is unknown, then use exact graph edges. Do not repeat a fresh,
-complete graph answer with Bash. Literal strings, configuration, logs, Git,
-builds, tests, and runtime probes remain source/tool work rather than graph work.
-
-## History and lessons
-
-Mechanical drift may create one lesson candidate per task. A candidate records
-the observed failure; it is not reusable guidance until semantic review writes
-the actual lesson and changes its status. Repeated failures refresh the same
-candidate instead of creating duplicates. The candidate key uses the exact
-canonical repository-relative spec path, so task names that sanitize to the
-same display label remain separate.
-The refresh changes event counts, observations and the latest event evidence;
-it preserves reviewed provenance, evidence, lesson text and review notes.
-The candidate store is capped at 1 MiB, matching history indexing, and updated
-under a stable, repository-scoped lock. Symlinks, special files, invalid UTF-8,
-path swaps and oversized stores fail without replacing existing reviewed
-knowledge.
-`mastermind context doctor` applies the same file limit and reports unsafe or
-unreadable context, task-state, review, and lesson inputs instead of treating
-them as absent knowledge.
-
-After a held audit, review `history-review.md` and mark Context and Lesson as
-`updated` or `not applicable` with a concrete reason. This prevents a successful
-diff from silently becoming an invented architectural decision.
-Keep the generated **Audit snapshot** marker and run `mastermind run-task
-<task>/spec.md` to finish. A changed spec, executor report, implementation or
-audit output requires another audit. The controller archives the previous
-review before opening one for changed evidence. Writing CONTEXT, its archives
-and lessons is part of semantic review; declared task files remain bound.
-A bound task state without that snapshot cannot be shown as complete or ready
-for semantic review: `status` routes it back to post-flight audit and
-`context-doctor` reports the review unresolved.
-
-`context-doctor` checks pending and completed tasks, explicit review dispositions,
-allowed lesson statuses and non-placeholder evidence. An `audit.md` file by
-itself does not complete a task. Completed tasks describe the version they
-reviewed; later unrelated work does not reopen them.
-
-For a saved document evidence graph, pass `--document-graph <path>` to
-`mastermind history` (or the same argument to `mmcg_history`), `mastermind ui`,
-or `mastermind review export`. History keeps index freshness and graph content
-freshness separate. Lens adds an explicit review queue, and review export binds
-the packet plus a stable live-observation digest into the offline package. A
-changed graph makes that package partial. Re-indexing does not clear changed
-endpoints or a changed Markdown corpus, and a current graph does not verify a
-declared relation.
+Records are local, unsigned, and owner-writable. They do not independently
+verify identity or semantic correctness.
 
 ## Deterministic workflow audit
 
 ```bash
 mastermind workflow audit --root .
-mastermind workflow audit --root ~/.claude --json
+mastermind doctor --workflow --client all
 ```
 
-The source layout is exactly `agents/subagents` plus nested `skills`. An
-installed layout is selected only by `.mastermind-workflow.json`; its client,
-profile, artifact list, and digests define the ownership boundary. If both or
-neither layout is present, audit fails instead of guessing or scanning unrelated
-user agents. Digest input names must be exact UTF-8 paths; ambiguous Unix
-backslash aliases are rejected before an ownership digest is accepted. Source
-agent and skill inventories apply the same identity rule before creating graph
-nodes or counting components; an unrepresentable entry makes the audit partial.
-
-The report's `complete` field covers only that inventory, traversal, and input
-checks finished. It does not mean the graph has no wiring diagnostics, a
-workflow executed, policy or security acceptance occurred, or a decision is
-correct. A complete collection may still contain errors; use the exit code and
-diagnostics for the audit result.
-
-Managed agents declare `workflow.schema_version: 1`, `activation`
-(`always`, `conditional`, or `manual`), `mutability` (`read-only` or `writer`),
-optional skill relations, and canonical writes. Skill links from an agent are
-advisory unless `required: true`. Installed skill-to-skill links remain profile
-closure requirements. A missing optional frontend skill in `core` is therefore
-visible in context estimates but is not an error.
-
-Write declarations bind an artifact ID to a repository-relative path template,
-authority, runtime, and exclusivity group. Only `{task}` is a valid placeholder.
-Artifact IDs and normalized paths are one-to-one; aliases and one ID mapped to
-multiple paths are invalid.
-Two co-activatable canonical writers conflict unless they share an exclusivity
-group or belong to mutually exclusive clients. The Claude executor agent and
-portable executor skill intentionally share `task-executor`; controller-owned
-state, audit, and history artifacts have separate writer identities.
-
-The graph records every declared built-in or mmcg grant separately from
-mutation capability. A read-only role with `Edit` or `Write` is invalid; broad
-`Bash` remains a visible warning, while all `Bash`, `Edit`, and `Write` grants
-retain a mutation-capability edge. Context estimates are independent byte-based
-scenarios for the agent body, each available advisory skill if loaded, known
-mmcg schemas, and unknown built-in tool schemas. They are not a promised runtime
-token total.
-
-Installed Claude audits verify registration only when an owned role scopes
-`mmcg`, and only at the paths Claude reads: the project `.mcp.json` next to a
-project `.claude` directory and the user `~/.claude.json`. A same-named key in
-`.claude/.mcp.json` or legacy `servers` data does not count. The entry must match
-an installer-produced Mastermind binary, project/global launcher, or canonical
-`npx` command for the current platform; arbitrary executables, packages, and
-launcher-controlling environment overrides are rejected.
-
-## Client model
-
-Planning, implementation, and post-flight are client-neutral. Claude Code and
-Codex can install the same selected skill profile; fresh installs default to
-`core`, while `--profile full` selects the complete portable bundle. Cursor,
-Continue, and generic MCP clients receive the graph tools but do not have a
-Mastermind-owned native workflow-extension format.
-
-`run-task --exec` is a legacy Claude CLI convenience. The portable path is an
-explicit handoff followed by `--post-only`.
+These check installation and wiring without running agents.
+See [workflow audit](reference/mmcg.md#workflow-audit) for diagnostics.
 
 ## Related documentation
 
-- [Getting started](getting-started.md)
+- [Architecture](architecture.md)
 - [CLI and MCP reference](reference/mmcg.md)
-- [Verifiable GitHub Action](github-action.md)
-- [Contributing](../CONTRIBUTING.md)
+- [Client integrations](README.md#start-here)
+- [GitHub Action](github-action.md)

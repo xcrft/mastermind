@@ -472,7 +472,7 @@ pub fn dispatch_history(
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum HistoryResponse {
-    History(queries::HistorySearchResponse),
+    History(Box<queries::HistorySearchResponse>),
     WithDocumentGraph(Box<queries::HistoryDocumentGraphResponse>),
 }
 
@@ -487,12 +487,12 @@ fn history_response(
         Some(path) => Ok(HistoryResponse::WithDocumentGraph(Box::new(
             queries::history_with_document_graph(store, query, kind, top.clamp(1, 50), path)?,
         ))),
-        None => Ok(HistoryResponse::History(queries::history(
+        None => Ok(HistoryResponse::History(Box::new(queries::history(
             store,
             query,
             kind,
             top.clamp(1, 50),
-        )?)),
+        )?))),
     }
 }
 
@@ -2291,6 +2291,7 @@ mod map_tests {
                 observed: Vec::new(),
                 inference: "retrieval only",
                 source_of_truth: "Markdown",
+                review_status: "unknown",
                 skipped_artifacts,
                 corpus_truncated: truncated,
                 truncated,

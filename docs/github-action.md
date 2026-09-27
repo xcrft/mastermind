@@ -1,179 +1,116 @@
-# Mastermind verifiable audit Action
+# GitHub audit Action
 
-Turn a Mastermind audit into evidence GitHub can verify and publish without giving
-pull-request code an OIDC token or write permission.
+The Docker Action audits changed task contracts and produces schema-v3 evidence
+for an exact repository revision. The accompanying workflows separate
+pull-request analysis from privileged publication.
 
-The Docker Action creates schema-v3 audit envelopes for an exact repository
-snapshot. The secure deployment splits untrusted analysis from privileged
-verification, attestation, and publication.
+## Set up the workflows
 
-| Stage | Trigger | Authority | Executes PR code |
+Start from these maintained examples:
+
+- [PR analysis](examples/mastermind-audit-pr.yml)
+- [Verification and publication](examples/mastermind-audit-publish.yml)
+
+Review them for the destination repository before copying them into
+`.github/workflows/`. Retain the exact revision checks, pinned dependencies,
+artifact validation, and separation of permissions.
+
+| Stage | Trigger | Permissions | Executes PR code |
 |---|---|---|---|
-| Analyze | `pull_request` | `contents: read`; no secrets or OIDC | Yes |
-| Verify | `workflow_run` | Read-only GitHub metadata and artifact access | No |
-| Attest | verified result | OIDC and attestations write only | No |
-| Publish | verified result | Pull-request comment write only | No |
+| Analyze | `pull_request` | Contents read, no secrets or OIDC | Yes |
+| Verify | `workflow_run` | Metadata and artifact reads | No |
+| Attest | Verified artifact | OIDC and attestations write | No |
+| Publish | Verified artifact | PR comment write | No |
 
-Do not assemble that privilege split from memory. Start from the pinned,
-repository-validated examples:
+Publication performs no checkout. Before attestation or a comment, it verifies:
 
-[`mastermind-audit-pr.yml`](examples/mastermind-audit-pr.yml) and
-[`mastermind-audit-publish.yml`](examples/mastermind-audit-publish.yml).
+| Binding | Required match |
+|---|---|
+| Workflow execution | Source run, attempt, repository and workflow identity |
+| Change | PR base and head |
+| Artifact | Server-owned artifact identity |
 
-## Read the proof correctly
+Downloaded PR artifacts remain untrusted until all checks pass.
 
-- **Content integrity:** the Mastermind Canonical JSON v1 bytes match their
-  SHA-256 digest. Replacing both the manifest and digest can still create a
-  different internally consistent envelope.
-- **Provenance authenticity:** a detached Ed25519 signature validates under a
-  trusted, non-revoked key ID. This proves control of that key, not signer
-  identity, signing time, or whether signing preceded key compromise.
-- **Policy acceptance:** every configured trust anchor passes. A repository
-  anchor requires exact `owner/repo`, full baseline and head OIDs, trusted-root
-  recomputation, and `worktree_clean:true`. A signature anchor requires the
-  signature, public key, and a trusted non-revoked key-ID allowlist. Partial or
-  empty policy fails with `incomplete_trust_anchor` or `no_trust_anchor`.
-- **GitHub artifact attestation:** the publication workflow verified the
-  deterministic archive and statement. This does not prove that PR analysis
-  ran in a trusted environment or that its findings are correct.
+## Provide task evidence
 
-`--integrity-only` is a diagnostic. It sets authenticity and policy to
-`not_evaluated`; the Docker Action, privileged `pr-comment`, and publication
-workflow do not use it.
+| Task selection | Result |
+|---|---|
+| Canonical task folder changed between baseline and HEAD | Audit its `spec.md` and valid `executor-report.md` |
+| Unchanged historical task | Excluded from this audit |
+| Missing evidence or no results | No publishable evidence |
 
-## Envelope and signature contract
+The [Action definition](../action.yml) accepts:
 
-The envelope digest covers the canonical manifest, not pretty-printed storage.
-Canonical JSON uses UTF-8, sorted object keys, array order, minimal JSON string
-escaping, explicit i64/u64 integers only, and no trailing newline. Strict
-readers reject duplicate or unknown fields, floats, and unknown schemas,
-algorithms, or canonicalization identifiers.
+| Input | Value |
+|---|---|
+| `root` | Repository-relative root under `GITHUB_WORKSPACE` |
+| `since`, `expected-baseline` | The same full baseline commit OID |
+| `expected-head` | Full head commit OID |
+| `expected-repository` | Exact `owner/repo` |
+| `bundle-dir` | A new repository-relative output directory |
+| `require-clean-worktree` | `true` for publication |
 
-The manifest binds repository identity, full baseline and HEAD, clean-worktree
-state, tool/config/index metadata, spec and executor-report paths and digests,
-normalized name/status entries, binary diff digest, verdict, file scope,
-claims, discrepancies, snapshot drift, logical mmcg queries, recorded verify
-commands, and summary.
+Outputs identify the verified bundle directory and aggregate result JSON.
+Inputs are data and are not evaluated as shell commands.
 
-Detached signatures sign a domain-separated canonical statement containing:
+## Inspect an envelope locally
 
-```text
-domain = mastermind/audit-envelope-signature/v1
-signature_schema = 1
-signature_algorithm = ed25519
-key_id = sha256:<public-key digest>
-envelope_schema = 3
-hash_algorithm = sha256
-canonicalization = mastermind-cjson-v1
-manifest_digest = sha256:<manifest digest>
-```
-
-Key files contain one base64 line. The private file encodes a 32-byte Ed25519
-seed and must have mode `0600` on Unix; the public file encodes 32 bytes. Keep
-trusted and revoked key-ID allowlists in independently reviewed policy. For
-rotation, add the new trusted ID, deploy verifiers, rotate signing, then revoke
-the old ID while retaining the policy needed to verify historical evidence.
-
-## Local commands
+Use a clean checkout and actual full commit IDs:
 
 ```bash
+BASELINE_OID=$(git merge-base HEAD origin/main)
+HEAD_OID=$(git rev-parse HEAD)
+
 mastermind audit-spec .mastermind/tasks/005-example/spec.md \
-  --since 1111111111111111111111111111111111111111 \
-  --root . --bundle audit.bundle.json
+  --since "$BASELINE_OID" --root . \
+  --executor-report .mastermind/tasks/005-example/executor-report.md \
+  --bundle .mastermind/audit.bundle.json
 
-mastermind audit sign audit.bundle.json \
-  --private-key audit-ed25519.seed \
-  --signature audit.bundle.sig.json
-
-mastermind audit verify audit.bundle.json \
-  --root . \
+mastermind audit verify .mastermind/audit.bundle.json --root . \
   --expected-repository owner/repo \
-  --expected-baseline 1111111111111111111111111111111111111111 \
-  --expected-head 2222222222222222222222222222222222222222
-
-mastermind audit verify audit.bundle.json \
-  --signature audit.bundle.sig.json \
-  --public-key audit-ed25519.pub \
-  --require-signature \
-  --trusted-key-id sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  --expected-baseline "$BASELINE_OID" --expected-head "$HEAD_OID"
 ```
 
-Snapshot and signature modes can be supplied together; every supplied policy
-must pass. A present signature is never ignored.
+The baseline must identify the reviewed change range. Replace the example task
+and repository identity. Keep generated bundles in the ignored `.mastermind/`
+directory so they do not dirty the checkout. For optional signing:
 
-## Action inputs and output
+```bash
+mastermind audit sign .mastermind/audit.bundle.json \
+  --private-key /private/path/audit-ed25519.seed \
+  --signature .mastermind/audit.bundle.sig.json
 
-The repository-root `action.yml` defines a Docker Action with these inputs:
+mastermind audit verify .mastermind/audit.bundle.json \
+  --signature .mastermind/audit.bundle.sig.json \
+  --public-key /private/path/audit-ed25519.pub \
+  --require-signature --trusted-key-id "sha256:<public-key-digest>"
+```
 
-- `root`: repository-relative root contained below `GITHUB_WORKSPACE`;
-- `since` and `expected-baseline`: the same full lowercase SHA-1 or SHA-256
-  baseline OID;
-- `bundle-dir`: a new, non-symlink repository-relative output directory;
-- `expected-repository`: exact GitHub `owner/repo`;
-- `expected-head`: full lowercase SHA-1 or SHA-256 head OID;
-- `require-clean-worktree`: must remain `true` for publication.
+Protect private seed files. Keep trusted and revoked key IDs in independently
+reviewed policy. When snapshot and signature policies are supplied, both must
+pass.
 
-The Action outputs the verified bundle directory and aggregate result JSON
-path. Inputs are passed as data; they are not evaluated, sourced, or rendered
-into shell syntax.
+## Interpret the result
 
-The Action audits only canonical task folders changed between `since` and
-`HEAD`. Every selected task must include `spec.md` and a valid
-`executor-report.md`; missing evidence fails the run. Historical task folders
-that were not changed in the pull request are not re-audited against the new
-baseline. This keeps a PR scoped to the contract it introduces or updates and
-prevents an empty report from producing publishable evidence.
+| Evidence | Establishes | Does not establish |
+|---|---|---|
+| Matching canonical digest | Envelope content is internally consistent | Authenticity or finding accuracy |
+| Signature under a trusted key | The signing key approved those bytes | Independent source inspection or human identity |
+| Repository policy checks | Required repository and revisions match | Semantic correctness |
+| GitHub artifact attestation | Archive and statement passed through the attestation workflow | Finding accuracy |
+| `--integrity-only` | Digest consistency only | Authenticity or policy admission. Unsuitable for publication |
 
-## Copyable workflows and trusted verifier
+See the [audit-envelope reference](reference/mmcg.md#schema-v3-audit-envelopes)
+for canonicalization, signatures, trust anchors, and validation limits.
 
-The unprivileged PR workflow uses the Action from its checked-out PR tree. That
-executes untrusted code but receives no secrets, OIDC, or write permission. The
-privileged workflow contains its strict schema-v3 verifier inline, so the
-verifier implementation and identity are bound to the independently allowlisted
-trusted workflow blob. The examples contain no unresolved Action or verifier
-placeholder. External Actions remain pinned to audited 40-character commits.
+## Maintain the integration
 
-The PR workflow triggers only on `pull_request`, checks out the exact head with
-credentials disabled, and has only `contents: read`. It uploads one
-attempt-specific artifact. Uploaded PR numbers, SHAs, workflow strings, and
-digests remain hostile claims.
+Keep external Actions pinned to full commits and OCI images to immutable
+digests. Review upstream changes before updating pins and the repository
+validator's allowlist. Run the required validation described in
+[Contributing](../CONTRIBUTING.md).
 
-The publication workflow has no checkout. Its read-only verify job keys API
-lookups to the source run ID and attempt, then checks repository ID/name, event,
-conclusion, workflow path/blob, independent PR/base/head association, and one
-server-owned artifact ID/digest/size. Extraction is capped at 64 MiB total,
-16 MiB per regular file, 256 files, and 240-byte relative paths. Links, devices,
-traversal, nested archives, and extra names are rejected. Only the trusted
-verify implementation runs before the deterministic statement/archive is
-created.
-
-Only the attestation job has `id-token: write` and `attestations: write`. Only
-the publication job has `pull-requests: write`; it rechecks PR head and artifact
-identity, then updates at most one constant-marker comment owned by
-`github-actions[bot]`. Neither job executes commands stored in an envelope.
-
-Treat every `workflow_run` download as hostile until this chain completes. If
-GitHub cannot independently return the workflow blob, PR association, server
-artifact digest, or exact run attempt, fail closed.
-
-## Updating pins
-
-For every pinned Action or OCI base:
-
-1. Read the upstream release notes and security advisories.
-2. Resolve the release tag from the authoritative upstream repository or registry.
-3. Verify the full commit or multi-architecture manifest digest independently.
-4. Review the diff from the old pin and update the allowlist in `scripts/validate.py` in the same change.
-5. Run the full Rust tests, repository validator, YAML parser check, and Docker build.
-
-Never shorten a commit or pin a mutable tag such as `v7`, `main`, or `master`.
-
-## GitHub plan limitations
-
-Artifact attestation availability and verification behavior depend on
-repository visibility and the organization's GitHub plan and policy.
-Private/internal support and API access can differ from public repositories.
-Confirm current GitHub documentation and organization settings before making
-attestations a required release gate. The local schema-v3 verifier performs no
-network lookup; the trusted publication workflow and GitHub tooling remain
-responsible for issuer, workflow, repository, and ref verification.
+Attestation availability depends on the repository's GitHub plan and policy.
+Confirm it before making publication a required release gate. Missing required
+metadata or artifact proof must stop publication.

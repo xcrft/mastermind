@@ -123,7 +123,22 @@ touches:
 
 verify:
   - cmd: \"<focused test command>\"
+    run:
+      id: focused
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
   - cmd: \"<repository-required gate>\"
+    run:
+      id: gate
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
+
+acceptance:
+  - id: outcome
+    statement: \"<observable behavior this task must achieve>\"
+    checks: [focused, gate]
 
 creates: []
 expected_docs: []
@@ -157,6 +172,9 @@ expected_docs: []
 
 - [ ] <behavior that can be observed or asserted>
 > - [ ] Existing relevant behavior remains compatible
+
+<!-- Planner: fill acceptance statements and observed check mappings in frontmatter.
+     Every listed check is required. Markdown checkboxes are explanatory only. -->
 
 ## Pre-edit Snapshot
 
@@ -451,7 +469,22 @@ touches:
 
 verify:
   - cmd: \"<typecheck command>\"
+    run:
+      id: typecheck
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
   - cmd: \"<test command>\"
+    run:
+      id: tests
+      argv: [<executable>, <argument>]
+      cwd: .
+      timeout_secs: 300
+
+acceptance:
+  - id: outcome
+    statement: \"<observable behavior this task must achieve>\"
+    checks: [typecheck, tests]
 
 creates: []
 expected_docs: []

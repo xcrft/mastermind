@@ -208,6 +208,7 @@ const ELEMENT_IDS = [
   "audit-explain-sev", "audit-structural-sev", "audit-health-sev", "audit-change-sev", "audit-security-sev",
   "audit-bugs", "audit-bus", "audit-bugs-sev", "audit-bus-sev",
   "audit-domain-card", "audit-domain", "audit-domain-sev", "audit-redteam", "audit-redteam-body",
+  "profiles-board", "profiles-status", "profiles-content", "profiles-refresh",
 ];
 
 function createDocument() {
@@ -234,7 +235,7 @@ function createDocument() {
     button.setAttribute("aria-pressed", "true");
     return button;
   });
-  const modeButtons = ["review", "audit"].map((mode) => {
+  const modeButtons = ["review", "audit", "profiles"].map((mode) => {
     const button = new MockElement("button");
     button.dataset.mode = mode;
     button.setAttribute("data-mode", mode);
@@ -243,6 +244,7 @@ function createDocument() {
   });
   nodes.set("mode-review", modeButtons[0]);
   nodes.set("mode-audit", modeButtons[1]);
+  nodes.set("mode-profiles", modeButtons[2]);
   return {
     nodes: nodes,
     scopeButtons: scopeButtons,
@@ -669,6 +671,9 @@ async function renderFixture(payload, options) {
     harness.nodes.set("lens-snapshot", embedded);
   }
   let fetchCalls = 0;
+  let contextFetchCalls = 0;
+  let snapshotFetchCalls = 0;
+  const requests = [];
   let releaseFetch = null;
   let intervalHandler = null;
   let now = settings.now === undefined ? Date.now() : settings.now;
@@ -702,30 +707,49 @@ async function renderFixture(payload, options) {
     document: harness.document,
     window: window,
     ResizeObserver: window.ResizeObserver,
-    fetch: async () => {
+    fetch: async (url, requestOptions) => {
       fetchCalls += 1;
+      requests.push({ url, options: requestOptions });
+      const contextRequest = url === "/api/context";
+      if (contextRequest) { contextFetchCalls += 1; }
+      else { snapshotFetchCalls += 1; }
       if (settings.rejectFetch) {
         throw new Error("standalone package attempted a network request");
       }
       if (fetchGate) {
         await fetchGate;
       }
-      const configured = Array.isArray(settings.responses)
-        ? settings.responses[Math.min(fetchCalls - 1, settings.responses.length - 1)]
-        : settings.response;
+      const responses = contextRequest ? settings.contextResponses : settings.responses;
+      const count = contextRequest ? contextFetchCalls : snapshotFetchCalls;
+      const configured = Array.isArray(responses)
+        ? responses[Math.min(count - 1, responses.length - 1)]
+        : contextRequest ? settings.contextResponse : settings.response;
+      if (configured && configured.wait) { await configured.wait; }
       if (configured && configured.reject) {
         throw new Error(configured.reject);
       }
       return {
         ok: configured ? configured.ok !== false : true,
         status: configured && configured.status ? configured.status : 200,
+        text: async () => {
+          if (configured && configured.textError) {
+            throw new Error("unreadable response body");
+          }
+          if (configured && Object.prototype.hasOwnProperty.call(configured, "wire")) {
+            return configured.wire;
+          }
+          const body = configured && Object.prototype.hasOwnProperty.call(configured, "payload")
+            ? configured.payload
+            : contextRequest ? contextFixture() : (payload || fixture());
+          return JSON.stringify(body);
+        },
         json: async () => {
           if (configured && configured.jsonError) {
             throw new Error("invalid json");
           }
           return configured && Object.prototype.hasOwnProperty.call(configured, "payload")
             ? configured.payload
-            : (payload || fixture());
+            : contextRequest ? contextFixture() : (payload || fixture());
         },
       };
     },
@@ -752,6 +776,8 @@ async function renderFixture(payload, options) {
     await settle();
   }
   harness.fetchCalls = fetchCalls;
+  harness.requests = requests;
+  harness.contextFetchCalls = () => contextFetchCalls;
   harness.advanceTime = (milliseconds) => {
     now += milliseconds;
     if (intervalHandler) {
@@ -759,6 +785,56 @@ async function renderFixture(payload, options) {
     }
   };
   return harness;
+}
+
+function contextFixture() {
+  const layer = (status, data) => ({ status, revision: "a".repeat(64), omitted_reason: null, data });
+  return {
+    schema_version: 1,
+    kind: "context_preview",
+    delivery: "not_recorded",
+    permission_effect: "none",
+    consistency: "independent_layer_snapshots",
+    selection: { role: "implementer", workflow: "review", paths: ["src/auth.rs"], since: "main", query: "authentication", budget_tokens: 5000 },
+    layers: {
+      person: layer("ok", {
+        schema_version: 2,
+        status: "ok",
+        source_verification: "complete",
+        source_verification_scope: "selected_claims",
+        evidence_basis: { scope: "feedback_and_habits", source_binding: "current", review: "revision_pinned", habit_tasks: "declared_ids", authorship: "unproven", independence: "unproven", semantic_accuracy: "unknown" },
+        habits: [{ id: "habit:1", when: "Before deployment", behavior: "Inspect rollback evidence", scope: "repo", role: "implementer", workflow: "review", episodes: 3, outcome: "unknown", exception: "unknown", review_revision: "r1" }],
+        feedback: [{ key: "feedback:1", statement: "PRIVATE_PREFERENCE <script>keep this literal</script>", category: "communication", scope: "global", sources: 2, last: "2026-09-26", review_revision: "r2" }],
+        evidence: { repos: 2, diff_sampled: 20, context_conflicts: 1, git_identity_status: "unverified_author_filter" },
+        conventions: [{ statement: "Small changes in this sample", evidence: "20 commits", counterpattern: "Large imports" }],
+        omitted: [],
+      }),
+      project: layer("ok", {
+        source: "CONTEXT.md", freshness: "stale", count: 1, claim_candidates_count: 1, review_status: "unknown",
+        observed: [{ heading: "Authentication", excerpt: "Use the shared middleware.", section_citation: "CONTEXT.md:4-8", excerpt_truncated: false }],
+        claim_candidates: [{ statement: "Use signed sessions", source_status: "current", review_status: "unreviewed", source_citation: "CONTEXT.md:6" }],
+      }),
+      documentation: layer("ok", {
+        query: "authentication", freshness: "fresh", indexed_documents: 6, indexed_sections: 24, indexed_total: 2, count: 1, result_truncated: true,
+        observed: [{ path: "docs/auth.md", heading: "Tokens", start_line: 5, end_line: 9, excerpt: "Token rotation policy", kind: "markdown" }],
+      }),
+      code: layer("ok", {
+        freshness: { structural: { status: "fresh" }, history: { status: "stale" } },
+        baseline: { requested_ref: "main", baseline_oid: "1".repeat(40), head_oid: "2".repeat(40) },
+        scope: { repository_relative_root: "." },
+        changes: { files: { total: null, returned: 1, items: [{ path: "src/other.rs", status: "modified" }] }, symbols: { total: 0, returned: 0, items: [] } },
+        tests: { total: null, returned: 0, items: [] },
+      }),
+      work: layer("observed_history", {
+        status: "observed_history", returned: 1, current_checkout: "not_verified", scan_error: null,
+        tasks: [{ folder: "rollback-review", phase: "complete", completion_basis: "historical_record", current_checkout: "not_verified", state: { next_step: null, blocking_reason: null, last_artifact: "review.md" } }],
+      }),
+    },
+    budget: { requested_tokens: 5000, estimated_tokens: 1800, serialized_bytes: 7200, estimator: "ceil_utf8_bytes_div4" },
+    context_revision: "b".repeat(64),
+    omitted: [],
+    precision_notes: ["Source freshness does not prove semantic accuracy."],
+  };
 }
 
 function cloneFixture() {
@@ -807,6 +883,160 @@ function contrastRatio(foreground, background) {
   const light = Math.max(relativeLuminance(foreground), relativeLuminance(background));
   const dark = Math.min(relativeLuminance(foreground), relativeLuminance(background));
   return (light + 0.05) / (dark + 0.05);
+}
+
+async function testPrivateProfiles() {
+  const harness = await renderFixture(fixture(), { width: 390 });
+  assert.equal(harness.contextFetchCalls(), 0, "Private context must not load during Review startup");
+  assert.equal(harness.nodes.get("profiles-content").textContent, "");
+  const open = () => harness.nodes.get("mode-profiles").dispatch("click");
+  open();
+  assert.equal(harness.nodes.get("profiles-board").hidden, false);
+  assert.equal(harness.nodes.get("mode-profiles").getAttribute("aria-pressed"), "true");
+  assert.equal(harness.nodes.get("profiles-board").getAttribute("aria-busy"), "true");
+  await harness.settle();
+  assert.equal(harness.contextFetchCalls(), 1);
+  const contextRequest = harness.requests.find((request) => request.url === "/api/context");
+  assert.equal(contextRequest.options.cache, "no-store");
+  assert.equal(contextRequest.options.method, "GET");
+  assert.equal(harness.nodes.get("refresh-button").getAttribute("aria-label"), "Refresh context preview");
+  const content = harness.nodes.get("profiles-content");
+  assert.equal(content.querySelectorAll(".profiles-card").length, 5, "All five independent layers remain inspectable");
+  assert.match(content.textContent, /Person pathssrc\/auth.rs/);
+  assert.match(content.textContent, /Project\/docs queryauthentication/);
+  assert.match(content.textContent, /Size budget5,000/);
+  assert.match(content.textContent, /Estimated size units1,800Requested size units5,000/);
+  assert.match(content.textContent, /4 UTF-8 JSON bytes per unit; model token use may differ\./);
+  assert.match(content.textContent, /Layer provenance/);
+  assert.doesNotMatch(content.textContent, /Context receipt|Layer receipt|Token budget|Estimated tokens|Requested tokens/);
+  assert.match(content.textContent, /Code covers the repository diff/);
+  assert.match(content.textContent, /src\/other.rs/);
+  const person = content.querySelectorAll(".profiles-card--person")[0];
+  assert.match(person.textContent, /Habits1 returned/);
+  assert.match(person.textContent, /Preferences1 returned/);
+  assert.match(person.textContent, /Human authorshipunproven/);
+  assert.match(person.textContent, /Independent observationsunproven/);
+  assert.match(person.textContent, /Semantic accuracyunknown/);
+  assert.match(person.textContent, /Context conflicts1/);
+  assert.match(person.textContent, /PRIVATE_PREFERENCE <script>keep this literal<\/script>/);
+  assert.equal(content.querySelectorAll("script").length, 0, "Private text is never executable HTML");
+  assert.match(content.querySelectorAll(".profiles-card--project")[0].textContent, /Freshnessstale/);
+  assert.match(content.querySelectorAll(".profiles-card--documentation")[0].textContent, /Indexed documents6/);
+  assert.match(content.querySelectorAll(".profiles-card--documentation")[0].textContent, /docs\/auth.mdLines5–9/);
+  assert.match(content.querySelectorAll(".profiles-card--code")[0].textContent, /Changed files1 returned · total unknown/);
+  assert.match(content.querySelectorAll(".profiles-card--work")[0].textContent, /Completed in stored history/);
+  assert.match(content.querySelectorAll(".profiles-card--work")[0].textContent, /Current checkoutnot verified/);
+  assert.match(harness.nodes.get("profiles-status").textContent, /delivery not recorded/);
+  const pre = content.querySelectorAll("pre")[0];
+  assert.equal(pre.getAttribute("tabindex"), "0", "Packet inspection supports keyboard scrolling");
+  assert.deepEqual(JSON.parse(pre.textContent), contextFixture(), "The full packet remains available without lossy UI summaries");
+  assert.equal(harness.nodes.get("snapshot-age").textContent, "Context preview just now");
+  harness.advanceTime(120000);
+  assert.equal(harness.nodes.get("snapshot-age").textContent, "Context preview 2m ago");
+  harness.nodes.get("mode-review").dispatch("click");
+  assert.equal(content.textContent, "", "Leaving Profiles removes private DOM data");
+  assert.equal(harness.nodes.get("profiles-board").hidden, true);
+  assert.equal(harness.nodes.get("refresh-button").getAttribute("aria-label"), "Refresh Lens snapshot");
+  assert.equal(harness.contextFetchCalls(), 1);
+
+  const exactPacket = contextFixture();
+  exactPacket.layers.documentation.data.observed[0].score = 0;
+  const exactWire = JSON.stringify(exactPacket).replace('"score":0', '"score":1.230000000000000000001E-008');
+  assert.notEqual(JSON.stringify(JSON.parse(exactWire)), exactWire, "Fixture must exercise a lossy numeric reserialization");
+  const wireHarness = await renderFixture(fixture(), { contextResponses: [{ wire: exactWire }, { wire: "{invalid json" }] });
+  wireHarness.nodes.get("mode-profiles").dispatch("click");
+  await wireHarness.settle();
+  assert.equal(wireHarness.nodes.get("profiles-content").querySelectorAll("pre")[0].textContent, exactWire, "Received packet must retain the exact wire used by its digest contract");
+  wireHarness.nodes.get("profiles-refresh").dispatch("click");
+  assert.equal(wireHarness.nodes.get("profiles-content").textContent, "", "Refreshing clears the previous exact wire synchronously");
+  await wireHarness.settle();
+  assert.equal(wireHarness.nodes.get("profiles-content").textContent, "", "Malformed replacement must not restore a previous exact wire");
+
+  const partial = contextFixture();
+  partial.layers.person.data.omitted = ["habits", "feedback"];
+  partial.layers.person.data.habits = [];
+  partial.layers.person.data.feedback = [];
+  partial.layers.documentation = { status: "not_requested", revision: null, omitted_reason: "documentation_query_not_selected", data: null };
+  partial.selection.query = null;
+  partial.layers.code.data = null;
+  partial.layers.code.omitted_reason = "context_budget";
+  partial.layers.code.verification = { freshness: { structural: { status: "incomplete" }, history: { status: "stale" } } };
+  partial.omitted = [{ layer: "code", reason: "context_budget" }];
+  const partialHarness = await renderFixture(fixture(), { contextResponse: { payload: partial } });
+  partialHarness.nodes.get("mode-profiles").dispatch("click");
+  await partialHarness.settle();
+  const partialContent = partialHarness.nodes.get("profiles-content");
+  assert.match(partialContent.querySelectorAll(".profiles-card--person")[0].textContent, /HabitsNot includedPreferencesNot included/);
+  assert.doesNotMatch(partialContent.querySelectorAll(".profiles-card--person")[0].textContent, /0 returned/);
+  assert.match(partialContent.querySelectorAll(".profiles-card--documentation")[0].textContent, /No documentation query was selected/);
+  const omittedCode = partialContent.querySelectorAll(".profiles-card--code")[0].textContent;
+  assert.match(omittedCode, /Budget omitted/);
+  assert.match(omittedCode, /contents and counts are unknown/);
+  assert.match(omittedCode, /Structure freshnessincompleteHistory freshnessstale/, "Budget omission must retain known verification limits");
+  assert.match(omittedCode, new RegExp("a".repeat(64)), "Omitted layer retains the source revision");
+  assert.doesNotMatch(omittedCode, /0 returned/);
+
+  let releaseRefresh;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const failureHarness = await renderFixture(fixture(), {
+    contextResponses: [{ payload: contextFixture() }, { wait: refreshGate, reject: "INTERNAL_SECRET" }, { payload: contextFixture() }],
+  });
+  failureHarness.nodes.get("mode-profiles").dispatch("click");
+  await failureHarness.settle();
+  assert.match(failureHarness.nodes.get("profiles-content").textContent, /PRIVATE_PREFERENCE/);
+  failureHarness.nodes.get("refresh-button").dispatch("click");
+  assert.equal(failureHarness.nodes.get("profiles-content").textContent, "", "Refresh must clear old data before network completion");
+  assert.equal(failureHarness.nodes.get("profiles-refresh").disabled, true);
+  releaseRefresh();
+  await failureHarness.settle();
+  assert.equal(failureHarness.nodes.get("profiles-content").textContent, "", "Network failure must not restore the previous private packet");
+  assert.match(failureHarness.nodes.get("profiles-status").textContent, /Private data has been cleared/);
+  assert.doesNotMatch(failureHarness.nodes.get("profiles-status").textContent, /INTERNAL_SECRET/);
+  assert.equal(failureHarness.nodes.get("snapshot-age").textContent, "No current context");
+  assert.equal(failureHarness.nodes.get("profiles-refresh").disabled, false);
+  failureHarness.nodes.get("profiles-refresh").dispatch("click");
+  await failureHarness.settle();
+  assert.match(failureHarness.nodes.get("profiles-content").textContent, /PRIVATE_PREFERENCE/, "An explicit retry can obtain a fresh packet");
+
+  const denied = contextFixture();
+  denied.layers.person = { status: "access_denied", revision: null, omitted_reason: "profile_access_denied", data: null };
+  const revokeHarness = await renderFixture(fixture(), { contextResponses: [{ payload: contextFixture() }, { payload: denied }] });
+  revokeHarness.nodes.get("mode-profiles").dispatch("click");
+  await revokeHarness.settle();
+  revokeHarness.nodes.get("profiles-refresh").dispatch("click");
+  await revokeHarness.settle();
+  assert.doesNotMatch(revokeHarness.nodes.get("profiles-content").textContent, /PRIVATE_PREFERENCE|Inspect rollback evidence/);
+  assert.match(revokeHarness.nodes.get("profiles-content").textContent, /Profile access is not granted/);
+
+  let releaseOld;
+  const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+  const raceHarness = await renderFixture(fixture(), { contextResponses: [{ wait: oldGate, payload: contextFixture() }, { payload: denied }] });
+  raceHarness.nodes.get("mode-profiles").dispatch("click");
+  raceHarness.nodes.get("mode-audit").dispatch("click");
+  assert.equal(raceHarness.nodes.get("profiles-content").textContent, "");
+  raceHarness.nodes.get("mode-profiles").dispatch("click");
+  await raceHarness.settle();
+  assert.match(raceHarness.nodes.get("profiles-content").textContent, /Profile access is not granted/);
+  releaseOld();
+  await raceHarness.settle();
+  assert.doesNotMatch(raceHarness.nodes.get("profiles-content").textContent, /PRIVATE_PREFERENCE/, "A stale response cannot restore private data after a newer access denial");
+
+  const invalidHarness = await renderFixture(fixture(), { contextResponse: { payload: { ...contextFixture(), schema_version: 99 } } });
+  invalidHarness.nodes.get("mode-profiles").dispatch("click");
+  await invalidHarness.settle();
+  assert.equal(invalidHarness.nodes.get("profiles-content").textContent, "");
+  assert.match(invalidHarness.nodes.get("profiles-status").textContent, /incompatible/);
+
+  const embedded = await renderFixture(fixture(), { embedded: true, rejectFetch: true });
+  assert.equal(embedded.nodes.get("mode-profiles").hidden, true);
+  assert.equal(embedded.nodes.get("mode-profiles").disabled, true);
+  assert.equal(embedded.nodes.get("refresh-button").getAttribute("aria-label"), "Static Lens snapshot");
+  embedded.nodes.get("mode-profiles").dispatch("click");
+  embedded.nodes.get("profiles-refresh").dispatch("click");
+  await embedded.settle();
+  assert.equal(embedded.contextFetchCalls(), 0, "Standalone packages must never fetch private context, even through programmatic clicks");
+  assert.equal(embedded.requests.length, 0);
+  assert.equal(embedded.nodes.get("profiles-content").textContent, "");
 }
 
 async function main() {
@@ -861,7 +1091,7 @@ async function main() {
   assert.match(CSS_SOURCE, /@media \(max-width: 360px\)[\s\S]*?\.wordmark__compact[\s\S]*?display:\s*inline/);
   assert.match(
     CSS_SOURCE,
-    /body:has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\)[\s\S]*?\.trace-context[\s\S]*?position:\s*sticky/s,
+    /body:not\(\[data-mode="profiles"\]\):has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\)[\s\S]*?\.trace-context[\s\S]*?position:\s*sticky/s,
     "Selected mobile traces must retain sticky context"
   );
   assert.match(
@@ -886,7 +1116,7 @@ async function main() {
   );
   assert.match(
     CSS_SOURCE,
-    /body:has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\) \.trace-context\s*\{[^}]*position:\s*sticky/s,
+    /body:not\(\[data-mode="profiles"\]\):has\(\.workspace\[data-trace-mode="mobile"\]\.has-selection\) \.trace-context\s*\{[^}]*position:\s*sticky/s,
     "Selected-trace context must follow the authoritative trace mode"
   );
   assert.match(CSS_SOURCE, /\.search-control input::placeholder\s*\{[^}]*color:\s*var\(--ink-soft\)/s);
@@ -2039,6 +2269,8 @@ async function main() {
   ownership.dispatch("click");
   assert.equal(ownership.getAttribute("aria-pressed"), "false");
   assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /CODEOWNERS/i);
+
+  await testPrivateProfiles();
 
   process.stdout.write("Lens focused DOM/static regressions passed\n");
 }

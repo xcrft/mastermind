@@ -1,8 +1,8 @@
 ---
 name: mastermind-style-deep
-description: Write a grounded portrait of how the author actually develops — design approach, code shape, comments, tests, optimization habits, what they pay attention to, and commit voice — into the "Design patterns & tendencies" section of ~/.mastermind/style.md. The structural signature the deterministic miner can't measure. Use when the user wants a real "write like me" profile, says "deep style", "design patterns", "qualitative profile", or notices `mastermind miner profile` only produced formatter-level rules.
+description: Draft a grounded, reviewable portrait of how the author develops from attributed code and commit evidence. Keep it as a persona candidate until the author verifies the source examples. Use for "deep style", "design patterns", or "qualitative profile" requests.
 metadata:
-  version: 0.3.1
+  version: 0.4.0
   authors:
     - mastermind
   tags:
@@ -13,11 +13,13 @@ metadata:
 
 # Mastermind — deep style portrait
 
-`mastermind miner profile` records corpus-level lexical observations (indentation,
-quotes, braces, line length). Those are diagnostic evidence because formatter,
-language mix, and repository policy often explain them better than personal
-taste; do not apply them directly as coding rules. This skill
-writes the part that matters: a grounded **portrait of how the author develops**.
+`mastermind miner profile` measures commit-level code-shape observations
+(indentation, quotes, braces, line length), commit voice, workflow habits and
+range, and sets formatter-decided conventions aside under Repository tooling.
+`mastermind miner feedback` records what the author stated to agents. Code-shape
+observations remain diagnostic evidence because language mix and repository
+policy can still explain them; do not apply them directly as coding rules. This
+skill drafts the qualitative **portrait of how the author develops** for review.
 The binary gathers evidence; you (the agent, already running a model) read code
 and write the portrait. No separate `claude -p` process or authentication.
 
@@ -41,7 +43,8 @@ Don't just grep. A portrait needs both numbers and read code:
    when available. Otherwise inspect `git shortlog -sne --all` and confirm the
    identity from local evidence; do not assume `git config user.name` matches
    the author being profiled. Read up to 100 matching subjects and a few bodies.
-4. **Enforcing config FIRST.** `rustfmt.toml` / `.eslintrc` / `pyproject` lint config, `#![deny(...)]` / `#![warn(...)]`, `clippy.toml`, CI lint steps. Anything a formatter or linter *forces* is not personal style — exclude it, or mark it "enforced". Do not credit a `///` on every fn as a habit if `#![deny(missing_docs)]` mandates it.
+4. **Enforcing config FIRST.** The Repository tooling line in `style.md` names
+   what the miner already set aside; check the rest yourself. `rustfmt.toml` / `.eslintrc` / `pyproject` lint config, `#![deny(...)]` / `#![warn(...)]`, `clippy.toml`, CI lint steps. Anything a formatter or linter *forces* is not personal style — exclude it, or mark it "enforced". Do not credit a `///` on every fn as a habit if `#![deny(missing_docs)]` mandates it.
 5. **Optimization signals.** Benchmarks (`criterion` / `#[bench]` / `*.bench.*`), `#[inline]`, `with_capacity`, caching/memoization, `tracing`/profiling spans, comments mentioning perf. Their presence can evidence what they optimize and whether it is measured. Absence is only a bounded observation, never a preference by itself.
 6. **Observability & safety signals.** Logging/tracing/metrics density, assertions, input validation, `#[must_use]`, where error boundaries sit.
 
@@ -64,23 +67,28 @@ Don't just grep. A portrait needs both numbers and read code:
 - **No generic praise.** `clean`, `readable`, `idiomatic`, `well-structured`, `best practices` — banned. If you can't tie it to a tell, cut it.
 - **Write it as a portrait** — a short grounded paragraph per dimension, not isolated bullets. It should read like a description of a person, not a lint report.
 
-## Inject into `~/.mastermind/style.md`
+## Save a review candidate
 
-The portrait is the `## Design patterns & tendencies (interpreted)` section in the managed block, right before the `\n---\nThe planner reads this …` footer. Replace it if present; otherwise insert before the footer.
+Write the portrait with a source list to a new `~/.mastermind/style.deep-candidate-*.md` file. Label each statement as unreviewed and cite the actual commit or file span that led to it. Do not write it into the managed `style.md` block or present it as an accepted personal rule. Ask the author to verify attribution, the examples, and counterexamples before any later import into the SQL profile.
 
 ## Persistence contract
 
-The interpreted section lives inside the managed block, but a normal
-`mastermind miner profile` re-mine preserves it verbatim. Re-running this skill
-replaces the section intentionally. The compatibility command
-`mastermind miner profile --deep` may also replace it with a bounded automated
-synthesis; prefer this skill when qualitative accuracy matters.
+The candidate stays separate from the generated profile. A normal
+`mastermind miner profile` re-mine does not overwrite it. The compatibility
+command `mastermind miner profile --deep` also writes an unreviewed candidate.
+On the next publication, legacy manual/interpreted text is preserved in fenced
+unreviewed notes in schema-5 `style.md`. Inspect its original evidence locally.
+For supported human session signals use `miner collect`, `candidates show`,
+`candidates propose-preference` and revision-bound `feedback accept`; habits use
+`habit propose` and `habit observe`. Git-only interpretations and unsupported
+session signals remain unreviewed. Do not invent a human quote or use the legacy
+`feedback add` route as proof of strict candidate provenance.
 
 ## Consumption contract
 
-The profile is advisory input for [[mastermind-task-planning]] and
-[[mastermind-task-executor]]. Use the interpreted portrait and manual overrides
-when relevant. Deterministic code-shape observations are evidence for the
+The reviewed profile is advisory input for [[mastermind-task-planning]] and
+[[mastermind-task-executor]]. An unreviewed candidate is not agent context.
+Deterministic code-shape observations are evidence for the
 portrait, not direct implementation preferences. Never transfer a
 language-specific observation into another language. Commit voice may be a
 fallback only when repository policy is silent. Repository code and

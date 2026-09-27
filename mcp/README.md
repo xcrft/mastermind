@@ -1,20 +1,16 @@
-# MCP servers
+# MCP server
 
-One local graph, one bounded [Model Context Protocol](https://modelcontextprotocol.io)
-server, no arbitrary SQL surface.
+[`mmcg`](servers/mmcg/README.md) exposes the local Mastermind index over stdio.
+Clients can query code, project history, documentation, workflow state and
+explicitly granted personal context.
 
-Mastermind currently ships one server:
+| Tool behavior | Write boundary |
+|---|---|
+| Structural queries | May refresh the managed derived index |
+| `mmcg_scratchpad_append` | Appends a local note |
+| Other queries | Read-only |
+| Arbitrary SQL or executable plugins | Not exposed |
 
-| Server | Transport | Surface |
-|---|---|---|
-| [`mmcg`](servers/mmcg/README.md) | stdio | 30 bounded tools over a local SQLite index: 21 refreshable non-destructive queries, 8 read-only queries, and one additive scratchpad write |
-
-The server supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#,
-Go, Java, PHP, and C/C++. It exposes structural, semantic, evidence, history,
-and workflow-state queries; it does not expose arbitrary SQL or executable
-plugin hooks.
-
-Want to connect a client? Start with the
-[generic MCP guide](../docs/integrations/generic-mcp.md). Need exact schemas,
-limits, and precision notes? Use the
-[complete technical reference](../docs/reference/mmcg.md#mcp-tools).
+- [Connect a client](../docs/integrations/generic-mcp.md)
+- [Tool arguments and result contracts](../docs/reference/mmcg.md#mcp-tools)
+- [Index coverage and limitations](../docs/reference/mmcg.md#what-it-indexes)

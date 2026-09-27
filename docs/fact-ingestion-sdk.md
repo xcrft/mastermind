@@ -1,266 +1,155 @@
-# Declarative fact-ingestion SDK
+# Fact-ingestion SDK
 
-Bring SARIF, coverage, tests, traces, or your own analysis into the same review
-without loading producer code into Mastermind.
+Import scanner findings, coverage, test results, traces or custom analysis as a
+revision-bound JSON manifest. Mastermind validates and stores the dataset.
+Producer code is never loaded into the process.
 
-The extension boundary is data ingestion, not plugin execution. A producer
-emits a revision-bound JSON manifest; Mastermind validates the complete input
-before atomically replacing that producer's normalized dataset in private
-SQLite tables. Lens, CLI, and the fixed read-only `mmcg_facts` tool read the
-result.
+The [public schema](../schemas/mastermind-facts-v1.schema.json) is
+`mastermind-facts/v1`. It supports annotations and relationships.
 
-The public v1 schema is
-[`schemas/mastermind-facts-v1.schema.json`](../schemas/mastermind-facts-v1.schema.json).
-Its API identifier is `mastermind-facts/v1`, with two capabilities:
-`annotations` and `relationships`.
+## Import an existing report
 
-## The contract in one screen
-
-| Property | v1 behavior |
-|---|---|
-| Producer output | Inert JSON matching the public schema |
-| Repository binding | Exact repository identity and full SHA-1 or SHA-256 Git revision |
-| File binding | Canonical path, byte size, and SHA-256 digest |
-| Provenance | Bounded local artifacts, optionally signed with Ed25519 |
-| Database writes | Performed only by Mastermind after full validation |
-| Read surfaces | `query facts`, `mmcg_facts`, Lens, and review export |
-| Executable extension points | None |
-
-## Built-in adapters
-
-Built-in adapters convert common reports into the same manifest. An adapter
-reads one bounded local artifact, maps every fact to the current index, records
-the exact digest and size, and emits nothing if parsing is partial or any fact
-cannot be mapped to an indexed repository file. Input artifacts require exact
-UTF-8 repository-relative identities, and output paths require exact UTF-8
-representations so the result always identifies the manifest that was written.
-
-```bash
-mastermind facts adapt --format sarif \
-  --input reports/semgrep.sarif --output reports/semgrep.facts.json \
-  --producer semgrep --producer-version 1.82.0 --dataset pr-security
-
-mastermind facts adapt --format coverage \
-  --input coverage/lcov.info --output coverage.facts.json \
-  --producer vitest --producer-version 3.2.0 --dataset unit-coverage
-
-mastermind facts adapt --format junit \
-  --input test-results/junit.xml --output junit.facts.json \
-  --producer pytest --producer-version 8.4.0 --dataset unit-tests
-
-mastermind facts adapt --format otel \
-  --input traces/otlp.json --output runtime.facts.json \
-  --producer otel-collector --producer-version 0.130.0 --dataset review-traces
-```
-
-`coverage` auto-detects LCOV and Cobertura XML. OTLP runtime parent-child
-relationships use `confidence=observed`; they still only decorate matching
-static endpoints in Lens and never create codegraph topology.
-
-## Custom producer flow
-
-Index the repository, then ask Mastermind for the exact contract that the
-manifest must bind:
+Index the repository, then adapt a report. Set `PRODUCER_VERSION` to the version
+that generated it.
 
 ```bash
 mastermind index .
+mastermind facts adapt --format sarif \
+  --input reports/semgrep.sarif --output reports/semgrep.facts.json \
+  --producer semgrep --producer-version "$PRODUCER_VERSION" --dataset pr-security
+mastermind enrich --facts reports/semgrep.facts.json
+mastermind query facts --path src --top 100
+```
+
+| Adapter | Input |
+|---|---|
+| `sarif` | SARIF findings |
+| `coverage` | LCOV or Cobertura |
+| `junit` | JUnit test report |
+| `otel` | OpenTelemetry OTLP JSON |
+
+| Adaptation step | Required result |
+|---|---|
+| Map report entries | Every fact maps to an indexed repository file |
+| Bind the report | Record its exact size and digest |
+| Parse or mapping failure | Reject the whole adaptation |
+
+## Write a custom producer
+
+First obtain the repository contract:
+
+```bash
 mastermind query facts --top 1 > mastermind-facts-contract.json
 ```
 
-The response contains `contract.api_version`, `contract.repository.identity`,
-`contract.repository.revision`, and `contract.supported_capabilities`. Copy
-those exact values, hash every referenced source and provenance artifact, and
-emit only the declared fact kinds.
+| Manifest input | Source |
+|---|---|
+| API version | Exact `contract.api_version` |
+| Repository identity and revision | Exact `contract.repository.identity` and `contract.repository.revision` |
+| Capabilities | Supported values returned in the contract |
+| Source files and provenance artifacts | Hash every referenced file and record its size |
+
+Replace all example identities, sizes, hashes and paths with measured values:
 
 ```json
 {
   "api_version": "mastermind-facts/v1",
-  "capabilities": ["annotations", "relationships"],
+  "capabilities": ["annotations"],
   "repository": {
     "identity": "git-remote:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "revision": "0123456789abcdef0123456789abcdef01234567"
   },
-  "producer": {
-    "name": "com.example.arch-lint",
-    "version": "1.4.0"
-  },
+  "producer": {"name": "com.example.arch-lint", "version": "1.0.0"},
   "dataset": "default",
-  "provenance": {
-    "kind": "static-analysis",
-    "artifacts": ["analyzer-output"]
-  },
+  "provenance": {"kind": "static-analysis", "artifacts": ["analysis"]},
   "files": [
     {
       "path": "src/payment.rs",
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "bytes": 1240
-    },
-    {
-      "path": "src/checkout.rs",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "bytes": 980
     }
   ],
   "artifacts": [
     {
-      "id": "analyzer-output",
+      "id": "analysis",
       "path": "reports/arch-lint.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "bytes": 4312
     }
   ],
   "facts": [
     {
       "kind": "annotation",
-      "id": "payment-owner-boundary",
+      "id": "payment-boundary",
       "path": "src/payment.rs",
       "line": 42,
       "severity": "warning",
       "category": "architecture.boundary",
-      "title": "Payment ownership boundary crossed",
-      "message": "The changed function crosses the declared payment boundary."
-    },
-    {
-      "kind": "relationship",
-      "id": "checkout-to-payment",
-      "relation": "calls",
-      "from": {"path": "src/checkout.rs", "line": 18},
-      "to": {"path": "src/payment.rs", "line": 42},
-      "confidence": "high",
-      "label": "Producer-resolved checkout to payment call"
+      "title": "Payment boundary crossed",
+      "message": "The function crosses the declared payment boundary."
     }
   ]
 }
 ```
 
-Import and inspect the normalized dataset:
-
 ```bash
 mastermind enrich --facts mastermind-facts.json
-mastermind query facts --path src --top 400
+mastermind query facts --top 100
 ```
 
-## Signed producer provenance
+For relationships, declare the capability and provide exact source and target
+endpoints as defined by the schema.
 
-For a producer-controlled trust boundary, sign the strict manifest with a
-local Ed25519 seed and verify it against an explicit trusted-key allowlist. The
-private-key file is a single base64-encoded 32-byte seed and must be owned by
-the current user with mode `0600` on Unix. The public-key file contains the
-base64-encoded 32-byte public key.
+## Sign producer evidence
+
+Use signing when import policy should require a particular producer key:
 
 ```bash
-mastermind facts keygen \
-  --private-key producer.seed \
-  --public-key producer.pub
-
+mastermind facts keygen --private-key producer.seed --public-key producer.pub
 mastermind facts sign mastermind-facts.json \
-  --private-key producer.seed \
-  --signature mastermind-facts.sig.json
-
+  --private-key producer.seed --signature mastermind-facts.sig.json
 mastermind facts verify mastermind-facts.json \
-  --signature mastermind-facts.sig.json \
-  --public-key producer.pub \
-  --trusted-key-id sha256:<public-key-digest> \
-  --json
-
+  --signature mastermind-facts.sig.json --public-key producer.pub \
+  --trusted-key-id "sha256:<public-key-digest>" --json
 mastermind enrich --facts mastermind-facts.json \
-  --signature mastermind-facts.sig.json \
-  --public-key producer.pub \
-  --trusted-key-id sha256:<public-key-digest> \
-  --require-signature
+  --signature mastermind-facts.sig.json --public-key producer.pub \
+  --trusted-key-id "sha256:<public-key-digest>" --require-signature
 ```
 
-`facts keygen` uses the operating system CSPRNG, writes the seed with private
-permissions on Unix, prints the derived `sha256:<public-key-digest>`, and
-refuses to replace either key file. Both output paths must have exact UTF-8
-representations; Mastermind validates them before creating either file so the
-reported paths always identify the keys that were written. Complete key bytes
-are published with an atomic no-clobber operation. The public key is published
-first, so a publication failure cannot leave a private seed without its public
-half at the requested paths.
+| Signing input or event | Contract |
+|---|---|
+| Key ID | Use the ID printed by key generation |
+| Key generation | Refuses existing paths. Creates the private seed with Unix mode `0600` |
+| Incomplete policy | Import fails |
+| `--revoked-key-id` | Overrides trust |
+| Verified import | Stores the key and signature proof |
+| Changed trust or revocation policy | Re-import the dataset to apply the decision |
+| Valid signature | Establishes control of the allowed key, not human identity, signing time or finding accuracy |
 
-The detached format is defined by
-[`mastermind-fact-signature-v1.schema.json`](../schemas/mastermind-fact-signature-v1.schema.json).
-It signs a domain-separated canonical statement over the validated manifest,
-including its repository identity, revision, source files, provenance
-artifacts, and facts. Revocation wins over trust; pass `--revoked-key-id`
-during verify/import to reject a compromised key. A partial signature policy
-(for example a signature without a public key or trusted key ID) fails closed.
+See the [signature schema](../schemas/mastermind-fact-signature-v1.schema.json)
+for the signed statement.
 
-The import stores the verified key ID and reproducible public-key/signature
-proof with the normalized facts. Lens and `mmcg_facts` expose the result as
-`signature_status=verified`; unsigned imports remain explicitly `unsigned`.
-Trust and revocation are evaluated at import time. Rotate or revoke a producer
-by updating the allowlist and re-importing that dataset under the new policy.
+## Read and replace datasets
 
-Ed25519 proves control of the allowlisted key. It does not by itself prove a
-human or organization identity, signing time, transparency-log inclusion, or
-whether a signature predates key compromise. Those claims require an external
-identity and timestamp/transparency policy.
+| Operation or condition | Result |
+|---|---|
+| `query facts`, `mmcg_facts`, Lens or review export | Same data with source and producer provenance. Unsigned imports stay labeled unsigned |
+| Relationship with matching source and target | Can corroborate an existing returned edge. Cannot create or remove codegraph topology |
+| Runtime or coverage fact | Retains its own evidence type |
+| Successful import | Atomically replaces only `(producer.name, dataset)` |
+| Empty `facts` array | Clears that dataset |
+| Failed validation | Preserves the previous dataset |
+| Changed revision, index or bound source | Reads withhold stale facts. Regenerate and re-import |
 
-The MCP equivalent is the built-in, read-only `mmcg_facts` tool with `path`
-and `top` arguments. Its bounded response includes verified provenance artifact
-paths, sizes, and SHA-256 digests. Lens loads current facts and shows the
-binding manifest digest on the producer card. Annotations appear as
-source-labelled findings. Relationships can corroborate a returned codegraph
-edge only when both file and line endpoints match; facts never create or remove
-graph topology.
+## Validation boundary
 
-`mastermind review export` carries the same normalized facts into its autonomous
-HTML. Unsigned datasets remain `producer-attested`; verified datasets and their
-provenance artifacts are `producer-signed`, with the key ID, public key,
-signature, detached-signature digest, and signed manifest digest recorded in
-the package manifest. Mixed packages are explicitly
-`partially-producer-signed`.
+| Validation | Rejection condition |
+|---|---|
+| Schema, fact IDs and capabilities | Unsupported shape, identity or value |
+| Repository and source bindings | Wrong repository/revision, indexed source hash or artifact hash |
+| File access | Over-limit input, nonregular file, symlink, noncanonical path or path substitution |
 
-## Validation and replacement
-
-Before any database write, Mastermind verifies all of the following:
-
-- the exact API version, declared capability allowlist, required fields, and
-  absence of duplicate or unknown JSON fields;
-- the indexed repository identity and current full SHA-1 or SHA-256 Git HEAD;
-- canonical repository-relative paths with no traversal, absolute roots,
-  backslashes, control bytes, or symlinks;
-- regular-file sizes and lowercase SHA-256 digests for every referenced source
-  and provenance artifact;
-- that each source digest also matches the current codegraph index;
-- unique fact IDs, one-based locations, bounded text, supported severities and
-  confidence values, and references only to declared files and artifacts.
-
-The repository identity is a credential-free digest of the canonical origin
-host/path when a supported Git remote exists, or a digest of the canonical
-local worktree path otherwise. The local fallback requires UTF-8 and preserves
-literal Unix backslashes rather than colliding with a nested slash path. The
-manifest is capped at 16 MiB, referenced
-sources at 10,000 files and 512 MiB total, provenance at 64 artifacts, 32 MiB
-each and 256 MiB total, and facts at 100,000. Query responses expose their own
-smaller limits and explicit partial/truncation states.
-
-The manifest and every repository input are read through bounded, no-follow
-file handles. Mastermind verifies the opened file identity before and after the
-read and rejects special files or path substitution, including FIFO swaps,
-instead of waiting for external input.
-
-A successful import atomically replaces only the dataset identified by
-`producer.name` plus `dataset`. An empty `facts` array therefore clears that
-dataset while preserving its validated provenance record. If validation fails,
-the previous dataset is untouched. If HEAD, repository identity, the codegraph,
-or any bound source later changes, reads omit that source and report it as
-stale; they never silently mix revisions.
-
-## Security boundary
-
-The v1 contract deliberately has no executable extension points:
-
-- no native or in-process plugin loading;
-- no producer-defined MCP handlers;
-- no executable custom policy rules;
-- no direct SQLite access or schema migrations;
-- no native Tree-sitter grammar packs;
-- no network fetches or commands from manifest fields.
-
-Only Mastermind writes its normalized fact tables. The language registry, MCP
-tool table, policy DSL, and Tree-sitter graph remain compiled into Mastermind.
-Future community query packs, framework recognizers, and evidence importers can
-target this ingestion boundary without receiving process or database authority.
+Producers have no direct SQLite access. Manifests cannot run commands, fetch
+network resources, install tools, or add MCP handlers. For exact input and
+response limits, see the
+[fact-ingestion reference](reference/mmcg.md#declarative-fact-ingestion-sdk).

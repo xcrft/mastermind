@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "kind": "mastermind-index-benchmark",
+  "date": "2026-09-27",
+  "code_revision": "101bed7bdb9912abaf9f6c612f02f252d459038e",
+  "profile": "bench",
+  "machine": {
+    "cpu": "Apple M3 Pro",
+    "physical_cores": 12,
+    "memory_gib": 36,
+    "os": "macOS 26.5.2",
+    "architecture": "arm64",
+    "rustc": "1.97.1"
+  },
+  "command": "cargo bench --manifest-path mcp/servers/mmcg/Cargo.toml --locked --bench indexer",
+  "limitations": [
+    "Synthetic Rust corpus; no model or SCIP generation.",
+    "Three sequential runs on a desktop; background load was not controlled.",
+    "Build and fixture generation excluded from phase timings.",
+    "No matched older-revision comparison or portable performance threshold."
+  ],
+  "runs": [
+    {
+      "schema_version": 1,
+      "files": 1000,
+      "symbols_per_file": 20,
+      "changed_files": 100,
+      "parse_batch_size": 64,
+      "cold": {
+        "elapsed_ms": 1837,
+        "peak_rss_kib": 28784,
+        "files_indexed": 1000,
+        "files_unchanged": 0,
+        "files_failed": 0
+      },
+      "warm": {
+        "elapsed_ms": 341,
+        "peak_rss_kib": 28880,
+        "files_indexed": 0,
+        "files_unchanged": 1000,
+        "files_failed": 0
+      },
+      "incremental": {
+        "elapsed_ms": 753,
+        "peak_rss_kib": 30752,
+        "files_indexed": 100,
+        "files_unchanged": 900,
+        "files_failed": 0
+      }
+    },
+    {
+      "schema_version": 1,
+      "files": 1000,
+      "symbols_per_file": 20,
+      "changed_files": 100,
+      "parse_batch_size": 64,
+      "cold": {
+        "elapsed_ms": 1320,
+        "peak_rss_kib": 29136,
+        "files_indexed": 1000,
+        "files_unchanged": 0,
+        "files_failed": 0
+      },
+      "warm": {
+        "elapsed_ms": 233,
+        "peak_rss_kib": 29216,
+        "files_indexed": 0,
+        "files_unchanged": 1000,
+        "files_failed": 0
+      },
+      "incremental": {
+        "elapsed_ms": 577,
+        "peak_rss_kib": 31072,
+        "files_indexed": 100,
+        "files_unchanged": 900,
+        "files_failed": 0
+      }
+    },
+    {
+      "schema_version": 1,
+      "files": 1000,
+      "symbols_per_file": 20,
+      "changed_files": 100,
+      "parse_batch_size": 64,
+      "cold": {
+        "elapsed_ms": 1319,
+        "peak_rss_kib": 28848,
+        "files_indexed": 1000,
+        "files_unchanged": 0,
+        "files_failed": 0
+      },
+      "warm": {
+        "elapsed_ms": 230,
+        "peak_rss_kib": 28960,
+        "files_indexed": 0,
+        "files_unchanged": 1000,
+        "files_failed": 0
+      },
+      "incremental": {
+        "elapsed_ms": 550,
+        "peak_rss_kib": 30864,
+        "files_indexed": 100,
+        "files_unchanged": 900,
+        "files_failed": 0
+      }
+    }
+  ]
+}

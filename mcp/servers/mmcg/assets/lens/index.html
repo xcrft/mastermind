@@ -66,7 +66,20 @@
         <div class="mode-switch" role="group" aria-label="Lens view">
           <button type="button" id="mode-review" data-mode="review" aria-pressed="true">Review change</button>
           <button type="button" id="mode-audit" data-mode="audit" aria-pressed="false">Audit codebase</button>
+          <button type="button" id="mode-profiles" data-mode="profiles" aria-pressed="false">Profiles</button>
         </div>
+        <section class="profiles-board" id="profiles-board" aria-labelledby="profiles-heading" hidden>
+          <header class="profiles-header">
+            <div>
+              <p class="section-index">Selected context</p>
+              <h2 id="profiles-heading">Person, project, and the work ahead</h2>
+              <p>See the evidence available to your agent for this selection.</p>
+            </div>
+            <button type="button" class="profiles-refresh" id="profiles-refresh">Refresh context</button>
+          </header>
+          <p class="profiles-status" id="profiles-status" role="status" aria-live="polite">Open Profiles to load a local context preview.</p>
+          <div id="profiles-content"></div>
+        </section>
         <section class="review-brief" aria-labelledby="instrument-heading">
         <div class="review-brief__conclusion">
           <p class="section-index">Current review</p>

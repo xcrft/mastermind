@@ -4,11 +4,11 @@
 
 | Check | Status | Scope |
 |---|---|---|
-| Python harness | 249/249 passed | Includes 9 control-loop tests and the hook intake harness, no model calls |
+| Python harness | 331/331 passed | 47 delivery/security, 35 documentation graph and 249 eval harness tests, no model calls |
 | Control-loop harness | 9/9 passed, included above | Finite-model recovery/mutations, exact test accounting, process failures and combined result gates |
 | Expanded CLI selection | 75/75 passed in 13 targets | Onboarding, worker, readiness, event influence, intake binding, semantic follow-up, context metadata and guarded executor |
 | Source-bound Lens suite | Passed | One aggregate DOM/static suite, no browser or model inference |
-| Current source-bound report | [Passed](baselines/control-loop-integration-20260927-04.json) | Clean starting revision, 175 unchanged source files |
+| Current source-bound report | [Passed](baselines/control-loop-integration-20260928-01.json) | Clean starting revision, 175 unchanged source files |
 | Public npm CLI | 54/54 passed | Includes onboarding through the actual native binary with disposable clients and homes |
 | Hook intake model trial | `not_run` | The runner exists, independent semantic label review and real processor results are still required |
 
@@ -20,17 +20,18 @@ separate run. The source-bound report does not hash or measure the npm updater.
 
 | Direction | Result | Evidence | Scope |
 |---|---|---|---|
-| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-integration-20260927-04.json), [contract](control-loop.md) | Six validated obligations at new publication |
+| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-integration-20260928-01.json), [contract](control-loop.md) | Six validated obligations at new publication |
 | Guard sensitivity | 6/6 removed guards produce counterexamples | Same report | Mutation check of the finite model |
 | Recovery | 64/64 open states reach completion within 7 successful actions | Same report | Starts a new preflight with stable inputs and successful producers |
 | CLI conformance | 75/75 named scenarios pass across 13 targets | Same report | Real CLI with fixture native clients, no model calls |
 | Lens boundary suite | 1 aggregate suite passed | Same report | DOM/static harness, no browser or model-use claim |
-| Evaluation duration | 289.2 s | Same report | Includes build and fixture overhead |
+| Evaluation duration | 244.6 s | Same report | Includes build and fixture overhead |
 | Indexing | Cold 1,320 ms, unchanged 233 ms, incremental 577 ms | [Raw runs](baselines/index-20260927.json), [method](../docs/benchmarks.md) | Medians of 3 runs, 1,000 Rust files, 100 changed |
 
-The integration report records clean starting revision `e8333f0` and the complete
+The integration report records clean starting revision `8b92423` and the complete
 measured source manifest. Source hashes remained stable during the run. Raw
-process logs remain local. The [previous 67-case report](baselines/control-loop-integration-20260927-03.json)
+process logs remain local. The [previous onboarding report](baselines/control-loop-integration-20260927-04.json)
+retains revision `e8333f0`, before the 3.0.0 version bump. The [67-case report](baselines/control-loop-integration-20260927-03.json)
 retains revision `e275c35`, before project onboarding. The [66-case report](baselines/control-loop-integration-20260927-02.json)
 retains revision `f1827eb`, before the worker-startup and SQLite inspection fixes. The earlier
 [24-case report](baselines/control-loop-hooks-20260927.json)

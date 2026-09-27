@@ -9,9 +9,9 @@ This evaluation checks publication of a new completed iteration.
 | CLI conformance | Run exact named regressions through the production CLI | 75/75 passed across 13 targets |
 | Lens UI | Check privacy, coverage and delivery metadata | 1 aggregate DOM/static suite passed |
 
-The [2026-09-27 integration report](baselines/control-loop-integration-20260927-04.json)
+The [2026-09-28 integration report](baselines/control-loop-integration-20260928-01.json)
 records a clean starting revision and 175 unchanged source files. The run took
-289.2 seconds, including local build and fixture overhead. The proof applies to
+244.6 seconds, including local build and fixture overhead. The proof applies to
 the finite model. It does not prove full Rust refinement or arbitrary goal achievement.
 
 ## Run

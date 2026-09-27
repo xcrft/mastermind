@@ -28,8 +28,9 @@ function updateFixture(t, mode) {
     fs.copyFileSync(path.join(SOURCE, "bin", file), path.join(packageRoot, "bin", file));
   }
   if (mode === "project") {
+    const version = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version;
     fs.writeFileSync(path.join(prefix, "package.json"), JSON.stringify({
-      private: true, devDependencies: { "@xcraftmind/mastermind": "^2.1.1" },
+      private: true, devDependencies: { "@xcraftmind/mastermind": `^${version}` },
     }));
   }
   let entry = path.join(packageRoot, "bin", "mastermind.js");

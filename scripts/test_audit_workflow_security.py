@@ -839,10 +839,24 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             "cargo build --release",
             "build-npm-packages.sh",
             "npm pack",
-            "npm install --no-save",
-            "node_modules/.bin/mastermind --version",
+            "scripts/smoke-packed-npm-release.sh",
         ):
             self.assertIn(token, recipe)
+        smoke = (ROOT / "scripts/smoke-packed-npm-release.sh").read_text(encoding="utf-8")
+        for token in (
+            "npm install --offline --ignore-scripts --no-audit --no-fund --no-save",
+            "node_modules/.bin/mastermind --version",
+            "node_modules/.bin/mastermind init --client none --json",
+        ):
+            self.assertIn(token, smoke)
+        for filename in ("ci-npm.yml", "publish-npm.yml"):
+            workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text(encoding="utf-8"))
+            scripts = "\n".join(
+                step.get("run", "")
+                for job in workflow["jobs"].values()
+                for step in job.get("steps", [])
+            )
+            self.assertIn("scripts/smoke-packed-npm-release.sh", scripts)
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
         self.assertIn("just npm-smoke-native", contributing)
 

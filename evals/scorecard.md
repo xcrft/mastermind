@@ -1,6 +1,20 @@
 # Evaluation scorecard
 
-## Recorded measurements
+## Current integration status
+
+| Check | Status | Scope |
+|---|---|---|
+| Python harness | 249/249 passed | Includes 9 control-loop tests and the hook intake harness, no model calls |
+| Control-loop harness | 9/9 passed, included above | Finite-model recovery/mutations, exact test accounting, process failures and combined result gates |
+| Expanded CLI selection | `not_run`, 66 scenarios in 12 targets | Worker, readiness, event influence, intake binding, semantic follow-up, context metadata and guarded executor |
+| Source-bound Lens suite | `not_run` | One aggregate DOM/static suite, no browser or model inference |
+| Current source-bound report | `not_run` | Generate after sources stop changing. No new baseline is published |
+| Hook intake model trial | `not_run` | The runner exists, independent semantic label review and real processor results are still required |
+
+Passing harness tests checks result accounting. It does not turn the unrun
+production selection into conformance evidence.
+
+## Retained measurements
 
 | Direction | Result | Evidence | Scope |
 |---|---|---|---|
@@ -18,7 +32,8 @@ The indexing report records revision `101bed7`. These records retain their
 original identities when branch history is squashed. Elapsed time includes
 local build and fixture overhead and is not a performance comparison.
 
-Generate a fresh control report after implementation or harness changes:
+These measurements predate the current extended selection. Generate a fresh
+control report after implementation and harness changes are frozen:
 
 ```sh
 python3 -m evals.control_loop --output .mastermind/research/control-loop/run-01

@@ -2,19 +2,20 @@
 
 This evaluation checks publication of a new completed iteration.
 
-| Layer | Check | Recorded result |
+| Layer | Check | Retained result |
 |---|---|---|
 | Finite model | Every reachable publication requires all six obligations | 65 states, 586 transitions, 0 violations |
 | Mutation detection | Remove each guard and require a reachable counterexample | 6/6 detected |
 | CLI conformance | Run exact named regressions through the production CLI | 24/24 passed across 8 targets |
 
-Results: [2026-09-27 report with hook intake](baselines/control-loop-hooks-20260927.json).
-The proof applies to the finite model. Full Rust refinement and arbitrary goal
-achievement remain outside the claim.
+The [2026-09-27 report](baselines/control-loop-hooks-20260927.json) describes its
+recorded source revision. The expanded CLI selection and UI suite below are
+`not_run` until a new source-bound report is generated. The proof applies to the
+finite model. It does not prove full Rust refinement or arbitrary goal achievement.
 
 ## Run
 
-From the repository root, with Python 3.10+, Rust and Git on a POSIX host:
+From a stable source tree, with Python 3.10+, Rust, Git and Node on a POSIX host:
 
 ```sh
 python3 -m evals.control_loop --output .mastermind/research/control-loop/run-01
@@ -25,8 +26,9 @@ python3 -m evals.control_loop --output .mastermind/research/control-loop/run-01
 | Output directory | Must be new |
 | Native clients | Fixtures in disposable repositories, no model calls |
 | Selected tests | Every exact test must run and pass, missing/ignored/renamed/failed tests fail the eval |
+| Lens UI | One aggregate DOM/static suite via `node --test --test-reporter=tap`, not a browser run |
 | Source binding | Hashes before and after execution must match |
-| Output | `report.json` plus raw Cargo stdout/stderr per target |
+| Output | `report.json`, raw Cargo stdout/stderr per target and `lens.stdout`/`lens.stderr` |
 | Report provenance | Starting revision, dirty-tree flag, source manifest, platform and wall time |
 | Trust boundary | Owner-writable local records, no runner signature or model-quality assessment |
 
@@ -37,10 +39,10 @@ python3 -m evals.control_loop --model-only --output /tmp/mastermind-model-01
 python3 -m unittest evals.test_control_loop
 ```
 
-The first command can succeed while the overall report remains `incomplete` and
-CLI conformance remains `not_run`. CI runs the model tests in the Python harness
-and the integration cases in the Rust suite. The combined report command is
-available as `just eval-control <new-output-directory>`.
+The first command leaves CLI and UI conformance `not_run` and the overall report
+`incomplete`. The second checks the model and harness accounting without running
+Cargo, Node or a model. The combined source-bound report is also available as
+`just eval-control <new-output-directory>`.
 
 ## State and assumptions
 
@@ -114,16 +116,25 @@ The source-bound CLI selection in `control_loop.py` covers:
 | Required proof | Missing or failed checks, foreign-repository receipt, late executable change |
 | Acceptance | Positive completion, unknown/negative judgments, review compare-and-swap |
 | Project history | Required updates block completion, changed lessons remain reviewable |
-| Recovery | Bound follow-up instructions, repeated review without another execution |
-| Admission and budget | Native denial, controller lock, stale input, finite repair attempts |
-| Context | Stale documents withheld, audience and source scope enforced |
-| Person profile | Collection creates no active habit, acceptance stays bound to reviewed sources |
-| Hook intake | Invalid results, timeouts, replay, revocation, concurrent prompts and unfinished deliveries cannot publish a workflow handoff |
+| Recovery | Bound follow-up instructions, review without execution, one opted-in semantic retry with fresh evidence |
+| Admission and budget | Native denial, controller lock, stale input, shared finite retry budget |
+| Guarded executor | Supported fixture calls, denied paths/actions, missing or conflicting mediation, receipt replay and declared check commands |
+| Context | Current document evidence, exact bytes offered to the process, audience scope and private review metadata |
+| Person profile | Collection creates no active habit, authorship review and current sources remain required |
+| Observation influence | Original observations remain available, later profile/refiner exposure limits habit promotion |
+| Hook intake | Invalid results, replay, revocation, unfinished deliveries, session binding and compare-and-swap recovery |
+| Managed worker | Single owner, persistent budgets/checkpoints, client isolation, restart, stop, timeout and source drift |
+| Readiness | Registration, capture, observed sessions, refiner configuration and worker state remain separate |
+| Lens UI | Private metadata clears on leave/error, stays out of standalone export and distinguishes offered context from unknown model use |
 
-These tests exercise production CLI paths. They are sampled conformance
-evidence: passing them does not prove that the abstraction covers all code,
-interleavings, inputs or supported environments. Persona, context and hook tests are
-adjacent boundary checks, not part of the six-bit completion theorem.
+CLI selectors exercise production paths with synthetic native clients and
+processors. Lens uses a mocked DOM. The harness counts that file as one aggregate
+suite, not one independent test for each helper function. These are sampled
+conformance checks, not exhaustive coverage of code, interleavings or environments.
+
+Persona, context, intake, worker, readiness, guarded execution and UI checks are adjacent boundaries.
+They do not add obligations to the six-bit theorem or establish model benefit,
+native before-effect enforcement or verified native loading.
 
 ## Reading results
 
@@ -131,6 +142,8 @@ adjacent boundary checks, not part of the six-bit completion theorem.
 |---|---|
 | `bounded_model_safety` | Reachable states, publications, violations and detected guard mutants |
 | `sampled_cli_conformance` | Exact selected production tests passed, failed or did not run |
+| `sampled_ui_conformance` | Aggregate Lens suite passed, failed or did not run |
+| `cli_cases`, `ui_suites` | Named selections, raw process outcome, elapsed time and accounting |
 | `source_unchanged` | Recorded source inventory and hashes stayed the same during the run |
 | `elapsed_seconds` | Evaluation duration on this machine, including build and fixture overhead |
 | `semantic_goal_success` | Unmeasured by this evaluation |
@@ -140,6 +153,10 @@ Real-task false completion, user corrections, unsupported conclusions, tokens
 and time require a fixed, independently reviewed task corpus. See
 [measurement definitions](README.md#measurement-contract) and the
 [current scorecard](scorecard.md).
+
+Overall `passed` requires model, CLI and UI success with unchanged sources. A
+nonzero exit, output/timeout stop or missing runtime cannot become a passing
+result because a child printed a successful test summary.
 
 ## Refiner protocol and model evaluation
 

@@ -1,81 +1,63 @@
-# Codex CLI integration
+# Codex integration
 
-Give Codex the bounded local graph plus Mastermind's portable delivery skills.
-Mastermind registers through `codex mcp` at user scope; Codex does not currently
-have a project-scope setup path.
+Install portable skills and connect the local graph through user-scope MCP.
 
-## Install the Codex workflow
+## Install
 
 ```bash
 npm install -g @xcraftmind/mastermind
 mastermind install --client codex
 cd your-project
 mastermind index .
-```
-
-The install command defaults to the `core` portable skill profile under
-`~/.codex/skills` and registers the MCP server. Pass `--profile full` for every
-shipped portable skill. It does not require `mastermind init` or a repository.
-To preview MCP registration without installing skills, use `mastermind setup
-codex --scope user`.
-
-Codex receives the portable planning, execution, project-map, impact, test,
-setup, review, and audit skills. It does not receive Claude Code's native
-spawnable subagent files because Codex has a different agent runtime. This is
-workflow-contract compatibility, not a claim that both clients expose identical
-role orchestration.
-
-Once installed, the normal task handoff stays client-neutral:
-
-```bash
-mastermind verify-spec .mastermind/tasks/001-example/spec.md
-# approve Scope and Acceptance Criteria
-mastermind run-task .mastermind/tasks/001-example/spec.md --pre-only
-# ask Codex to implement the spec and write executor-report.md
-mastermind run-task .mastermind/tasks/001-example/spec.md --post-only
-```
-
-Avoid `run-task --exec` in Codex workflows; that compatibility flag invokes the
-Claude CLI specifically.
-
-Apply the native registration explicitly:
-
-```bash
-mastermind setup codex --scope user --write
-```
-
-`mastermind setup codex --scope project` is rejected before configuration reads
-or subprocesses. Mastermind resolves Codex only from absolute `PATH` entries
-outside the current repository and invokes it without a shell. Inspection uses
-the successful `codex mcp list --json` response: exactly one `mmcg` entry must
-contain the exact stdio command, ordered arguments, and `enabled: true`.
-Truncated or malformed output is rejected, and executable identity is rechecked
-before every inspection or mutation within the ten-second bound.
-
-## Change or undo safely
-
-A matching enabled native entry is an idempotent no-op. A disabled or customized
-entry requires `--force`; `--force` never implies `--write`. After a successful
-native add or remove, Mastermind reads the list again and returns `Wrote` only
-when the requested configuration state is observed. This verifies registration,
-not an MCP server handshake.
-
-```bash
-mastermind setup codex --scope user --remove          # dry-run
-mastermind setup codex --scope user --remove --write
-```
-
-## Verify the result
-
-```bash
-mastermind doctor
 mastermind doctor --workflow --client codex
 ```
 
-Doctor recognizes only the `[mcp_servers.mmcg]` table with a string `command`
-and ordered string `args` in `~/.codex/config.toml`. An omitted `enabled` uses
-Codex's active default; `enabled = false` is reported as disabled rather than
-healthy. It parses normal TOML quoting, comments, and multiline arrays, while
-rejecting malformed types, duplicate keys, and symlinked config ancestry. Doctor
-does not execute Codex or a configured command. The old YAML configuration shape
-is unsupported.
+| Setting | Behavior |
+|---|---|
+| Fresh install | `core` skills |
+| `--profile frontend`, `security`, `full` | Expanded selection |
+| Update without `--profile` | Keep the selected profile |
+| Agent runtime | Codex uses portable skills, not Claude-native subagent files |
+
+## Register MCP only
+
+```bash
+mastermind setup codex --scope user
+mastermind setup codex --scope user --write
+```
+
+Setup previews first, uses `codex mcp` to apply, then checks the enabled `mmcg`
+entry. Project-scope setup is unsupported. Restart Codex afterward.
+
+## Use the task workflow
+
+| Step | Owner |
+|---|---|
+| Approve spec and run preflight | Planner and controller |
+| Implement and write executor report | Codex |
+| Run declared checks and postflight | Runner and controller |
+| Assess evidence and resolve history | Reviewer |
+| Complete | Controller |
+
+See [Workflow](../workflow.md) for commands.
+`run-task --exec` and `review-task run` launch Claude Code, even when the
+implementation was done in Codex.
+
+## Verify or remove
+
+```bash
+mastermind doctor
+mastermind setup codex --scope user --remove
+mastermind setup codex --scope user --remove --write
+```
+
+| Condition | Behavior |
+|---|---|
+| Matching enabled entry | No change |
+| Customized or disabled entry | Requires `--force` and `--write` |
+| Native registration changed | Setup checks the resulting entry |
+| Doctor | Reads `[mcp_servers.mmcg]` in `~/.codex/config.toml` |
+
+Registration checks and server handshake are distinct.
+[Persona hooks](../guides/persona-hooks.md) requires separate capture and
+global-profile read grants.

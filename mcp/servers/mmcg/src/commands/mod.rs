@@ -4,6 +4,7 @@
 //! dispatcher. `UninstallScope` lives in `main.rs` because it is a
 //! `ValueEnum` embedded in the clap CLI spec.
 
+pub mod acceptance;
 pub mod audit;
 pub mod ci;
 pub mod demo;
@@ -13,8 +14,10 @@ pub mod pr_comment;
 pub mod query;
 pub mod run_task;
 pub mod spec_gate;
+pub mod task_review;
 pub mod tour;
 pub mod uninstall;
+mod verification;
 
 pub use ci::run as ci;
 pub use demo::run as demo;
@@ -26,3 +29,4 @@ pub use run_task::dispatch as run_task;
 pub use spec_gate::{audit as audit_spec, verify as verify_spec};
 pub use tour::run as tour;
 pub use uninstall::do_uninstall;
+pub use verification::dispatch as verification_run;

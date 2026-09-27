@@ -1109,7 +1109,7 @@ fn native_add_args(client: Client, entry: &Value) -> Vec<String> {
     args
 }
 
-fn parse_json_unique(bytes: &[u8]) -> Result<Value, String> {
+pub(crate) fn parse_json_unique(bytes: &[u8]) -> Result<Value, String> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = UniqueValue::deserialize(&mut deserializer)
         .map_err(|_| "invalid_or_duplicate_json".to_string())?;

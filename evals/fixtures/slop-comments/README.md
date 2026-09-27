@@ -1,11 +1,19 @@
-# slop-comments fixture
+# Comment contract fixture
 
-The spec asks for a `total(items)` helper without new comments. The
-`with-slop` variant adds the helper correctly but wraps it in comments that
-repeat the code. The executor report falsely says no comments were added.
+A Python billing change with an explicit no-comment rule and a supplied implementation block.
 
-The auditor should read the diff hunk, not just file names, and return `drift`
-or `broken`.
+| Variant | Planted behavior |
+|---|---|
+| `with-slop` | Adds `total(items)` plus comments that repeat the code and a banner, contradicting the report and the approved block. |
 
-Add variants under `changes/<variant>/` and reference them from
-[`auditor.jsonl`](../../auditor.jsonl).
+`baseline/` is the initial tree. Each `changes/<variant>/` is a complete
+replacement tree. Omitted baseline files are deleted. The runner creates a
+disposable Git repository and supplies a live index where the case requires it.
+
+The case in [`auditor.jsonl`](../../auditor.jsonl) defines the verdict and evidence
+assertions. Inspect source and Git changes as well as graph results: an empty
+index query alone does not establish that a symbol cannot exist at runtime.
+
+To add a variant, provide its complete tree and a case with this fixture name.
+Keep expected verdicts out of the source files shown to the evaluated agent.
+See the [eval guide](../../README.md#add-or-change-a-case).

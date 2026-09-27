@@ -1,8 +1,7 @@
 # Agents
 
-These are the Claude Code roles that turn a broad task into bounded research,
-execution, and review. Portable behavior lives under [`skills/`](../skills/);
-copying an agent file into another client does not reproduce Claude Code's
+Claude Code roles for research, implementation and review. Portable task
+behavior lives in [skills](../skills/). These files also depend on Claude Code's
 delegation runtime.
 
 | Directory | Contents |
@@ -14,24 +13,25 @@ delegation runtime.
 
 | Subagent | Description |
 |---|---|
-| [`mastermind-prompt-refiner`](subagents/mastermind-prompt-refiner.md) | Normalizes explicit prompt rewrites or cold-agent handoffs while preserving the original request. |
-| [`mastermind-critic`](subagents/mastermind-critic.md) | Pre-spec design challenger. Stress-tests a proposed approach, returns 3 weaknesses + verdict. |
-| [`mastermind-investigator`](subagents/mastermind-investigator.md) | Debugging investigator that tracks competing hypotheses and evidence before confirming a cause. |
-| [`mastermind-researcher`](subagents/mastermind-researcher.md) | Read-only fact gathering with file and line citations; does not make design decisions. |
-| [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Executes an approved task by acceptance criteria, uses bounded in-scope repair, and writes the canonical report. |
-| [`mastermind-auditor`](subagents/mastermind-auditor.md) | Post-flight auditor. Verifies executor report claims against `git diff` and mmcg. |
-| [`mastermind-comment-auditor`](subagents/mastermind-comment-auditor.md) | Post-implementation comment reviewer. Flags added narration with quoted evidence and reports deleted rationale. |
-| [`mastermind-frontend-auditor`](subagents/mastermind-frontend-auditor.md) | Post-implementation UI reviewer. Uses the codegraph for unrendered components, props-contract breaks, duplicates, and raw values. |
-| [`mastermind-test-auditor`](subagents/mastermind-test-auditor.md) | Post-implementation test reviewer. Uses `mmcg_test_impact` classifications to separate real coverage from a filename match. |
-| [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Independent security reviewer. Spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection); optional OWASP ASI mode. |
+| [`mastermind-prompt-refiner`](subagents/mastermind-prompt-refiner.md) | Rewrites prompts or prepares handoffs while retaining the original request. |
+| [`mastermind-critic`](subagents/mastermind-critic.md) | Challenges a proposed design before the spec is written. |
+| [`mastermind-investigator`](subagents/mastermind-investigator.md) | Investigates competing causes and records supporting or conflicting evidence. |
+| [`mastermind-researcher`](subagents/mastermind-researcher.md) | Collects source facts and citations without changing files. |
+| [`mastermind-task-executor`](subagents/mastermind-task-executor.md) | Implements an approved task and writes its executor report. |
+| [`mastermind-auditor`](subagents/mastermind-auditor.md) | Checks executor claims against the diff and codegraph. |
+| [`mastermind-comment-auditor`](subagents/mastermind-comment-auditor.md) | Reviews added comments and removed rationale. |
+| [`mastermind-frontend-auditor`](subagents/mastermind-frontend-auditor.md) | Reviews component usage, props contracts, duplication and raw values. |
+| [`mastermind-test-auditor`](subagents/mastermind-test-auditor.md) | Reviews test relevance, assertions and uncovered behavior. |
+| [`mastermind-feedback-collector`](subagents/mastermind-feedback-collector.md) | Collects stated preferences as quoted candidates for profile review. |
+| [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Reviews security-sensitive boundaries with optional OWASP ASI mapping. |
 
-## Give a project durable context
+## Project templates
 
 | Template | Description |
 |---|---|
 | [`mastermind-workflow`](claude-md/mastermind-workflow.md) | `CLAUDE.md` contract for Direct, Verified, and Strict task delivery. |
 | [`mastermind-context`](claude-md/mastermind-context.md) | `CONTEXT.md` template for durable decisions, constraints, glossary terms, and protected areas. |
 
-The npm package stages these files into its installable workflow bundle.
-`scripts/validate.py` checks the canonical template mirrors embedded in the Rust
-crate.
+The npm workflow bundle includes these files. `just validate` checks the
+template mirrors embedded in the Rust crate. See [installation](../docs/getting-started.md)
+and [workflow](../docs/workflow.md) for use.

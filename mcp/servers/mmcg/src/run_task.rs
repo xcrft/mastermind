@@ -6,7 +6,7 @@
 //!    FIND-block staleness, VERIFY-command resolvability.
 //! 2. **Risk report** — blast-radius totals, dependency-cycle membership of
 //!    mentioned files, top centrality of snapshot symbols.
-//! 3. Executor — hand-off message by default; `--exec` shells out to `claude -p`.
+//! 3. Executor — hand-off by default; `--exec` records a bounded native invocation.
 //! 4. `audit_spec` — post-flight drift: scope creep, snapshot drift, silent
 //!    removals, missing planned tests.
 //! 5. **Release notes draft** — H1 + Goals + Tests Plan + `git diff --stat` of
@@ -28,7 +28,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const STRICT_EVIDENCE_FILE_LIMIT: usize = 1_000;
 const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
@@ -97,6 +96,17 @@ pub struct RunState {
     /// Keep explicitly requested strict pre-flight checks on later retries.
     #[serde(default)]
     pub strict: bool,
+    /// This iteration must retain a successful invocation bound to its context
+    /// and permission policy. Legacy/manual handoffs have no delivery claim.
+    #[serde(default)]
+    pub invocation_required: bool,
+    /// Structured acceptance also requires an explicit, revision-bound review.
+    /// Unfinished legacy tasks derive this requirement from their spec.
+    #[serde(default)]
+    pub semantic_review_required: bool,
+    /// Exact active local review bytes, never an independently signed verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_review_sha256: Option<String>,
 }
 
 fn default_run_status() -> String {
@@ -123,6 +133,14 @@ pub(crate) fn validate_run_status(status: &str) -> Result<(), String> {
 
 pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
     validate_run_status(&state.status)?;
+    if let Some(revision) = state.semantic_review_sha256.as_deref() {
+        if !state.semantic_review_required
+            || revision.len() != 64
+            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("controller semantic review pin is invalid".into());
+        }
+    }
     if let Some(risk) = state.risk.as_deref() {
         if !matches!(risk, "low" | "medium" | "high") {
             return Err(format!("unsupported controller risk {risk:?}"));
@@ -243,7 +261,7 @@ pub struct ReleaseNotes {
 
 /// Flags from `main.rs`. Single struct so the dispatcher signature stays stable
 /// as options are added (next likely: `--json`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunOpts {
     /// Restart pre-flight, preserving the task's baseline and iteration budget.
     pub reset: bool,
@@ -251,8 +269,14 @@ pub struct RunOpts {
     pub pre_only: bool,
     /// Force post-flight; error if no state file exists.
     pub post_only: bool,
-    /// Shell out to `claude -p` between phases. Default false — hand-off only.
+    /// Launch a bounded, recorded native executor between phases.
     pub exec: bool,
+    /// Retry only fresh observed failures after a complete mechanical audit.
+    pub auto_repair: bool,
+    pub invocation: crate::invocation::InvocationOptions,
+    /// Review once after a held audit; without exec, use the existing pending task.
+    pub auto_review: bool,
+    pub review_invocation: crate::review_invocation::Options,
     /// Skip the "index must exist and be non-empty" pre-check, for docs/spec-only
     /// specs that don't touch indexed source. Default false: a missing-or-empty
     /// index hard-fails pre-flight, since mmcg's core claim is "grounded in the
@@ -281,6 +305,10 @@ impl Default for RunOpts {
             pre_only: false,
             post_only: false,
             exec: false,
+            auto_repair: false,
+            invocation: crate::invocation::InvocationOptions::default(),
+            auto_review: false,
+            review_invocation: crate::review_invocation::Options::default(),
             allow_no_index: false,
             strict: false,
             max_iterations: 3,
@@ -464,6 +492,7 @@ fn ensure_history_review(
     spec_path: &Path,
     release_path: &Path,
     snapshot: &str,
+    structured: bool,
 ) -> std::io::Result<bool> {
     let path = history_review_file_path(repo_root, spec_path);
     let root = RootCapability::open(repo_root).map_err(std::io::Error::other)?;
@@ -570,8 +599,20 @@ fn ensure_history_review(
     let spec = markdown_path(&spec_identity);
     let audit = markdown_path(&audit_identity);
     let release = markdown_path(&release_identity);
-    let body = format!(
-        "# History review — {}\n\n\
+    let body = if structured {
+        format!(
+            "# History review — {title}\n\n\
+Context and Lesson decisions are recorded in the typed `history` assessments\n\
+of `semantic-review.json`, bound to the reviewed CONTEXT.md and\n\
+.mastermind/tasks/_lessons.md source revisions. This note does not approve\n\
+completion. Prepare or run `mastermind review-task`, then resume `run-task`.\n\
+Use `no_change` only when no further durable update is needed.\n\n\
+- **Audit snapshot:** {snapshot}\n\
+- **Evidence:** {spec}; {audit}; {release}\n"
+        )
+    } else {
+        format!(
+            "# History review — {}\n\n\
 Complete this after semantic review. Replace each `pending` with `updated` or\n\
 `not applicable`; do not create ceremonial CONTEXT or lesson entries.\n\n\
 - **Audit snapshot:** {snapshot}\n\
@@ -579,8 +620,9 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
 - **Lesson:** pending\n\
 - **Reason:** semantic review required\n\
 - **Evidence:** {spec}; {audit}; {release}\n",
-        title,
-    );
+            title,
+        )
+    };
     bounded_fs::write_atomic_regular_file(repo_root, &path, body.as_bytes(), false)
         .map_err(std::io::Error::other)?;
     Ok(true)
@@ -588,8 +630,7 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
 
 /// Return true only after both durable-knowledge dispositions were reviewed
 /// and the generated placeholder reason was replaced. The Markdown file remains
-/// authoritative; lifecycle commands derive completion from it instead of
-/// treating post-flight success as semantic review.
+/// authoritative for legacy tasks. Structured tasks consume typed decisions.
 pub fn history_review_complete(review_path: &Path) -> bool {
     history_review_complete_for_snapshot(review_path, None)
 }
@@ -611,6 +652,26 @@ fn bound_history_review_complete(review_path: &Path, snapshot: Option<&str>) -> 
         return false;
     };
     history_review_complete_for_snapshot(review_path, Some(snapshot))
+}
+
+/// One gate shared by completion, status and doctor. Only an explicitly legacy
+/// task can fall back to Markdown; missing or invalid typed decisions block it.
+pub(crate) fn history_review_resolved(
+    root: &Path,
+    spec: &Path,
+    state: &RunState,
+) -> Result<(), String> {
+    match crate::task_review::history_resolution(root, spec, state)? {
+        Some(()) => Ok(()),
+        None if bound_history_review_complete(
+            &history_review_file_path(root, spec),
+            state.history_snapshot_sha256.as_deref(),
+        ) =>
+        {
+            Ok(())
+        }
+        None => Err("history_review_markdown_unresolved".into()),
+    }
 }
 
 pub(crate) fn history_review_body_complete(body: &str, snapshot: Option<&str>) -> bool {
@@ -781,6 +842,17 @@ fn history_input_snapshot(
     for file in paths {
         let _ = hash_history_file(&root, &file, false, &mut digest, &mut bytes_left)?;
     }
+    // Observed verification records live under controller artifacts, but are
+    // inputs to the reviewed result. A pending/changed rerun invalidates review.
+    for path in crate::verification_receipts::history_paths(&parsed, repo_root, spec_path)? {
+        let relative = repository_relative_identity(&root, &path)?;
+        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut bytes_left)?;
+    }
+    if state.invocation_required {
+        let path = crate::invocation::receipt_path(repo_root, spec_path);
+        let relative = repository_relative_identity(&root, &path)?;
+        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut bytes_left)?;
+    }
     Ok(HistoryInputs {
         snapshot: crate::hex::encode(&digest.finalize()),
         spec_body,
@@ -845,7 +917,7 @@ fn history_audit_snapshot(
     Ok(crate::hex::encode(&digest.finalize()))
 }
 
-fn current_history_snapshot(
+pub(crate) fn current_history_snapshot(
     repo_root: &Path,
     spec_path: &Path,
     state: &RunState,
@@ -1137,6 +1209,7 @@ fn preflight_required_state(state: &RunState, reason: &str) -> RunState {
     blocked.last_artifact = Some("spec.md".into());
     blocked.held_snapshot_sha256 = None;
     blocked.history_snapshot_sha256 = None;
+    blocked.semantic_review_sha256 = None;
     blocked
 }
 
@@ -1744,8 +1817,27 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
 /// above are independently testable.
 pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts) -> Outcome {
     let state_path = state_file_path(repo_root, spec_path);
-    if opts.post_only && (opts.pre_only || opts.reset) {
-        eprintln!("error: --post-only cannot be combined with --pre-only or --reset");
+    if opts.auto_review
+        && (opts.pre_only
+            || opts.post_only
+            || (!opts.exec && (opts.reset || opts.force_iteration))
+            || opts.review_invocation.validate().is_err())
+    {
+        eprintln!("error: --auto-review requires valid review limits and no pre-only or post-only; reset and force-iteration require --exec");
+        return Outcome::PreFailed;
+    }
+    if opts.auto_repair
+        && (!opts.exec
+            || opts.pre_only
+            || opts.post_only
+            || opts.force_iteration
+            || !(1..=crate::auto_repair::MAX_ITERATIONS).contains(&opts.max_iterations))
+    {
+        eprintln!("error: --auto-repair requires --exec, max-iterations 1..=20, and no pre-only, post-only, or force-iteration");
+        return Outcome::PreFailed;
+    }
+    if opts.post_only && (opts.pre_only || opts.reset || opts.exec) {
+        eprintln!("error: --post-only cannot be combined with --pre-only, --reset, or --exec");
         return Outcome::PreFailed;
     }
     let identity = match controller_identity(repo_root, spec_path) {
@@ -1755,7 +1847,17 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             return Outcome::PreFailed;
         }
     };
-    let existing = match load_state(&state_path) {
+    // Keep preflight and the complete native run in one controller critical
+    // section. An older executor must never overwrite a newer iteration.
+    // Verification commands only read controller state and use their own lock.
+    let _controller_lock = match controller_lock(repo_root, &state_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: task controller is busy or unavailable: {error}");
+            return Outcome::PreFailed;
+        }
+    };
+    let mut existing = match load_state(&state_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -1771,22 +1873,54 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             spec_path,
             &identity,
             state,
-            opts.pre_only || opts.reset,
+            opts.pre_only || opts.reset || opts.exec,
         ) {
             eprintln!("error: {error}");
             return Outcome::PreFailed;
         }
     }
 
+    // Review resume consumes the current approved iteration. It must not fall
+    // through to preflight or treat a historical completion as a new review.
+    if opts.auto_review && !opts.exec {
+        if !existing.as_ref().is_some_and(|state| {
+            state.status == "history_review_required"
+                && state.next_step.as_deref() != Some("run_preflight")
+        }) {
+            eprintln!("error: --auto-review without --exec requires an existing pending held task. Complete preflight and postflight first; use plain run-task to inspect or resume other states.");
+            return Outcome::PreFailed;
+        }
+        return review_and_complete_task(
+            spec_path,
+            repo_root,
+            index_path,
+            &state_path,
+            &opts.review_invocation,
+        );
+    }
+
     // Explicit retries keep the first baseline and the durable iteration count.
     // Deleting state before validation would lose both on a failed --reset.
-    if opts.pre_only || opts.reset || existing.is_none() {
+    // Every explicit native invocation receives a new approved iteration. A
+    // previous success cannot survive an early failure before pending is saved.
+    if opts.pre_only || opts.reset || opts.exec || existing.is_none() {
         if opts.post_only {
             eprintln!(
                 "error: --post-only requested but no state file at `{}`. Run pre-flight first.",
                 state_path.display()
             );
             return Outcome::PreFailed;
+        }
+        if opts.exec && !opts.pre_only {
+            return run_native_loop(
+                spec_path,
+                repo_root,
+                index_path,
+                &state_path,
+                opts,
+                &identity,
+                existing.as_ref(),
+            );
         }
         return run_pre(
             spec_path,
@@ -1799,6 +1933,25 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         );
     }
 
+    // Migrate unfinished structured tasks at every resume, including --post-only.
+    // Only an already completed legacy iteration keeps its historical contract.
+    let state = existing.as_mut().unwrap();
+    if state.status != "learned" && !state.semantic_review_required {
+        match crate::task_review::required(repo_root, spec_path, state) {
+            Ok(true) => {
+                state.semantic_review_required = true;
+                if let Err(error) = save_state_in_repository(repo_root, &state_path, state) {
+                    eprintln!("error: persisting semantic review requirement: {error}");
+                    return Outcome::PreFailed;
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("error: resolving semantic review requirement: {error}");
+                return Outcome::PreFailed;
+            }
+        }
+    }
     let state = existing.as_ref().unwrap();
     if state.next_step.as_deref() == Some("run_preflight") {
         eprintln!(
@@ -1811,112 +1964,595 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         return run_post(spec_path, repo_root, index_path, state, &state_path);
     }
 
-    if !opts.post_only {
-        if let Some(state) = existing.as_ref() {
-            let review_path = history_review_file_path(repo_root, spec_path);
-            let review_complete = bound_history_review_complete(
-                &review_path,
-                state.history_snapshot_sha256.as_deref(),
-            );
-            if state.status == "learned" && review_complete {
-                println!(
-                    "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
-                    state_path.display()
-                );
-                return Outcome::PostHeld;
+    let review_path = history_review_file_path(repo_root, spec_path);
+    let semantic_review = crate::task_review::completion_approved(repo_root, spec_path, state);
+    let history_review = history_review_resolved(repo_root, spec_path, state);
+    let review_complete = semantic_review.is_ok() && history_review.is_ok();
+    if state.status == "learned" && review_complete {
+        println!(
+            "Task already complete — state is `{}`. Use --reset to start a new iteration or --post-only to re-audit.",
+            state_path.display()
+        );
+        return Outcome::PostHeld;
+    }
+    if matches!(state.status.as_str(), "learned" | "history_review_required") {
+        let snapshot = current_history_snapshot(repo_root, spec_path, state);
+        if state.history_snapshot_sha256.is_none()
+            || snapshot.as_ref().ok() != state.history_snapshot_sha256.as_ref()
+        {
+            let reason = snapshot
+                .err()
+                .unwrap_or_else(|| "audited inputs changed or have no review binding".into());
+            let mut stale = state.clone();
+            stale.status = "audit_required".into();
+            stale.next_step = Some("run_audit".into());
+            stale.blocking_reason = Some(reason.clone());
+            stale.held_snapshot_sha256 = None;
+            stale.history_snapshot_sha256 = None;
+            if let Err(error) = save_state_in_repository(repo_root, &state_path, &stale) {
+                eprintln!("error: persisting required re-audit: {error}");
             }
-            if matches!(state.status.as_str(), "learned" | "history_review_required") {
-                let snapshot = current_history_snapshot(repo_root, spec_path, state);
-                if state.history_snapshot_sha256.is_none()
-                    || snapshot.as_ref().ok() != state.history_snapshot_sha256.as_ref()
-                {
-                    let reason = snapshot.err().unwrap_or_else(|| {
-                        "audited inputs changed or have no review binding".into()
-                    });
-                    let mut stale = state.clone();
-                    stale.status = "audit_required".into();
-                    stale.next_step = Some("run_audit".into());
-                    stale.blocking_reason = Some(reason.clone());
-                    stale.held_snapshot_sha256 = None;
-                    stale.history_snapshot_sha256 = None;
-                    if let Err(error) = save_state_in_repository(repo_root, &state_path, &stale) {
-                        eprintln!("error: persisting required re-audit: {error}");
-                    }
-                    eprintln!("error: history review cannot close this task: {reason}. Re-run run-task to audit the current work.");
+            eprintln!("error: history review cannot close this task: {reason}. Re-run run-task to audit the current work.");
+            return Outcome::PostBroken;
+        }
+        if review_complete {
+            return complete_reviewed_task(spec_path, repo_root, index_path, state, &state_path);
+        } else {
+            if state.status == "learned" {
+                let mut pending = state.clone();
+                pending.status = "history_review_required".into();
+                pending.next_step = Some("review_history".into());
+                if let Err(error) = save_state_in_repository(repo_root, &state_path, &pending) {
+                    eprintln!("error: persisting required semantic review: {error}");
                     return Outcome::PostBroken;
                 }
-                if review_complete {
-                    let mut store = match open_validated_task_index(
-                        index_path,
-                        repo_root,
-                        state.allow_no_index,
-                    ) {
-                        Ok(store) => store,
-                        Err(error) => {
-                            eprintln!(
-                                "error: validating index for semantic history refresh: {error}"
-                            );
-                            return Outcome::PostBroken;
-                        }
-                    };
-                    if let Some(store) = store.as_mut() {
-                        if let Err(error) = refresh_durable_history(store, repo_root) {
-                            eprintln!(
-                                "error: refreshing durable history before semantic completion: {error}"
-                            );
-                            return Outcome::PostBroken;
-                        }
-                    }
-                    if current_history_snapshot(repo_root, spec_path, state)
-                        .ok()
-                        .as_ref()
-                        != state.history_snapshot_sha256.as_ref()
-                        || !bound_history_review_complete(
-                            &review_path,
-                            state.history_snapshot_sha256.as_deref(),
-                        )
-                    {
-                        eprintln!("error: audited inputs or semantic review changed during history refresh; re-run run-task");
-                        return Outcome::PostBroken;
-                    }
-                    let mut completed = state.clone();
-                    completed.status = "learned".into();
-                    completed.next_step = Some("close".into());
-                    completed.last_artifact = Some("history-review.md".into());
-                    if let Err(error) = save_state_in_repository(repo_root, &state_path, &completed)
-                    {
-                        eprintln!(
-                            "error: persisting reviewed state `{}`: {error}",
-                            state_path.display()
-                        );
-                        return Outcome::PostBroken;
-                    }
-                    println!("Task complete — semantic history review is resolved.");
-                } else {
-                    if state.status == "learned" {
-                        let mut pending = state.clone();
-                        pending.status = "history_review_required".into();
-                        pending.next_step = Some("review_history".into());
-                        if let Err(error) =
-                            save_state_in_repository(repo_root, &state_path, &pending)
+            }
+            if crate::task_review::required(repo_root, spec_path, state).unwrap_or(true) {
+                if let Err(reason) = semantic_review.and(history_review) {
+                    let action =
+                        if crate::task_review::bound_review_revision(repo_root, spec_path, state)
+                            .is_some()
                         {
-                            eprintln!("error: persisting required semantic review: {error}");
-                            return Outcome::PostBroken;
-                        }
-                    }
-                    println!(
-                        "Mechanical audit is held; semantic history review is still required at `{}`.",
-                        review_path.display()
-                    );
+                            "follow-up"
+                        } else {
+                            "prepare"
+                        };
+                    println!("Mechanical audit is held; structured task review is required: {}. Read the current review packet with `mastermind review-task {} {} --json`. Follow its role and evidence requirements, then submit a fresh review with Context/Lesson decisions.", crate::terminal::escape(&reason), action, spec_path.display());
                 }
-                return Outcome::PostHeld;
+            } else {
+                println!(
+                    "Mechanical audit is held; semantic history review is still required at `{}`.",
+                    review_path.display()
+                );
             }
         }
+        return Outcome::PostHeld;
     }
 
     // Default mode + state present → resume post.
-    let state = existing.unwrap();
-    run_post(spec_path, repo_root, index_path, &state, &state_path)
+    run_post(spec_path, repo_root, index_path, state, &state_path)
+}
+
+/// Both entry points retain the caller's controller lock through one review
+/// and final completion. Judgments never start another executor/repair iteration.
+fn review_and_complete_task(
+    spec_path: &Path,
+    repo_root: &Path,
+    index_path: &Path,
+    state_path: &Path,
+    options: &crate::review_invocation::Options,
+) -> Outcome {
+    println!("\nInvoking semantic reviewer for the held task revision...\n");
+    match crate::review_invocation::run_locked(spec_path, repo_root, options) {
+        Ok(report) => {
+            print!("{}", report.render_text());
+            // Submission replaces the active pin; never close from the
+            // pre-review in-memory state. Keep this controller lock.
+            let mut reviewed = match load_state(state_path) {
+                Ok(Some(state)) => state,
+                _ => return Outcome::PostBroken,
+            };
+            if !report.approved() || !report.history_resolved() {
+                let failed = report.status == crate::task_review::Status::Failed;
+                let reason = if failed {
+                    report
+                        .reason
+                        .as_deref()
+                        .unwrap_or("review_invocation_failed")
+                } else if !report.approved() {
+                    "semantic_review_not_accepted"
+                } else if report.history_status
+                    == crate::history_disposition::HistoryStatus::UpdateRequired
+                {
+                    "history_review_update_required"
+                } else {
+                    "history_review_decision_unknown"
+                };
+                reviewed.blocking_reason = Some(reason.into());
+                reviewed.last_artifact = Some(
+                    if failed {
+                        "review-invocation.json"
+                    } else {
+                        "semantic-review.json"
+                    }
+                    .into(),
+                );
+                if let Err(error) = save_state_in_repository(repo_root, state_path, &reviewed) {
+                    eprintln!("error: recording review blocker: {error}");
+                }
+                eprintln!("error: task completion stopped: {reason}");
+                return Outcome::PostBroken;
+            }
+            complete_reviewed_task(spec_path, repo_root, index_path, &reviewed, state_path)
+        }
+        Err(reason) => {
+            eprintln!("error: semantic review stopped: {reason}");
+            Outcome::PostBroken
+        }
+    }
+}
+
+/// Called only while the task controller lock is held, after review is recorded.
+/// Resume, repeated post-flight, and native auto-review share this completion gate.
+fn complete_reviewed_task(
+    spec_path: &Path,
+    repo_root: &Path,
+    index_path: &Path,
+    state: &RunState,
+    state_path: &Path,
+) -> Outcome {
+    if let Err(reason) = crate::task_review::completion_approved(repo_root, spec_path, state)
+        .and_then(|()| history_review_resolved(repo_root, spec_path, state))
+    {
+        eprintln!("error: task review cannot close this task: {reason}");
+        return Outcome::PostBroken;
+    }
+    let mut store = match open_validated_task_index(index_path, repo_root, state.allow_no_index) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("error: validating index for semantic history refresh: {error}");
+            return Outcome::PostBroken;
+        }
+    };
+    if let Some(store) = store.as_mut() {
+        if let Err(error) = refresh_durable_history(store, repo_root) {
+            eprintln!("error: refreshing durable history before semantic completion: {error}");
+            return Outcome::PostBroken;
+        }
+    }
+    // Receipt bytes can stay unchanged while a dependency hidden
+    // from Git's diff or the external executable has changed.
+    // Recheck observed obligations only at this new completion;
+    // already completed tasks retain their historical meaning.
+    let receipts_current = read_preflight_spec(repo_root, spec_path).and_then(|body| {
+        if state.invocation_required {
+            crate::invocation::validate_completed(spec_path, repo_root, state)?;
+        }
+        crate::task_review::validate_current(repo_root, spec_path, state)?;
+        let parsed = spec::parse_str(&state.spec_path, &body);
+        let observed = crate::verification_receipts::inspect_checks(
+            &parsed,
+            repo_root,
+            &state.baseline_ref,
+            std::time::Instant::now() + crate::diff::git_timeout(),
+        );
+        let acceptance = crate::acceptance::evaluate(&parsed, &observed)?;
+        if crate::acceptance::declared(&parsed).is_some() && !acceptance.requirements_satisfied() {
+            return Err("acceptance_requirements_unmet".into());
+        }
+        crate::verification_receipts::current_digests(&observed?)
+    });
+    if let Err(reason) = receipts_current {
+        let mut stale = state.clone();
+        stale.status = "audit_required".into();
+        stale.next_step = Some("run_audit".into());
+        stale.blocking_reason = Some(reason.clone());
+        stale.held_snapshot_sha256 = None;
+        stale.history_snapshot_sha256 = None;
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &stale) {
+            eprintln!("error: persisting required re-audit: {error}");
+        }
+        eprintln!("error: observed verification cannot close this task: {reason}. Run the declared checks again, then re-run post-flight.");
+        return Outcome::PostBroken;
+    }
+    if current_history_snapshot(repo_root, spec_path, state)
+        .ok()
+        .as_ref()
+        != state.history_snapshot_sha256.as_ref()
+        || history_review_resolved(repo_root, spec_path, state).is_err()
+        || crate::task_review::validate_current(repo_root, spec_path, state).is_err()
+    {
+        eprintln!("error: audited inputs or semantic review changed during history refresh; re-run run-task");
+        return Outcome::PostBroken;
+    }
+    let mut completed = state.clone();
+    completed.status = "learned".into();
+    completed.next_step = Some("close".into());
+    completed.blocking_reason = None;
+    completed.last_artifact = Some(
+        if state.semantic_review_required {
+            "semantic-review.json"
+        } else {
+            "history-review.md"
+        }
+        .into(),
+    );
+    if let Err(error) = save_state_in_repository(repo_root, state_path, &completed) {
+        eprintln!(
+            "error: persisting reviewed state `{}`: {error}",
+            state_path.display()
+        );
+        return Outcome::PostBroken;
+    }
+    println!("Task complete — semantic history review is resolved.");
+    Outcome::PostHeld
+}
+
+pub(crate) fn controller_lock(
+    repo_root: &Path,
+    state_path: &Path,
+) -> Result<std::fs::File, String> {
+    let root = RootCapability::open(repo_root).map_err(|_| "controller_root_unavailable")?;
+    let path = state_path.with_extension("controller.lock");
+    let parent = path.parent().ok_or("controller_lock_unavailable")?;
+    root.ensure_directory(parent)
+        .map_err(|_| "controller_lock_unavailable")?;
+    bounded_fs::try_locked_regular_file_with_capability(&root, &path)
+        .map_err(|_| "controller_busy_or_unavailable".into())
+}
+
+/// One owned audit, never reconstructed from mutable Markdown or executor prose.
+struct PostflightEvidence {
+    audit: audit_spec::Report,
+    inputs_snapshot: String,
+}
+
+fn stop_auto_repair(
+    repo_root: &Path,
+    state_path: &Path,
+    state: &RunState,
+    reason: &str,
+) -> Outcome {
+    // The stop must survive restart and ordinary --post-only. A fresh explicit
+    // preflight is the approval boundary for any changed or unresolved inputs.
+    let stopped = preflight_required_state(state, reason);
+    if let Err(error) = save_state_in_repository(repo_root, state_path, &stopped) {
+        eprintln!("error: persisting automatic repair stop: {error}");
+    }
+    eprintln!("Automatic repair stopped: {reason}. Review the task before another invocation.");
+    Outcome::PostBroken
+}
+
+fn run_native_loop(
+    spec_path: &Path,
+    repo_root: &Path,
+    index_path: &Path,
+    state_path: &Path,
+    opts: RunOpts,
+    identity: &ControllerIdentity,
+    existing: Option<&RunState>,
+) -> Outcome {
+    use crate::auto_repair::Feedback;
+    use crate::verification_receipts as receipts;
+    let mut previous = existing.cloned();
+    let mut feedback: Option<Feedback> = None;
+    let mut original: Option<RunState> = None;
+    let mut executable_pins = None;
+    if opts.auto_review {
+        let contract = read_preflight_spec(repo_root, spec_path)
+            .map(|body| spec::parse_str(&identity.spec_path, &body))
+            .map_err(|_| "auto_review_contract_unavailable".to_string())
+            .and_then(|parsed| {
+                crate::acceptance::validate(&parsed)?;
+                crate::acceptance::declared(&parsed)
+                    .map(|_| ())
+                    .ok_or_else(|| "auto_review_requires_structured_acceptance".into())
+            });
+        if let Err(reason) = contract {
+            eprintln!("error: {reason}");
+            return Outcome::PreFailed;
+        }
+    }
+    if opts.auto_repair {
+        let contract = read_preflight_spec(repo_root, spec_path)
+            .map(|body| spec::parse_str(&identity.spec_path, &body))
+            .map_err(|_| "auto_repair_contract_unavailable")
+            .and_then(|parsed| crate::auto_repair::validate_contract(&parsed));
+        if let Err(reason) = contract {
+            eprintln!("error: {reason}");
+            return Outcome::PreFailed;
+        }
+    }
+    loop {
+        // This check precedes advancing the iteration: old receipts are still
+        // bound to the audited attempt here. Re-approval will invalidate them.
+        if let (Some(prior), Some(feedback)) = (previous.as_ref(), feedback.as_ref()) {
+            let unchanged = history_input_snapshot(repo_root, spec_path, prior)
+                .is_ok_and(|inputs| inputs.snapshot == feedback.source_inputs_sha256)
+                && receipts::repair_input_revision(
+                    repo_root,
+                    &prior.baseline_ref,
+                    std::time::Instant::now() + crate::diff::git_timeout(),
+                )
+                .is_ok_and(|revision| revision == feedback.source_verification_inputs_sha256);
+            if !unchanged {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    prior,
+                    "auto_repair_inputs_changed",
+                );
+            }
+        }
+        let pre = run_pre(
+            spec_path,
+            repo_root,
+            index_path,
+            state_path,
+            opts.clone(),
+            identity,
+            previous.as_ref(),
+        );
+        if pre != Outcome::PreReady {
+            return pre;
+        }
+        let state = match load_state(state_path) {
+            Ok(Some(state)) => state,
+            _ => {
+                eprintln!("error: approved native state unavailable");
+                return Outcome::ExecFailed;
+            }
+        };
+        let parsed = match read_preflight_spec(repo_root, spec_path) {
+            Ok(body) if spec_hash_matches(&state.spec_hash, &body) => {
+                spec::parse_str(&identity.spec_path, &body)
+            }
+            _ => {
+                return stop_auto_repair(repo_root, state_path, &state, "invocation_task_changed");
+            }
+        };
+        if opts.auto_repair {
+            if let Err(reason) = crate::auto_repair::validate_contract(&parsed) {
+                return stop_auto_repair(repo_root, state_path, &state, reason);
+            }
+            if let Some(first) = &original {
+                if state.spec_hash != first.spec_hash
+                    || state.spec_path != first.spec_path
+                    || state.repository_identity != first.repository_identity
+                    || state.baseline_ref != first.baseline_ref
+                    || state.strict != first.strict
+                    || state.allow_no_index != first.allow_no_index
+                    || previous
+                        .as_ref()
+                        .and_then(|prior| prior.iteration.checked_add(1))
+                        != Some(state.iteration)
+                    || !state.invocation_required
+                {
+                    return stop_auto_repair(
+                        repo_root,
+                        state_path,
+                        &state,
+                        "auto_repair_contract_changed",
+                    );
+                }
+            } else {
+                original = Some(state.clone());
+            }
+            let current = receipts::repair_executable_revisions(
+                &parsed,
+                repo_root,
+                &state.baseline_ref,
+                std::time::Instant::now() + crate::diff::git_timeout(),
+            );
+            match current {
+                Ok(pins)
+                    if executable_pins
+                        .as_ref()
+                        .is_none_or(|expected| expected == &pins) =>
+                {
+                    executable_pins = Some(pins);
+                }
+                _ => {
+                    return stop_auto_repair(
+                        repo_root,
+                        state_path,
+                        &state,
+                        "auto_repair_check_executable_changed_or_unavailable",
+                    )
+                }
+            }
+            // A new preflight must not consume stale feedback if any source
+            // artifact changed while its gates were running.
+            if let (Some(prior), Some(feedback)) = (previous.as_ref(), feedback.as_ref()) {
+                if !history_input_snapshot(repo_root, spec_path, prior)
+                    .is_ok_and(|inputs| inputs.snapshot == feedback.source_inputs_sha256)
+                    || !receipts::repair_input_revision(
+                        repo_root,
+                        &prior.baseline_ref,
+                        std::time::Instant::now() + crate::diff::git_timeout(),
+                    )
+                    .is_ok_and(|revision| revision == feedback.source_verification_inputs_sha256)
+                {
+                    return stop_auto_repair(
+                        repo_root,
+                        state_path,
+                        &state,
+                        "auto_repair_inputs_changed",
+                    );
+                }
+            }
+        }
+
+        let mut executing = state.clone();
+        executing.status = "executing".into();
+        executing.last_artifact = Some("invocation.json".into());
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &executing) {
+            eprintln!("error: persisting executing state: {error}");
+            return Outcome::ExecFailed;
+        }
+        println!("\nInvoking executor with bound context and permission policy...\n");
+        let invocation = crate::invocation::execute_with_feedback(
+            spec_path,
+            repo_root,
+            index_path,
+            &executing,
+            &opts.invocation,
+            feedback.as_ref(),
+        )
+        .and_then(|receipt| {
+            if receipt.success() {
+                Ok(receipt)
+            } else {
+                Err(receipt
+                    .reason
+                    .unwrap_or_else(|| "native_invocation_incomplete".into()))
+            }
+        });
+        let invocation = match invocation {
+            Ok(receipt) => receipt,
+            Err(reason) => {
+                if opts.auto_repair {
+                    return stop_auto_repair(
+                        repo_root,
+                        state_path,
+                        &executing,
+                        &format!("auto_repair_native_failure: {reason}"),
+                    );
+                }
+                executing.blocking_reason = Some(reason.clone());
+                if let Err(error) = save_state_in_repository(repo_root, state_path, &executing) {
+                    eprintln!("error: persisting invocation failure: {error}");
+                }
+                eprintln!("Executor failed: {reason}. Review invocation.json before repeating the original --exec command.");
+                return Outcome::ExecFailed;
+            }
+        };
+        if opts.auto_repair {
+            let current = receipts::repair_executable_revisions(
+                &parsed,
+                repo_root,
+                &state.baseline_ref,
+                std::time::Instant::now() + crate::diff::git_timeout(),
+            );
+            if current.as_ref().ok() != executable_pins.as_ref() {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    &state,
+                    "auto_repair_check_executable_changed_or_unavailable",
+                );
+            }
+        }
+        println!("\nNative invocation completed. Continuing into post-flight.\n");
+        let mut evidence = None;
+        let outcome = run_post_with_evidence(
+            spec_path,
+            repo_root,
+            index_path,
+            &state,
+            state_path,
+            opts.auto_repair.then_some(&mut evidence),
+        );
+        if outcome == Outcome::PostHeld && opts.auto_review {
+            return review_and_complete_task(
+                spec_path,
+                repo_root,
+                index_path,
+                state_path,
+                &opts.review_invocation,
+            );
+        }
+        if !opts.auto_repair || outcome == Outcome::PostHeld {
+            return outcome;
+        }
+        let stopped = match load_state(state_path) {
+            Ok(Some(state)) => state,
+            _ => return outcome,
+        };
+        let Some(evidence) = evidence else {
+            return stop_auto_repair(
+                repo_root,
+                state_path,
+                &stopped,
+                "auto_repair_postflight_requires_review",
+            );
+        };
+        let verification_inputs = match receipts::repair_input_revision(
+            repo_root,
+            &state.baseline_ref,
+            std::time::Instant::now() + crate::diff::git_timeout(),
+        ) {
+            Ok(revision) => revision,
+            Err(_) => {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    &stopped,
+                    "auto_repair_checks_unavailable",
+                )
+            }
+        };
+        let checks = match receipts::inspect_repair_checks(
+            &parsed,
+            repo_root,
+            &state.baseline_ref,
+            std::time::Instant::now() + crate::diff::git_timeout(),
+        ) {
+            Ok(checks) => checks,
+            Err(_) => {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    &stopped,
+                    "auto_repair_checks_unavailable",
+                )
+            }
+        };
+        let (failed, unmet) = match crate::auto_repair::assess(&parsed, &evidence.audit, &checks) {
+            Ok(items) => items,
+            Err(reason) => return stop_auto_repair(repo_root, state_path, &stopped, reason),
+        };
+        if stopped.iteration >= opts.max_iterations {
+            return stop_auto_repair(
+                repo_root,
+                state_path,
+                &stopped,
+                "auto_repair_iteration_budget_exhausted",
+            );
+        }
+        if !crate::invocation::validate_completed(spec_path, repo_root, &state)
+            .is_ok_and(|current| current == invocation)
+            || !history_input_snapshot(repo_root, spec_path, &state)
+                .is_ok_and(|inputs| inputs.snapshot == evidence.inputs_snapshot)
+            || !receipts::repair_input_revision(
+                repo_root,
+                &state.baseline_ref,
+                std::time::Instant::now() + crate::diff::git_timeout(),
+            )
+            .is_ok_and(|revision| revision == verification_inputs)
+        {
+            return stop_auto_repair(
+                repo_root,
+                state_path,
+                &stopped,
+                "auto_repair_inputs_changed",
+            );
+        }
+        feedback = match Feedback::new(
+            &evidence.audit,
+            &invocation,
+            evidence.inputs_snapshot,
+            verification_inputs,
+            opts.max_iterations,
+            failed,
+            unmet,
+        ) {
+            Ok(feedback) => Some(feedback),
+            Err(reason) => return stop_auto_repair(repo_root, state_path, &stopped, reason),
+        };
+        println!("\nAutomatic repair: fresh checks failed; starting iteration {} of {}. Scope and permissions remain bound to the approved contract.", stopped.iteration + 1, opts.max_iterations);
+        previous = Some(stopped);
+    }
 }
 
 fn run_pre(
@@ -2133,6 +2769,9 @@ fn run_pre(
         iteration,
         allow_no_index: opts.allow_no_index,
         strict: opts.strict,
+        invocation_required: opts.exec && !opts.pre_only,
+        semantic_review_required: crate::acceptance::declared(&parsed).is_some(),
+        semantic_review_sha256: None,
     };
     if let Err(e) = save_state_in_repository(repo_root, state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
@@ -2145,24 +2784,10 @@ fn run_pre(
         head_short
     );
 
-    // 4. executor: --exec (synchronous shell-out) or hand-off message.
+    // Native execution is supervised by the caller while the controller lock
+    // remains held over every automatic attempt.
     if opts.exec && !opts.pre_only {
-        println!("\nInvoking executor (`claude -p`)...\n");
-        match run_executor(spec_path, repo_root) {
-            Ok(()) => {
-                println!("\nExecutor returned 0. Continuing into post-flight.\n");
-                return run_post(spec_path, repo_root, index_path, &state, state_path);
-            }
-            Err(e) => {
-                eprintln!("\n❌ Executor failed: {e}");
-                eprintln!(
-                    "State kept at `{}`. After fixing, re-run `mastermind run-task {}`.",
-                    state_path.display(),
-                    spec_path.display()
-                );
-                return Outcome::ExecFailed;
-            }
-        }
+        return Outcome::PreReady;
     }
 
     println!(
@@ -2180,6 +2805,17 @@ fn run_post(
     state: &RunState,
     state_path: &Path,
 ) -> Outcome {
+    run_post_with_evidence(spec_path, repo_root, index_path, state, state_path, None)
+}
+
+fn run_post_with_evidence(
+    spec_path: &Path,
+    repo_root: &Path,
+    index_path: &Path,
+    state: &RunState,
+    state_path: &Path,
+    capture: Option<&mut Option<PostflightEvidence>>,
+) -> Outcome {
     // A failed explicit re-audit must not leave an earlier learned state
     // eligible for completion or architecture-policy evidence.
     let mut auditing = state.clone();
@@ -2190,6 +2826,22 @@ fn run_post(
     if let Err(error) = save_state_in_repository(repo_root, state_path, &auditing) {
         eprintln!("error: persisting audit-required state: {error}");
         return Outcome::PostBroken;
+    }
+    if state.invocation_required {
+        if let Err(reason) = crate::invocation::validate_completed(spec_path, repo_root, state) {
+            auditing.status = "executing".into();
+            auditing.next_step = Some("run_executor".into());
+            auditing.blocking_reason = Some(reason.clone());
+            auditing.last_artifact = Some("invocation.json".into());
+            if let Err(error) = save_state_in_repository(repo_root, state_path, &auditing) {
+                eprintln!("error: persisting invocation gate failure: {error}");
+            }
+            eprintln!(
+                "error: post-flight requires this iteration's completed invocation: {reason}"
+            );
+            eprintln!("Review invocation.json and the blocker, then repeat the original --exec command to start a new bounded attempt.");
+            return Outcome::PostBroken;
+        }
     }
     let inputs = match history_input_snapshot(repo_root, spec_path, state) {
         Ok(inputs) => inputs,
@@ -2360,6 +3012,7 @@ fn run_post(
         println!("{hint}");
     }
 
+    let mut completion = None;
     if matches!(outcome, Outcome::PostHeld) {
         if history_input_snapshot(repo_root, spec_path, state)
             .ok()
@@ -2431,18 +3084,21 @@ fn run_post(
                     return Outcome::PostBroken;
                 }
             };
-        if let Err(error) =
-            ensure_history_review(repo_root, spec_path, &release_path, &history_snapshot).map(
-                |created| {
-                    if created {
-                        println!(
-                            "History review saved to {}",
-                            history_review_file_path(repo_root, spec_path).display()
-                        );
-                    }
-                },
-            )
-        {
+        if let Err(error) = ensure_history_review(
+            repo_root,
+            spec_path,
+            &release_path,
+            &history_snapshot,
+            crate::acceptance::declared(&parsed).is_some(),
+        )
+        .map(|created| {
+            if created {
+                println!(
+                    "History review saved to {}",
+                    history_review_file_path(repo_root, spec_path).display()
+                );
+            }
+        }) {
             eprintln!("error: failed to create history review: {error}");
             return Outcome::PostBroken;
         }
@@ -2462,27 +3118,29 @@ fn run_post(
             );
             return Outcome::PostBroken;
         }
-        let review_path = history_review_file_path(repo_root, spec_path);
-        let mut complete = state.clone();
-        if history_review_complete_for_snapshot(&review_path, Some(&history_snapshot)) {
-            complete.status = "learned".into();
-            complete.next_step = Some("close".into());
-        } else {
-            complete.status = "history_review_required".into();
-            complete.next_step = Some("review_history".into());
-        }
-        complete.risk = Some("low".into());
-        complete.blocking_reason = None;
-        complete.last_artifact = Some("history-review.md".into());
-        complete.held_snapshot_sha256 = held_snapshot_sha256;
-        complete.held_snapshot_version = STRICT_SNAPSHOT_VERSION;
-        complete.history_snapshot_sha256 = Some(history_snapshot);
-        if let Err(error) = save_state_in_repository(repo_root, state_path, &complete) {
+        let mut pending = state.clone();
+        pending.status = "history_review_required".into();
+        pending.next_step = Some("review_history".into());
+        pending.semantic_review_required |= crate::acceptance::declared(&parsed).is_some();
+        pending.risk = Some("low".into());
+        pending.blocking_reason = None;
+        pending.last_artifact = Some("history-review.md".into());
+        pending.held_snapshot_sha256 = held_snapshot_sha256;
+        pending.held_snapshot_version = STRICT_SNAPSHOT_VERSION;
+        pending.history_snapshot_sha256 = Some(history_snapshot);
+        // A stale review after a fresh held audit remains pending. A current
+        // review may complete only through the shared final evidence checks.
+        let reviewed = history_review_resolved(repo_root, spec_path, &pending).is_ok()
+            && crate::task_review::validate_current(repo_root, spec_path, &pending).is_ok();
+        if let Err(error) = save_state_in_repository(repo_root, state_path, &pending) {
             eprintln!(
                 "error: persisting post-flight state `{}`: {error}",
                 state_path.display()
             );
             return Outcome::PostBroken;
+        }
+        if reviewed {
+            completion = Some(pending);
         }
     } else {
         if durable_index {
@@ -2521,7 +3179,24 @@ fn run_post(
         );
     }
 
-    outcome
+    if let Some(capture) = capture {
+        if history_input_snapshot(repo_root, spec_path, state)
+            .is_ok_and(|inputs| inputs.snapshot == inputs_before_audit)
+        {
+            *capture = Some(PostflightEvidence {
+                audit,
+                inputs_snapshot: inputs_before_audit,
+            });
+        } else {
+            return stop_auto_repair(repo_root, state_path, state, "auto_repair_inputs_changed");
+        }
+    }
+    match completion {
+        Some(pending) => {
+            complete_reviewed_task(spec_path, repo_root, index_path, &pending, state_path)
+        }
+        None => outcome,
+    }
 }
 
 fn comment_audit_hint(outcome: Outcome, baseline_ref: &str) -> Option<String> {
@@ -2530,37 +3205,6 @@ fn comment_audit_hint(outcome: Outcome, baseline_ref: &str) -> Option<String> {
             "  next: inspect the comment delta vs `{baseline_ref}`; run `mastermind-comment-audit` only when it is non-empty"
         )
     })
-}
-
-/// Invoke `claude -p` synchronously on this spec, streaming stdout/stderr to the
-/// user's terminal. Err on spawn failure or non-zero exit so the caller keeps
-/// state for retry.
-fn run_executor(spec_path: &Path, repo_root: &Path) -> Result<(), String> {
-    let prompt = format!(
-        "Implement the mastermind spec at `{}` using the mastermind-task-executor workflow. \
-         Implement its approved outcomes inside Scope, prove the Acceptance Criteria, and run \
-         the Final Verification commands. Repair implementation-caused failures in a bounded \
-         loop, but stop for contract drift, missing prerequisites, or unsafe scope expansion. \
-         Write the canonical report to \
-         `<task>/executor-report.md`; do not write lifecycle state. Ensure `mmcg` is available \
-         via your MCP configuration so verify/audit gates have the live index.",
-        spec_path.display(),
-    );
-    let claude = crate::setup::resolve_native_cli("claude", repo_root)
-        .map_err(|error| format!("resolve claude: {error}"))?;
-    let status = Command::new(claude)
-        .arg("-p")
-        .arg(&prompt)
-        .stdin(std::process::Stdio::null())
-        .current_dir(repo_root)
-        .status()
-        .map_err(|e| {
-            format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
-        })?;
-    if !status.success() {
-        return Err(format!("claude exited with {status}"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2687,7 +3331,7 @@ mod tests {
         let fake_claude = bin.join("claude");
         fs::write(
             &fake_claude,
-            "#!/bin/sh\npwd > \"$MMCG_RUN_TASK_CWD_TEST_CAPTURE\"\nexit 1\n",
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.1.267 (Claude Code)'; exit 0;;\n  --help) echo '--input-format --output-format --verbose --tools --permission-mode --permission-prompts --max-turns --no-session-persistence --no-chrome acceptEdits none stream-json text'; exit 0;;\nesac\ncat >/dev/null\npwd > \"$MMCG_RUN_TASK_CWD_TEST_CAPTURE\"\nexit 1\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
@@ -2770,6 +3414,9 @@ verifications: []\n\
             iteration: 0,
             allow_no_index: true,
             strict: false,
+            invocation_required: false,
+            semantic_review_required: false,
+            semantic_review_sha256: None,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
@@ -3020,7 +3667,8 @@ verifications: []\n\
         let spec = Path::new(".mastermind/tasks/001\\alias/spec.md");
         let release = root.path().join(".mastermind/releases/001-alias.md");
 
-        let error = ensure_history_review(root.path(), spec, &release, "snapshot").unwrap_err();
+        let error =
+            ensure_history_review(root.path(), spec, &release, "snapshot", false).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!root.path().join(".mastermind").exists());
@@ -3037,7 +3685,8 @@ verifications: []\n\
             .join("spec.md");
         let release = root.path().join(".mastermind/releases/002.md");
 
-        let error = ensure_history_review(root.path(), &spec, &release, "snapshot").unwrap_err();
+        let error =
+            ensure_history_review(root.path(), &spec, &release, "snapshot", false).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!root.path().join(".mastermind").exists());
@@ -3159,7 +3808,7 @@ verifications: []\n\
         let (root, spec, state) = history_snapshot_fixture();
         let release = release_file_path(root.path(), &spec);
         let snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
-        assert!(ensure_history_review(root.path(), &spec, &release, &snapshot).unwrap());
+        assert!(ensure_history_review(root.path(), &spec, &release, &snapshot, false).unwrap());
         let review = history_review_file_path(root.path(), &spec);
         let body = fs::read_to_string(&review)
             .unwrap()
@@ -3173,13 +3822,13 @@ verifications: []\n\
             &review,
             Some(&snapshot)
         ));
-        assert!(!ensure_history_review(root.path(), &spec, &release, &snapshot).unwrap());
+        assert!(!ensure_history_review(root.path(), &spec, &release, &snapshot, false).unwrap());
         assert_eq!(fs::read_to_string(&review).unwrap(), body);
         // The rendered Held audit is unchanged, but the function body differs.
         fs::write(root.path().join("src/lib.py"), "def value(): return 2\n").unwrap();
         let new_snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
         assert_ne!(new_snapshot, snapshot);
-        assert!(ensure_history_review(root.path(), &spec, &release, &new_snapshot).unwrap());
+        assert!(ensure_history_review(root.path(), &spec, &release, &new_snapshot, false).unwrap());
         assert!(!history_review_complete_for_snapshot(
             &review,
             Some(&new_snapshot)

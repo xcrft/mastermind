@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes 30 bounded MCP tools.
+description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes bounded MCP tools.
 metadata:
   version: 2.1.1
   authors:
@@ -24,192 +24,92 @@ metadata:
 
 # mmcg — Mastermind Codegraph
 
-Ask architecture questions against the repository on your machine, not against
-a pasted fragment or a remote black box.
-
-mmcg is the local structural engine inside
-[Mastermind](https://github.com/xcrft/mastermind). It indexes symbols, calls,
-imports, and evidence into SQLite, then exposes the same state through CLI,
-Lens, and MCP.
-
-Use it to answer questions such as:
-
-- Does this symbol exist and where is it defined?
-- Who calls it, and what is its transitive blast radius?
-- What are the components, entry points, hotspots, and cycles?
-- What can the current worktree change affect?
-- Which tests are structurally connected to that change?
-
-The npm package exposes this binary as both `mastermind` and `mmcg`. Cargo
-installation uses `mmcg`.
+mmcg indexes repository symbols, calls, imports and project evidence into a
+local SQLite database. Use the CLI, MCP server or Lens UI to inspect structure,
+change impact and verification evidence.
 
 ## Install
 
-Prebuilt binaries, Node.js 24+:
+With Cargo (Rust 1.96+):
+
+```bash
+cargo install mmcg --locked
+mmcg --version
+```
+
+Or install a prebuilt binary with Node.js 24+:
 
 ```bash
 npm install -g @xcraftmind/mastermind
 mastermind --version
 ```
 
-Build from source, Rust 1.96+:
+The npm package provides both `mastermind` and `mmcg`. Cargo provides `mmcg`.
+SQLite and tree-sitter are bundled.
+
+## Index and review
+
+Run inside a Git repository. Replace `main` with the baseline you want to review.
 
 ```bash
-cargo install mmcg
-mmcg --version
-```
-
-SQLite and tree-sitter are bundled. No system SQLite or parser libraries are required.
-
-## See your first result
-
-```bash
-cd your-project
 mmcg index .
-mmcg enrich --scip index.scip # optional compiler-resolved overlay
-mmcg enrich --facts facts.json # optional declarative fact overlay
-mmcg status
 mmcg map .
 mmcg impact --since main
-mmcg brief --role executor --since main --budget-tokens 2000
-mmcg concept "payment retry handler" --top 10
-mmcg temporal --since main
 mmcg ui --since main
 ```
 
-`index` is incremental by default and writes `.mastermind/mmcg.db`. Discovery
-honors Git and `.ignore` rules while retaining tracked sources, matches
-extensions case-insensitively, parses `.pyi` and BOM-marked UTF-16 sources, and
-reports bounded path samples for skipped inputs. It automatically rebuilds when
-stored extractor semantics are incompatible. Use `mmcg watch` to keep it
-refreshed while editing.
+The default index is `.mastermind/mmcg.db`. Indexing is incremental. Use
+`mmcg watch` while editing or `mmcg index . --force` to reparse all files.
 
-Structural MCP queries refresh the managed `.mastermind/mmcg.db` on demand
-before querying. The canonical database path, not mutable SQLite metadata,
-selects the repository root. Custom external indexes remain manual-refresh-only;
-failed or unavailable refreshes return a structured `index_stale` result.
-
-Run the stdio MCP server directly:
-
-```bash
-mmcg serve
-```
-
-When installed through npm, prefer the dry-run-first client setup commands:
-
-```bash
-mastermind setup claude --scope user          # preview
-mastermind setup claude --scope user --write  # apply
-```
-
-See the [client integration guides](https://github.com/xcrft/mastermind/tree/main/docs/integrations) for Claude Code, Codex, Cursor, Continue, and generic MCP clients.
-
-## What one graph can answer
-
-| Area | Examples |
+| Task | Command |
 |---|---|
-| Symbol graph | Search, callers, callees, imports, outlines, API surface |
-| Semantic overlay | Optional SCIP definitions, references, implementations, and provenance |
-| Extension facts | Revision-bound declarative annotations and relationships with no plugin execution |
-| Architecture | Project map, temporal drift, centrality, dependency cycles, unreferenced candidates |
-| Change analysis | Git-aware symbol changes, blast radius, component crossings |
-| Review evidence | Read-only diff-first Lens plus autonomous HTML/SARIF/summary packages with revision and evidence digests |
-| Test selection | Direct, transitive, and heuristic candidates with evidence |
-| Workflow gates | `verify-spec`, `audit-spec`, and `run-task` |
-| Local coordination | Bounded additive scratchpad and indexed project history |
+| Look up a definition | `mmcg query search PaymentService` |
+| Find containing callers | `mmcg query callers charge` |
+| Find symbols by concept | `mmcg concept "payment retry handler" --top 10` |
+| Prepare a role briefing | `mmcg brief --role executor --since main --budget-tokens 2000` |
+| Search project history | `mmcg history "retry policy"` |
+| Add compiler-resolved evidence | `mmcg enrich --scip index.scip` |
+| Add declarative facts | `mmcg enrich --facts facts.json` |
 
-The MCP surface contains 21 non-destructive queries that may refresh the managed
-derived index, 8 read-only tools, and one additive local scratchpad write.
-Results are bounded and return precision or truncation notes when the engine
-cannot prove completeness.
+Supported languages: Python and type stubs, TypeScript/TSX, JavaScript/JSX,
+Vue SFC, Rust, C#, Go, Java, PHP and C/C++.
 
-Use `mmcg_brief` or `mastermind brief` once at role entry. Planner, executor,
-and auditor packets share one schema and differ only in admission priority.
-The 256–8,000 token budget counts the final MCP envelope after JSON escaping
-and `content.text`/`structuredContent` duplication. Typed repository strings
-are marked untrusted; source bodies, declaration signatures, literal/default
-values, and history titles or excerpts are excluded.
-
-Use `mmcg_concept` or `mastermind concept` to retrieve at most 50 local symbol
-candidates from plain concept terms. The schema-v1 result uses fixed quoted-AND
-matching over normalized names, repository paths, and declaration shapes. It
-uses SQLite FTS5 only: no embeddings, model calls, network access, source
-bodies, comments, literals, or default values. Scores are query-local retrieval
-ranks where lower is better, not confidence. Managed indexes refresh once when
-needed; custom external indexes remain read-only and fail closed when stale.
-
-## Supported languages
-
-- Python and Python type stubs
-- TypeScript and TSX
-- JavaScript and JSX
-- Vue SFC
-- Rust
-- C#
-- Go
-- Java
-- PHP
-- C and C++
-
-## Know the evidence boundary
-
-The default mmcg graph is syntactic, not a compiler or language server:
-
-- Call resolution is primarily name-based rather than type-based.
-- Dynamic dispatch, reflection, generated code, and cross-language calls may be invisible.
-- Import paths reflect source spelling and do not resolve every re-export.
-- C/C++ include paths resolve to indexed files for architecture maps and cycle
-  detection, but included contents and compiler semantics are not expanded.
-- Dead-code and test-impact results are candidates to review, not deletion or test-skipping authorization.
-
-This model keeps the default index local and independent of language
-toolchains. Change-impact workflows fail closed on stale index, root, Git
-snapshot, and work-limit conditions.
-
-`mmcg enrich --scip index.scip` is an optional second layer. It stores
-compiler-resolved facts separately, exposes them through `query semantic` and
-`mmcg_semantic`, and lets Lens prefer exact SCIP evidence while retaining the
-Tree-sitter topology and no-toolchain fallback. Embedded SCIP document text is
-verified when available; `project_root` must identify this repository unless
-every document embeds matching text. Later source changes suppress stale
-semantic facts.
-
-`mmcg enrich --facts facts.json` is the safe community-extension boundary. A
-strict [`mastermind-facts/v1`](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
-manifest declares capabilities and binds every source/provenance artifact to
-the exact repository identity, Git revision, byte size, and SHA-256 digest.
-Mastermind validates the whole manifest before atomically replacing one
-producer dataset in private normalized tables. `query facts`, the fixed
-read-only `mmcg_facts` tool, and Lens can read it; producers cannot load native
-code, register MCP handlers or policy rules, change graph topology, or access
-SQLite directly.
-
-## Reference
-
-The exhaustive technical documentation is intentionally separate from this crate landing page:
-
-- [CLI, indexing, MCP protocol, all tools, and limitations](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
-- [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
-- [Mastermind workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
-- [Verifiable audits and GitHub Action](https://github.com/xcrft/mastermind/blob/main/docs/github-action.md)
-
-## Development
+## Connect an agent
 
 ```bash
-cargo test --all --locked
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo fmt --all -- --check
-cargo bench --bench indexer
+mmcg setup claude --scope user          # preview
+mmcg setup claude --scope user --write  # apply
 ```
 
-The benchmark emits schema-v1 JSON for cold, warm, and 10%-incremental runs
-plus peak process RSS. See the
-[methodology and reference results](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md).
-Treat results as same-machine regression evidence, not a portable performance
-promise.
+For direct stdio use, run `mmcg serve`. Structural MCP queries may refresh the
+managed index before reading it. Custom indexes require an explicit refresh.
+Other tools are read-only except the additive local scratchpad write.
 
-See [CONTRIBUTING.md](https://github.com/xcrft/mastermind/blob/main/CONTRIBUTING.md) for the repository-wide contribution guide.
+See [client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
+for Claude Code, Codex, Cursor, Continue and generic MCP clients.
 
-## License
+## Interpret results
 
-MIT — see [LICENSE](https://github.com/xcrft/mastermind/blob/main/LICENSE).
+| Result | Evidence and limits |
+|---|---|
+| Default graph | Syntactic, with gaps for name collisions, dynamic dispatch, reflection, generated code and cross-language calls |
+| SCIP | Separately identified compiler evidence |
+| Imported facts | Source and revision metadata, no executable plugin loading |
+| Unreferenced symbols | Candidates for review, no proof of runtime unreachability |
+| Candidate tests | Suggested coverage, no observed test result |
+| Stale inputs, omissions and work limits | Reported in the result, source-current evidence still needs interpretation |
+
+Indexing, queries and Lens run locally. Explicit model-backed commands such as
+native execution, review or persona analysis use the selected client/provider.
+See the workflow and persona guides before enabling them.
+
+## Reference and development
+
+- [CLI, MCP tools, limits and precision](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
+- [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
+- [Persona capture and review](https://github.com/xcrft/mastermind/blob/main/docs/guides/persona-hooks.md)
+- [Fact-ingestion contract](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
+- [Contributing and validation](https://github.com/xcrft/mastermind/blob/main/CONTRIBUTING.md)
+- [Benchmark methodology](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md)
+
+License: [MIT](https://github.com/xcrft/mastermind/blob/main/LICENSE).

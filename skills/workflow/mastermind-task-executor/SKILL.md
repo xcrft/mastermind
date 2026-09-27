@@ -12,7 +12,7 @@ workflow:
       runtime: portable
       exclusivity_group: task-executor
 metadata:
-  version: 0.6.2
+  version: 0.6.3
   authors: [mastermind]
   tags: [workflow, execution, delegation, mmcg]
 ---
@@ -39,13 +39,29 @@ read another artifact only when the spec or caller names it.
 1. Read the complete spec.
 2. Confirm that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification agree with one another.
+   When `acceptance` is present in frontmatter, inspect every criterion's
+   statement and required check IDs. Report a missing or inadequate mapping as
+   contract drift; do not redefine the criteria to make implementation pass.
 3. Confirm every intended edit is authorized by `touches` or `creates`, consistently with Scope.
-4. When `~/.mastermind/style.md` exists, use relevant non-conflicting rules as
-   preferences. Repository code, formatter/linter configuration, and the spec
-   take precedence over the user-global profile. Deterministic code-shape
-   observations are diagnostic evidence, not implementation instructions; do
-   not apply a language-specific observation to another language. Commit voice
-   is fallback-only when repository policy is silent.
+4. Call `mmcg_profile` with Scope paths, `role: executor`, and `workflow` equal
+   to the effective approved task mode (`strict` when controller `state.json`
+   has `strict: true`, otherwise the spec's mode). Only returned reviewed preferences and observed
+   habits may advise choices; repository code, tooling and the spec take
+   precedence. Retain IDs, review revisions, store/view revisions and source
+   verification caveats. Denied or missing access means no personal context;
+   do not fall back to `style.md`, legacy notes or inbox candidates. Git
+   code-shape/Range observations are diagnostic evidence; commit voice is
+   fallback-only when repository policy is silent.
+   Combine four separate components: the code brief, relevant
+   `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+   `mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+   revisions, citations and caveats. Before handoff, serialize the combined JSON,
+   including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+   This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+   queries, lower `top` or reduce supported brief/profile budgets and retrieve
+   again. Omit a whole optional component only with its tool, verification status
+   and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+   task-critical evidence explicitly. Each receiving role retrieves its own slice.
 5. For a named symbol, use mmcg to check its current location and impact. Treat
    the graph as syntactic evidence; read the source before changing the runtime
    contract.
@@ -78,10 +94,30 @@ the same failing condition. If it still fails, report `partial` or `failed` with
 the evidence. Do not hide a failure by weakening a test, removing an acceptance
 criterion, or changing the spec.
 
+When the controller supplies a `<mastermind-repair-json>` packet, use its failed
+check and criterion IDs to locate the remaining approved work. Its digests bind
+the preceding audit; it grants no new scope or permissions. Re-run all declared
+checks after a repair. Use `implementation_defect` only for an implementation
+defect; describe permission, environment and contract blockers separately.
+The controller may invoke another bounded attempt only with `--auto-repair`
+and current observed evidence. It owns the cumulative iteration budget and
+stops for semantic history review after a held audit.
+
 Run every command in Final Verification and every explicit `verify[].cmd` or
 legacy `VERIFY:` declaration after the focused checks pass. Preserve the full
 command and arguments in the canonical report. Commands must terminate; do not
 launch a server or watcher as verification.
+
+For every `verify[].run`, use `mastermind verification run <spec> --id <id>`
+(or the equivalent `mmcg` command). Running its argv directly does not create
+the required receipt. Re-run after final source/dependency changes and inspect
+`mastermind acceptance status <spec> --json` when criteria are declared. Copy
+only the actually observed results to the executor report. Legacy report-only
+commands retain their normal execution/report contract. Never edit
+`verification/*.json`, `invocation.json`, or controller lifecycle/lock files.
+The native runner owns its invocation record; a handed-off agent must not
+invent a delivery record. Satisfied evidence requirements do not establish
+semantic coverage or bypass postflight.
 
 For a runnable UI change or a spec with `## Design Context`, collect browser
 observations before closing the report. Record the accessibility tree states,

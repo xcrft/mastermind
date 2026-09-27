@@ -1,43 +1,26 @@
 # Local team graph
 
-See several services as one architecture without centralizing their source or
-pretending a naming heuristic proves a network call.
+A team graph combines existing local indexes with declared cross-repository
+relationships. Queries are read-only.
 
-A team graph combines existing local indexes into one bounded, read-only view.
-Each repository stays independently indexed. Mastermind neither copies
-repositories into a central database nor infers cross-repository calls; the
-manifest declares those relationships.
+## Prepare the repositories
 
-The public v1 schema is
-[`schemas/mastermind-team-v1.schema.json`](../schemas/mastermind-team-v1.schema.json),
-with API identifier `mastermind-team/v1`.
+| Required input | Preparation |
+|---|---|
+| Clean Git revision for each member | Resolve uncommitted changes before locking |
+| Fresh `.mastermind/mmcg.db` for each member | Run `mastermind index .` in that repository |
+| Reviewed relationship manifest | Declare the cross-repository edges to display |
 
-## Prerequisites
+## Create and pin a manifest
 
-Each member repository must have:
-
-- a clean, current Git revision;
-- a fresh `.mastermind/mmcg.db` created by `mastermind index .`;
-- a stable local root and index path available to the querying process.
-
-## From manifest to pinned graph
-
-Create a draft manifest. Paths may be absolute or relative to the manifest.
+Paths can be absolute or relative to the manifest:
 
 ```json
 {
   "api_version": "mastermind-team/v1",
   "repositories": [
-    {
-      "id": "checkout",
-      "root": "../checkout",
-      "index": "../checkout/.mastermind/mmcg.db"
-    },
-    {
-      "id": "payments",
-      "root": "../payments",
-      "index": "../payments/.mastermind/mmcg.db"
-    }
+    {"id": "checkout", "root": "../checkout", "index": "../checkout/.mastermind/mmcg.db"},
+    {"id": "payments", "root": "../payments", "index": "../payments/.mastermind/mmcg.db"}
   ],
   "relationships": [
     {
@@ -51,69 +34,44 @@ Create a draft manifest. Paths may be absolute or relative to the manifest.
 }
 ```
 
-Resolve and pin every repository before querying it:
-
 ```bash
 mastermind team lock team.json --output team.lock.json
 mastermind team map team.lock.json > team-map.json
 ```
 
-`team lock` writes canonical root and index paths plus the credential-free
-repository identity, exact Git revision, and a domain-separated digest of the
-SQLite database and active WAL bytes. Its JSON result also prints the exact
-`manifest_sha256` value to use as `MMCG_TEAM_MANIFEST_SHA256`. `team map`
-reopens every index through
-Mastermind's private read-only snapshot path and rechecks all pins. Revision,
-identity, source freshness, DB/WAL drift, duplicate canonical roots, or
-duplicate canonical indexes fail closed.
-Canonical root, index, and output paths must have exact UTF-8 representations;
-`team lock` rejects them before writing rather than serializing a replacement
-path that could resolve to a different repository or database.
+| Operation or result | Contract |
+|---|---|
+| `team lock` | Pins canonical paths, repository identities, Git revisions and database/WAL digests |
+| `team map` | Rechecks every pin and source freshness |
+| Changed repository or index | Requires a new lock |
+| Nodes | Namespaced by repository |
+| Internal edges | Retain static codegraph provenance |
+| Cross-repository edges | Retain `provenance=team-manifest`. A declaration is not an observed network call |
 
-Database and WAL digests stream through a retained capability for their shared
-parent directory. Each opened file is bounded and checked by identity before
-and after the read; symlinks, path substitution, and special files such as
-FIFOs are rejected without blocking.
+## Use through MCP
 
-The result namespaces every node (`repo:checkout` and
-`repo:checkout/component:src/api`). Internal component edges remain
-Tree-sitter-derived with `confidence=medium`; cross-repository edges exist only
-when declared in the manifest and carry `confidence=declared` plus
-`provenance=team-manifest`.
+For `mmcg_team_map`, keep the locked manifest inside the served repository.
+Configure both values in the server environment:
 
-## MCP
+```text
+MMCG_TEAM_MANIFEST=team.lock.json
+MMCG_TEAM_MANIFEST_SHA256=sha256:<digest printed by team lock>
+```
 
-The fixed read-only `mmcg_team_map` tool accepts a canonical
-repository-relative `manifest` path. For MCP, the locked manifest must live
-inside the repository served by that MCP process and the server operator must
-authorize that exact file through `MMCG_TEAM_MANIFEST` (an absolute path or a
-path relative to the served repository) and pin its exact bytes through
-`MMCG_TEAM_MANIFEST_SHA256=sha256:<digest>`. Without both values the tool fails
-closed; a changed manifest also fails until the operator reviews and repins it.
-The referenced repositories and indexes may be elsewhere on the local
-filesystem, but must still match the locked identities, revisions, and snapshot
-digests. This prevents a repository-controlled manifest from silently widening
-an agent's filesystem read scope.
+| Input | Rule |
+|---|---|
+| Tool manifest path | Repository-relative and equal to the configured manifest |
+| Member repository paths | May be outside the served repository, but must match the lock |
+| Changed manifest | Review it and configure its new digest |
 
-## Bounds and trust model
+## Boundaries
 
-Version 1 allows at most 16 repositories and 500 explicit relationships. It
-returns at most 20 components and 200 internal edges per repository, probes at
-most 20,000 import edges, caps each DB/WAL file at 2 GiB and all index bytes at
-4 GiB, and enforces a 30-second operation deadline. Any bounded projection is
-marked `partial` with diagnostics; it is never presented as a complete graph.
-Component endpoints use the same canonical depth-2 component model as the
-default repository map. Declared endpoints are retained inside the 20-component
-budget even when they are not among the largest components.
-Repository IDs are unambiguous ASCII slugs containing only letters, digits,
-dots, underscores, and hyphens; the `team:internal:` edge-ID namespace is
-reserved for Mastermind-derived edges.
+| Boundary | Behavior |
+|---|---|
+| Version 1 input | At most 16 repositories and 500 explicit relationships |
+| Bounded output | Inspect `partial` and diagnostics for omitted components or edges |
+| Unsafe paths, duplicate roots/indexes, stale sources or changed pins | Query rejected |
+| Manifest authority | Declares data only. Queries cannot fetch repositories, run plugins or write member indexes |
 
-The manifest is inert data: no commands, credentials, network fetches, native
-plugins, custom MCP handlers, policy code, or SQLite writes are permitted. A
-declared edge is evidence supplied by the manifest owner, not compiler- or
-runtime-resolved proof. Keep the lock file under normal code-review ownership
-and regenerate it whenever a member repository or its index changes.
-
-Version 1 does not provide remote repository discovery, distributed locking,
-access control, or a hosted graph.
+See the [public schema](../schemas/mastermind-team-v1.schema.json) and
+[reference](reference/mmcg.md#local-team-graph) for exact limits and endpoint rules.

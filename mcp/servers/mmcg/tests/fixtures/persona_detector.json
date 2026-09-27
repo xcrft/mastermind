@@ -1,0 +1,470 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic regression examples authored during implementation; not user data or an independently labeled accuracy benchmark",
+  "items": [
+    {
+      "id": "synthetic-001",
+      "language": "en",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "I prefer short replies with test results.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-002",
+      "language": "ru",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "Я предпочитаю короткие ответы с результатами проверок.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-003",
+      "language": "mixed",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "Мне удобнее сначала увидеть plan, потом code diff.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-004",
+      "language": "en",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "I usually review the contract before changing code.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-005",
+      "language": "ru",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "Я обычно читаю документацию перед изменением кода.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-006",
+      "language": "mixed",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "Я привыкла проверять tests перед review.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-007",
+      "language": "en",
+      "category": "correction",
+      "expected_kind": "possible_correction",
+      "text": "From now on, include test results in the final reply.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-008",
+      "language": "ru",
+      "category": "correction",
+      "expected_kind": "possible_correction",
+      "text": "Больше не добавляй общие фразы в ответы.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-009",
+      "language": "en",
+      "category": "task_bound",
+      "expected_kind": "possible_stated_preference",
+      "text": "I prefer not to add tests only for this PR.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-010",
+      "language": "ru",
+      "category": "task_bound",
+      "expected_kind": "possible_stated_preference",
+      "text": "Я предпочитаю краткий ответ только для этой задачи.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-011",
+      "language": "en",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "My default is to report the failure before the proposed fix.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-012",
+      "language": "ru",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "Мне важно видеть причины изменений в коде.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-013",
+      "language": "mixed",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "Предпочитаю review с точными file references и проверками.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-014",
+      "language": "en",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "I would rather keep policy in data than duplicate code branches.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-015",
+      "language": "ru",
+      "category": "preference",
+      "expected_kind": "possible_stated_preference",
+      "text": "В ответах ценю конкретные выводы и команды проверок.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-016",
+      "language": "en",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "I generally put durable state beside its lifecycle owner.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-017",
+      "language": "ru",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "Обычно я отделяю чистую логику от внешних эффектов.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-018",
+      "language": "mixed",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "Я стараюсь проверить rollback перед migration review.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-019",
+      "language": "en",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "I avoid hiding partial failure behind a successful reply.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-020",
+      "language": "ru",
+      "category": "habit",
+      "expected_kind": "possible_self_report",
+      "text": "Как правило, я проверяю границы контракта перед правкой.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-021",
+      "language": "en",
+      "category": "conditional",
+      "expected_kind": "possible_self_report",
+      "text": "When reviewing code, I check which layer owns the state.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-022",
+      "language": "ru",
+      "category": "conditional",
+      "expected_kind": "possible_self_report",
+      "text": "При ревью я сначала ищу слой, который владеет состоянием.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-023",
+      "language": "mixed",
+      "category": "conditional",
+      "expected_kind": "possible_self_report",
+      "text": "Когда проверяю rollout, я смотрю на actual runtime outcome.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-024",
+      "language": "en",
+      "category": "conditional",
+      "expected_kind": "possible_self_report",
+      "text": "Before changing a contract, I check its callers and tests.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-025",
+      "language": "ru",
+      "category": "correction",
+      "expected_kind": "possible_correction",
+      "text": "В следующих ответах указывай выполненные проверки.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-026",
+      "language": "en",
+      "category": "correction",
+      "expected_kind": "possible_correction",
+      "text": "In future replies, keep the diagnosis separate from the test result.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-027",
+      "language": "mixed",
+      "category": "correction",
+      "expected_kind": "possible_correction",
+      "text": "На будущее, показывай diff и test results без общих обещаний.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-028",
+      "language": "ru",
+      "category": "negation",
+      "expected_kind": "possible_self_report",
+      "text": "Я больше не полагаюсь на зелёный CI без проверки runtime.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-029",
+      "language": "en",
+      "category": "negation",
+      "expected_kind": "possible_self_report",
+      "text": "I normally avoid asserting a rollout succeeded without runtime evidence.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-030",
+      "language": "en",
+      "category": "implicit_unhandled",
+      "expected_kind": "possible_stated_preference",
+      "text": "A pure decision core with effects at the boundary is easier for me to review.",
+      "known_miss": true
+    },
+    {
+      "id": "synthetic-031",
+      "language": "ru",
+      "category": "implicit_unhandled",
+      "expected_kind": "possible_self_report",
+      "text": "Сначала читаю контракт, потом разбираю код, так у меня складывается проверка.",
+      "known_miss": true
+    },
+    {
+      "id": "synthetic-032",
+      "language": "en",
+      "category": "long_unhandled",
+      "expected_kind": "possible_self_report",
+      "text": "I usually review the full contract before changing code. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. ",
+      "known_miss": true
+    },
+    {
+      "id": "synthetic-033",
+      "language": "en",
+      "category": "one_off",
+      "expected_kind": null,
+      "text": "Review this code before lunch.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-034",
+      "language": "ru",
+      "category": "one_off",
+      "expected_kind": null,
+      "text": "Не коммить эту задачу.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-035",
+      "language": "mixed",
+      "category": "one_off",
+      "expected_kind": null,
+      "text": "Проверь tests в этом PR.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-036",
+      "language": "en",
+      "category": "project_rule",
+      "expected_kind": null,
+      "text": "This repository requires tests for every migration.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-037",
+      "language": "ru",
+      "category": "project_rule",
+      "expected_kind": null,
+      "text": "В этом проекте схема базы меняется только через миграции.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-038",
+      "language": "en",
+      "category": "third_party",
+      "expected_kind": null,
+      "text": "Anton said: I prefer short replies.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-039",
+      "language": "ru",
+      "category": "third_party",
+      "expected_kind": null,
+      "text": "Он обычно проверяет контракт перед изменением кода.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-040",
+      "language": "mixed",
+      "category": "third_party",
+      "expected_kind": null,
+      "text": "Коллега написал: I usually review code first.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-041",
+      "language": "en",
+      "category": "quotation",
+      "expected_kind": null,
+      "text": "> I prefer short replies.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-042",
+      "language": "ru",
+      "category": "quotation",
+      "expected_kind": null,
+      "text": "```text\nЯ предпочитаю короткие ответы.\n```",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-043",
+      "language": "mixed",
+      "category": "quotation",
+      "expected_kind": null,
+      "text": "    I prefer краткие replies.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-044",
+      "language": "en",
+      "category": "quotation",
+      "expected_kind": null,
+      "text": "\"I usually review code first.\"",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-045",
+      "language": "ru",
+      "category": "question",
+      "expected_kind": null,
+      "text": "Мне удобнее читать код до документации?",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-046",
+      "language": "en",
+      "category": "question",
+      "expected_kind": null,
+      "text": "Do I usually check tests before review?",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-047",
+      "language": "en",
+      "category": "irrelevant",
+      "expected_kind": null,
+      "text": "I prefer coffee without sugar.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-048",
+      "language": "ru",
+      "category": "irrelevant",
+      "expected_kind": null,
+      "text": "Я обычно гуляю утром.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-049",
+      "language": "en",
+      "category": "collective",
+      "expected_kind": null,
+      "text": "We prefer small code changes.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-050",
+      "language": "ru",
+      "category": "collective",
+      "expected_kind": null,
+      "text": "Мы обычно проводим ревью утром.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-051",
+      "language": "en",
+      "category": "quoted_fragment",
+      "expected_kind": null,
+      "text": "I prefer short replies.\n> But this quotation is not my own wording.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-052",
+      "language": "ru",
+      "category": "quoted_fragment",
+      "expected_kind": null,
+      "text": "Я обычно читаю код.\n```\nчужой текст\n```",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-053",
+      "language": "en",
+      "category": "secret",
+      "expected_kind": null,
+      "text": "I prefer commits signed using ghp_syntheticcredential",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-054",
+      "language": "mixed",
+      "category": "html",
+      "expected_kind": null,
+      "text": "Я предпочитаю short replies <!-- third party -->",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-055",
+      "language": "en",
+      "category": "conditional_third_party",
+      "expected_kind": null,
+      "text": "When reviewing code, Anton says: I check the tests first.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-056",
+      "language": "ru",
+      "category": "conditional_third_party",
+      "expected_kind": null,
+      "text": "При ревью Антон сказал: я проверяю контракт.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-057",
+      "language": "en",
+      "category": "conditional_third_party",
+      "expected_kind": null,
+      "text": "When reviewing code, Anton wrote “before merging, I check the tests”.",
+      "known_miss": false
+    },
+    {
+      "id": "synthetic-058",
+      "language": "ru",
+      "category": "conditional_third_party",
+      "expected_kind": null,
+      "text": "При ревью Антон написал «обычно я проверяю код».",
+      "known_miss": false
+    }
+  ]
+}

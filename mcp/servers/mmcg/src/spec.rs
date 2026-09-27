@@ -128,6 +128,14 @@ pub struct Frontmatter {
     /// are command obligations checked by preflight and canonical postflight.
     #[serde(default)]
     pub verify: Vec<VerifyEntry>,
+    /// Every declared criterion requires all of its observed `verify[].run` IDs.
+    /// Absence preserves legacy behavior; an explicit empty/null contract fails.
+    #[serde(
+        default,
+        deserialize_with = "crate::acceptance::deserialize_contract",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub acceptance: Option<Vec<crate::acceptance::Criterion>>,
     /// Required docs, including new docs explicitly listed in `creates`.
     /// Code-removal acknowledgements never exempt these paths.
     #[serde(default)]
@@ -223,14 +231,20 @@ impl SymbolSpec {
 #[serde(untagged, deny_unknown_fields)]
 pub enum VerifyEntry {
     Label(String),
-    Command { cmd: String },
+    Command {
+        cmd: String,
+    },
+    Observed {
+        cmd: String,
+        run: crate::verification_receipts::RunDeclaration,
+    },
 }
 
 impl VerifyEntry {
     /// Runnable command (`cmd:` form), or None for label-only entries.
     pub fn command(&self) -> Option<&str> {
         match self {
-            VerifyEntry::Command { cmd } => Some(cmd),
+            VerifyEntry::Command { cmd } | VerifyEntry::Observed { cmd, .. } => Some(cmd),
             VerifyEntry::Label(_) => None,
         }
     }
@@ -238,7 +252,7 @@ impl VerifyEntry {
     pub fn label(&self) -> &str {
         match self {
             VerifyEntry::Label(s) => s,
-            VerifyEntry::Command { cmd } => cmd,
+            VerifyEntry::Command { cmd } | VerifyEntry::Observed { cmd, .. } => cmd,
         }
     }
 }

@@ -1458,6 +1458,9 @@ mod tests {
                 iteration: 1,
                 allow_no_index: false,
                 strict: true,
+                invocation_required: false,
+                semantic_review_required: false,
+                semantic_review_sha256: None,
             })
             .unwrap(),
         )

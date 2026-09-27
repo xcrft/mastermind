@@ -477,20 +477,16 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 # without forcing the same long inventory into every user-facing README.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
-MMCG_EXPECTED_LAST_TOOL = "mmcg_concept"
+MMCG_EXPECTED_LAST_TOOL = "mmcg_profile"
 MMCG_EXPECTED_BEHAVIOR_COUNTS = {
     "refreshable_tool": 21,
-    "read_only_tool": 8,
+    "read_only_tool": 12,
     "additive_tool": 1,
 }
 
-# Files that must reference every mmcg_* tool name. (Each may have one
-# canonical mention line; we only require *presence* of each tool name in the
-# file's text. False positives possible if a name appears in unrelated prose,
-# but mmcg_xxx names are sufficiently distinctive.)
+# The reference owns the complete catalog; integration guides link to it.
 MMCG_TOOL_LIST_DOCS: list[str] = [
     "docs/reference/mmcg.md",
-    "docs/integrations/generic-mcp.md",
 ]
 
 # Files that quote a tool *count* like "16 structural query tools" / "15 tools".
@@ -967,6 +963,14 @@ def validate_mmcg_tool_drift() -> list[Issue]:
     issues = validate_mmcg_tool_extractor_fixture()
     if issues:
         return issues
+    guide = REPO_ROOT / "docs/integrations/generic-mcp.md"
+    try:
+        guide_text = guide.read_text(encoding="utf-8")
+    except OSError as error:
+        issues.append(Issue(guide, "error", f"cannot read MCP integration guide: {error}"))
+    else:
+        if not re.search(r"\]\(\.\./reference/mmcg\.md#mcp-tools\)", guide_text):
+            issues.append(Issue(guide, "error", "MCP integration guide must link to the canonical tool catalog"))
     src_path = REPO_ROOT / MMCG_MCP_SRC
     if not src_path.is_file():
         return [Issue(src_path, "error", "mcp.rs missing — cannot derive tool list")]

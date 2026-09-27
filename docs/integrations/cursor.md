@@ -1,45 +1,40 @@
 # Cursor integration
 
-Connect Cursor to the local graph while preserving every unrelated MCP server
-and root setting. Use project scope for `.cursor/mcp.json` or user scope for
-`~/.cursor/mcp.json`.
-
-## Preview first, then apply
+## Register
 
 ```bash
 npm install -g @xcraftmind/mastermind
 cd your-project
 mastermind index .
 mastermind setup cursor --scope project --root .
-```
-
-Apply project or user registration explicitly:
-
-```bash
 mastermind setup cursor --scope project --root . --write
-mastermind setup cursor --scope user --write
 ```
 
-The setup engine preserves unrelated root fields and MCP servers, rejects
-duplicate JSON keys and unsafe paths, and does not write without `--write`.
+| Scope | Configuration |
+|---|---|
+| `project` | `.cursor/mcp.json` |
+| `user` | `~/.cursor/mcp.json` |
 
-## Change or undo safely
-
-A canonical entry is an idempotent no-op. Customized replacement or removal
-requires `--force`, which does not imply `--write`. Forced file-backed changes
-save the previous bytes under `~/.mastermind/setup-backups/`.
-
-```bash
-mastermind setup cursor --scope project --root . --remove          # dry-run
-mastermind setup cursor --scope project --root . --remove --write
-```
-
-## Verify the result
+Setup previews without `--write` and preserves unrelated entries.
+Reload Cursor, then inspect registration and project health:
 
 ```bash
 mastermind doctor
 ```
 
-Doctor treats Cursor configuration as bounded data, reports only structural
-status, and does not execute the configured command. Restart Cursor after
-applying a change. Keep `.mastermind/` out of version control.
+## Change or remove
+
+```bash
+mastermind setup cursor --scope project --root . --remove
+mastermind setup cursor --scope project --root . --remove --write
+```
+
+| Condition | Action |
+|---|---|
+| Removal | Select the original scope |
+| Matching entry | No change |
+| Customized entry | Add `--force` and `--write` |
+| Forced file change | Backup at `~/.mastermind/setup-backups/` |
+
+Use [Workflow](../workflow.md) for controlled tasks and the
+[MCP reference](../reference/mmcg.md#mcp-tools) for tool arguments.

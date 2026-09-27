@@ -522,6 +522,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
             }
             Finding::ExecutorReportUnexpectedFile { .. } => "executor report unexpected file",
             Finding::VerificationRequirementUnmet { .. } => "verification requirement unmet",
+            Finding::AcceptanceCriterionUnmet { .. } => "acceptance criterion unmet",
             Finding::HallucinatedSymbol { .. } => "hallucinated symbol",
             Finding::MissingCallEdge { .. } => "missing call edge",
             Finding::VacuousTestClaim { .. } => "vacuous test claim",
@@ -582,6 +583,7 @@ mod tests {
             symbol_diff: None,
             claim_checks: None,
             executor_report: None,
+            acceptance: None,
         }
     }
 

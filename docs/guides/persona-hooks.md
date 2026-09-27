@@ -35,7 +35,70 @@ execution currently require macOS or Linux.
 | Existing hooks | Preserved |
 | Native hook trust and profile reads | Require separate authorization |
 | Activation | Restart the client to capture `SessionStart` |
-| Installed receiver | Short local capture only, no model or analysis worker |
+| Installed receiver | Local capture. Prompt refinement requires a selected processor. Habit analysis uses a separate worker |
+
+### Refine every admitted prompt
+
+Select a processor once for this client and project:
+
+```bash
+mastermind miner hooks setup --client codex --project-root . \
+  --refiner-provider claude --refiner-timeout 8 --write
+```
+
+Use `--refiner-processor /absolute/path/to/processor` for a local or custom
+processor. Repeat `--refiner-arg=VALUE` for its arguments. The built-in Claude
+adapter uses the isolated API/provider contract described below. Setup without
+refiner options preserves the selection. `--disable-refiner --write` disables
+refinement while retaining capture. Restart and trust the updated hook definitions.
+
+```text
+native prompt → local capture → durable intake → selected processor
+                                            → validated advisory → native agent
+```
+
+| Intake contract | Behavior |
+|---|---|
+| Original | Stored from the captured text, with a SHA-256 digest of its UTF-8 bytes |
+| `passthrough` | Result must equal the original byte for byte |
+| `refined` | Separate proposed text, bounded to 16 KiB |
+| `ask` | Up to 3 questions. No planner or executor handoff |
+| Workflow activation | Model interprets intent in any language. An exact eligible user-prose citation is required |
+| Activation result | Advisory handoff to the existing `mastermind-task-planning` skill |
+| Continuation | Requires an explicit task binding. Automatic session-to-task binding is not implemented yet |
+| Permission | Intake grants no execution, tools or approval |
+| Native delivery | `additionalContext`. The original prompt still reaches the agent |
+| Incomplete, redacted or generated input | No processor invocation |
+| Failure or invalid result | `degraded`, original retained, no workflow handoff |
+| Concurrent revocation, reconfiguration, new prompt or end | Result withheld when publication admission changes |
+
+| Bound | Value |
+|---|---|
+| Processor invocations | At most 1 attempt per captured prompt, including failures |
+| Processor timeout | Default 8 s, configurable 1–20 s |
+| Native prompt hook timeout | Processor timeout + 3 s |
+| Other installed hooks | 3 s |
+| Original / processor response | 16 KiB / 64 KiB |
+| Combined native context | 8 KiB. Oversized refinement uses a receipt reference. Profile delivery may be omitted |
+| Client model/API retries and token usage | Not measured by this adapter |
+
+Inspect `intake` in `hooks show`, then read the full receipt:
+
+```bash
+mastermind miner hooks intake '<intake-id>'
+mastermind miner hooks status --client codex --project-root .
+```
+
+A `pending` receipt after a crash means the outcome is unknown and is not
+automatically retried. Clients without stable event IDs cannot distinguish
+identical intentional repeats from retries, so ambiguous replay is quarantined.
+Native clients can ignore or truncate context and may continue with the original
+after a hook timeout. An offered advisory does not prove the workflow ran.
+
+Refiner-exposed episodes remain captured but are conservatively excluded from
+independent habit evidence. Event-level influence accounting is still required
+to mine unaffected observations from those episodes. Structural validation binds
+the result to its source and does not prove preservation of meaning.
 
 ## 2. Inspect captured episodes
 
@@ -72,7 +135,7 @@ mastermind miner hooks analyze '<capture-episode-id>' \
 
 | Built-in Claude processor | Contract |
 |---|---|
-| Invocation | Explicit provider request using `--bare` |
+| Invocation | Explicit provider request using `--bare`, limited to one agentic turn with [`--max-turns`](https://code.claude.com/docs/en/cli-reference) |
 | Disabled | Tools, MCP discovery, project settings, persistence and browser integration |
 | Credentials | API/provider credentials required. Subscription OAuth/keychain credentials are not used |
 | Unsupported client | Fail without an interactive-session fallback |
@@ -177,7 +240,7 @@ mastermind miner hooks setup --client codex --project-root . \
 
 | Exposure | Mining effect |
 |---|---|
-| Mastermind injection or recognized MCP/profile-file read | Excludes affected episodes from independent habit mining |
+| Mastermind profile/refiner injection or recognized MCP/profile-file read | Excludes affected episodes from independent habit mining |
 | Repetition of injected advice | Not independent evidence |
 | Other delivery paths | Detection is limited to supported paths |
 
@@ -186,6 +249,7 @@ mastermind miner hooks setup --client codex --project-root . \
 | Evidence change | Required action |
 |---|---|
 | Later prompt changes an earlier episode revision | Inspect and analyze the new revision |
+| User-prose eligibility rules change | Earlier analysis and source proofs become stale. Inspect and analyze again |
 | Same task in a new session | Retain the same task identity |
 | New or changed evidence | Review again. Old approval cannot be silently reused |
 

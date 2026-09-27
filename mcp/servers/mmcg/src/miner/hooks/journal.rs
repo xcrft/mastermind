@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod intake;
+
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
@@ -35,7 +37,12 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_analysis (
                     episode TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL,
                     completed INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(episode,revision,processor));";
+                    PRIMARY KEY(episode,revision,processor));
+                CREATE TABLE IF NOT EXISTS hook_refiner (
+                    client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
+                    data TEXT, PRIMARY KEY(client,project_root));
+                CREATE TABLE IF NOT EXISTS hook_intake (
+                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);";
 
 pub(super) fn path() -> Result<PathBuf, Error> {
     Ok(std::env::home_dir()
@@ -852,6 +859,7 @@ impl Journal {
         tx.execute("DELETE FROM hook_episode WHERE id=?1", [id])?;
         tx.execute("DELETE FROM hook_event WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
+        tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
         tx.commit()?;
         Ok(())
     }
@@ -942,6 +950,7 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     gaps.dedup();
     let revision = hash(&json!([
         EXTRACTOR,
+        super::semantic::PROSE_VERSION,
         ep,
         session.capture_version,
         session.gaps,

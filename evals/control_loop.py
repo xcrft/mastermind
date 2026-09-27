@@ -166,6 +166,13 @@ CASES = {
         "collection_preview_is_read_only_and_collection_does_not_publish_candidates",
         "preference_acceptance_binds_review_and_live_sources_through_mcp_and_refresh",
     ),
+    "persona_hooks_refiner_cli": (
+        "malformed_binding_and_timeout_failures_preserve_original_without_workflow_handoff",
+        "replay_closed_turn_and_conflicting_native_identity_never_repeat_the_processor",
+        "revocation_or_a_new_prompt_withholds_a_blocked_processors_old_result",
+        "durable_capture_fences_block_refinement_before_processing_and_before_publication",
+        "disabling_refiner_revokes_processing_even_when_native_configuration_is_malformed",
+    ),
 }
 
 

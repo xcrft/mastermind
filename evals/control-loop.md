@@ -118,10 +118,11 @@ The source-bound CLI selection in `control_loop.py` covers:
 | Admission and budget | Native denial, controller lock, stale input, finite repair attempts |
 | Context | Stale documents withheld, audience and source scope enforced |
 | Person profile | Collection creates no active habit, acceptance stays bound to reviewed sources |
+| Hook intake | Invalid results, timeouts, replay, revocation, concurrent prompts and unfinished deliveries cannot publish a workflow handoff |
 
 These tests exercise production CLI paths. They are sampled conformance
 evidence: passing them does not prove that the abstraction covers all code,
-interleavings, inputs or supported environments. Persona and context tests are
+interleavings, inputs or supported environments. Persona, context and hook tests are
 adjacent boundary checks, not part of the six-bit completion theorem.
 
 ## Reading results

@@ -35,6 +35,7 @@ pub(super) fn configure(
     project_root: &Path,
     write: bool,
     remove: bool,
+    refiner_timeout: Option<u64>,
 ) -> Result<Value, Box<dyn Error>> {
     if !cfg!(unix) {
         return Err("native hook command installation currently requires a Unix platform".into());
@@ -91,10 +92,14 @@ pub(super) fn configure(
     events.push(extra_event);
     let mut generated = serde_json::Map::new();
     for event in &events {
-        generated.insert(
-            (*event).to_string(),
-            json!([{ "hooks": [handler.clone()] }]),
-        );
+        let mut event_handler = handler.clone();
+        if *event == "UserPromptSubmit" {
+            if let Some(timeout) = refiner_timeout {
+                event_handler["timeout"] = json!(timeout + 3);
+                event_handler["statusMessage"] = json!("Refining the request with Mastermind");
+            }
+        }
+        generated.insert((*event).to_string(), json!([{ "hooks": [event_handler] }]));
     }
     merge(&mut config, &registration, &generated, remove)?;
     let changed = config != original;
@@ -142,7 +147,7 @@ pub(super) fn configure(
         "local_hooks_disabled": original.get("disableAllHooks").and_then(Value::as_bool) == Some(true),
         "platform": "unix",
         "coverage": "native_events_only",
-        "purpose": "local mining capture; these hooks do not enforce action permissions",
+        "purpose": "local mining capture and optional prompt refinement; these hooks do not enforce action permissions",
         "limits": limits,
         "documentation": documentation,
     }))

@@ -35,6 +35,25 @@ The Python harness tests use fixtures. Neither command calls a model.
 | `intake` | [intake.jsonl](intake.jsonl) | Goal refinement | Refine, pass through or ask |
 | `workflow` | [workflow.jsonl](workflow.jsonl) | Portable workflow skills | Required behavior in a focused scenario |
 
+[Hook intake cases](hook-intake.jsonl) are a separate, author-labeled synthetic
+corpus for the automatic refiner. They are not wired to `runner.py` and no model
+quality result is published for them. Production protocol and lifecycle checks
+run in Rust's `persona_hooks_refiner_cli` suite using deterministic processors.
+
+| Hook corpus | Cases |
+|---|---:|
+| Activate Mastermind | 10 |
+| Continue an explicitly bound task | 7 |
+| Ordinary request, including quoted instructions and negation | 15 |
+| Unclear reference or missing task binding | 8 |
+| Total | 40 |
+
+The corpus covers Russian, English, mixed Russian/English, Spanish, French,
+German and Chinese. Fake-processor routing tests establish protocol behavior,
+not multilingual classification accuracy or preservation of meaning. A model
+benchmark still needs independently reviewed labels, held-out cases and retained
+outputs for every attempted case.
+
 [Fixture READMEs](fixtures/) describe the planted changes. Model-backed researcher
 and auditor runs need a matching `mmcg` binary. The runner uses deterministic
 grading, without an LLM judge.

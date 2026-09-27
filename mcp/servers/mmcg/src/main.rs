@@ -1070,6 +1070,23 @@ enum HookCmd {
         /// Optionally offer reviewed context using an existing profile read grant.
         #[arg(long)]
         profile_client: Option<String>,
+        /// Refine each admitted prompt with an explicitly selected provider.
+        #[arg(long, value_parser=["claude"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
+        refiner_provider: Option<String>,
+        /// Custom refiner executable. Receives JSON on stdin and returns strict JSON.
+        #[arg(long, conflicts_with_all=["refiner_provider", "disable_refiner", "remove"])]
+        refiner_processor: Option<PathBuf>,
+        #[arg(
+            long = "refiner-arg",
+            requires = "refiner_processor",
+            allow_hyphen_values = true
+        )]
+        refiner_args: Vec<String>,
+        #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u64).range(1..=20))]
+        refiner_timeout: u64,
+        /// Disable automatic refinement while retaining local mining capture.
+        #[arg(long)]
+        disable_refiner: bool,
     },
     /// Native JSON hook on stdin; stdout is only the native hook response.
     Receive {
@@ -1077,6 +1094,10 @@ enum HookCmd {
         client: String,
         #[arg(long, default_value = ".")]
         project_root: PathBuf,
+    },
+    /// Inspect the immutable prompt and result of a hook refiner attempt.
+    Intake {
+        id: String,
     },
     Status {
         #[arg(long, value_parser=["claude","codex"])]
@@ -2679,13 +2700,30 @@ fn run_cli_inner(
                     write,
                     remove,
                     profile_client,
-                } => hooks::setup(
-                    &client,
-                    &project_root,
-                    write,
-                    remove,
-                    profile_client.as_deref(),
-                )?,
+                    refiner_provider,
+                    refiner_processor,
+                    refiner_args,
+                    refiner_timeout,
+                    disable_refiner,
+                } => {
+                    let refiner = (refiner_provider.is_some() || refiner_processor.is_some())
+                        .then_some(hooks::RefinerConfig {
+                            provider: refiner_provider,
+                            processor: refiner_processor,
+                            args: refiner_args,
+                            timeout_secs: refiner_timeout,
+                        });
+                    hooks::setup(
+                        &client,
+                        &project_root,
+                        write,
+                        remove,
+                        profile_client.as_deref(),
+                        refiner.as_ref(),
+                        disable_refiner,
+                    )?;
+                }
+                HookCmd::Intake { id } => hooks::intake(&id)?,
                 HookCmd::Receive {
                     client,
                     project_root,

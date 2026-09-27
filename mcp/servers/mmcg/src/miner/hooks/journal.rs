@@ -11,10 +11,38 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod intake;
+
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_EPISODES: i64 = 2000;
+const CAPTURE_VERSION: u32 = 2;
+
+const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
+                CREATE TABLE IF NOT EXISTS hook_grant (
+                    client TEXT NOT NULL, project_root TEXT NOT NULL, generation INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL, pending INTEGER NOT NULL DEFAULT 0,
+                    gap TEXT NOT NULL DEFAULT '', profile_client TEXT,
+                    PRIMARY KEY(client,project_root));
+                CREATE TABLE IF NOT EXISTS hook_session (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS hook_episode (id TEXT PRIMARY KEY, session TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_episode_session ON hook_episode(session,id);
+                CREATE TABLE IF NOT EXISTS hook_event (
+                    id TEXT PRIMARY KEY, session TEXT NOT NULL, native_key TEXT NOT NULL,
+                    digest TEXT NOT NULL, episode TEXT, tool_id TEXT, kind TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_event_tool ON hook_event(session,tool_id,kind);
+                CREATE TABLE IF NOT EXISTS hook_draft (id TEXT PRIMARY KEY, episode TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_draft_episode ON hook_draft(episode,id);
+                CREATE TABLE IF NOT EXISTS hook_analysis (
+                    episode TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(episode,revision,processor));
+                CREATE TABLE IF NOT EXISTS hook_refiner (
+                    client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
+                    data TEXT, PRIMARY KEY(client,project_root));
+                CREATE TABLE IF NOT EXISTS hook_intake (
+                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);";
 
 pub(super) fn path() -> Result<PathBuf, Error> {
     Ok(std::env::home_dir()
@@ -39,6 +67,8 @@ pub(super) struct Grant {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
+    #[serde(default)]
+    capture_version: u32,
     id: String,
     native_id: String,
     client: String,
@@ -181,25 +211,7 @@ impl Journal {
         }
         conn.busy_timeout(Duration::from_millis(500))?;
         if write {
-            conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
-                CREATE TABLE IF NOT EXISTS hook_grant (
-                    client TEXT NOT NULL, project_root TEXT NOT NULL, generation INTEGER NOT NULL,
-                    enabled INTEGER NOT NULL, pending INTEGER NOT NULL DEFAULT 0,
-                    gap TEXT NOT NULL DEFAULT '', profile_client TEXT,
-                    PRIMARY KEY(client,project_root));
-                CREATE TABLE IF NOT EXISTS hook_session (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS hook_episode (id TEXT PRIMARY KEY, session TEXT NOT NULL, data TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS hook_episode_session ON hook_episode(session,id);
-                CREATE TABLE IF NOT EXISTS hook_event (
-                    id TEXT PRIMARY KEY, session TEXT NOT NULL, native_key TEXT NOT NULL,
-                    digest TEXT NOT NULL, episode TEXT, tool_id TEXT, kind TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS hook_event_tool ON hook_event(session,tool_id,kind);
-                CREATE TABLE IF NOT EXISTS hook_draft (id TEXT PRIMARY KEY, episode TEXT NOT NULL, data TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS hook_draft_episode ON hook_draft(episode,id);
-                CREATE TABLE IF NOT EXISTS hook_analysis (
-                    episode TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL,
-                    completed INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(episode,revision,processor));")?;
+            conn.execute_batch(SCHEMA)?;
             let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
             conn.pragma_update(None, "max_page_count", MAX_BYTES as i64 / page_size)?;
         }
@@ -311,6 +323,7 @@ impl Journal {
             incoming.native_session
         ]));
         let mut session = self.session(&sid)?.unwrap_or_else(|| Session {
+            capture_version: CAPTURE_VERSION,
             id: sid.clone(),
             native_id: incoming.native_session.clone(),
             client: grant.client.clone(),
@@ -348,23 +361,33 @@ impl Journal {
         if !active_generation {
             return Err("capture was revoked during delivery".into());
         }
-        let existing: Option<String> = tx
+        let existing: Option<(String, Option<String>)> = tx
             .query_row(
-                "SELECT digest FROM hook_event WHERE id=?1",
+                "SELECT digest,episode FROM hook_event WHERE id=?1",
                 [&event_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(digest) = existing {
-            if digest != incoming.digest {
+        if let Some((digest, episode)) = existing {
+            let conflict = digest != incoming.digest;
+            if conflict {
                 add_gap(&mut session.gaps, "event_identity_conflict");
             } else if incoming.native_key.is_none() && incoming.kind == "UserPromptSubmit" {
                 add_gap(&mut session.gaps, "ambiguous_prompt_replay");
             }
+            if incoming.native_key.is_none() && incoming.kind == "SessionEnd" && session.started {
+                // Without a native identity this may be the resumed session ending again.
+                add_gap(&mut session.gaps, "ambiguous_session_lifecycle");
+                session.started = false;
+                session.active = None;
+                session.previous_assistant = None;
+            }
             save_session(&tx, &session)?;
             finish(&tx, grant)?;
             tx.commit()?;
-            return Ok(json!({"status":"duplicate","event_id":event_id,"episode":session.active}));
+            return Ok(
+                json!({"status":if conflict {"conflict"} else {"duplicate"},"event_id":event_id,"episode":episode}),
+            );
         }
         if incoming.forked {
             add_gap(&mut session.gaps, "fork_or_delegated_session");
@@ -392,14 +415,28 @@ impl Journal {
             text: incoming.text,
         };
         if incoming.kind == "SessionStart" {
+            if !session.started {
+                session.active = None;
+                session.previous_assistant = None;
+            }
             session.started = true;
         }
         let mut target = session.active.clone();
         if incoming.kind == "UserPromptSubmit" {
+            if let Some(turn) = &incoming.native_turn {
+                if !episodes_for_turn(&tx, &sid, turn)?.is_empty() {
+                    add_gap(&mut session.gaps, "ambiguous_turn_identity");
+                }
+            }
             if let Some(previous) = &session.active {
                 let mut ep = load_episode(&tx, previous)?;
                 if !ep.closed {
                     add_gap(&mut ep.gaps, "next_prompt_before_stop");
+                    if ep.turn_id.is_none() || incoming.native_turn.is_none() {
+                        // Without both turn identities, a later Stop cannot
+                        // establish which of the overlapping requests ended.
+                        add_gap(&mut session.gaps, "ambiguous_turn_overlap");
+                    }
                 }
                 let mut correction = event.clone();
                 correction.origin = "next_turn_context".into();
@@ -443,6 +480,21 @@ impl Journal {
             target = Some(id.clone());
             session.active = Some(id);
             session.episode_count += 1;
+        } else if matches!(incoming.kind.as_str(), "Stop" | "Interrupt" | "StopFailure") {
+            if let Some(turn) = &incoming.native_turn {
+                let matches = episodes_for_turn(&tx, &sid, turn)?;
+                target = match matches.as_slice() {
+                    [episode] => Some(episode.clone()),
+                    [] => {
+                        add_gap(&mut session.gaps, "unmatched_turn_event");
+                        None
+                    }
+                    _ => {
+                        add_gap(&mut session.gaps, "ambiguous_turn_identity");
+                        None
+                    }
+                };
+            }
         } else if matches!(incoming.kind.as_str(), "PostToolUse" | "PostToolUseFailure") {
             if let Some(tool_id) = &incoming.tool_id {
                 let found: Option<String> = tx.query_row("SELECT episode FROM hook_event WHERE session=?1 AND tool_id=?2 AND kind='PreToolUse' ORDER BY rowid DESC LIMIT 1",
@@ -477,8 +529,8 @@ impl Journal {
                 }
             } else if incoming.kind == "Stop" {
                 ep.closed = true;
-                if !event.text.is_empty() {
-                    session.previous_assistant = Some(event.clone());
+                if session.started && session.active.as_ref() == Some(id) {
+                    session.previous_assistant = (!event.text.is_empty()).then(|| event.clone());
                 }
             } else if matches!(
                 incoming.kind.as_str(),
@@ -491,6 +543,11 @@ impl Journal {
         } else if !matches!(incoming.kind.as_str(), "SessionStart" | "SessionEnd") {
             add_gap(&mut session.gaps, "event_without_user_turn");
         }
+        if incoming.kind == "SessionEnd" {
+            session.started = false;
+            session.active = None;
+            session.previous_assistant = None;
+        }
         tx.execute("INSERT INTO hook_event(id,session,native_key,digest,episode,tool_id,kind) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![event_id,sid,key,incoming.digest,target,incoming.tool_id,incoming.kind])?;
         save_session(&tx, &session)?;
@@ -499,16 +556,31 @@ impl Journal {
         Ok(json!({"status":"recorded","event_id":event_id,"episode":target}))
     }
 
-    pub fn expose(&mut self, episode: &str, packet: &Value) -> Result<(), Error> {
+    pub fn expose(&mut self, grant: &Grant, episode: &str, packet: &Value) -> Result<(), Error> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut ep = load_episode(&tx, episode)?;
+        let current = read_grant(&tx, &grant.client, Path::new(&grant.project_root))?
+            .ok_or("hook profile delivery grant is unavailable")?;
+        if !current.enabled
+            || current.generation != grant.generation
+            || current.profile_client.is_none()
+            || current.profile_client != grant.profile_client
+            || ep.client != grant.client
+            || ep.project_root != grant.project_root
+            || ep.generation != grant.generation
+        {
+            return Err("hook profile delivery is no longer authorized for this capture".into());
+        }
         let mut session: Session = serde_json::from_str(&tx.query_row(
             "SELECT data FROM hook_session WHERE id=?1",
             [&ep.session],
             |r| r.get::<_, String>(0),
         )?)?;
+        if !session.started || session.active.as_deref() != Some(episode) || ep.closed {
+            return Err("hook profile delivery requires the active open prompt".into());
+        }
         let claims = |field: &str, key: &str| {
             packet[field].as_array().map(|items| items.iter().take(32)
             .map(|item|json!({"id":item[key],"review_revision":item["review_revision"]})).collect::<Vec<_>>()).unwrap_or_default()
@@ -787,6 +859,7 @@ impl Journal {
         tx.execute("DELETE FROM hook_episode WHERE id=?1", [id])?;
         tx.execute("DELETE FROM hook_event WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
+        tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
         tx.commit()?;
         Ok(())
     }
@@ -814,6 +887,16 @@ fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
         r.get(0)
     })?;
     Ok(serde_json::from_str(&data)?)
+}
+
+fn episodes_for_turn(conn: &Connection, session: &str, turn: &str) -> Result<Vec<String>, Error> {
+    // The session key already includes capture generation. Two matches are
+    // enough to reject an ambiguous identity, never choose the latest match.
+    let mut statement = conn.prepare(
+        "SELECT id FROM hook_episode WHERE session=?1 AND json_extract(data,'$.turn_id')=?2 LIMIT 2",
+    )?;
+    let rows = statement.query_map(params![session, turn], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 fn save_session(conn: &Connection, session: &Session) -> Result<(), Error> {
     conn.execute("INSERT INTO hook_session(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![session.id,serde_json::to_string(session)?])?;
@@ -845,6 +928,9 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
         .ok_or("capture grant unavailable")?;
     let mut gaps = ep.gaps.clone();
     gaps.extend(session.gaps.iter().cloned());
+    if session.capture_version != CAPTURE_VERSION {
+        gaps.push("legacy_capture_semantics".into());
+    }
     if !grant.enabled || grant.generation != ep.generation {
         gaps.push("capture_revoked_or_restarted".into());
     }
@@ -864,7 +950,9 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     gaps.dedup();
     let revision = hash(&json!([
         EXTRACTOR,
+        super::semantic::PROSE_VERSION,
         ep,
+        session.capture_version,
         session.gaps,
         grant.generation,
         grant.enabled,
@@ -880,4 +968,448 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
         coverage_gaps: gaps,
         profile_influenced: !ep.exposures.is_empty(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journal() -> Journal {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        Journal { conn }
+    }
+
+    fn deliver(db: &mut Journal, root: &Path, event: Value) -> Value {
+        let grant = db.begin_capture("codex", root).unwrap().unwrap();
+        db.receive(
+            &grant,
+            super::super::normalize(&event).unwrap(),
+            "project",
+            "repository",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_keeps_its_original_episode_after_a_later_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        let start = json!({"session_id":"s", "hook_event_name":"SessionStart"});
+        assert!(deliver(&mut db, root.path(), start.clone())["episode"].is_null());
+        let first = json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"});
+        let original = deliver(&mut db, root.path(), first.clone());
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop"}),
+        );
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        assert_ne!(original["episode"], next["episode"]);
+
+        let replay = deliver(&mut db, root.path(), first.clone());
+        assert_eq!(replay["status"], "duplicate");
+        assert_eq!(replay["episode"], original["episode"]);
+        assert!(deliver(&mut db, root.path(), start)["episode"].is_null());
+
+        let mut changed = first;
+        changed["prompt"] = json!("Different text with an old identity");
+        let conflict = deliver(&mut db, root.path(), changed);
+        assert_eq!(conflict["status"], "conflict");
+        assert_eq!(conflict["episode"], original["episode"]);
+        assert_eq!(db.grant("codex", root.path()).unwrap().unwrap().pending, 0);
+        assert!(snapshot_at(&db.conn, next["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .contains(&"event_identity_conflict".to_owned()));
+    }
+
+    #[test]
+    fn a_late_unidentified_stop_cannot_certify_an_overlapping_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        let second = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"Stop", "last_assistant_message":"Result for the first request"}),
+        );
+        let snapshot = snapshot_at(&db.conn, second["episode"].as_str().unwrap()).unwrap();
+        assert!(snapshot
+            .coverage_gaps
+            .contains(&"ambiguous_turn_overlap".to_owned()));
+
+        // An unidentified Stop cannot repair the session's ordering evidence.
+        let third = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"UserPromptSubmit", "prompt":"Third request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"Stop", "last_assistant_message":"Result for another request"}),
+        );
+        assert!(snapshot_at(&db.conn, third["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .contains(&"ambiguous_turn_overlap".to_owned()));
+    }
+
+    #[test]
+    fn profile_delivery_rechecks_capture_generation_and_audience() {
+        for change in ["revoke", "recover", "audience"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = journal();
+            let grant = db
+                .configure("codex", root.path(), true, Some("reader-one"), false)
+                .unwrap();
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+            );
+            let receipt = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"Original request"}),
+            );
+            db.configure(
+                "codex",
+                root.path(),
+                change != "revoke",
+                Some(if change == "audience" {
+                    "reader-two"
+                } else {
+                    "reader-one"
+                }),
+                change == "recover",
+            )
+            .unwrap();
+            let episode = receipt["episode"].as_str().unwrap();
+            assert!(
+                db.expose(&grant, episode, &json!({"profile_revision":"old-view"}))
+                    .is_err(),
+                "{change}"
+            );
+            assert!(db.episode(episode).unwrap().exposures.is_empty());
+        }
+    }
+
+    #[test]
+    fn earlier_capture_semantics_cannot_certify_stored_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        let receipt = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"Original request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop"}),
+        );
+        let id = receipt["episode"].as_str().unwrap();
+        let current = snapshot_at(&db.conn, id).unwrap();
+        assert!(current.coverage_gaps.is_empty());
+        let session = db.episode(id).unwrap().session;
+        let mut legacy = serde_json::to_value(db.session(&session).unwrap().unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("capture_version");
+        db.conn
+            .execute(
+                "UPDATE hook_session SET data=?1 WHERE id=?2",
+                params![legacy.to_string(), session],
+            )
+            .unwrap();
+        let old = snapshot_at(&db.conn, id).unwrap();
+        assert!(old
+            .coverage_gaps
+            .contains(&"legacy_capture_semantics".to_owned()));
+        assert_ne!(old.revision, current.revision);
+        assert_eq!(old.events, current.events);
+    }
+
+    #[test]
+    fn session_end_requires_a_new_start_before_another_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        let grant = db
+            .configure("codex", root.path(), true, Some("reader"), false)
+            .unwrap();
+        let start = json!({"session_id":"s", "hook_event_name":"SessionStart"});
+        deliver(&mut db, root.path(), start.clone());
+        let first = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionEnd"}),
+        );
+        assert!(db
+            .expose(&grant, first["episode"].as_str().unwrap(), &json!({}))
+            .is_err());
+        assert_eq!(deliver(&mut db, root.path(), start)["status"], "duplicate");
+        let after_end = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Late request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop"}),
+        );
+        assert!(
+            snapshot_at(&db.conn, after_end["episode"].as_str().unwrap())
+                .unwrap()
+                .coverage_gaps
+                .contains(&"missing_session_start".to_owned())
+        );
+
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "event_id":"fresh-start", "hook_event_name":"SessionStart"}),
+        );
+        let resumed = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"New request after resume"}),
+        );
+        assert!(db
+            .expose(&grant, resumed["episode"].as_str().unwrap(), &json!({}))
+            .is_ok());
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"Stop"}),
+        );
+        assert!(snapshot_at(&db.conn, resumed["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .is_empty());
+    }
+
+    #[test]
+    fn a_late_identified_stop_closes_its_own_turn_without_replacing_newer_context() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        let first = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        let second = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop", "last_assistant_message":"Newer response"}),
+        );
+        let late = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop", "last_assistant_message":"Older response"}),
+        );
+        assert_eq!(late["episode"], first["episode"]);
+        assert!(
+            db.episode(first["episode"].as_str().unwrap())
+                .unwrap()
+                .closed
+        );
+        assert!(snapshot_at(&db.conn, second["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .is_empty());
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"Third request"}),
+        );
+        let episode = db.episode(next["episode"].as_str().unwrap()).unwrap();
+        let context: Vec<_> = episode
+            .events
+            .iter()
+            .filter(|e| e.origin == "prior_turn_context")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(context, ["Newer response"]);
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_stop_identity_never_falls_back_to_the_active_turn() {
+        for ambiguous in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = journal();
+            db.configure("codex", root.path(), true, None, false)
+                .unwrap();
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+            );
+            let first = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "event_id":"first", "turn_id":"same", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+            );
+            let active = if ambiguous {
+                deliver(
+                    &mut db,
+                    root.path(),
+                    json!({"session_id":"s", "event_id":"second", "turn_id":"same", "hook_event_name":"UserPromptSubmit", "prompt":"Conflicting request"}),
+                )
+            } else {
+                first
+            };
+            let stop = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":if ambiguous {"same"} else {"unknown"}, "hook_event_name":"Stop"}),
+            );
+            assert!(stop["episode"].is_null());
+            assert!(
+                !db.episode(active["episode"].as_str().unwrap())
+                    .unwrap()
+                    .closed
+            );
+            let gaps = snapshot_at(&db.conn, active["episode"].as_str().unwrap())
+                .unwrap()
+                .coverage_gaps;
+            assert!(gaps.contains(
+                &if ambiguous {
+                    "ambiguous_turn_identity"
+                } else {
+                    "unmatched_turn_event"
+                }
+                .to_owned()
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_session_end_without_identity_cannot_leave_resumed_admission_open() {
+        for stable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = journal();
+            let grant = db
+                .configure("codex", root.path(), true, Some("reader"), false)
+                .unwrap();
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+            );
+            let mut end = json!({"session_id":"s", "hook_event_name":"SessionEnd"});
+            if stable {
+                end["event_id"] = json!("first-end");
+            }
+            deliver(&mut db, root.path(), end.clone());
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "event_id":"fresh-start", "hook_event_name":"SessionStart"}),
+            );
+            let prompt = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Resumed request"}),
+            );
+            assert_eq!(deliver(&mut db, root.path(), end)["status"], "duplicate");
+            let offered = db.expose(&grant, prompt["episode"].as_str().unwrap(), &json!({}));
+            assert_eq!(offered.is_ok(), stable);
+        }
+    }
+
+    #[test]
+    fn an_active_stop_without_text_clears_the_previous_response() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop", "last_assistant_message":"Old response"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop", "last_assistant_message":null}),
+        );
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"Third request"}),
+        );
+        assert!(!db
+            .episode(next["episode"].as_str().unwrap())
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.origin == "prior_turn_context"));
+    }
 }

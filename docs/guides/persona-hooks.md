@@ -334,6 +334,11 @@ mastermind miner hooks setup --client codex --project-root . \
 | Generated text or repetition of injected advice | Does not establish an independent human preference |
 | Other delivery paths | Detection is limited to supported paths |
 
+The private Lens Profiles view shows selected claims, a metadata-only review
+queue and recorded invocation delivery. `offered_to_process` means bytes were
+offered to the native process. `model_use` remains `unknown`. A context preview
+records no new delivery and does not approve any candidate.
+
 ## Maintain or remove evidence
 
 | Evidence change | Required action |

@@ -143,6 +143,88 @@ pub fn from_paths(
     result
 }
 
+/// Revalidate the evidence actually selected for delivery immediately before
+/// native execution. Work rows are historical previews and are deliberately
+/// excluded: publishing this invocation changes its own work row. This is an
+/// optimistic boundary check, not an atomic snapshot across Git, SQL and files.
+pub fn validate_delivery(
+    root: &Path,
+    index_path: &Path,
+    options: &ContextOptions,
+    profile_client: Option<&str>,
+    offered: &Value,
+) -> Result<(), &'static str> {
+    let normalized = options
+        .normalized()
+        .map_err(|_| "invocation_context_selection_invalid")?;
+    let options = &normalized;
+    let mut selection = options.clone();
+    // Rechecking a selected layer must not omit it merely because another
+    // optional layer has grown since the initial preview.
+    selection.budget_tokens = MAX_BUDGET;
+    // The personal selection is checked separately, after project source I/O.
+    let current = from_paths(root, index_path, &selection, None)
+        .map_err(|_| "invocation_context_revalidation_unavailable")?;
+    if offered["repository_identity"] != current["repository_identity"] {
+        return Err("invocation_context_repository_changed");
+    }
+    for name in ["project", "documentation", "code"] {
+        let previous = &offered["layers"][name];
+        if !previous["data"].is_null()
+            && (previous["status"] != current["layers"][name]["status"]
+                || previous["revision"] != current["layers"][name]["revision"])
+        {
+            return Err("invocation_context_sources_changed");
+        }
+    }
+    let previous = &offered["layers"]["person"]["data"];
+    if !previous.is_null() && !previous["profile_revision"].is_null() {
+        // Do this last, after all other source I/O. Compare selected evidence,
+        // not the global store revision or the advisory draft review queue.
+        let client = profile_client.ok_or("invocation_profile_audience_missing")?;
+        let repo = crate::miner::profile::RepoContext::for_root(root);
+        let person = crate::miner::profile::view(
+            &options.paths,
+            repo.as_ref(),
+            2_000,
+            Some((root, client)),
+            Some(options.role.as_str()),
+            options.workflow.as_deref(),
+        )
+        .map_err(|_| "invocation_profile_revalidation_unavailable")?;
+        if previous["status"] != person["status"]
+            || previous["profile_revision"] != person["profile_revision"]
+            || previous["source_verification"] != person["source_verification"]
+        {
+            return Err("invocation_profile_sources_or_grant_changed");
+        }
+    }
+    Ok(())
+}
+
+/// The approved title is a bounded search selector, never an instruction or
+/// query language. The document reader treats the resulting words literally.
+#[cfg(any(unix, test))]
+pub(crate) fn task_query(title: Option<&str>) -> Option<String> {
+    let words: Vec<String> = title?
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 3)
+        .take(12)
+        .map(|word| {
+            let mut bytes = 0;
+            let literal: String = word
+                .chars()
+                .take_while(|ch| {
+                    bytes += ch.len_utf8();
+                    bytes <= 32
+                })
+                .collect();
+            format!("\"{literal}\"")
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" OR "))
+}
+
 /// Reuses the existing readers without refreshing an index, mining a profile,
 /// creating a store, invoking a model or recording delivery. Each layer owns
 /// its freshness check. There is no cross-store atomic snapshot claim.
@@ -158,27 +240,6 @@ pub fn build(
     let root = capability.canonical_root();
     let identity =
         crate::facts::repository_identity(root).map_err(|_| ContextError::RootUnavailable)?;
-
-    let person = match profile_client {
-        None => omitted("not_enabled", "profile_audience_not_configured"),
-        Some(client) => {
-            let repo = crate::miner::profile::RepoContext::for_root(root);
-            match crate::miner::profile::view(
-                &options.paths,
-                repo.as_ref(),
-                2_000,
-                Some((root, client)),
-                Some(options.role.as_str()),
-                options.workflow.as_deref(),
-            ) {
-                Ok(data) => {
-                    let status = data["status"].as_str().unwrap_or("unavailable").to_owned();
-                    layer(&status, data)?
-                }
-                Err(_) => omitted("unavailable", "profile_read_failed"),
-            }
-        }
-    };
 
     let mut project = omitted("unavailable", "index_unavailable");
     let mut code = project.clone();
@@ -266,6 +327,37 @@ pub fn build(
     }
     let work = crate::workflow_status::task_overview(root, 20);
     let work_status = work["status"].as_str().unwrap_or("unavailable").to_owned();
+    // Check personal sources and audience access after all other layer I/O,
+    // including the separately granted review queue. A revoked queue read
+    // cannot leave an earlier personal payload in the returned preview.
+    let person = match profile_client {
+        None => omitted("not_enabled", "profile_audience_not_configured"),
+        Some(client) => {
+            let queue = crate::miner::hooks::review_queue(root, client);
+            let repo = crate::miner::profile::RepoContext::for_root(root);
+            match crate::miner::profile::view(
+                &options.paths,
+                repo.as_ref(),
+                2_000,
+                Some((root, client)),
+                Some(options.role.as_str()),
+                options.workflow.as_deref(),
+            ) {
+                Ok(mut data) => {
+                    if matches!(
+                        data["status"].as_str(),
+                        Some("ok" | "insufficient_evidence")
+                    ) {
+                        data["review_queue"] = queue;
+                    }
+                    let status = data["status"].as_str().unwrap_or("unavailable").to_owned();
+                    layer(&status, data)?
+                }
+                Err(_) => omitted("unavailable", "profile_read_failed"),
+            }
+        }
+    };
+
     capability
         .verify()
         .map_err(|_| ContextError::RootUnavailable)?;
@@ -384,4 +476,25 @@ fn stabilize_budget(packet: &mut Value) -> Result<(), ContextError> {
         packet["budget"]["estimated_tokens"] = json!(units);
     }
     Err(ContextError::Serialization)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multilingual_task_title_search_cannot_exceed_selection_limits() {
+        let title = ("Ж".repeat(500) + "\n").repeat(100);
+        let options = ContextOptions {
+            since: "HEAD".into(),
+            paths: vec![],
+            role: BriefRole::Executor,
+            workflow: None,
+            query: task_query(Some(&title)),
+            budget_tokens: DEFAULT_BUDGET,
+        };
+        assert!(options.normalized().is_ok());
+        assert!(options.query.as_ref().unwrap().len() <= 512);
+        assert_eq!(task_query(Some("\n\t---***\"")), None);
+    }
 }

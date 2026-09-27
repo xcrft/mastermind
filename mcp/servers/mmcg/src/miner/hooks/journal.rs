@@ -823,6 +823,47 @@ impl Journal {
                 "promotion_eligible":snapshot.revision==draft.episode_revision && super::semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok()})) }).collect()
     }
 
+    pub fn review_queue(&self, root: &Path) -> Result<Value, Error> {
+        // Metadata only, bounded to the selected repository. Finish the SQL
+        // cursor before verifying any source or calling Git.
+        let mut statement = self.conn.prepare("SELECT d.data FROM hook_draft d JOIN hook_episode e ON d.episode=e.id WHERE json_extract(e.data,'$.project_root')=?1 AND json_extract(d.data,'$.attested')=0 ORDER BY d.id LIMIT 9")?;
+        let rows = statement
+            .query_map([root.to_string_lossy()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let truncated = rows.len() > 8;
+        let mut items = Vec::new();
+        let mut snapshots = std::collections::BTreeMap::new();
+        for row in rows.iter().take(8) {
+            let draft: Draft = serde_json::from_str(row)?;
+            let snapshot = snapshots
+                .entry(draft.episode.clone())
+                .or_insert_with(|| self.snapshot(&draft.episode).ok());
+            let current = snapshot.as_ref().filter(|source| {
+                source.revision == draft.episode_revision && source.coverage_gaps.is_empty()
+            });
+            let class = current
+                .and_then(|source| super::semantic::evidence_class(source, &draft.content).ok());
+            let eligible = current.is_some_and(|source| {
+                super::semantic::validate_for_promotion(
+                    source,
+                    std::slice::from_ref(&draft.content),
+                )
+                .is_ok()
+            });
+            items.push(json!({"id":draft.id,"kind":"hook_habit_candidate","status":"authorship_review_required",
+                "source_status":if current.is_some() {"current"} else {"stale_or_unavailable"},
+                "evidence_class":class,"promotion_eligible":eligible,"source_id":draft.episode,
+                "episode_id":draft.episode,"source_revision":draft.episode_revision,
+                "support_count":draft.content.supports.len(),"contradiction_count":draft.content.contradictions.len()}));
+        }
+        Ok(
+            json!({"status":"observed","scope":"unattested_hook_drafts_in_selected_repository",
+            "total":if truncated {None} else {Some(items.len())},"returned":items.len(),"truncated":truncated,
+            "items":items,"authority":"unreviewed_observations_only"}),
+        )
+    }
+
     pub fn attested_drafts(&self, session: &str) -> Result<Vec<Draft>, Error> {
         let mut stmt=self.conn.prepare("SELECT d.data FROM hook_draft d JOIN hook_episode e ON d.episode=e.id WHERE e.session=?1 AND json_extract(d.data,'$.attested')=1 ORDER BY d.id LIMIT 513")?;
         let rows = stmt.query_map([session], |r| r.get::<_, String>(0))?;

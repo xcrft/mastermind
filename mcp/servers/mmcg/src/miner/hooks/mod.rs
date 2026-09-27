@@ -169,6 +169,38 @@ pub(crate) fn task_intake(root: &Path, spec: &Path) -> Result<Option<(String, Va
     journal::task::load(root, spec).map_err(|error| error.to_string())
 }
 
+pub(crate) fn review_queue(root: &Path, audience: &str) -> Value {
+    let result = (|| -> Result<Value, Error> {
+        if !super::access::valid_client_id(audience) {
+            return Err("invalid audience".into());
+        }
+        let root = root.canonicalize()?;
+        let path = store::ProfileStore::db_path().ok_or("profile store is unavailable")?;
+        let profile = store::ProfileStore::open_optional_read_only(&path)?
+            .ok_or("profile access is absent")?;
+        let allowed = || {
+            profile
+                .reader_allowed(root.to_str().ok_or("invalid project root")?, audience)
+                .map_err(Error::from)
+        };
+        if !allowed()? {
+            return Err("profile access denied".into());
+        }
+        let queue = if journal::path()?.exists() {
+            Journal::open(false)?.review_queue(&root)?
+        } else {
+            json!({"status":"not_configured","total":null,"returned":0,"truncated":false,"items":[]})
+        };
+        if !allowed()? {
+            return Err("profile access revoked".into());
+        }
+        Ok(queue)
+    })();
+    result.unwrap_or_else(
+        |_| json!({"status":"unavailable","total":null,"returned":0,"truncated":false,"items":[]}),
+    )
+}
+
 pub fn recover(client_id: &str, root: &Path) -> Result<(), Error> {
     client(client_id)?;
     let root = root.canonicalize()?;

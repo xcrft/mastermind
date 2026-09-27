@@ -449,6 +449,9 @@ enum Cmd {
     /// Run explicitly declared verification commands and record bound results.
     #[command(subcommand)]
     Verification(VerificationCmd),
+    /// Internal native invocation mediation.
+    #[command(subcommand, hide = true)]
+    Invocation(InvocationCmd),
     /// Inspect current evidence for structured acceptance criteria.
     #[command(subcommand)]
     Acceptance(AcceptanceCmd),
@@ -550,12 +553,18 @@ enum Cmd {
         /// Run Claude with bound context and permission policy in a new preflight iteration.
         #[arg(long, conflicts_with = "post_only")]
         exec: bool,
+        /// Mediate supported native tool requests against the approved file and check scope.
+        #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only"])]
+        guarded_exec: bool,
         /// Retry fresh failed checks inside the approved scope and finite iteration budget.
         #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
         auto_repair: bool,
         /// Review a held task once and complete if resolved. Without --exec, resume its existing audit.
         #[arg(long, conflicts_with_all = ["pre_only", "post_only"])]
         auto_review: bool,
+        /// Allow one concrete negative-criterion repair followed by a fresh review.
+        #[arg(long, requires_all = ["exec", "auto_review"], conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
+        auto_follow_up: bool,
         /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
         #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
         review_timeout: u64,
@@ -823,6 +832,14 @@ enum ReviewCmd {
         /// Live-check one root-bound portable document graph and bind it into the package.
         #[arg(long, value_name = "PATH")]
         document_graph: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InvocationCmd {
+    Guard {
+        #[arg(long)]
+        manifest: PathBuf,
     },
 }
 
@@ -2490,6 +2507,16 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
+        Cmd::Invocation(InvocationCmd::Guard { manifest }) => {
+            match mmcg::invocation::guard_hook(&manifest) {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(2),
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    std::process::exit(2);
+                }
+            }
+        }
         Cmd::Verification(VerificationCmd::Run {
             spec,
             root,
@@ -2701,8 +2728,10 @@ fn run_cli_inner(
             pre_only,
             post_only,
             exec,
+            guarded_exec,
             auto_repair,
             auto_review,
+            auto_follow_up,
             review_timeout,
             review_max_turns,
             exec_timeout,
@@ -2726,6 +2755,7 @@ fn run_cli_inner(
                     exec,
                     auto_repair,
                     auto_review,
+                    auto_follow_up,
                     review_invocation: mmcg::review_invocation::Options {
                         timeout_secs: review_timeout,
                         max_turns: review_max_turns,
@@ -2734,6 +2764,7 @@ fn run_cli_inner(
                         wall_timeout_secs: exec_timeout,
                         max_turns: exec_max_turns,
                         profile_client,
+                        guarded: guarded_exec,
                     },
                     allow_no_index,
                     strict,

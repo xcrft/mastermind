@@ -249,7 +249,19 @@ mastermind run-task "$TASK_SPEC" --exec \
 | Native configuration | Authentication, MCP, hooks, and local rules inherited |
 
 Unsupported or denied native runs block postflight. `offered_to_process`
-records a stdin write, not proof of model use. Native policies are not an OS sandbox.
+records input delivery and byte counts. `model_use` remains `unknown`, including
+in Lens. File scope is audited after execution. Native policies are not an OS sandbox.
+
+For an explicitly scoped task with observed checks:
+
+```bash
+mastermind run-task "$TASK_SPEC" --exec --guarded-exec --auto-review
+```
+
+Guarded mode checks supported tool calls against exact paths and verification
+commands, then reconciles the decision log before accepting the invocation.
+Native hook failures can fall back to client permissions. This mode records
+conditional mediation, not OS containment. See [rules and limits](reference/task-runtime.md#guarded-execution).
 
 <a id="run-a-native-semantic-reviewer"></a>
 
@@ -273,10 +285,12 @@ mastermind run-task "$TASK_SPEC" --auto-review
 | `review-task run` | Reviewer only | Stores assessment |
 | `--exec --auto-review` | Executor, audit, then one reviewer | Closes if all gates pass |
 | `--auto-review` without `--exec` | One reviewer for an existing held task | Preserves baseline, iteration, options, and executor receipt |
+| `--exec --auto-review --auto-follow-up` | At most one eligible semantic repair and a fresh review | Uses the same cumulative iteration budget |
 
 Review resume runs no executor or checks. It rejects missing, unheld, completed,
 or mechanically stale tasks, and conflicts with `--reset` and `--force-iteration`.
-Negative, unknown, unresolved-history, or failed review stops with a nonzero result.
+Without `--auto-follow-up`, a negative review stops. Unknown judgments,
+unresolved history and native failures stop even when that flag is enabled.
 
 | Native limit | Executor | Reviewer |
 |---|---:|---:|
@@ -292,17 +306,25 @@ Sources: [CLI definitions](../mcp/servers/mmcg/src/main.rs) and
 
 ```bash
 mastermind run-task "$TASK_SPEC" --exec --auto-repair --max-iterations 3 --auto-review
+# Also allow one qualifying semantic follow-up after mechanically passing checks:
+mastermind run-task "$TASK_SPEC" --exec --auto-review --auto-follow-up --max-iterations 3
 ```
 
 | Condition | Action |
 |---|---|
 | Fresh ordinary check failure, honest partial report, implementation defect, approved scope | Retry within the iteration budget |
 | Missing/stale evidence, infrastructure failure, scope drift, runtime denial/failure, changed executable | Stop |
-| Negative or unresolved reviewer judgment | Stop without another repair |
+| Current native review with a concrete unmet criterion, no unknown criteria, other judgments satisfied and both history decisions `no_change` | One semantic retry only with `--auto-follow-up`, then fresh checks, audit and review |
+| Unknown judgment, unresolved history, scope/permission issue, stale source | Stop without another repair |
 
-Requires structured acceptance and observed checks. The allowed budget is
-1–20 iterations, defined in [auto_repair.rs](../mcp/servers/mmcg/src/auto_repair.rs).
-Review runs once after a held audit.
+Semantic feedback retains review, input and executable revisions. It treats the
+reviewer's explanation as an unverified claim and never invents a failed check.
+`--auto-follow-up` requires `--exec --auto-review` and a 1–20 iteration limit.
+It cannot use `--force-iteration`, `--pre-only` or `--post-only`.
+
+Both retry modes require structured acceptance and observed checks. Their
+cumulative budget includes prior preflights and is limited to 1–20 iterations.
+A second negative review stops. See [exact retry gates](reference/task-runtime.md#one-semantic-follow-up).
 
 ## Strict
 

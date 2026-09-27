@@ -3679,6 +3679,52 @@ body[data-mode="profiles"] .method-ledger {
   gap: 16px;
 }
 
+.profiles-availability {
+  margin: 0 0 20px;
+}
+
+.profiles-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.profiles-table {
+  width: 100%;
+  min-width: 600px;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+
+.profiles-table caption {
+  padding: 12px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.profiles-table th,
+.profiles-table td {
+  max-width: 280px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.profiles-table thead {
+  background: var(--surface-soft);
+  color: var(--ink-soft);
+}
+
+.profiles-review-queue > .profiles-facts + .profiles-facts {
+  margin-top: 12px;
+}
+
 .profiles-card,
 .profiles-receipt {
   min-width: 0;

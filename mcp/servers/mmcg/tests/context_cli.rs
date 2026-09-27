@@ -18,6 +18,11 @@ const QUOTE: &str = "I prefer short replies with test results.";
 const PREFERENCE: &str = "Keep executor replies brief and include test results";
 #[cfg(unix)]
 const PRIVATE_NOTE: &str = "PRIVATE_CONTEXT_PROFILE_NOTE_DO_NOT_SERVE";
+#[cfg(unix)]
+const HOOK_QUOTE: &str =
+    "Before changing a public API, inspect its callers and preserve the contract.";
+#[cfg(unix)]
+const HOOK_BEHAVIOR: &str = "Inspects callers before changing a public API contract";
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -166,6 +171,151 @@ impl Fixture {
             "CLI must emit one compact JSON packet"
         );
         checked_packet(wire.strip_suffix('\n').unwrap_or(wire), budget)
+    }
+
+    #[cfg(unix)]
+    fn context_at(&self, root: &Path, client: &str) -> Value {
+        let output = self
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(root)
+            .args(["context", "preview", "--root"])
+            .arg(root)
+            .args([
+                "--role",
+                "executor",
+                "--since",
+                "HEAD",
+                "--workflow",
+                "strict",
+                "--budget-tokens",
+                "8000",
+                "--profile-client",
+                client,
+            ])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let wire = std::str::from_utf8(&output.stdout).unwrap().trim_end();
+        checked_packet(wire, 8000)
+    }
+
+    #[cfg(unix)]
+    fn hook_event(
+        &self,
+        root: &Path,
+        session: &str,
+        turn: &str,
+        kind: &str,
+        extra: Value,
+    ) -> Value {
+        let mut event = json!({
+            "session_id":session,"turn_id":turn,"hook_event_name":kind,"cwd":root,
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        let mut child = self
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(root)
+            .env_remove("MASTERMIND_MINER")
+            .args(["miner", "hooks", "receive", "--client", "codex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_success(&output);
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn hook_draft(&self, root: &Path, session: &str) -> Value {
+        use std::os::unix::fs::PermissionsExt;
+
+        let output = self
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(root)
+            .args(["miner", "hooks", "setup", "--client", "codex", "--write"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        self.hook_event(
+            root,
+            session,
+            "one",
+            "SessionStart",
+            json!({"source":"startup"}),
+        );
+        self.hook_event(
+            root,
+            session,
+            "one",
+            "UserPromptSubmit",
+            json!({"prompt":HOOK_QUOTE}),
+        );
+        self.hook_event(
+            root,
+            session,
+            "one",
+            "Stop",
+            json!({
+                "last_assistant_message":"PRIVATE_HOOK_ASSISTANT_RESPONSE"
+            }),
+        );
+        let output = self
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(root)
+            .args(["miner", "hooks", "episodes"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(listed["episodes"].as_array().unwrap().len(), 1);
+        let output = self.success(&[
+            "miner",
+            "hooks",
+            "show",
+            listed["episodes"][0]["id"].as_str().unwrap(),
+        ]);
+        let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let episode = &shown["episode"];
+        let event = episode["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "UserPromptSubmit")
+            .unwrap();
+        let response = json!({
+            "schema":1,"episode_id":episode["id"],"episode_revision":episode["revision"],
+            "drafts":[{"when":"When changing a public API", "behavior":HOOK_BEHAVIOR,
+                "rationale":null,"outcome":null,"exception":"No exception was observed.",
+                "role":null,"workflow":null,"evidence_kind":"technical_approach",
+                "supports":[{"event_id":event["id"],"quote":HOOK_QUOTE}],"contradictions":[]}]
+        });
+        let processor = self._temp.path().join(format!("processor-{session}"));
+        fs::write(&processor, format!(
+            "#!/bin/sh\n[ \"$MASTERMIND_MINER\" = 1 ] || exit 7\ncat >/dev/null\ncat <<'RESPONSE'\n{response}\nRESPONSE\n"
+        )).unwrap();
+        fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = self.success(&[
+            "miner",
+            "hooks",
+            "analyze",
+            episode["id"].as_str().unwrap(),
+            "--revision",
+            episode["revision"].as_str().unwrap(),
+            "--processor",
+            processor.to_str().unwrap(),
+        ]);
+        let analyzed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        analyzed["drafts"][0].clone()
     }
 
     fn mcp(&self, client: Option<&str>, arguments: &[Value]) -> Vec<Value> {
@@ -647,5 +797,274 @@ fn context_person_layer_requires_configured_audience_scope_and_current_source() 
     assert!(
         !stale.to_string().contains(PREFERENCE),
         "no static style.md fallback"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn context_review_queue_requires_exact_root_access_and_withholds_candidate_content() {
+    let f = Fixture::new();
+    let draft = f.hook_draft(&f.root, "private-queue-session");
+    let other = f._temp.path().join("other-project");
+    fs::create_dir(&other).unwrap();
+    assert_success(
+        &f.command("git")
+            .current_dir(&other)
+            .args(["init", "-q"])
+            .output()
+            .unwrap(),
+    );
+    let other = other.canonicalize().unwrap();
+    let other_draft = f.hook_draft(&other, "private-other-session");
+
+    let denied = f.context_at(&f.root, "context-test");
+    assert_eq!(denied["layers"]["person"]["status"], "access_denied");
+    assert!(!denied.to_string().contains(draft["id"].as_str().unwrap()));
+    f.success(&["miner", "access", "grant", "--client", "context-test"]);
+    let granted = f.context_at(&f.root, "context-test");
+    let person = &granted["layers"]["person"]["data"];
+    assert_eq!(
+        person["status"], "insufficient_evidence",
+        "a draft is not a reviewed profile claim"
+    );
+    let queue = &person["review_queue"];
+    assert_eq!(
+        queue["status"], "observed",
+        "the first draft must be visible before profile publication"
+    );
+    assert_eq!(queue["total"], 1);
+    assert_eq!(queue["returned"], 1);
+    assert_eq!(queue["truncated"], false);
+    assert_eq!(queue["authority"], "unreviewed_observations_only");
+    let item = &queue["items"][0];
+    assert_eq!(item["id"], draft["id"]);
+    assert_eq!(item["source_id"], draft["episode"]);
+    assert_eq!(item["episode_id"], draft["episode"]);
+    assert_eq!(item["source_revision"], draft["episode_revision"]);
+    assert_eq!(item["source_status"], "current");
+    assert_eq!(item["evidence_class"], "no_recorded_prior_exposure");
+    assert_eq!(item["promotion_eligible"], true);
+    assert_eq!(item["status"], "authorship_review_required");
+    assert_eq!(item["support_count"], 1);
+    assert_eq!(item["contradiction_count"], 0);
+    let keys = item
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            "contradiction_count",
+            "episode_id",
+            "evidence_class",
+            "id",
+            "kind",
+            "promotion_eligible",
+            "source_id",
+            "source_revision",
+            "source_status",
+            "status",
+            "support_count"
+        ]
+    );
+    for private in [
+        HOOK_QUOTE,
+        HOOK_BEHAVIOR,
+        "PRIVATE_HOOK_ASSISTANT_RESPONSE",
+        "private-queue-session",
+        "private-other-session",
+        other_draft["id"].as_str().unwrap(),
+    ] {
+        assert!(
+            !granted.to_string().contains(private),
+            "preview leaked {private}"
+        );
+    }
+    let via_mcp = f.mcp(Some("context-test"), &[args("executor", "strict", 8000)]);
+    assert_eq!(
+        mcp_packet(&via_mcp[0], 8000)["layers"]["person"]["data"]["review_queue"],
+        *queue
+    );
+
+    // The same audience has no implicit access to a second repository, even
+    // though both capture journals live in this synthetic user's global DB.
+    assert_eq!(
+        f.context_at(&other, "context-test")["layers"]["person"]["status"],
+        "access_denied"
+    );
+    f.success(&[
+        "miner",
+        "access",
+        "grant",
+        other.to_str().unwrap(),
+        "--client",
+        "context-test",
+    ]);
+    let other_packet = f.context_at(&other, "context-test");
+    assert_eq!(
+        other_packet["layers"]["person"]["data"]["review_queue"]["items"][0]["id"],
+        other_draft["id"]
+    );
+    assert!(!other_packet
+        .to_string()
+        .contains(draft["id"].as_str().unwrap()));
+    f.success(&["miner", "access", "revoke", "--client", "context-test"]);
+    let revoked = f.context_at(&f.root, "context-test");
+    assert_eq!(revoked["layers"]["person"]["status"], "access_denied");
+    assert!(revoked["layers"]["person"]["data"]
+        .get("review_queue")
+        .is_none());
+    assert!(!revoked.to_string().contains(draft["id"].as_str().unwrap()));
+    let revoked_mcp = f.mcp(Some("context-test"), &[args("executor", "strict", 8000)]);
+    assert_eq!(
+        mcp_packet(&revoked_mcp[0], 8000)["layers"]["person"]["status"],
+        "access_denied"
+    );
+    assert_eq!(
+        f.context_at(&other, "context-test")["layers"]["person"]["data"]["review_queue"]
+            ["returned"],
+        1
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn context_review_queue_preserves_stale_and_malformed_source_boundaries() {
+    let f = Fixture::new();
+    let draft = f.hook_draft(&f.root, "queue-source-session");
+    f.success(&["miner", "access", "grant", "--client", "context-test"]);
+    let initial = f.context_at(&f.root, "context-test");
+    assert_eq!(
+        initial["layers"]["person"]["data"]["review_queue"]["items"][0]["source_status"],
+        "current"
+    );
+    f.hook_event(
+        &f.root,
+        "queue-source-session",
+        "two",
+        "UserPromptSubmit",
+        json!({
+            "prompt":"The previous request applies only to public API changes."
+        }),
+    );
+    let stale = f.context_at(&f.root, "context-test");
+    let item = &stale["layers"]["person"]["data"]["review_queue"]["items"][0];
+    assert_eq!(item["id"], draft["id"]);
+    assert_eq!(item["source_status"], "stale_or_unavailable");
+    assert_eq!(item["promotion_eligible"], false);
+    assert!(item["evidence_class"].is_null());
+
+    // Corrupt an owner-writable source fixture after its real admission. Keep
+    // the repository discriminator intact so the read must reject the source,
+    // rather than hiding it through a different SQL selection.
+    let db_path = f.home.join(".mastermind/persona-events.db");
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        db.execute(
+            "UPDATE hook_episode SET data=json_set(data,'$.events',?2) WHERE id=?1",
+            rusqlite::params![
+                draft["episode"].as_str().unwrap(),
+                "PRIVATE_MALFORMED_EVENT_BODY"
+            ],
+        )
+        .unwrap(),
+        1
+    );
+    drop(db);
+    let before = fs::read(&db_path).unwrap();
+    let malformed = f.context_at(&f.root, "context-test");
+    let queue = &malformed["layers"]["person"]["data"]["review_queue"];
+    assert_eq!(queue["status"], "observed");
+    assert_eq!(queue["items"][0]["id"], draft["id"]);
+    assert_eq!(queue["items"][0]["source_status"], "stale_or_unavailable");
+    assert_eq!(queue["items"][0]["promotion_eligible"], false);
+    assert!(queue["items"][0]["evidence_class"].is_null());
+    for private in [HOOK_QUOTE, HOOK_BEHAVIOR, "PRIVATE_MALFORMED_EVENT_BODY"] {
+        assert!(!malformed.to_string().contains(private));
+    }
+    assert_eq!(
+        fs::read(db_path).unwrap(),
+        before,
+        "preview must not repair or publish journal data"
+    );
+}
+
+#[test]
+fn context_delivery_revalidates_selected_document_evidence_before_native_use() {
+    use mmcg::context::{from_paths, validate_delivery, ContextOptions};
+
+    let f = Fixture::new();
+    f.index();
+    let index = f.root.join(".mastermind/mmcg.db");
+    let options = ContextOptions {
+        since: "HEAD".into(),
+        paths: vec!["src/lib.rs".into()],
+        role: mmcg::queries::BriefRole::Executor,
+        workflow: Some("strict".into()),
+        query: Some("transport".into()),
+        budget_tokens: 8000,
+    };
+    let offered = from_paths(&f.root, &index, &options, None).unwrap();
+    assert_eq!(
+        offered["layers"]["documentation"]["data"]["freshness"],
+        "fresh"
+    );
+    assert!(!offered["layers"]["documentation"]["data"]["observed"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        validate_delivery(&f.root, &index, &options, None, &offered),
+        Ok(())
+    );
+
+    f.write(
+        "docs/transport.md",
+        "# Transport\n\nThe transport now also checks the delivery revision.\n",
+    );
+    assert_eq!(
+        validate_delivery(&f.root, &index, &options, None, &offered),
+        Err("invocation_context_sources_changed")
+    );
+    f.index();
+    assert_eq!(
+        validate_delivery(&f.root, &index, &options, None, &offered),
+        Err("invocation_context_sources_changed"),
+        "reindexing cannot make an already selected old document current"
+    );
+    let refreshed = from_paths(&f.root, &index, &options, None).unwrap();
+    assert_ne!(
+        refreshed["layers"]["documentation"]["revision"],
+        offered["layers"]["documentation"]["revision"]
+    );
+    assert_eq!(
+        validate_delivery(&f.root, &index, &options, None, &refreshed),
+        Ok(())
+    );
+
+    // Successful validation of a preview without source payloads must retain
+    // that absence. It is not evidence that unselected documents are current.
+    let absent_index = f.root.join(".mastermind/not-created.db");
+    let omitted = from_paths(&f.root, &absent_index, &options, None).unwrap();
+    for layer in ["project", "documentation", "code"] {
+        assert_eq!(omitted["layers"][layer]["status"], "unavailable");
+        assert!(omitted["layers"][layer]["data"].is_null());
+        assert!(omitted["layers"][layer]["revision"].is_null());
+    }
+    f.write(
+        "docs/transport.md",
+        "# Transport\n\nA change outside the omitted source selection.\n",
+    );
+    assert_eq!(
+        validate_delivery(&f.root, &absent_index, &options, None, &omitted),
+        Ok(())
+    );
+    assert_eq!(omitted["delivery"], "not_recorded");
+    assert_eq!(omitted["permission_effect"], "none");
+    assert!(
+        !absent_index.exists(),
+        "delivery validation must not create an index"
     );
 }

@@ -263,10 +263,12 @@ command observations from reported results and semantic judgments.
 | `--max-iterations N` | Cumulative preflight limit, default 3. 0 disables the general limit. |
 | `--force-iteration` | Override the general iteration limit and record the override as a lesson candidate. |
 | `--exec` | Start a new preflight iteration and one bound Claude invocation. |
+| `--guarded-exec` | With `--exec`, restrict supported native tools to the declared scope and exact verification commands, then reconcile observed calls. See [guarded execution](task-runtime.md#guarded-execution) for native fallback and process boundaries. |
 | `--exec-timeout N`, `--exec-max-turns N` | Executor limits: 1–7,200 seconds and 1–100 turns. Defaults 1,800 and 40. |
 | `--profile-client ID` | Include advice through an existing profile grant. Requires `--exec`. |
 | `--auto-repair` | With `--exec`, retry eligible fresh failed checks under the same structured contract and a finite 1–20 iteration budget. |
 | `--auto-review` | Run one semantic review after a held audit, or resume review of an existing pending held task without `--exec`. |
+| `--auto-follow-up` | With `--exec --auto-review`, allow one concrete negative-criterion repair, new checks and review within the shared iteration budget. |
 | `--review-timeout N`, `--review-max-turns N` | Independent reviewer limits: 1–7,200 seconds and 1–100 turns. Defaults 600 and 20. |
 
 `--auto-repair` requires structured acceptance and observed checks. It rejects
@@ -276,12 +278,18 @@ acceptance and excludes `--pre-only`/`--post-only`. Without `--exec`, it preserv
 the existing baseline, iteration, options and executor receipt and launches no
 preflight, executor or check commands. Missing, unheld or learned tasks are
 rejected before review. Use plain `run-task` for an already completed iteration.
-Negative, unknown or failed review never starts a repair iteration.
+By default, negative review stops. `--auto-follow-up` permits one retry for
+concrete unmet criteria in a current native review, with no unknown criteria,
+satisfied scope/proportionality/verification quality and both history decisions
+`no_change`. It uses the same finite 1–20 iteration budget, retains the approved
+contract and requires fresh checks, audit and review. A second negative review
+stops. See [exact gates](task-runtime.md#one-semantic-follow-up).
 
 Native execution records `invocation_required` before launch and requires a
 completed bound `invocation.json` for postflight and first completion. This
-records execution provenance. Scope remains audited after execution. Inherited
-client permissions and configuration are not an OS filesystem/network sandbox.
+records execution provenance. Scope remains audited after execution. Guarded
+mode adds conditional native mediation. Neither mode supplies an OS
+filesystem/network sandbox.
 
 Task state binds the repository identity and exact UTF-8 relative spec path.
 Foreign state is rejected. Legacy unbound state requires explicit preflight or
@@ -345,6 +353,34 @@ publication and access. [Client hooks](../guides/persona-hooks.md) cover capture
 and semantic drafts. [Mining algebra](persona-mining-contract.md) and
 [extraction quality](persona-quality.md) describe what the evidence establishes.
 
+### Native hooks and managed mining
+
+```bash
+mmcg miner hooks setup --client codex --project-root . --write
+mmcg miner hooks status --client codex --project-root .
+mmcg miner hooks worker start --client codex --project-root . \
+  --provider claude --max-calls 64 --max-runtime 3600
+mmcg miner hooks worker status --client codex --project-root .
+mmcg miner hooks worker stop --client codex --project-root .
+```
+
+| Operation or state | Meaning |
+|---|---|
+| Hook setup | Installs local capture definitions and a scoped capture grant. Does not start a miner |
+| Refiner selection | Optional prompt interpretation on admitted input, separate from habit analysis |
+| `worker start` | Explicit managed run on macOS/Linux, one owner per client and canonical project root |
+| Repeated start | Keeps the active run and its budget. A stopped restart can reuse saved settings |
+| `worker status` | Read-only ownership, heartbeat, counters and configuration. Does not start a process |
+| `worker stop` | Requests cooperative cancellation of the owned processor group |
+| `hooks status` / `doctor` | Separate registration, capture, session, refiner and managed-miner states |
+| Observed `SessionStart` | Local observation in the current capture generation, not verified client trust/loading |
+| Mining output | Unreviewed drafts with event-level exposure. Human authorship and habit approval require review |
+
+Defaults are 64 processor invocations and 3,600 seconds per managed run, with
+60 seconds per attempt and batches of 4. These are local invocation limits, not
+token or provider billing limits. Original observations retain the exposure
+recorded when they were captured. See [setup, budgets and recovery](../guides/persona-hooks.md#run-a-managed-worker).
+
 ### Project and client setup
 
 ```bash
@@ -361,7 +397,9 @@ mmcg setup generic --scope project --config ./mcp.json
 `init` scaffolds the project. `--no-claude` disables model-assisted context
 writing, `--no-index` skips graph construction, `--no-global` skips npm Claude
 workflow reconciliation, and `--seed-style` opts into profile enrichment.
-`doctor` checks configuration, handshake and installed agent contracts.
+`doctor` checks configuration, handshake, installed agent contracts and optional
+hook readiness. An unconfigured optional hook client is not a failure. Readiness
+inspection neither invokes a provider nor establishes model quality.
 `workflow audit` inspects owned wiring without executing agent instructions.
 
 Setup previews changes unless `--write` is given. Cargo/manual setup records
@@ -799,12 +837,31 @@ for a consistent active-WAL read.
 Refreshes fail closed when the repository, index, WAL, baseline, or work
 snapshot changes, or when indexed source files disappeared. The final check
 runs after evidence, audit, and the optional document graph, and binds the exact
-bounded working-tree projection plus its omission state. There are no
-source-content or mutation routes.
+bounded working-tree projection plus its omission state. There are no arbitrary
+file-read or mutation routes.
 
 `--since` is required. `--path`, `--depth 1..5`, `--top 1..100`, and
 `--production-only` bound the initial review. Run `mmcg index .` first. Lens
 will report a missing or stale index rather than create or update one.
+
+### Private Profiles and context preview
+
+Profiles fetches `/api/context` only when opened in the local Lens server.
+The server fixes the root, profile audience and selection. The separate route
+is excluded from portable Lens HTML and `/api/lens` exports.
+
+| Display | Evidence boundary |
+|---|---|
+| Person | Selected advice under the existing profile-read grant. Counts do not measure how well a person is understood |
+| Evidence review queue | This project's bounded candidate metadata, exposure class, source state and proposal eligibility. No raw quotes |
+| Project/code/docs | Their own source freshness, omissions and candidate status |
+| Work | Stored task state and review gates. Completion remains historical |
+| Recorded input delivery | Invocation identity, role, task/context revisions, byte counts and digests. `offered_to_process` records delivery, `model_use` stays `unknown` |
+| Current context preview | No delivery recorded. Equality with an invocation revision does not prove model use or current checkout correctness |
+| Missing access or bounded omissions | Explicitly unavailable, never shown as a complete empty profile |
+
+Refresh and navigation clear the previous personal packet. No review or execution
+is triggered here. See the [context contract](persona-context.md).
 
 ### Selected-scope audit
 

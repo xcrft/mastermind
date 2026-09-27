@@ -259,51 +259,53 @@ def bridge(manifest_path: Path) -> int:
     """Trusted stream recorder, nested inside the production-owned process group."""
     manifest = strict_json(read_regular(manifest_path, REQUEST_LIMIT))
     directory = manifest_path.parent
-    streams = {}
+
+    def private_opener(path, flags):
+        return os.open(path, flags | os.O_NOFOLLOW, 0o600)
+
     try:
-        for name in ("processor.stdout", "processor.stderr"):
-            fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            streams[name] = os.fdopen(fd, "wb", buffering=0)
-        body = sys.stdin.buffer.read(REQUEST_LIMIT + 1)
-        write_new(directory / "request.json", body[:REQUEST_LIMIT])
-        if len(body) > REQUEST_LIMIT:
-            raise ValueError("production request exceeds byte limit")
-        request = strict_json(body)
-        expected = strict_json(read_regular(directory / "input.json", REQUEST_LIMIT))
-        if digest(encoded(expected)) != manifest["input_sha256"]:
-            raise ValueError("input changed before bridge invocation")
-        validate_request(request, expected)
+        with (
+            open(directory / "processor.stdout", "xb", buffering=0, opener=private_opener) as stdout,
+            open(directory / "processor.stderr", "xb", buffering=0, opener=private_opener) as stderr,
+        ):
+            streams = {"processor.stdout": stdout, "processor.stderr": stderr}
+            body = sys.stdin.buffer.read(REQUEST_LIMIT + 1)
+            write_new(directory / "request.json", body[:REQUEST_LIMIT])
+            if len(body) > REQUEST_LIMIT:
+                raise ValueError("production request exceeds byte limit")
+            request = strict_json(body)
+            expected = strict_json(read_regular(directory / "input.json", REQUEST_LIMIT))
+            if digest(encoded(expected)) != manifest["input_sha256"]:
+                raise ValueError("input changed before bridge invocation")
+            validate_request(request, expected)
 
-        def record(name):
-            def receive(chunk):
-                streams[name].write(chunk)
-                return None
-            return receive
+            def record(name):
+                def receive(chunk):
+                    streams[name].write(chunk)
+                    return None
+                return receive
 
-        result = run_bounded(
-            manifest["command"], cwd=Path(manifest["cwd"]),
-            env=clean_environment(Path(manifest["home"]), Path(manifest["temporary"])),
-            stdin=body, timeout=manifest["processor_timeout_seconds"],
-            stdout_limit=STDOUT_LIMIT, stderr_limit=STDERR_LIMIT, start_new_session=False,
-            on_stdout=record("processor.stdout"), on_stderr=record("processor.stderr"),
-        )
-        status = asdict(result)
-        status.pop("stdout")
-        status.pop("stderr")
-        status.update(status="finished", request_sha256=digest(body))
-        write_json(directory / "process.json", status)
-        sys.stdout.buffer.write(result.stdout)
-        sys.stdout.buffer.flush()
-        sys.stderr.buffer.write(result.stderr)
-        sys.stderr.buffer.flush()
-        return 0 if result.returncode == 0 and result.stop_reason is None else 1
+            result = run_bounded(
+                manifest["command"], cwd=Path(manifest["cwd"]),
+                env=clean_environment(Path(manifest["home"]), Path(manifest["temporary"])),
+                stdin=body, timeout=manifest["processor_timeout_seconds"],
+                stdout_limit=STDOUT_LIMIT, stderr_limit=STDERR_LIMIT, start_new_session=False,
+                on_stdout=record("processor.stdout"), on_stderr=record("processor.stderr"),
+            )
+            status = asdict(result)
+            status.pop("stdout")
+            status.pop("stderr")
+            status.update(status="finished", request_sha256=digest(body))
+            write_json(directory / "process.json", status)
+            sys.stdout.buffer.write(result.stdout)
+            sys.stdout.buffer.flush()
+            sys.stderr.buffer.write(result.stderr)
+            sys.stderr.buffer.flush()
+            return 0 if result.returncode == 0 and result.stop_reason is None else 1
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
         if not (directory / "process.json").exists():
             write_json(directory / "process.json", {"status": "bridge_error"})
         return 1
-    finally:
-        for stream in streams.values():
-            stream.close()
 
 
 def retained(path: Path, limit: int) -> dict | None:

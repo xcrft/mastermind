@@ -8,7 +8,7 @@
 | Control-loop harness | 9/9 passed, included above | Finite-model recovery/mutations, exact test accounting, process failures and combined result gates |
 | Expanded CLI selection | 66/66 passed in 12 targets | Worker, readiness, event influence, intake binding, semantic follow-up, context metadata and guarded executor |
 | Source-bound Lens suite | Passed | One aggregate DOM/static suite, no browser or model inference |
-| Current source-bound report | [Passed](baselines/control-loop-integration-20260927.json) | Clean starting revision, 172 unchanged source files |
+| Current source-bound report | [Passed](baselines/control-loop-integration-20260927-02.json) | Clean starting revision, 172 unchanged source files |
 | Hook intake model trial | `not_run` | The runner exists, independent semantic label review and real processor results are still required |
 
 Harness tests check result accounting. The retained integration run separately
@@ -18,17 +18,19 @@ records the selected production scenarios and the UI suite.
 
 | Direction | Result | Evidence | Scope |
 |---|---|---|---|
-| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-integration-20260927.json), [contract](control-loop.md) | Six validated obligations at new publication |
+| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-integration-20260927-02.json), [contract](control-loop.md) | Six validated obligations at new publication |
 | Guard sensitivity | 6/6 removed guards produce counterexamples | Same report | Mutation check of the finite model |
 | Recovery | 64/64 open states reach completion within 7 successful actions | Same report | Starts a new preflight with stable inputs and successful producers |
 | CLI conformance | 66/66 named scenarios pass across 12 targets | Same report | Real CLI with fixture native clients, no model calls |
 | Lens boundary suite | 1 aggregate suite passed | Same report | DOM/static harness, no browser or model-use claim |
-| Evaluation duration | 254.3 s | Same report | Includes build and fixture overhead |
+| Evaluation duration | 244.6 s | Same report | Includes build and fixture overhead |
 | Indexing | Cold 1,320 ms, unchanged 233 ms, incremental 577 ms | [Raw runs](baselines/index-20260927.json), [method](../docs/benchmarks.md) | Medians of 3 runs, 1,000 Rust files, 100 changed |
 
-The integration report records clean starting revision `9da71dd` and the complete
+The integration report records clean starting revision `f1827eb` and the complete
 measured source manifest. Source hashes remained stable during the run. Raw
-process logs remain local. The earlier [24-case report](baselines/control-loop-hooks-20260927.json)
+process logs remain local. The [previous 66-case report](baselines/control-loop-integration-20260927.json)
+retains revision `9da71dd`, before the lock-lifetime fix. The earlier
+[24-case report](baselines/control-loop-hooks-20260927.json)
 retains its original `abf942c` dirty-tree identity. The indexing report records
 `101bed7`. These records keep their original identities when history is squashed.
 The different CLI selections and local build overhead prevent a timing comparison.

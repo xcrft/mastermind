@@ -193,6 +193,7 @@ mastermind miner hooks recover --client codex --project-root .
 | New generation | Invalidates old capture receipts. Restart the client |
 | Missing events | Cannot be reconstructed |
 | Crash, journal contention or incomplete lifecycle | Evidence withheld |
+| Older capture semantics | Raw data stays available. Start a new session or recover to collect current evidence, then review new candidates |
 
 To stop future capture:
 
@@ -222,6 +223,8 @@ mastermind miner habit refresh
 | Disabled, unsupported or untrusted hooks | Capture may be incomplete |
 | Native client coverage | Not every tool or interruption path is exposed |
 | Complete captured episode | Describes received events, not all activity |
+| Overlapping prompts without both turn IDs | The session is incomplete because a later `Stop` cannot identify the completed prompt |
+| Profile delivery | Rechecks the capture generation and selected profile reader before recording the offer. Revocation cannot retract context already offered |
 | Secret screening | Heuristic. Inspect text before an external processor request |
 | Journal and processor limits | See [exact bounds](../reference/persona.md#hook-processor-contract) |
 | Enforcement | Hooks collect evidence. They do not enforce every action or guarantee truthful model behavior |

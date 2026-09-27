@@ -6,12 +6,13 @@ This evaluation checks publication of a new completed iteration.
 |---|---|---|
 | Finite model | Every reachable publication requires all six obligations | 65 states, 586 transitions, 0 violations |
 | Mutation detection | Remove each guard and require a reachable counterexample | 6/6 detected |
-| CLI conformance | Run exact named regressions through the production CLI | 24/24 passed across 8 targets |
+| CLI conformance | Run exact named regressions through the production CLI | 66/66 passed across 12 targets |
+| Lens UI | Check privacy, coverage and delivery metadata | 1 aggregate DOM/static suite passed |
 
-The [2026-09-27 report](baselines/control-loop-hooks-20260927.json) describes its
-recorded source revision. The expanded CLI selection and UI suite below are
-`not_run` until a new source-bound report is generated. The proof applies to the
-finite model. It does not prove full Rust refinement or arbitrary goal achievement.
+The [2026-09-27 integration report](baselines/control-loop-integration-20260927.json)
+records a clean starting revision and 172 unchanged source files. The run took
+254.3 seconds, including local build and fixture overhead. The proof applies to
+the finite model. It does not prove full Rust refinement or arbitrary goal achievement.
 
 ## Run
 

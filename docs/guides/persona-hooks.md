@@ -53,6 +53,14 @@ mastermind miner hooks show '<capture-episode-id>'
 | Assistant and tool output | Context only, not independent habit support |
 | Mastermind controller prompts | Excluded from capture |
 
+| Event ordering | Capture behavior |
+|---|---|
+| `SessionEnd` | Closes admission. A fresh `SessionStart` is required for another prompt |
+| Late `Stop` with a turn ID | Closes only its matching turn and cannot replace newer response context |
+| Unknown or reused turn ID | Records a coverage gap instead of assigning the event to the active turn |
+| Empty current response | Clears earlier assistant context |
+| Repeated `SessionEnd` without an event ID | Closes admission and records ambiguity. A replay cannot be distinguished from another end |
+
 ## 3. Analyze with a selected processor
 
 To send one inspected episode to the built-in Claude processor:

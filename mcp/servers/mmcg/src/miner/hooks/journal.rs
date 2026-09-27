@@ -15,7 +15,7 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_EPISODES: i64 = 2000;
-const CAPTURE_VERSION: u32 = 1;
+const CAPTURE_VERSION: u32 = 2;
 
 const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_grant (
@@ -368,6 +368,13 @@ impl Journal {
             } else if incoming.native_key.is_none() && incoming.kind == "UserPromptSubmit" {
                 add_gap(&mut session.gaps, "ambiguous_prompt_replay");
             }
+            if incoming.native_key.is_none() && incoming.kind == "SessionEnd" && session.started {
+                // Without a native identity this may be the resumed session ending again.
+                add_gap(&mut session.gaps, "ambiguous_session_lifecycle");
+                session.started = false;
+                session.active = None;
+                session.previous_assistant = None;
+            }
             save_session(&tx, &session)?;
             finish(&tx, grant)?;
             tx.commit()?;
@@ -401,10 +408,19 @@ impl Journal {
             text: incoming.text,
         };
         if incoming.kind == "SessionStart" {
+            if !session.started {
+                session.active = None;
+                session.previous_assistant = None;
+            }
             session.started = true;
         }
         let mut target = session.active.clone();
         if incoming.kind == "UserPromptSubmit" {
+            if let Some(turn) = &incoming.native_turn {
+                if !episodes_for_turn(&tx, &sid, turn)?.is_empty() {
+                    add_gap(&mut session.gaps, "ambiguous_turn_identity");
+                }
+            }
             if let Some(previous) = &session.active {
                 let mut ep = load_episode(&tx, previous)?;
                 if !ep.closed {
@@ -457,6 +473,21 @@ impl Journal {
             target = Some(id.clone());
             session.active = Some(id);
             session.episode_count += 1;
+        } else if matches!(incoming.kind.as_str(), "Stop" | "Interrupt" | "StopFailure") {
+            if let Some(turn) = &incoming.native_turn {
+                let matches = episodes_for_turn(&tx, &sid, turn)?;
+                target = match matches.as_slice() {
+                    [episode] => Some(episode.clone()),
+                    [] => {
+                        add_gap(&mut session.gaps, "unmatched_turn_event");
+                        None
+                    }
+                    _ => {
+                        add_gap(&mut session.gaps, "ambiguous_turn_identity");
+                        None
+                    }
+                };
+            }
         } else if matches!(incoming.kind.as_str(), "PostToolUse" | "PostToolUseFailure") {
             if let Some(tool_id) = &incoming.tool_id {
                 let found: Option<String> = tx.query_row("SELECT episode FROM hook_event WHERE session=?1 AND tool_id=?2 AND kind='PreToolUse' ORDER BY rowid DESC LIMIT 1",
@@ -491,8 +522,8 @@ impl Journal {
                 }
             } else if incoming.kind == "Stop" {
                 ep.closed = true;
-                if !event.text.is_empty() {
-                    session.previous_assistant = Some(event.clone());
+                if session.started && session.active.as_ref() == Some(id) {
+                    session.previous_assistant = (!event.text.is_empty()).then(|| event.clone());
                 }
             } else if matches!(
                 incoming.kind.as_str(),
@@ -504,6 +535,11 @@ impl Journal {
             save_episode(&tx, &ep)?;
         } else if !matches!(incoming.kind.as_str(), "SessionStart" | "SessionEnd") {
             add_gap(&mut session.gaps, "event_without_user_turn");
+        }
+        if incoming.kind == "SessionEnd" {
+            session.started = false;
+            session.active = None;
+            session.previous_assistant = None;
         }
         tx.execute("INSERT INTO hook_event(id,session,native_key,digest,episode,tool_id,kind) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![event_id,sid,key,incoming.digest,target,incoming.tool_id,incoming.kind])?;
@@ -535,6 +571,9 @@ impl Journal {
             [&ep.session],
             |r| r.get::<_, String>(0),
         )?)?;
+        if !session.started || session.active.as_deref() != Some(episode) || ep.closed {
+            return Err("hook profile delivery requires the active open prompt".into());
+        }
         let claims = |field: &str, key: &str| {
             packet[field].as_array().map(|items| items.iter().take(32)
             .map(|item|json!({"id":item[key],"review_revision":item["review_revision"]})).collect::<Vec<_>>()).unwrap_or_default()
@@ -841,6 +880,16 @@ fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
     })?;
     Ok(serde_json::from_str(&data)?)
 }
+
+fn episodes_for_turn(conn: &Connection, session: &str, turn: &str) -> Result<Vec<String>, Error> {
+    // The session key already includes capture generation. Two matches are
+    // enough to reject an ambiguous identity, never choose the latest match.
+    let mut statement = conn.prepare(
+        "SELECT id FROM hook_episode WHERE session=?1 AND json_extract(data,'$.turn_id')=?2 LIMIT 2",
+    )?;
+    let rows = statement.query_map(params![session, turn], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
 fn save_session(conn: &Connection, session: &Session) -> Result<(), Error> {
     conn.execute("INSERT INTO hook_session(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![session.id,serde_json::to_string(session)?])?;
     Ok(())
@@ -1099,5 +1148,259 @@ mod tests {
             .contains(&"legacy_capture_semantics".to_owned()));
         assert_ne!(old.revision, current.revision);
         assert_eq!(old.events, current.events);
+    }
+
+    #[test]
+    fn session_end_requires_a_new_start_before_another_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        let grant = db
+            .configure("codex", root.path(), true, Some("reader"), false)
+            .unwrap();
+        let start = json!({"session_id":"s", "hook_event_name":"SessionStart"});
+        deliver(&mut db, root.path(), start.clone());
+        let first = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionEnd"}),
+        );
+        assert!(db
+            .expose(&grant, first["episode"].as_str().unwrap(), &json!({}))
+            .is_err());
+        assert_eq!(deliver(&mut db, root.path(), start)["status"], "duplicate");
+        let after_end = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Late request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop"}),
+        );
+        assert!(
+            snapshot_at(&db.conn, after_end["episode"].as_str().unwrap())
+                .unwrap()
+                .coverage_gaps
+                .contains(&"missing_session_start".to_owned())
+        );
+
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "event_id":"fresh-start", "hook_event_name":"SessionStart"}),
+        );
+        let resumed = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"New request after resume"}),
+        );
+        assert!(db
+            .expose(&grant, resumed["episode"].as_str().unwrap(), &json!({}))
+            .is_ok());
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"Stop"}),
+        );
+        assert!(snapshot_at(&db.conn, resumed["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .is_empty());
+    }
+
+    #[test]
+    fn a_late_identified_stop_closes_its_own_turn_without_replacing_newer_context() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        let first = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        let second = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop", "last_assistant_message":"Newer response"}),
+        );
+        let late = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop", "last_assistant_message":"Older response"}),
+        );
+        assert_eq!(late["episode"], first["episode"]);
+        assert!(
+            db.episode(first["episode"].as_str().unwrap())
+                .unwrap()
+                .closed
+        );
+        assert!(snapshot_at(&db.conn, second["episode"].as_str().unwrap())
+            .unwrap()
+            .coverage_gaps
+            .is_empty());
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"Third request"}),
+        );
+        let episode = db.episode(next["episode"].as_str().unwrap()).unwrap();
+        let context: Vec<_> = episode
+            .events
+            .iter()
+            .filter(|e| e.origin == "prior_turn_context")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(context, ["Newer response"]);
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_stop_identity_never_falls_back_to_the_active_turn() {
+        for ambiguous in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = journal();
+            db.configure("codex", root.path(), true, None, false)
+                .unwrap();
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+            );
+            let first = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "event_id":"first", "turn_id":"same", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+            );
+            let active = if ambiguous {
+                deliver(
+                    &mut db,
+                    root.path(),
+                    json!({"session_id":"s", "event_id":"second", "turn_id":"same", "hook_event_name":"UserPromptSubmit", "prompt":"Conflicting request"}),
+                )
+            } else {
+                first
+            };
+            let stop = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":if ambiguous {"same"} else {"unknown"}, "hook_event_name":"Stop"}),
+            );
+            assert!(stop["episode"].is_null());
+            assert!(
+                !db.episode(active["episode"].as_str().unwrap())
+                    .unwrap()
+                    .closed
+            );
+            let gaps = snapshot_at(&db.conn, active["episode"].as_str().unwrap())
+                .unwrap()
+                .coverage_gaps;
+            assert!(gaps.contains(
+                &if ambiguous {
+                    "ambiguous_turn_identity"
+                } else {
+                    "unmatched_turn_event"
+                }
+                .to_owned()
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_session_end_without_identity_cannot_leave_resumed_admission_open() {
+        for stable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = journal();
+            let grant = db
+                .configure("codex", root.path(), true, Some("reader"), false)
+                .unwrap();
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+            );
+            let mut end = json!({"session_id":"s", "hook_event_name":"SessionEnd"});
+            if stable {
+                end["event_id"] = json!("first-end");
+            }
+            deliver(&mut db, root.path(), end.clone());
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "event_id":"fresh-start", "hook_event_name":"SessionStart"}),
+            );
+            let prompt = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Resumed request"}),
+            );
+            assert_eq!(deliver(&mut db, root.path(), end)["status"], "duplicate");
+            let offered = db.expose(&grant, prompt["episode"].as_str().unwrap(), &json!({}));
+            assert_eq!(offered.is_ok(), stable);
+        }
+    }
+
+    #[test]
+    fn an_active_stop_without_text_clears_the_previous_response() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"First request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop", "last_assistant_message":"Old response"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Second request"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"Stop", "last_assistant_message":null}),
+        );
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"three", "hook_event_name":"UserPromptSubmit", "prompt":"Third request"}),
+        );
+        assert!(!db
+            .episode(next["episode"].as_str().unwrap())
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.origin == "prior_turn_context"));
     }
 }

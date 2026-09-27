@@ -6,9 +6,9 @@ This evaluation checks publication of a new completed iteration.
 |---|---|---|
 | Finite model | Every reachable publication requires all six obligations | 65 states, 586 transitions, 0 violations |
 | Mutation detection | Remove each guard and require a reachable counterexample | 6/6 detected |
-| CLI conformance | Run exact named regressions through the production CLI | 19/19 passed |
+| CLI conformance | Run exact named regressions through the production CLI | 24/24 passed across 8 targets |
 
-Results: [2026-09-27 report](baselines/control-loop-20260927.json).
+Results: [2026-09-27 report with hook intake](baselines/control-loop-hooks-20260927.json).
 The proof applies to the finite model. Full Rust refinement and arbitrary goal
 achievement remain outside the claim.
 

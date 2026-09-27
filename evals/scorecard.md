@@ -4,18 +4,19 @@
 
 | Direction | Result | Evidence | Scope |
 |---|---|---|---|
-| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-20260927.json), [contract](control-loop.md) | Six validated obligations at new publication |
+| Completion model | 65 states, 586 transitions, 0 publication violations | [Report](baselines/control-loop-hooks-20260927.json), [contract](control-loop.md) | Six validated obligations at new publication |
 | Guard sensitivity | 6/6 removed guards produce counterexamples | Same report | Mutation check of the finite model |
 | Recovery | 64/64 open states reach completion within 7 successful actions | Same report | Starts a new preflight with stable inputs and successful producers |
-| CLI conformance | 19/19 named scenarios pass across 7 targets | Same report | Real CLI with fixture native clients, no model calls |
-| Evaluation duration | 87.8 s | Same report | Includes build and fixture overhead |
+| CLI conformance | 24/24 named scenarios pass across 8 targets | Same report | Real CLI with fixture native clients, no model calls |
+| Evaluation duration | 246.8 s | Same report | Includes build and fixture overhead |
 | Indexing | Cold 1,320 ms, unchanged 233 ms, incremental 577 ms | [Raw runs](baselines/index-20260927.json), [method](../docs/benchmarks.md) | Medians of 3 runs, 1,000 Rust files, 100 changed |
 
-The 2026-09-27 control report records starting revision `101bed7`, a dirty tree
-containing the new harness, and the complete measured source manifest. Source
-hashes remained stable during the run. Raw process logs remain local. The index
-report records the same implementation revision. These records retain their
-original identities when branch history is squashed.
+The control report records starting revision `abf942c`, a dirty tree containing
+the hook refiner and updated harness, and the complete measured source manifest.
+Source hashes remained stable during the run. Raw process logs remain local.
+The indexing report records revision `101bed7`. These records retain their
+original identities when branch history is squashed. Elapsed time includes
+local build and fixture overhead and is not a performance comparison.
 
 Generate a fresh control report after implementation or harness changes:
 

@@ -17,6 +17,9 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_DRAFTS: usize = 8;
 const MAX_CITATIONS: usize = 8;
+// Included in episode revisions so earlier source interpretations cannot keep
+// certifying a claim after eligibility rules change.
+pub(super) const PROSE_VERSION: &str = "hook-user-prose-v2";
 const EVIDENCE_KINDS: &[&str] = &[
     "technical_approach",
     "workflow_pattern",
@@ -137,20 +140,47 @@ fn analyze_claude_with_processor(
     processor: &Path,
     timeout_secs: u64,
 ) -> Result<Vec<SemanticDraft>, Box<dyn Error>> {
+    let isolated = tempfile::Builder::new()
+        .prefix("mastermind-persona-processor-")
+        .tempdir()?;
+    let args = claude_args(INSTRUCTIONS);
+    analyze_in_directory(input, processor, &args, timeout_secs, Some(isolated.path()))
+}
+
+pub(super) fn run_claude(
+    request: Vec<u8>,
+    instructions: &str,
+    root: &Path,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let claude = crate::setup::resolve_native_cli("claude", root)
+        .map_err(|_| "Claude processor is unavailable")?;
+    let isolated = tempfile::Builder::new()
+        .prefix("mastermind-refiner-")
+        .tempdir()?;
+    run_processor(
+        &claude,
+        &claude_args(instructions),
+        request,
+        timeout_secs,
+        Some(isolated.path()),
+    )
+}
+
+fn claude_args(instructions: &str) -> Vec<String> {
     // https://code.claude.com/docs/en/headless#start-faster-with-bare-mode
     // https://code.claude.com/docs/en/cli-reference
     // Older clients fail on unsupported flags; that is safer than silently
     // using the user's project context or local customization as evidence.
-    let isolated = tempfile::Builder::new()
-        .prefix("mastermind-persona-processor-")
-        .tempdir()?;
-    let args = [
+    [
         "-p",
         "--bare",
         "--input-format",
         "text",
         "--output-format",
         "text",
+        "--max-turns",
+        "1",
         "--tools",
         "",
         "--strict-mcp-config",
@@ -162,12 +192,11 @@ fn analyze_claude_with_processor(
         "--disable-slash-commands",
         "--no-chrome",
         "--system-prompt",
-        INSTRUCTIONS,
+        instructions,
     ]
     .into_iter()
     .map(String::from)
-    .collect::<Vec<_>>();
-    analyze_in_directory(input, processor, &args, timeout_secs, Some(isolated.path()))
+    .collect()
 }
 
 fn analyze_in_directory(
@@ -386,37 +415,46 @@ fn validate_citation(
     {
         return Err("semantic citation is not bounded credential-free source text".into());
     }
-    let excluded = excluded_ranges(&event.text);
+    if !quote_is_user_prose(&event.text, quote) {
+        return Err("semantic citation is absent from exact user prose or overlaps quoted, pasted, code or wrapped material".into());
+    }
+    Ok(())
+}
+
+pub(super) fn quote_is_user_prose(text: &str, quote: &str) -> bool {
+    let excluded = excluded_ranges(text);
     let native_attachment = [
         "# Files pasted by the user:",
         "# Files mentioned by the user:",
     ]
     .iter()
-    .any(|prefix| event.text.trim_start().starts_with(prefix));
+    .any(|prefix| text.trim_start().starts_with(prefix));
     let request_start = if native_attachment {
         const REQUEST_MARKER: &str = "\n## My request:";
-        event
-            .text
-            .find(REQUEST_MARKER)
-            .map(|start| start + REQUEST_MARKER.len())
-            .ok_or("native attachment event has no separate user request")?
+        let mut markers = text.match_indices(REQUEST_MARKER);
+        let Some((start, _)) = markers.next() else {
+            return false;
+        };
+        // A document can itself contain this heading. Text-only envelopes do
+        // not authenticate which of several occurrences belongs to the host.
+        if markers.next().is_some() {
+            return false;
+        }
+        start + REQUEST_MARKER.len()
     } else {
         0
     };
-    let eligible = event.text.match_indices(quote).any(|(start, _)| {
-        let end = start + quote.len();
-        // Bind the section boundary and prose checks to this exact occurrence.
-        // An attachment occurrence must not validate a duplicate that appears
-        // only inside code or a quotation in the user's request.
-        start >= request_start
-            && !excluded
-                .iter()
-                .any(|range| range.start < end && start < range.end)
-    });
-    if !eligible {
-        return Err("semantic citation is absent from exact user prose or overlaps quoted, pasted, code or wrapped material".into());
-    }
-    Ok(())
+    !quote.is_empty()
+        && text.match_indices(quote).any(|(start, _)| {
+            let end = start + quote.len();
+            // Bind the section boundary and prose checks to this exact occurrence.
+            // An attachment occurrence must not validate a duplicate that appears
+            // only inside code or a quotation in the user's request.
+            start >= request_start
+                && !excluded
+                    .iter()
+                    .any(|range| range.start < end && start < range.end)
+        })
 }
 
 fn excluded_ranges(text: &str) -> Vec<Range<usize>> {
@@ -626,7 +664,7 @@ fn wrapper_ranges(text: &str, literals: &[bool]) -> Option<Vec<Range<usize>>> {
 }
 
 #[cfg(not(unix))]
-fn run_processor(
+pub(super) fn run_processor(
     _processor: &Path,
     _args: &[String],
     _request: Vec<u8>,
@@ -640,7 +678,7 @@ fn run_processor(
 }
 
 #[cfg(unix)]
-fn run_processor(
+pub(super) fn run_processor(
     processor: &Path,
     args: &[String],
     request: Vec<u8>,

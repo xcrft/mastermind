@@ -610,7 +610,20 @@ fn pending_capture_fences_mcp_and_a_recovery_cannot_reassign_its_delivery() {
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        if f.success(&["miner", "hooks", "status", "--client", "codex"])["grant"]["pending"] == 1 {
+        let output = f.run(&["miner", "hooks", "status", "--client", "codex"]);
+        let pending = if output.status.success() {
+            parse(output)["grant"]["pending"] == 1
+        } else {
+            // The receiver may update SQLite while status opens its bounded
+            // file snapshot. That refusal is safe and remains deadline-bound.
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).trim(),
+                "mmcg error: file identity changed during read",
+                "{output:?}"
+            );
+            false
+        };
+        if pending {
             break;
         }
         assert!(

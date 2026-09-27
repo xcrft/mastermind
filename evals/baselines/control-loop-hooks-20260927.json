@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "kind": "mastermind-control-loop-eval",
+  "runtime": {
+    "python": "3.13.15",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O"
+  },
+  "bounded_model_safety": {
+    "status": "passed",
+    "states": 65,
+    "transitions": 586,
+    "publication_edges": 1,
+    "violations": [],
+    "open_states": 64,
+    "recoverable_open_states": 64,
+    "recovery_steps_bound": 7,
+    "mutants": [
+      {
+        "omitted_guard": "authorized",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "contract_changed",
+            "publish"
+          ],
+          "before": {
+            "authorized": false,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "executed",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "invocation_invalidated",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": false,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "verified",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "check_failed_or_inputs_changed",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": false,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "audited",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "audit_invalidated",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": false,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "reviewed",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "history_resolved",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": false,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "history",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": false,
+            "completed": false
+          }
+        }
+      }
+    ]
+  },
+  "sampled_cli_conformance": "passed",
+  "cli_cases": [
+    {
+      "status": "passed",
+      "expected": [
+        "unix::every_check_is_required_and_executor_pass_cannot_supply_missing_proof"
+      ],
+      "passed": [
+        "unix::every_check_is_required_and_executor_pass_cannot_supply_missing_proof"
+      ],
+      "missing": [],
+      "target": "acceptance_cli",
+      "elapsed_seconds": 13.839757333000307,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "unix::observed_failure_overrules_reported_pass_and_revokes_a_previous_success",
+        "unix::late_external_executable_change_cannot_close_legacy_repeated_postflight",
+        "unix::a_receipt_from_another_repository_cannot_satisfy_the_same_task_name"
+      ],
+      "passed": [
+        "unix::a_receipt_from_another_repository_cannot_satisfy_the_same_task_name",
+        "unix::observed_failure_overrules_reported_pass_and_revokes_a_previous_success",
+        "unix::late_external_executable_change_cannot_close_legacy_repeated_postflight"
+      ],
+      "missing": [],
+      "target": "verification_receipts_cli",
+      "elapsed_seconds": 15.734285082995484,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "prepare_is_read_only_and_unknown_until_typed_positive_review_closes_across_processes",
+        "unknown_or_negative_judgments_are_stored_and_block_completion_despite_green_checks",
+        "compare_and_swap_rejects_a_queued_positive_after_a_newer_negative",
+        "accepted_semantics_with_unknown_or_required_history_updates_cannot_close_via_markdown",
+        "repeated_postflight_preserves_current_review_and_keeps_ignored_lesson_changes_reviewable",
+        "follow_up_returns_exact_bound_history_work_and_conditional_steps_without_side_effects"
+      ],
+      "passed": [
+        "compare_and_swap_rejects_a_queued_positive_after_a_newer_negative",
+        "follow_up_returns_exact_bound_history_work_and_conditional_steps_without_side_effects",
+        "prepare_is_read_only_and_unknown_until_typed_positive_review_closes_across_processes",
+        "accepted_semantics_with_unknown_or_required_history_updates_cannot_close_via_markdown",
+        "unknown_or_negative_judgments_are_stored_and_block_completion_despite_green_checks",
+        "repeated_postflight_preserves_current_review_and_keeps_ignored_lesson_changes_reviewable"
+      ],
+      "missing": [],
+      "target": "task_review_cli",
+      "elapsed_seconds": 103.61520012500114,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "review_resume_completes_manual_and_native_held_tasks_without_execution",
+        "review_holds_the_controller_lock_until_native_completion",
+        "review_resume_revokes_stale_pending_approval_before_any_native_or_check_launch"
+      ],
+      "passed": [
+        "review_holds_the_controller_lock_until_native_completion",
+        "review_resume_completes_manual_and_native_held_tasks_without_execution",
+        "review_resume_revokes_stale_pending_approval_before_any_native_or_check_launch"
+      ],
+      "missing": [],
+      "target": "review_invocation_cli",
+      "elapsed_seconds": 71.16964233400358,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "auto_repair_respects_iteration_budget_and_plain_exec_does_not_retry",
+        "native_denial_and_terminal_failures_cannot_enter_postflight_with_complete_report"
+      ],
+      "passed": [
+        "native_denial_and_terminal_failures_cannot_enter_postflight_with_complete_report",
+        "auto_repair_respects_iteration_budget_and_plain_exec_does_not_retry"
+      ],
+      "missing": [],
+      "target": "invocation_cli",
+      "elapsed_seconds": 22.33973949999927,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "context_withholds_changed_markdown_until_explicit_reindex",
+        "context_person_layer_requires_configured_audience_scope_and_current_source"
+      ],
+      "passed": [
+        "context_withholds_changed_markdown_until_explicit_reindex",
+        "context_person_layer_requires_configured_audience_scope_and_current_source"
+      ],
+      "missing": [],
+      "target": "context_cli",
+      "elapsed_seconds": 6.072401333003654,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "collection_preview_is_read_only_and_collection_does_not_publish_candidates",
+        "preference_acceptance_binds_review_and_live_sources_through_mcp_and_refresh"
+      ],
+      "passed": [
+        "collection_preview_is_read_only_and_collection_does_not_publish_candidates",
+        "preference_acceptance_binds_review_and_live_sources_through_mcp_and_refresh"
+      ],
+      "missing": [],
+      "target": "persona_transcripts_cli",
+      "elapsed_seconds": 5.112484291996225,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "malformed_binding_and_timeout_failures_preserve_original_without_workflow_handoff",
+        "replay_closed_turn_and_conflicting_native_identity_never_repeat_the_processor",
+        "revocation_or_a_new_prompt_withholds_a_blocked_processors_old_result",
+        "durable_capture_fences_block_refinement_before_processing_and_before_publication",
+        "disabling_refiner_revokes_processing_even_when_native_configuration_is_malformed"
+      ],
+      "passed": [
+        "disabling_refiner_revokes_processing_even_when_native_configuration_is_malformed",
+        "durable_capture_fences_block_refinement_before_processing_and_before_publication",
+        "replay_closed_turn_and_conflicting_native_identity_never_repeat_the_processor",
+        "revocation_or_a_new_prompt_withholds_a_blocked_processors_old_result",
+        "malformed_binding_and_timeout_failures_preserve_original_without_workflow_handoff"
+      ],
+      "missing": [],
+      "target": "persona_hooks_refiner_cli",
+      "elapsed_seconds": 8.268463917003828,
+      "exit_code": 0,
+      "stop_reason": null
+    }
+  ],
+  "semantic_goal_success": null,
+  "token_savings": null,
+  "cost_savings": null,
+  "limitations": [
+    "Finite abstraction; no refinement proof of all Rust executions.",
+    "CLI cases sample local behavior with synthetic native clients, without model inference.",
+    "Recovery assumes a stable environment and successful checks and judgments.",
+    "Owner-writable local evidence; no sandbox or independent reviewer attestation.",
+    "No semantic quality, long-task convergence, token or cost improvement is measured."
+  ],
+  "source": {
+    "sha256": "6ccb169d4853ce3d209c11958e6886a57089f70ecd61d2f8e0bf2955bea5272b",
+    "files": {
+      "evals/benchmark_process.py": "d13a82dd275da9716751bcb6dccfa667975b69f35ff78237ff2e68f75be3f11c",
+      "evals/control_loop.py": "f770c6ec8e38750024a5373f30fe438aa61ae66e7db02cbaee5e73b1c939eb45",
+      "mcp/servers/mmcg/Cargo.lock": "5b417c87c5576f5209105fe6758141131bee34e7ddd185629c366f7718c41fbc",
+      "mcp/servers/mmcg/Cargo.toml": "6e509851edf2458068fd89219137b53e10cddb330b1341beba5a9a4143514c97",
+      "mcp/servers/mmcg/assets/lens/app.js": "878376534bda4b415124dd5c9259c005a6ee4bc615d31edb41c9affdfc0687ed",
+      "mcp/servers/mmcg/assets/lens/app.test.cjs": "e2ffa649c3534d04fc638db68504542829fdb4c95fe95e45ac09ed40f95770fc",
+      "mcp/servers/mmcg/assets/lens/index.html": "9d81b8ad52ffedd75b16f62a3b83ccebf83dbd4eebe88f931f82c649475b818d",
+      "mcp/servers/mmcg/assets/lens/mastermind-mark.svg": "0ca6ea9b32af13abe980e78927fd035992d2fbb05209d8447982b5a6a29d0438",
+      "mcp/servers/mmcg/assets/lens/styles.css": "f8e40c4b805a03524cece6e4d2ea76f0cd835bfe6fcd8831b35106ef689d1878",
+      "mcp/servers/mmcg/assets/mastermind-review-pr.yml": "96bfeeb0366c6c586be02c7101c839439a3d5c161c7ed5a4cfb97b102b23b293",
+      "mcp/servers/mmcg/build.rs": "a66de2284ce4e8318b0b15b3ed45506519c0238f822c09e861329d55be3237b7",
+      "mcp/servers/mmcg/src/acceptance.rs": "f8b0088eb25187d7571d39f22285aad8bc88767f6293ce132e2be089e3bce054",
+      "mcp/servers/mmcg/src/audit_bundle.rs": "ee39433016e5020f607df2e7db57b0245586f8516823720b0a00879f23ce5a7d",
+      "mcp/servers/mmcg/src/audit_spec.rs": "12a91b6736c4fb0a666af83dd983e016fc4a6543969390e0ee5b3c6d9de9e24d",
+      "mcp/servers/mmcg/src/auto_repair.rs": "90fb5c1a270d86089cbb69dd59be3cd18b43b5f064800b5c9bf3df3606dcad54",
+      "mcp/servers/mmcg/src/bounded_fs.rs": "56327217e5d0908d9edfa8719e31d0506f5817be8082fb665cf75b14e9c50c85",
+      "mcp/servers/mmcg/src/commands/acceptance.rs": "9643c0284caed31b7c9cd46c1226d0336a0880337c82337fef8d1ececb639010",
+      "mcp/servers/mmcg/src/commands/audit.rs": "cf49d4351e25f93d425f25cd88509ddf76b0f62d0ee81437fd904197e698e9eb",
+      "mcp/servers/mmcg/src/commands/ci.rs": "c10a512e426f4ab20f8a7b29951e1f48aa019f2cfb6241a56e690f0ae832197b",
+      "mcp/servers/mmcg/src/commands/demo.rs": "bb2f92a296cf826656802e865e4fb4f2ebaff3e9532618e6711a703bb59663ed",
+      "mcp/servers/mmcg/src/commands/init.rs": "1c65f71af5cbff37e6c8b9df925ee5fd6f1b615b7b22df3f4502b7e2553725a2",
+      "mcp/servers/mmcg/src/commands/mod.rs": "5b144ee1c55a21506fb78496691b78a5dd1ec80c61f110525615a090203091df",
+      "mcp/servers/mmcg/src/commands/new_spec.rs": "65267414155718f3557c198afb8b2e04c2c2c4dc94cf611b33490ad4ef730a0c",
+      "mcp/servers/mmcg/src/commands/pr_comment.rs": "b705f05fd20331f231ff668c5e91320cc7f1134cf6fd18b716d1e2b2acb65a5a",
+      "mcp/servers/mmcg/src/commands/query.rs": "a1343860d40109e34843f14aa7c1cd95fafe84e506b689b528b1af1f00f3eb54",
+      "mcp/servers/mmcg/src/commands/run_task.rs": "0b5e211d92aad2427da618381333eb140e5318e73aed9e30bf44994f5c22607e",
+      "mcp/servers/mmcg/src/commands/spec_gate.rs": "d7403c05fdcb718e6a84936260b4f561080f0ac23c882cde24eb164c3f17a56f",
+      "mcp/servers/mmcg/src/commands/task_review.rs": "2c9e26d87c04df385e64621124405438d3e5185fef8a2124359cf09c7e33cceb",
+      "mcp/servers/mmcg/src/commands/tour.rs": "fcf5754bb82bd07ad5c6b1f1a8cff49f19dd78260773722cabd122e42ff54ef5",
+      "mcp/servers/mmcg/src/commands/uninstall.rs": "6ac57c97b1c320577ebaa7ee361ed8e881c20ad4497b2f7b105f0c9d4b35edd8",
+      "mcp/servers/mmcg/src/commands/verification.rs": "318612963654803f18e77d450cbc4195670ce674b45f81eb59ef4d4bbb4deb16",
+      "mcp/servers/mmcg/src/context.rs": "379d97fd074d6098ecda0ac6b99a0430d2f2689563e9002c8dcd7f85b599ce3c",
+      "mcp/servers/mmcg/src/context_doctor.rs": "3986de0a64b33a810f348222d65b5cce87970c2b5156c280968706b14af991f9",
+      "mcp/servers/mmcg/src/declared_files.rs": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a",
+      "mcp/servers/mmcg/src/diff.rs": "6868c33df04ee3273b3afda7bed47e252a3151df3870d7153fcf866b645376c7",
+      "mcp/servers/mmcg/src/doctor.rs": "5ecd045b29fc996843814c60ca193c1cd1e1ea9556eb405f3374b5970c3477a4",
+      "mcp/servers/mmcg/src/document_graph.rs": "690f12a1c3d23e4e27e6032bcbb75c07d7fb3df31f00a65b93f44fba34a4ef73",
+      "mcp/servers/mmcg/src/document_sections.rs": "8f8d18d885d11b11371d5f980f192a5c426f50c3247deaddfe699170298c2e37",
+      "mcp/servers/mmcg/src/evidence/junit.rs": "f4c2a7fd2c4ca75bb8d783b90c3ac1aa5b3909f782a19d747668a286957decd1",
+      "mcp/servers/mmcg/src/evidence/otel.rs": "c05fbb998eb0f7c221724e9b02fc735b833ad5fc8d552f4552d742c7c183d152",
+      "mcp/servers/mmcg/src/evidence.rs": "77ee49301a14eb23ca824306c7537ef32d61d9be5c29d532c6b54b0adffa6a9b",
+      "mcp/servers/mmcg/src/executor_claims.rs": "adf32891bc91c4555b9f41cb1174c34aa38adfc4e2124e7faf89e258df3a3591",
+      "mcp/servers/mmcg/src/executor_report.rs": "523d4331cd05ed12cc8ced111f4d9a1ee5080dcd7ee03c9090856ca3643bbe5d",
+      "mcp/servers/mmcg/src/fact_adapter.rs": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d",
+      "mcp/servers/mmcg/src/fact_signature.rs": "573cf37167427f60b4dce10a97dd8e20e5961608878d21b30dce8f18907a37ce",
+      "mcp/servers/mmcg/src/facts.rs": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce",
+      "mcp/servers/mmcg/src/find_checks.rs": "c661f42546ec4d722ff425a17832e773ab89c0e3e3a852250053e3a8810ea998",
+      "mcp/servers/mmcg/src/fingerprint.rs": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f",
+      "mcp/servers/mmcg/src/hex.rs": "56726fd8bdbe08f32aaeeff716c21a91d14ecf02fe106a88847dcd10a85d118a",
+      "mcp/servers/mmcg/src/history_disposition.rs": "3be781710ab2aa945263fd517a550ce817a2e48b0a1a2f2aeab549965eccdae0",
+      "mcp/servers/mmcg/src/indexer/cpp.rs": "46c4981a218c95b5035bcd7513c5de967f61f152cd5e6c03a6f7bb43fdf39aae",
+      "mcp/servers/mmcg/src/indexer/csharp.rs": "dae69b56c39bc77611a888808e110e30c1f13f30731ffb63951552f381dc3a94",
+      "mcp/servers/mmcg/src/indexer/go.rs": "f8c969195b690abfb2b8f72f1d622530965ae14e1c99b76cb467561dabce2888",
+      "mcp/servers/mmcg/src/indexer/java.rs": "82929ce78bcc928eec38fc24684d26c647f66ce67a256718c36ad726453ff648",
+      "mcp/servers/mmcg/src/indexer/javascript.rs": "10036243b5c82056285c8b699280b94b4103e378f0b96d4b6ba91fe7f091373b",
+      "mcp/servers/mmcg/src/indexer/php.rs": "aa2e3c1a2b714a7ba738b2574ce9127402e085fdb38c235423481b810f1f2150",
+      "mcp/servers/mmcg/src/indexer/python.rs": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1",
+      "mcp/servers/mmcg/src/indexer/rust_lang.rs": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0",
+      "mcp/servers/mmcg/src/indexer/typescript.rs": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda",
+      "mcp/servers/mmcg/src/indexer/vue.rs": "b9ed6f06a535b7732ac8cb3cde79ed85ab70be5297d862fb89dfe7ea300b7513",
+      "mcp/servers/mmcg/src/indexer.rs": "178fdafc330504bea4489e7b3566116f3833ca2d1990234d389fbe53b4b9b8dc",
+      "mcp/servers/mmcg/src/invocation.rs": "9aefc96d7e4397c370617ff23010ba2bc7bea49871f97942860268733cd54272",
+      "mcp/servers/mmcg/src/lens.rs": "a66e3224993edfeedee8ed3d39ff09223b95d75aeb454b152fccaaff45f030b4",
+      "mcp/servers/mmcg/src/lessons.rs": "3dc2341d5e3e7f6e2f2b62de95949db78a1ea906522a5fb9d237672619d164cb",
+      "mcp/servers/mmcg/src/lib.rs": "560d7c86dd24e6f5c3329cf86722cea11ee5b44aa56779315caf33325929adc1",
+      "mcp/servers/mmcg/src/main.rs": "947ca1cd02383b86c11be5086cd4fc3cbece540981becab79ce2e33de9837ce3",
+      "mcp/servers/mmcg/src/mcp.rs": "1b6ad0c7e2c63804c0478689df37f77f2e4498e6ca4383ebfd1241d18abf9cdf",
+      "mcp/servers/mmcg/src/miner/access.rs": "b555c63f4da93c513495d6d5fb4a1d61a3a6b00226ba19589ff917c935212755",
+      "mcp/servers/mmcg/src/miner/codex_transcript.rs": "17989e9fda7ce8070475f5e94d7c393f1c0899751edc9ebef0e36a5472a403b1",
+      "mcp/servers/mmcg/src/miner/collection/evaluation.rs": "6266c716d2dd75336570970a55ef7c23a72ad7762c4ed6f97f891b8ea310dd3f",
+      "mcp/servers/mmcg/src/miner/collection/search.rs": "98262a98e126010e551afda765664b0503c22d33db83aa1bfbff1bab69008d1e",
+      "mcp/servers/mmcg/src/miner/collection/sources.rs": "9afafb6b5b10a6c73ad61f7ff0f0ac272212e37f655eb98a6fb20ff52e84adee",
+      "mcp/servers/mmcg/src/miner/collection.rs": "2ea77096eb6bcb8ac70c827053741493daa87fb0493ed7041fd14e8a54f14be4",
+      "mcp/servers/mmcg/src/miner/curation.rs": "fc62c7a02fec20be40dc649ec427a8a2d041271cebb0f24b9af0f90e3d5cfe85",
+      "mcp/servers/mmcg/src/miner/feedback.rs": "4a20c5802c2b3fc91de36d4f75a6683f13c9a51eb63d91746cd6af5887b1292a",
+      "mcp/servers/mmcg/src/miner/habit.rs": "45ee940aa15ba6425bda7d915d6218a6964664c7e4bb7e4c1e3b51d9c3bbd376",
+      "mcp/servers/mmcg/src/miner/hooks/fence.rs": "d02abbbaf7dec0602625fc734641045e6b0ccfb08896d74c4391328a8a98070a",
+      "mcp/servers/mmcg/src/miner/hooks/install.rs": "2f340b2a876ae908af945b0c95a98971a3000d4c0976977955731cec11709ac0",
+      "mcp/servers/mmcg/src/miner/hooks/journal/intake.rs": "3b54b76a0258b513668796a184bdbe74f80ac1ec6820d3ce482077ee7e66e553",
+      "mcp/servers/mmcg/src/miner/hooks/journal.rs": "4e51c5a926464e9607713cbe8959734fd66383967f47d1436e3a25a80571ad67",
+      "mcp/servers/mmcg/src/miner/hooks/mod.rs": "8e23aba06b04ec18af7fed71eb2757a3322c8382c6a970c9d3459f0971d13eb7",
+      "mcp/servers/mmcg/src/miner/hooks/refiner.rs": "884a5b46c167e9bc1344014717be2cdc9e6b5c6150e4ae7aee232b8e04302e88",
+      "mcp/servers/mmcg/src/miner/hooks/semantic.rs": "3c3b4bb78479db331f688fca6d8958f922b7e3f1d99e06615964f0711bb0c6ae",
+      "mcp/servers/mmcg/src/miner/hooks/worker.rs": "e32d3fd3eaecbccf2b6329ad15bb7c0e3ec136c8b4aa92867bde840b4a83d0e5",
+      "mcp/servers/mmcg/src/miner/mod.rs": "487970160d129c9e7bff370a2cef9bbcf93c114894458e00f091c75fcee71af9",
+      "mcp/servers/mmcg/src/miner/profile.rs": "3f39a007742a747000855aa8d6f2ca17ea2680cba8a094cf643b794fbb1dfa63",
+      "mcp/servers/mmcg/src/miner/range.rs": "9a7159c110ecd7e16b091c04ac3d59a5470df5ce07529474bd23075ce2d360cc",
+      "mcp/servers/mmcg/src/miner/stats.rs": "e6989c987de7d3431484beb76c4771d4330d66b1b5f471023a7b99a670617cfc",
+      "mcp/servers/mmcg/src/miner/store/collection/search.rs": "5cc4962eb7bec922acc3db867d6458233d9e5aaf6109ee7ead510978e454dc06",
+      "mcp/servers/mmcg/src/miner/store/collection.rs": "dd7397c50b136e2b8f48e4de563b32ee77477675fa8f24f99f9b5f61635fee20",
+      "mcp/servers/mmcg/src/miner/store/curation.rs": "9b4bec031115d1dcb0c7c99d4f2339051c300d12f15b52206ae528789d233f7d",
+      "mcp/servers/mmcg/src/miner/store/habit_generations/tests.rs": "9c5c2efd4670eb6347f6d77b2943c9da8c9db401ad311c67f919983c1d56c94a",
+      "mcp/servers/mmcg/src/miner/store/habit_generations.rs": "9214969d8342202c15050a4ef954d803760cb27a640f964ec46818798f1c4065",
+      "mcp/servers/mmcg/src/miner/store/habit_review.rs": "0f8aad803bd28c8f2ce6938da0dae3b80cdf3975628b641998163b877faa2328",
+      "mcp/servers/mmcg/src/miner/store/habit_supersession/tests.rs": "0997a2abb185e9377d6c338fe2ceeff00c199d0739fecd1c0c492771b8f18a51",
+      "mcp/servers/mmcg/src/miner/store/habit_supersession.rs": "dced5171167fddc2f9538f75da7fc4e8d0e0fb67132a08e0ef1f52c93e830f21",
+      "mcp/servers/mmcg/src/miner/store/preferences.rs": "9df0be024ad0a3ca6cb9474675ebf23a6e37b7a310123f524320ced1892f1b38",
+      "mcp/servers/mmcg/src/miner/store/supersession.rs": "7934906c4d48939722fa1458bf43387535651629523af048e730117f5a96045e",
+      "mcp/servers/mmcg/src/miner/store.rs": "56fe6b797d15abf7cf75527ec380dd71e7e31b842f30e55186a79a19aed09489",
+      "mcp/servers/mmcg/src/miner/tooling.rs": "a0e3a6bf2b2a014cefa6d5a045249434fa44b62c33c4eac1822fa04b8a621a48",
+      "mcp/servers/mmcg/src/miner/workflow.rs": "6216490a5182ec664a7e1b12a22c163a15b090750e4796c70840d0a2b93c8f2b",
+      "mcp/servers/mmcg/src/policy/evidence.rs": "a06bdde9c0de59a870af9e403f7457fb57b9a874ad08c8303e694fed26b0de1b",
+      "mcp/servers/mmcg/src/policy.rs": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23",
+      "mcp/servers/mmcg/src/project_claims.rs": "cd0be21e2aaf33713361e6a3c979c2b8e18eeff15af935528cb61846d33b4d77",
+      "mcp/servers/mmcg/src/queries.rs": "6e9869b64d1e385e8c739f7dcb2f3e91c5ef5bc2d391d0bf95cbaa1771a5cb7d",
+      "mcp/servers/mmcg/src/review_invocation.rs": "3257a374ddf516941c0164cd6f5c5a85bd2c24a96aa4a1596a06bdd10b03fb93",
+      "mcp/servers/mmcg/src/review_package.rs": "a3928259c8c6cd7a962a238b43b3c49a048757ddf2c8d440aa6751997dd0dcc8",
+      "mcp/servers/mmcg/src/run_task.rs": "bb5d69cd780500824170e20f798787f4d926fd8e0299b38034826141eb4e2859",
+      "mcp/servers/mmcg/src/sarif_export.rs": "ad5b527bd89de43a0ff0ef7cb956a3fe63000721e19a8035f2fa3681cebc29e9",
+      "mcp/servers/mmcg/src/scip_overlay.rs": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17",
+      "mcp/servers/mmcg/src/setup.rs": "ae99f96f8351e1929ff56406c6dae56197bcf82dfee2d5c481d6a1652e089cbd",
+      "mcp/servers/mmcg/src/spec.rs": "f73b1ae303193943376cadb021a754ebceb9ea64817fd463b0c9eee316a315d4",
+      "mcp/servers/mmcg/src/spec_removals.rs": "c95bab325c8eab1904eb4e10ee734803713d4484ddd336d5e9d8363e6c14388a",
+      "mcp/servers/mmcg/src/spec_symbols.rs": "e0cf607dd5acc5afd9603fdf6637801ba0ed1b1c4fc471c0dd7b26fd8ca7ff1f",
+      "mcp/servers/mmcg/src/store.rs": "19850f874498f7c53292e4341ee38962f335dd8acb69d3fa2d7df8191db6fde7",
+      "mcp/servers/mmcg/src/task_review.rs": "3fc8792e067265e54b770b5d4d4d389e3f3c0698d0fb23e4dd8d39db96ec05fd",
+      "mcp/servers/mmcg/src/task_scaffold.rs": "2f30e61e7ebe38c177691f024672ed93967a6cd6ae9a380d3f008cf00ce72bf3",
+      "mcp/servers/mmcg/src/team.rs": "7ee8ff16eb2f63ce7a215075a1ac7bbcb224eee151acc6e84b69be2e33c05d15",
+      "mcp/servers/mmcg/src/templates.rs": "cedc114fb9a88a174053a3f051ad92649cdc8cc1fd3403fdb5ae09d8e4b5ffc2",
+      "mcp/servers/mmcg/src/temporal.rs": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01",
+      "mcp/servers/mmcg/src/terminal.rs": "9a31ff078802c805b56042cf3e4121061670915087a14e687df19f58dbb8f930",
+      "mcp/servers/mmcg/src/test_scan.rs": "0c3f77f99a45f6681f2e8246ecf4ec79a6d086802be9732c66412991273b803d",
+      "mcp/servers/mmcg/src/verification.rs": "4b44c5de6d37097811c19e96e85f23a37ef49952864a340e238aa65876c6bead",
+      "mcp/servers/mmcg/src/verification_receipts.rs": "7c5c1a5f5f6df65cfa2f251c278946d426fc32ad3f263e8744f62df82cba6990",
+      "mcp/servers/mmcg/src/verify_spec.rs": "9a2564670cb48f99bc44e2376a4f6b36903a1e085c7309a08d81748b32307de5",
+      "mcp/servers/mmcg/src/watcher.rs": "51f72c062260c469fb57d96dcd04af6b3449d776d1fca857cadae7dfff4965f5",
+      "mcp/servers/mmcg/src/workflow_status.rs": "cb2de6ce8af81867eb151d8432759b06393962eedef4702369e77c8a11e38d1c",
+      "mcp/servers/mmcg/templates/context.md": "29d594c0a62f2c2e3498823813c37a12ff944de1b820502ed5f211920efc9ff3",
+      "mcp/servers/mmcg/templates/workflow.md": "b897f0c140b17d2a6bb673ba6785ff10b0528a5c95aa9f462745ee009ec16fec",
+      "mcp/servers/mmcg/tests/acceptance_cli.rs": "ffb85c12358cdc8f8024295d3e2dd1808d61c6cce216b3d9e2b91e696406b3e8",
+      "mcp/servers/mmcg/tests/attribute_impact_cli.rs": "8514f2ddb6d95d9fb2304e483d575a72e89b320f96f4d976d80b171de143e8ed",
+      "mcp/servers/mmcg/tests/context_cli.rs": "74659528b88876ad43089876e51a4823511301ded44d0a38da88611abfee1ae3",
+      "mcp/servers/mmcg/tests/declared_files_cli.rs": "9a72cb1470871b2f3d87d52de75f6f3f62c1ee54a5c99a6167f180181c9ccf87",
+      "mcp/servers/mmcg/tests/executor_claims_cli.rs": "81240058c1e20a952b782d41f85a26fc515cd206afbf920586de794afcb88350",
+      "mcp/servers/mmcg/tests/executor_report_cli.rs": "9c403250d959ca250dc0cdfe9ce28c8675bee369f2921ce845b7f812a22b12e9",
+      "mcp/servers/mmcg/tests/fact_lifecycle_cli.rs": "c6fd8797caf27b0be13340434d5de658eb3825294d43f34f7b72bc5bc5112f6d",
+      "mcp/servers/mmcg/tests/find_preflight_cli.rs": "05be6a9689d9c407ee5cd2708b1e36f2c2cc042cc6e5d133fb069af74e7ad764",
+      "mcp/servers/mmcg/tests/fixtures/change-impact-schema-v1.json": "bb2d853c0820e2360e48b74e944c24901414b66059a732ae7b5e229c8a9b9ee1",
+      "mcp/servers/mmcg/tests/fixtures/change-impact-test-projection-v1.json": "1cf3d3129cef9f35e656601bac7b314aa4b7d7447b849901a382b308aff8c21d",
+      "mcp/servers/mmcg/tests/fixtures/executor-report-v1.md": "9f3a196fd68b45b6d1294aea29bc633c2c2eb5a681a488cb53f9154e164ba596",
+      "mcp/servers/mmcg/tests/fixtures/persona_detector.json": "9bedcf1c80fc26e7fe2f1d144c18036d71ed0231193ce1325c5ff438b82a02f8",
+      "mcp/servers/mmcg/tests/golden.rs": "5b256962da890a82f35d2428e9e1d4311c9f91418e0f4036aa6fa77866f5148a",
+      "mcp/servers/mmcg/tests/invocation_cli.rs": "c7f04ceb521345e5baa6811c5963b680d432788d259b49e4eb90333d7f9cbc5c",
+      "mcp/servers/mmcg/tests/persona_hooks_cli.rs": "3bce4da53a7d58f3fcda82ca6b3073a0d6ed51ae1b0a784e5bc5a84a045ca765",
+      "mcp/servers/mmcg/tests/persona_hooks_controller_origin_cli.rs": "568494c057e343b009008fd47eb97026a0ef1f366447d043cd3dbb9b6fbaaff1",
+      "mcp/servers/mmcg/tests/persona_hooks_install_cli.rs": "5ba3e4d5a58ac0bac638bf2e7de5772b9b62b6b077c35315dc34edcfdf2b5faa",
+      "mcp/servers/mmcg/tests/persona_hooks_refiner_cli.rs": "04a2230107d7aac03e7d1c6977e2d6edbf0941c1e27dc164573315b1fac6e7d0",
+      "mcp/servers/mmcg/tests/persona_transcripts/composition.rs": "587f186aaf45b66d9e14a09a455ea7c17abd8ebddc1d07c68eaa2b07f3028909",
+      "mcp/servers/mmcg/tests/persona_transcripts/search.rs": "d044939cc1c72173056397b9c0599d152e241f06de1157fea45c0dd8eef5e13a",
+      "mcp/servers/mmcg/tests/persona_transcripts/source_sync.rs": "013978459a8f59fc5bbdae29befdb0f1f37ea12cc57d3dee206233138ed2e886",
+      "mcp/servers/mmcg/tests/persona_transcripts_cli.rs": "c727dca8a3b26ab49266cb26459532bc862fa07d9f5bd7e1b1e8a58991a66aec",
+      "mcp/servers/mmcg/tests/policy_cli.rs": "99dba2d21a4377a9eb442300b12a28293973568f37900c1d3da3d015bfd6b26e",
+      "mcp/servers/mmcg/tests/query_explain_cli.rs": "1202be2beccff1324d4ec59b0d744ad2c0c29b6c0a41edf65234d82989097855",
+      "mcp/servers/mmcg/tests/research_graph.rs": "2d2d159d72f9fb9a372d9d4643c734a006d3648f50ffd3caea59fc199b7f40c6",
+      "mcp/servers/mmcg/tests/review_invocation_cli.rs": "bc1b152cb50864be29d7377173145273e7d09b85414f3894fc7bc6650dcd46bd",
+      "mcp/servers/mmcg/tests/scoped_removals_cli.rs": "213bbfc6158eef287f29ab8c735cb31c7bc7568cd9c00ce38a1e4389c6b61d7e",
+      "mcp/servers/mmcg/tests/scoped_snapshot_cli.rs": "440b4cc9d4d6bf141ae09c568f95044d8da076314bca961cde32bee7b09c0c2a",
+      "mcp/servers/mmcg/tests/task_review_cli.rs": "426e900cd2438fe2564a6453f42d863ffdc18ac1ba42024d838de7b770ad0f4a",
+      "mcp/servers/mmcg/tests/verification_coverage_cli.rs": "129fcf9d2a0503cdaac9f79d3a1040f1b6405bcb3ccf88050ad9ad87bef93b2b",
+      "mcp/servers/mmcg/tests/verification_receipts_cli.rs": "bd226ad1c534a9ba52abcfd1385b446878348659891b1527fdce0bc51b83189e"
+    }
+  },
+  "revision": "abf942c08d908f763905f25a244ea2cced9d02f9",
+  "working_tree_dirty": true,
+  "source_unchanged": true,
+  "status": "passed",
+  "elapsed_seconds": 246.76869483300106
+}

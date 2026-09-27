@@ -13,6 +13,21 @@ pub fn valid_client_id(value: &str) -> bool {
 }
 
 pub fn set(root: &Path, client_id: &str, allowed: bool) -> Result<(), Box<dyn std::error::Error>> {
+    configure(root, client_id, allowed)?;
+    let root = root.display();
+    println!(
+        "{} profile access for client `{client_id}` in `{root}`.",
+        if allowed { "Granted" } else { "Revoked" }
+    );
+    Ok(())
+}
+
+/// Update the existing root/client grant without printing CLI output.
+pub fn configure(
+    root: &Path,
+    client_id: &str,
+    allowed: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !valid_client_id(client_id) {
         return Err(
             "client must be 1-64 ASCII letters, digits, dots, dashes or underscores".into(),
@@ -24,12 +39,11 @@ pub fn set(root: &Path, client_id: &str, allowed: bool) -> Result<(), Box<dyn st
     }
     let root = root.to_str().ok_or("profile access root is not UTF-8")?;
     let path = ProfileStore::db_path().ok_or("could not resolve home directory")?;
+    if !allowed && ProfileStore::open_optional_read_only(&path)?.is_none() {
+        return Ok(());
+    }
     let mut store = ProfileStore::open(&path)?;
     store.set_reader_grant(root, client_id, allowed)?;
-    println!(
-        "{} profile access for client `{client_id}` in `{root}`.",
-        if allowed { "Granted" } else { "Revoked" }
-    );
     Ok(())
 }
 

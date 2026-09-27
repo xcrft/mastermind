@@ -56,15 +56,39 @@ pub struct Request {
 }
 
 pub fn run(request: &Request, mmcg_binary: &Path) -> Outcome {
+    run_with_profile_client(request, mmcg_binary, None)
+}
+
+/// Register the selected MCP audience without granting it profile access.
+/// `None` preserves the ordinary setup contract. A previously canonical entry
+/// with no environment can acquire this one explicit value without `force`;
+/// a different audience or other customized settings retain overwrite protection.
+pub fn run_with_profile_client(
+    request: &Request,
+    mmcg_binary: &Path,
+    profile_client: Option<&str>,
+) -> Outcome {
+    if profile_client.is_some_and(|client| !crate::miner::access::valid_client_id(client)) {
+        return finish_error(
+            request,
+            "unresolved",
+            operation(request),
+            &json!({}),
+            "invalid_profile_client",
+        );
+    }
     if let Err(class) = validate_request(request) {
         return finish_error(request, "unresolved", operation(request), &json!({}), class);
     }
-    let entry = match mmcg_entry(mmcg_binary) {
+    let mut entry = match mmcg_entry(mmcg_binary) {
         Ok(entry) => entry,
         Err(class) => {
             return finish_error(request, "unresolved", operation(request), &json!({}), class)
         }
     };
+    if let Some(client) = profile_client {
+        entry["env"] = json!({"MMCG_PROFILE_CLIENT": client});
+    }
     match (request.client, request.scope) {
         (Client::Claude | Client::Codex, Scope::User) => run_native(request, &entry),
         (Client::Continue, _) => match target_for(request) {
@@ -76,6 +100,23 @@ pub fn run(request: &Request, mmcg_binary: &Path) -> Outcome {
             Err(class) => finish_error(request, "unresolved", operation(request), &entry, class),
         },
     }
+}
+
+/// The only automatic migration is the exact default entry lacking the new
+/// audience. In particular an empty/custom environment is not discarded.
+fn profile_base_entry(entry: &Value) -> Option<Value> {
+    let env = entry.get("env")?.as_object()?;
+    if env.len() != 1
+        || !env
+            .get("MMCG_PROFILE_CLIENT")?
+            .as_str()
+            .is_some_and(crate::miner::access::valid_client_id)
+    {
+        return None;
+    }
+    let mut base = entry.clone();
+    base.as_object_mut()?.remove("env");
+    Some(base)
 }
 
 /// MCP config file location on disk + a short label for diff headers.
@@ -230,6 +271,17 @@ fn mmcg_entry_for_platform(
             ))
         }
         Some("project") => {
+            // npm knows its resolved launcher. User-scoped MCP must keep that
+            // absolute entry point when another repository becomes the cwd.
+            if let Some(launcher) = std::env::var_os("MASTERMIND_LAUNCHER_JS") {
+                let node = std::env::var_os("MASTERMIND_NODE").ok_or("node_path_missing")?;
+                let launcher = PathBuf::from(launcher);
+                let node = PathBuf::from(node);
+                if !launcher.is_absolute() || !node.is_absolute() {
+                    return Err("npm_launcher_path_not_absolute");
+                }
+                return Ok(json!({"command":node,"args":[launcher,"serve"]}));
+            }
             // Project-local install. Path relative to the project root (where
             // `.mcp.json` lives), so it survives `cd` into subdirs.
             let bin = match platform {
@@ -290,6 +342,133 @@ impl Drop for TestCanonicalEntryGuard {
 
 pub(crate) fn canonical_entry(mmcg_binary: &Path) -> Result<Value, &'static str> {
     mmcg_entry(mmcg_binary)
+}
+
+/// Inspect only the saved user registration. Never execute native clients,
+/// configured servers, credential helpers or commands embedded in settings.
+pub fn inspect_profile_registration(
+    client: Client,
+    root: &Path,
+    mmcg_binary: &Path,
+    profile_client: &str,
+) -> Result<Value, String> {
+    if !matches!(client, Client::Claude | Client::Codex) {
+        return Err("profile_registration_client_unsupported".into());
+    }
+    if !crate::miner::access::valid_client_id(profile_client) {
+        return Err("invalid_profile_client".into());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|_| "project_root_unavailable")?;
+    if !root.is_dir() {
+        return Err("project_root_not_directory".into());
+    }
+    let inspected = (|| -> Result<(&str, &str), String> {
+        let home = setup_home_dir().ok_or("home_directory_unavailable")?;
+        let variable = match client {
+            Client::Claude => "CLAUDE_CONFIG_DIR",
+            _ => "CODEX_HOME",
+        };
+        let config_dir = std::env::var_os(variable).map(PathBuf::from);
+        // Existing synthetic-home tests must never follow the host's overrides.
+        #[cfg(test)]
+        let config_dir = if TEST_HOME_DIR.with(|slot| slot.borrow().is_some()) {
+            None
+        } else {
+            config_dir
+        };
+        let path = user_registration_path(client, &home, config_dir.as_deref())?;
+        let Some(bytes) = read_config_capped(&path)? else {
+            return Ok(("missing_or_stale", "registration_not_found"));
+        };
+        let value = if client == Client::Claude {
+            parse_json_unique(&bytes)?
+        } else {
+            let text = std::str::from_utf8(&bytes).map_err(|_| "invalid_toml_encoding")?;
+            let value: toml::Value = toml::from_str(text).map_err(|_| "invalid_toml")?;
+            serde_json::to_value(value).map_err(|_| "invalid_toml_shape")?
+        };
+        let key = if client == Client::Claude {
+            "mcpServers"
+        } else {
+            "mcp_servers"
+        };
+        let object = value.as_object().ok_or("invalid_config_root")?;
+        let Some(servers) = object.get(key) else {
+            return Ok(("missing_or_stale", "registration_not_found"));
+        };
+        let servers = servers.as_object().ok_or("invalid_mcp_servers")?;
+        let Some(entry) = servers.get("mmcg") else {
+            return Ok(("missing_or_stale", "registration_not_found"));
+        };
+        let mut observed = entry.clone();
+        if let Some(fields) = observed.as_object_mut() {
+            let defaults: &[(&str, Value)] = if client == Client::Claude {
+                &[("type", json!("stdio"))]
+            } else {
+                &[("enabled", json!(true)), ("env_vars", json!([]))]
+            };
+            for (key, default) in defaults {
+                if fields.get(*key) == Some(default) {
+                    fields.remove(*key);
+                }
+            }
+            if fields.get("env") == Some(&json!({})) {
+                fields.remove("env");
+            }
+        }
+        let mut expected = mmcg_entry(mmcg_binary)?;
+        if observed == expected {
+            return Ok(("missing_or_stale", "explicit_profile_client_missing"));
+        }
+        expected["env"] = json!({"MMCG_PROFILE_CLIENT": profile_client});
+        if observed == expected {
+            Ok(("configured", "user_registration_matches"))
+        } else {
+            Ok(("customized", "registration_differs"))
+        }
+    })();
+    let (status, reason) = match inspected {
+        Ok((status, reason)) => (status, reason.to_string()),
+        Err(reason) => ("unavailable", reason),
+    };
+    Ok(
+        json!({"status":status,"reason":reason,"client":client,"profile_client":profile_client,
+        "project_root":root,"scope":"user_configuration_only","inspection":"read_only",
+        "project_overlays":"not_verified","activation":"not_verified","runtime_connection":"not_observed"}),
+    )
+}
+
+fn user_registration_path(
+    client: Client,
+    home: &Path,
+    config_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if !home.is_absolute() || config_dir.is_some_and(|path| !path.is_absolute()) {
+        return Err("config_directory_must_be_absolute".into());
+    }
+    match client {
+        Client::Claude => {
+            // Claude keeps its older .config.json when one already exists;
+            // otherwise CLAUDE_CONFIG_DIR relocates the global .claude.json.
+            let legacy = config_dir
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join(".claude"))
+                .join(".config.json");
+            match std::fs::symlink_metadata(&legacy) {
+                Ok(_) => return Ok(legacy),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("config_read_failed".into()),
+            }
+            Ok(config_dir.unwrap_or(home).join(".claude.json"))
+        }
+        Client::Codex => Ok(config_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".codex"))
+            .join("config.toml")),
+        _ => Err("profile_registration_client_unsupported".into()),
+    }
 }
 
 pub(crate) fn read_json_mmcg(path: &Path) -> Result<Option<Value>, String> {
@@ -496,7 +675,10 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
         if existing.as_ref() == Some(entry) {
             return finish_outcome(request, &target.label, "install", entry, Outcome::NoChange);
         }
-        let customized = existing.is_some();
+        let profile_upgrade = existing
+            .as_ref()
+            .is_some_and(|current| profile_base_entry(entry).as_ref() == Some(current));
+        let customized = existing.is_some() && !profile_upgrade;
         if customized && !request.force {
             return finish_outcome(
                 request,
@@ -548,7 +730,7 @@ fn run_json(request: &Request, target: &Target, entry: &Value) -> Outcome {
 }
 
 pub(crate) fn continue_entry(entry: &Value) -> Value {
-    json!({
+    let mut result = json!({
         "name": "Mastermind MCP",
         "version": "1.0.0",
         "schema": "v1",
@@ -557,7 +739,11 @@ pub(crate) fn continue_entry(entry: &Value) -> Value {
             "command": entry.get("command").cloned().unwrap_or(Value::Null),
             "args": entry.get("args").cloned().unwrap_or_else(|| json!([])),
         }],
-    })
+    });
+    if let Some(env) = entry.get("env") {
+        result["mcpServers"][0]["env"] = env.clone();
+    }
+    result
 }
 
 fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
@@ -616,7 +802,13 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
     if existing.as_ref() == Some(&canonical) {
         return finish_outcome(request, &target.label, "install", entry, Outcome::NoChange);
     }
-    if existing.is_some() && !request.force {
+    let profile_upgrade = existing.as_ref().is_some_and(|current| {
+        profile_base_entry(entry)
+            .map(|base| continue_entry(&base))
+            .as_ref()
+            == Some(current)
+    });
+    if existing.is_some() && !profile_upgrade && !request.force {
         return finish_outcome(
             request,
             &target.label,
@@ -628,7 +820,7 @@ fn run_continue(request: &Request, target: &Target, entry: &Value) -> Outcome {
     if !request.write {
         return finish_outcome(request, &target.label, "install", entry, Outcome::DryRun);
     }
-    if existing.is_some() {
+    if existing.is_some() && !profile_upgrade {
         if let Some(bytes) = observed_bytes {
             if backup_private(&target.path, bytes).is_err() {
                 return finish_error(request, &target.label, "install", entry, "backup_failed");
@@ -668,18 +860,33 @@ enum ParsedNativeState {
     Claude {
         command_fields: Vec<String>,
         args_fields: Vec<String>,
+        profile: NativeProfileSettings,
     },
     Codex {
         enabled: bool,
         command: String,
         args: Vec<String>,
+        profile: NativeProfileSettings,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeProfileSettings {
+    environment: Value,
+    customized: Value,
+}
+
+impl NativeProfileSettings {
+    fn matches(&self, environment: &Value) -> bool {
+        self.environment == *environment && self.customized == json!({})
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeState {
     Absent,
     Canonical(ParsedNativeState),
+    ProfileUpgrade(ParsedNativeState),
     Customized(ParsedNativeState),
 }
 
@@ -776,6 +983,7 @@ fn run_native(request: &Request, entry: &Value) -> Outcome {
     };
     let present = !matches!(inspected, NativeState::Absent);
     let canonical = matches!(inspected, NativeState::Canonical(_));
+    let profile_upgrade = matches!(inspected, NativeState::ProfileUpgrade(_));
 
     if request.remove {
         if !present {
@@ -792,7 +1000,7 @@ fn run_native(request: &Request, entry: &Value) -> Outcome {
         }
     } else if canonical {
         return finish_outcome(request, "native", "install", entry, Outcome::NoChange);
-    } else if present && !request.force {
+    } else if present && !profile_upgrade && !request.force {
         return finish_outcome(
             request,
             "native",
@@ -940,7 +1148,7 @@ fn native_matches(
         Client::Codex => parse_codex_native(&output.stdout)?,
         _ => return Err("invalid_native_client".into()),
     };
-    classify_native_state(parsed, command, &args)
+    classify_native_state(parsed, command, &args, entry.get("env"))
 }
 
 fn codex_list_matches(output: &BoundedOutput, entry: &Value) -> Result<NativeState, String> {
@@ -978,27 +1186,43 @@ fn codex_list_matches(output: &BoundedOutput, entry: &Value) -> Result<NativeSta
     if servers.next().is_some() {
         return Err("native_parse_failed".into());
     }
-    classify_native_state(parse_codex_native_value(server)?, command, &args)
+    classify_native_state(
+        parse_codex_native_value(server)?,
+        command,
+        &args,
+        entry.get("env"),
+    )
 }
 
 fn classify_native_state(
     parsed: ParsedNativeState,
     command: &str,
     args: &[String],
+    environment: Option<&Value>,
 ) -> Result<NativeState, String> {
-    let canonical = match &parsed {
+    let (canonical_command, profile) = match &parsed {
         ParsedNativeState::Claude {
             command_fields,
             args_fields,
-        } => command_fields.as_slice() == [command] && args_fields.as_slice() == [args.join(" ")],
+            profile,
+        } => (
+            command_fields.as_slice() == [command] && args_fields.as_slice() == [args.join(" ")],
+            profile,
+        ),
         ParsedNativeState::Codex {
             enabled,
             command: observed_command,
             args: observed_args,
-        } => *enabled && observed_command == command && observed_args.as_slice() == args,
+            profile,
+        } => (
+            *enabled && observed_command == command && observed_args.as_slice() == args,
+            profile,
+        ),
     };
-    if canonical {
+    if canonical_command && environment.is_none_or(|expected| profile.matches(expected)) {
         Ok(NativeState::Canonical(parsed))
+    } else if canonical_command && environment.is_some() && profile.matches(&json!({})) {
+        Ok(NativeState::ProfileUpgrade(parsed))
     } else {
         Ok(NativeState::Customized(parsed))
     }
@@ -1008,16 +1232,60 @@ fn parse_claude_native(bytes: &[u8]) -> Result<ParsedNativeState, String> {
     let body = std::str::from_utf8(bytes).map_err(|_| "native_parse_failed".to_string())?;
     let mut command_fields = Vec::new();
     let mut args_fields = Vec::new();
-    for line in body.lines().map(str::trim) {
+    let mut environment = serde_json::Map::new();
+    let mut customized = serde_json::Map::new();
+    let mut in_environment = false;
+    let mut environment_seen = false;
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if in_environment && raw_line.starts_with("    ") && !line.is_empty() {
+            match raw_line[4..].split_once('=') {
+                Some((key, value)) if !key.is_empty() => {
+                    if environment.insert(key.into(), json!(value)).is_some() {
+                        customized.insert("duplicate_environment".into(), json!(true));
+                    }
+                }
+                _ => {
+                    customized.insert("unparsed_environment".into(), json!(true));
+                }
+            }
+            continue;
+        }
+        if in_environment && !line.is_empty() {
+            customized.insert("unparsed_environment".into(), json!(true));
+        }
+        in_environment = false;
         if let Some(value) = line.strip_prefix("Command:") {
             command_fields.push(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Args:") {
             args_fields.push(value.trim().to_string());
+        } else if line == "Environment:" {
+            if environment_seen {
+                customized.insert("duplicate_environment".into(), json!(true));
+            }
+            environment_seen = true;
+            in_environment = true;
+        } else if let Some(value) = line.strip_prefix("Environment:") {
+            customized.insert("unparsed_environment".into(), json!(value));
+        } else if let Some(value) = line.strip_prefix("Timeout:") {
+            customized.insert("timeout".into(), json!(value));
+        } else if let Some(value) = line.strip_prefix("Type:") {
+            if value.trim() != "stdio" {
+                customized.insert("type".into(), json!(value));
+            }
+        } else if let Some(value) = line.strip_prefix("Scope:") {
+            if !value.trim().starts_with("User config") {
+                customized.insert("scope".into(), json!(value));
+            }
         }
     }
     Ok(ParsedNativeState::Claude {
         command_fields,
         args_fields,
+        profile: NativeProfileSettings {
+            environment: Value::Object(environment),
+            customized: Value::Object(customized),
+        },
     })
 }
 
@@ -1061,10 +1329,43 @@ fn parse_codex_native_value(value: &Value) -> Result<ParsedNativeState, String> 
                 .ok_or_else(|| "native_parse_failed".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let environment = transport
+        .get("env")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut customized_transport = transport.clone();
+    for field in ["type", "command", "args", "env"] {
+        customized_transport.remove(field);
+    }
+    for field in ["env_vars", "cwd"] {
+        if customized_transport
+            .get(field)
+            .is_some_and(|value| value.is_null() || (field == "env_vars" && value == &json!([])))
+        {
+            customized_transport.remove(field);
+        }
+    }
+    let mut customized = server.clone();
+    for field in ["name", "enabled", "transport", "auth_status"] {
+        customized.remove(field);
+    }
+    for field in ["disabled_reason", "startup_timeout_sec", "tool_timeout_sec"] {
+        if customized.get(field).is_some_and(Value::is_null) {
+            customized.remove(field);
+        }
+    }
+    if !customized_transport.is_empty() {
+        customized.insert("transport".into(), Value::Object(customized_transport));
+    }
     Ok(ParsedNativeState::Codex {
         enabled,
         command,
         args,
+        profile: NativeProfileSettings {
+            environment,
+            customized: Value::Object(customized),
+        },
     })
 }
 
@@ -1090,11 +1391,18 @@ fn native_add_args(client: Client, entry: &Value) -> Vec<String> {
             "--scope".into(),
             "user".into(),
             "mmcg".into(),
-            "--".into(),
         ],
-        Client::Codex => vec!["mcp".into(), "add".into(), "mmcg".into(), "--".into()],
+        Client::Codex => vec!["mcp".into(), "add".into(), "mmcg".into()],
         _ => Vec::new(),
     };
+    if let Some(environment) = entry.get("env").and_then(Value::as_object) {
+        for (key, value) in environment {
+            if let Some(value) = value.as_str() {
+                args.extend(["--env".into(), format!("{key}={value}")]);
+            }
+        }
+    }
+    args.push("--".into());
     if let Some(command) = entry.get("command").and_then(Value::as_str) {
         args.push(command.into());
     }
@@ -1668,12 +1976,63 @@ fn run_bounded(program: &Path, args: &[String]) -> Result<BoundedOutput, String>
     run_bounded_with_timeout(program, args, PROCESS_TIMEOUT)
 }
 
+/// Bounded local setup/installer output. Raw stderr is deliberately not exposed.
+/// Callers must check both truncation flags before parsing or trusting success.
+#[derive(Debug)]
+pub struct CommandResult {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+/// Run an explicitly selected executable in a fixed project directory. This
+/// shares setup's pipe limits, deadline and descendant cleanup, without a shell.
+pub fn run_bounded_command(
+    program: &Path,
+    args: &[String],
+    root: &Path,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
+    if timeout.is_zero() || timeout > Duration::from_secs(60) {
+        return Err("command_timeout_invalid".into());
+    }
+    if !program.is_absolute() {
+        return Err("command_program_must_be_absolute".into());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|_| "command_root_unavailable".to_string())?;
+    if !root.is_dir() {
+        return Err("command_root_not_directory".into());
+    }
+    let output = run_bounded_at(program, args, Some(&root), timeout)?;
+    Ok(CommandResult {
+        success: output.status.success(),
+        stdout: output.stdout,
+        stdout_truncated: output.stdout_truncated,
+        stderr_truncated: output.stderr_truncated,
+    })
+}
+
 fn run_bounded_with_timeout(
     program: &Path,
     args: &[String],
     timeout: Duration,
 ) -> Result<BoundedOutput, String> {
+    run_bounded_at(program, args, None, timeout)
+}
+
+fn run_bounded_at(
+    program: &Path,
+    args: &[String],
+    root: Option<&Path>,
+    timeout: Duration,
+) -> Result<BoundedOutput, String> {
     let mut command = Command::new(program);
+    if let Some(root) = root {
+        command.current_dir(root);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -2694,6 +3053,359 @@ mod tests {
     }
 
     #[test]
+    fn profile_client_setup_validates_before_io_and_previews_without_writes() {
+        let _entry = TestCanonicalEntryGuard::new(json!({
+            "command": "/bin/mmcg", "args": ["serve"],
+        }));
+        let directory = tmp("profile-client-validation");
+        let root = directory.join("missing");
+        let request = Request {
+            client: Client::Generic,
+            scope: Scope::Project,
+            root: root.clone(),
+            config: Some(root.join("config.json")),
+            write: true,
+            remove: false,
+            force: true,
+        };
+        for invalid in [
+            "",
+            "../other",
+            "client name",
+            "codex\nOTHER=value",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some(invalid)),
+                Outcome::Error
+            );
+            assert!(!root.exists());
+        }
+        let preview = Request {
+            write: false,
+            ..request
+        };
+        assert_eq!(
+            run_with_profile_client(&preview, Path::new("/bin/mmcg"), Some("codex")),
+            Outcome::DryRun
+        );
+        assert!(!root.exists());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn profile_client_migrates_only_the_default_json_entry_and_keeps_other_settings() {
+        let base = json!({"command": "/bin/mmcg", "args": ["serve"]});
+        let _entry = TestCanonicalEntryGuard::new(base.clone());
+        let root = tmp("profile-client-json");
+        let config = root.join("config.json");
+        let original = json!({
+            "settings": {"env": {"PRIVATE": "keep-root-setting"}},
+            "mcpServers": {
+                "other": {"command": "custom", "env": {"TOKEN": "keep-other-env"}},
+                "mmcg": base,
+            },
+        });
+        fs::write(&config, serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut request = Request {
+            client: Client::Generic,
+            scope: Scope::Project,
+            root: root.clone(),
+            config: Some(config.clone()),
+            write: false,
+            remove: false,
+            force: false,
+        };
+        let before = fs::read(&config).unwrap();
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("codex")),
+            Outcome::DryRun
+        );
+        assert_eq!(fs::read(&config).unwrap(), before);
+        request.write = true;
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("codex")),
+            Outcome::Wrote
+        );
+        let migrated: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(migrated["settings"], original["settings"]);
+        assert_eq!(
+            migrated["mcpServers"]["other"],
+            original["mcpServers"]["other"]
+        );
+        assert_eq!(
+            migrated["mcpServers"]["mmcg"]["env"],
+            json!({"MMCG_PROFILE_CLIENT": "codex"})
+        );
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("codex")),
+            Outcome::NoChange
+        );
+        request.write = false;
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("codex")),
+            Outcome::NoChange
+        );
+
+        request.write = true;
+        for customized in [
+            json!({"command": "/bin/mmcg", "args": ["serve"], "env": {}}),
+            json!({"command": "/bin/mmcg", "args": ["serve"], "env": {"MMCG_PROFILE_CLIENT": "other"}}),
+            json!({"command": "/bin/mmcg", "args": ["serve"], "env": {"TOKEN": "secret"}}),
+            json!({"command": "/bin/mmcg", "args": ["serve"], "env": {"MMCG_PROFILE_CLIENT": "codex", "TOKEN": "secret"}}),
+            json!({"command": "/custom/mmcg", "args": ["serve"]}),
+        ] {
+            let mut custom = original.clone();
+            custom["mcpServers"]["mmcg"] = customized;
+            let bytes = serde_json::to_vec(&custom).unwrap();
+            fs::write(&config, &bytes).unwrap();
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("codex")),
+                Outcome::RefusedOverwrite
+            );
+            assert_eq!(fs::read(&config).unwrap(), bytes);
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn profile_client_continue_migration_preserves_custom_file_protection() {
+        let base = json!({"command": "/bin/mmcg", "args": ["serve"]});
+        let _entry = TestCanonicalEntryGuard::new(base.clone());
+        let root = tmp("profile-client-continue");
+        let target = root.join(".continue/mcpServers/mastermind.yaml");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            serde_norway::to_string(&continue_entry(&base)).unwrap(),
+        )
+        .unwrap();
+        let request = Request {
+            client: Client::Continue,
+            scope: Scope::Project,
+            root: root.clone(),
+            config: None,
+            write: true,
+            remove: false,
+            force: false,
+        };
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("continue")),
+            Outcome::Wrote
+        );
+        let mut value: Value = serde_norway::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert_eq!(
+            value["mcpServers"][0]["env"],
+            json!({"MMCG_PROFILE_CLIENT": "continue"})
+        );
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("continue")),
+            Outcome::NoChange
+        );
+        value["mcpServers"][0]["env"]["TOKEN"] = json!("kept-private");
+        let customized = serde_norway::to_string(&value).unwrap();
+        fs::write(&target, &customized).unwrap();
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), Some("continue")),
+            Outcome::RefusedOverwrite
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), customized);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_registration_status_never_executes_clients_servers_or_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tmp("registration-data-only");
+        let binaries = tmp("registration-traps");
+        for name in ["claude", "codex", "server"] {
+            let executable = binaries.join(name);
+            fs::write(&executable, "#!/bin/sh\n: > \"$0.executed\"\nexit 1\n").unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _native = TestNativeBinGuard::new(binaries.clone());
+        let entry = json!({"command": binaries.join("server"), "args": ["serve"]});
+        let _canonical = TestCanonicalEntryGuard::new(entry.clone());
+        let home = root.join("home");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let _home = TestHomeDirGuard::new(home.clone());
+        let mut claude = entry.clone();
+        claude["type"] = json!("stdio");
+        claude["env"] = json!({"MMCG_PROFILE_CLIENT": "claude"});
+        let claude_path = home.join(".claude.json");
+        let claude_bytes = serde_json::to_vec(&json!({
+            "mcpServers": {"mmcg": claude, "private": {"env": {"TOKEN": "hidden-value"}}},
+            "apiKeyHelper": binaries.join("server"),
+            "projects": {"ignored-overlay": {"mcpServers": {"mmcg": {"command": "other"}}}},
+        }))
+        .unwrap();
+        fs::write(&claude_path, &claude_bytes).unwrap();
+        let codex_path = home.join(".codex/config.toml");
+        let codex_text = format!(
+            "credential = 'hidden-value'\n[mcp_servers.mmcg]\ncommand = {:?}\nargs = ['serve']\nenabled = true\nenv_vars = []\n[mcp_servers.mmcg.env]\nMMCG_PROFILE_CLIENT = 'codex'\n",
+            binaries.join("server").to_str().unwrap()
+        );
+        fs::write(&codex_path, &codex_text).unwrap();
+        for client in [Client::Claude, Client::Codex] {
+            let report = inspect_profile_registration(
+                client,
+                &root,
+                Path::new("/unused"),
+                client_label(client),
+            )
+            .unwrap();
+            assert_eq!(report["status"], "configured");
+            assert_eq!(report["scope"], "user_configuration_only");
+            assert_eq!(report["project_overlays"], "not_verified");
+            assert_eq!(report["runtime_connection"], "not_observed");
+            assert!(!serde_json::to_string(&report)
+                .unwrap()
+                .contains("hidden-value"));
+            let mismatch =
+                inspect_profile_registration(client, &root, Path::new("/unused"), "other").unwrap();
+            assert_eq!(mismatch["status"], "customized");
+        }
+        assert_eq!(fs::read(&claude_path).unwrap(), claude_bytes);
+        assert_eq!(fs::read_to_string(&codex_path).unwrap(), codex_text);
+        assert!(!root.join(".mastermind").exists());
+        for name in ["claude", "codex", "server"] {
+            assert!(!binaries.join(format!("{name}.executed")).exists());
+        }
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(binaries).ok();
+    }
+
+    #[test]
+    fn profile_registration_status_preserves_missing_and_rejects_ambiguous_data() {
+        let _entry =
+            TestCanonicalEntryGuard::new(json!({"command": "/bin/mmcg", "args": ["serve"]}));
+        let root = tmp("registration-missing-invalid");
+        let home = root.join("missing-home");
+        let _home = TestHomeDirGuard::new(home.clone());
+        for client in [Client::Claude, Client::Codex] {
+            let report =
+                inspect_profile_registration(client, &root, Path::new("/unused"), "codex").unwrap();
+            assert_eq!(report["status"], "missing_or_stale");
+            assert_eq!(report["reason"], "registration_not_found");
+        }
+        assert!(!home.exists());
+        assert_eq!(
+            inspect_profile_registration(
+                Client::Codex,
+                &root.join("absent"),
+                Path::new("/unused"),
+                "bad client"
+            )
+            .unwrap_err(),
+            "invalid_profile_client"
+        );
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        for (client, path, contents) in [
+            (
+                Client::Claude,
+                home.join(".claude.json"),
+                b"{\"mcpServers\":{},\"mcpServers\":{}}".as_slice(),
+            ),
+            (
+                Client::Codex,
+                home.join(".codex/config.toml"),
+                b"[mcp_servers.mmcg]\ncommand='secret'\ncommand='other'\n".as_slice(),
+            ),
+        ] {
+            fs::write(&path, contents).unwrap();
+            let report =
+                inspect_profile_registration(client, &root, Path::new("/unused"), "codex").unwrap();
+            assert_eq!(report["status"], "unavailable");
+            assert!(!report.to_string().contains("secret"));
+            assert_eq!(fs::read(path).unwrap(), contents);
+        }
+        let path = home.join(".claude.json");
+        fs::write(&path, b"{\"mcpServers\":{\"mmcg\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"],\"env\":{}}}}").unwrap();
+        let report =
+            inspect_profile_registration(Client::Claude, &root, Path::new("/unused"), "claude")
+                .unwrap();
+        assert_eq!(report["status"], "missing_or_stale");
+        assert_eq!(report["reason"], "explicit_profile_client_missing");
+        fs::write(&path, vec![b' '; CONFIG_MAX_BYTES + 1]).unwrap();
+        let report =
+            inspect_profile_registration(Client::Claude, &root, Path::new("/unused"), "claude")
+                .unwrap();
+        assert_eq!(report["status"], "unavailable");
+        assert_eq!(report["reason"], "config_too_large");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn user_registration_paths_honor_overrides_and_claude_legacy_precedence() {
+        let root = tmp("registration-paths");
+        let home = root.join("home");
+        let override_dir = root.join("override");
+        assert_eq!(
+            user_registration_path(Client::Claude, &home, None).unwrap(),
+            home.join(".claude.json")
+        );
+        assert_eq!(
+            user_registration_path(Client::Codex, &home, None).unwrap(),
+            home.join(".codex/config.toml")
+        );
+        assert_eq!(
+            user_registration_path(Client::Claude, &home, Some(&override_dir)).unwrap(),
+            override_dir.join(".claude.json")
+        );
+        assert_eq!(
+            user_registration_path(Client::Codex, &home, Some(&override_dir)).unwrap(),
+            override_dir.join("config.toml")
+        );
+        for client in [Client::Claude, Client::Codex] {
+            assert!(user_registration_path(client, &home, Some(Path::new("relative"))).is_err());
+            assert!(user_registration_path(client, &home, Some(Path::new(""))).is_err());
+        }
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/.config.json"), b"{}").unwrap();
+        assert_eq!(
+            user_registration_path(Client::Claude, &home, None).unwrap(),
+            home.join(".claude/.config.json")
+        );
+        fs::create_dir_all(&override_dir).unwrap();
+        fs::write(override_dir.join(".config.json"), b"{}").unwrap();
+        assert_eq!(
+            user_registration_path(Client::Claude, &home, Some(&override_dir)).unwrap(),
+            override_dir.join(".config.json")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_registration_status_rejects_linked_native_configuration() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp("registration-linked");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = TestHomeDirGuard::new(home.clone());
+        let outside = root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("config.toml"), b"[mcp_servers]\n").unwrap();
+        fs::write(outside.join("config.json"), b"{\"mcpServers\":{}}").unwrap();
+        symlink(&outside, home.join(".codex")).unwrap();
+        symlink(outside.join("config.json"), home.join(".claude.json")).unwrap();
+        for client in [Client::Claude, Client::Codex] {
+            let report =
+                inspect_profile_registration(client, &root, Path::new("/unused"), "codex").unwrap();
+            assert_eq!(report["status"], "unavailable");
+            assert_eq!(report["reason"], "symlink_target_rejected");
+        }
+        assert_eq!(
+            fs::read(outside.join("config.toml")).unwrap(),
+            b"[mcp_servers]\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn dry_run_and_errors_never_render_existing_secrets() {
         let secret = "never-render-this-secret";
         let entry = json!({
@@ -3065,6 +3777,211 @@ mod tests {
             native_matches(Client::Codex, &codex_disabled, &entry).unwrap(),
             NativeState::Customized(_)
         ));
+    }
+
+    #[test]
+    fn native_profile_client_requires_exact_environment_and_default_visible_settings() {
+        let base = json!({"command": "/bin/mmcg", "args": ["serve"]});
+        let expected = json!({
+            "command": "/bin/mmcg", "args": ["serve"],
+            "env": {"MMCG_PROFILE_CLIENT": "codex"},
+        });
+        let plain = b"  Scope: User config\n  Command: /bin/mmcg\n  Args: serve\n";
+        assert!(matches!(
+            native_matches(Client::Claude, &bounded_stdout(plain, false), &expected).unwrap(),
+            NativeState::ProfileUpgrade(_)
+        ));
+        let canonical = b"  Scope: User config\n  Command: /bin/mmcg\n  Args: serve\n  Environment:\n    MMCG_PROFILE_CLIENT=codex\n";
+        assert!(matches!(
+            native_matches(Client::Claude, &bounded_stdout(canonical, false), &expected).unwrap(),
+            NativeState::Canonical(_)
+        ));
+        for customization in [
+            "  Environment:\n    MMCG_PROFILE_CLIENT=other\n",
+            "  Environment:\n    MMCG_PROFILE_CLIENT=codex\n    TOKEN=private\n",
+            "  Environment:\n    MMCG_PROFILE_CLIENT=codex \n",
+            "  Environment:\n    MMCG_PROFILE_CLIENT=codex\n    MMCG_PROFILE_CLIENT=codex\n",
+            "  Environment:\nMMCG_PROFILE_CLIENT=codex\n",
+            "  Timeout: 10000ms\n",
+            "  Scope: Project config\n",
+        ] {
+            let body = format!("{}{}", String::from_utf8_lossy(plain), customization);
+            let output = bounded_stdout(body.as_bytes(), false);
+            assert!(
+                matches!(
+                    native_matches(Client::Claude, &output, &expected).unwrap(),
+                    NativeState::Customized(_)
+                ),
+                "{customization}"
+            );
+            // The existing API retains its command/argv-only matching contract.
+            assert!(matches!(
+                native_matches(Client::Claude, &output, &base).unwrap(),
+                NativeState::Canonical(_)
+            ));
+        }
+        let mut codex = json!({
+            "name": "mmcg", "enabled": true,
+            "transport": {"type": "stdio", "command": "/bin/mmcg", "args": ["serve"],
+                "env": null, "env_vars": [], "cwd": null},
+            "startup_timeout_sec": null, "tool_timeout_sec": null,
+            "disabled_reason": null, "auth_status": "unsupported",
+        });
+        let classify = |server: &Value| {
+            native_matches(
+                Client::Codex,
+                &bounded_stdout(&serde_json::to_vec(server).unwrap(), false),
+                &expected,
+            )
+            .unwrap()
+        };
+        assert!(matches!(classify(&codex), NativeState::ProfileUpgrade(_)));
+        codex["transport"]["env"] = expected["env"].clone();
+        assert!(matches!(classify(&codex), NativeState::Canonical(_)));
+        for (pointer, value) in [
+            ("/transport/env", json!({"MMCG_PROFILE_CLIENT": "other"})),
+            (
+                "/transport/env",
+                json!({"MMCG_PROFILE_CLIENT": "codex", "TOKEN": "secret"}),
+            ),
+            ("/transport/env", json!({"MMCG_PROFILE_CLIENT": 1})),
+            ("/transport/env_vars", json!(["MMCG_PROFILE_CLIENT"])),
+            ("/transport/cwd", json!("/other/project")),
+            ("/tool_timeout_sec", json!(60)),
+        ] {
+            let mut changed = codex.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                matches!(classify(&changed), NativeState::Customized(_)),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_profile_client_migrates_rechecks_and_preserves_conflicting_audience() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _entry = TestCanonicalEntryGuard::new(json!({
+            "command": "/bin/mmcg", "args": ["serve"],
+        }));
+        let root = tmp("native-profile-client");
+        let request_root = tmp("native-profile-project");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let _native = TestNativeBinGuard::new(bin.clone());
+        let script = r#"#!/bin/sh
+state=legacy
+if [ -f "$0.state" ]; then read -r state < "$0.state" || :; fi
+case "$2" in
+  get)
+    [ "$state" != removed ] || exit 1
+    printf '  Scope: User config\n  Type: stdio\n  Command: /bin/mmcg\n  Args: serve\n'
+    [ "$state" = legacy ] || printf '  Environment:\n    MMCG_PROFILE_CLIENT=%s\n' "$state"
+    ;;
+  list)
+    if [ "$state" = removed ]; then printf '[]\n'; exit 0; fi
+    if [ "$state" = legacy ]; then environment=null; else environment="{\"MMCG_PROFILE_CLIENT\":\"$state\"}"; fi
+    printf '[{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/mmcg","args":["serve"],"env":%s,"env_vars":[],"cwd":null}}]\n' "$environment"
+    ;;
+  remove)
+    printf 'remove\n' >> "$0.mutations"
+    printf 'removed\n' > "$0.state"
+    ;;
+  add)
+    printf 'add\n' >> "$0.mutations"
+    printf '%s\n' "$@" > "$0.argv"
+    audience=
+    for arg in "$@"; do
+      [ "$arg" != -- ] || break
+      case "$arg" in MMCG_PROFILE_CLIENT=*) audience=${arg#MMCG_PROFILE_CLIENT=};; esac
+    done
+    [ -n "$audience" ] || exit 2
+    printf '%s\n' "$audience" > "$0.state"
+    ;;
+  *) exit 2;;
+esac
+"#;
+        for client in [Client::Claude, Client::Codex] {
+            let name = client_label(client);
+            let executable = bin.join(name);
+            fs::write(&executable, script).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut request = Request {
+                client,
+                scope: Scope::User,
+                root: request_root.clone(),
+                config: None,
+                write: false,
+                remove: false,
+                force: false,
+            };
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some(name)),
+                Outcome::DryRun
+            );
+            let mutations = bin.join(format!("{name}.mutations"));
+            assert!(!mutations.exists());
+            request.write = true;
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some(name)),
+                Outcome::Wrote
+            );
+            let recorded = fs::read_to_string(bin.join(format!("{name}.argv"))).unwrap();
+            let args = recorded.lines().collect::<Vec<_>>();
+            let separator = args.iter().position(|arg| *arg == "--").unwrap();
+            assert_eq!(
+                &args[separator - 2..separator],
+                ["--env", &format!("MMCG_PROFILE_CLIENT={name}")]
+            );
+            assert_eq!(&args[separator + 1..], ["/bin/mmcg", "serve"]);
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some(name)),
+                Outcome::NoChange
+            );
+            fs::write(bin.join(format!("{name}.state")), b"other\n").unwrap();
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), Some(name)),
+                Outcome::RefusedOverwrite
+            );
+            assert_eq!(fs::read_to_string(mutations).unwrap(), "remove\nadd\n");
+            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::NoChange);
+        }
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(request_root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_setup_command_pins_cwd_and_rejects_unbounded_deadlines() {
+        let root = tmp("bounded-command-cwd");
+        let args = vec![
+            "-c".into(),
+            "printf '%s\\n' \"$PWD\" \"$1\"".into(),
+            "test".into(),
+            "literal; $(not-a-command)".into(),
+        ];
+        let result =
+            run_bounded_command(Path::new("/bin/sh"), &args, &root, Duration::from_secs(1))
+                .unwrap();
+        assert!(result.success);
+        assert!(!result.stdout_truncated && !result.stderr_truncated);
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("{}\nliteral; $(not-a-command)\n", root.display())
+        );
+        for timeout in [Duration::ZERO, Duration::from_secs(61)] {
+            assert_eq!(
+                run_bounded_command(Path::new("/bin/sh"), &args, &root, timeout).unwrap_err(),
+                "command_timeout_invalid"
+            );
+        }
+        assert_eq!(
+            run_bounded_command(Path::new("sh"), &args, &root, Duration::from_secs(1)).unwrap_err(),
+            "command_program_must_be_absolute"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

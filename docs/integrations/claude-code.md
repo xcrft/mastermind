@@ -7,17 +7,21 @@ and Claude's named subagents.
 
 ```bash
 npm install -g @xcraftmind/mastermind
-mastermind install --client claude
 cd your-project
-mastermind index .
+mastermind init --client claude
+mastermind status
 mastermind doctor --workflow --client claude
 ```
 
 | Option | Result |
 |---|---|
 | Default | `core` skills |
-| `--profile frontend`, `security`, `full` | Expanded skill selection |
+| `mastermind update --workflow-only --client claude --profile frontend` | Select the frontend skill bundle. Other profiles are `security` and `full` |
 | Restart Claude Code | Load the installed workflow |
+
+`init` also indexes code and documents and enables local hook capture. Semantic
+mining requires `--mining on --provider claude`. Add `--profile-access on` to
+grant this project access to your profile. See [onboarding](../getting-started.md).
 
 ## Register MCP only
 

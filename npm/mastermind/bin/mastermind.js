@@ -5,6 +5,7 @@
 // project-local npm vs cargo).
 
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { resolveBinary, runBinary } from "./resolve.js";
@@ -16,7 +17,7 @@ const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 // Package root (…/npm/mastermind). Its bundled `share/` tree holds the workflow
 // subagents + skills that `init` installs into ~/.claude/.
-const pkgRoot = path.dirname(require.resolve("../package.json"));
+const pkgRoot = fs.realpathSync(path.dirname(require.resolve("../package.json")));
 const installMode = detectInstallMode();
 
 if (process.argv[2] === "update") {
@@ -42,44 +43,61 @@ if (
 }
 
 /**
- * Detect how this wrapper was invoked so `setup claude` can write a stable
- * MCP `command` form per install mode.
- *
- *   npx    — process.argv[1] lives under an npx cache (`/_npx/` or `\_npx\`)
- *   project — wrapper lives under a `node_modules` of cwd or any ancestor
- *             (monorepos hoist deps to the workspace root)
- *   global  — wrapper lives under a known npm global prefix
- *   cargo   — never reached here (cargo users invoke `mmcg` directly, no JS)
- *
- * Best-effort: if none match cleanly, returns "unknown" — the Rust side
- * falls back to `command: mastermind` which works for any PATH-installed case.
+ * Use the resolved package layout, not the bin symlink or caller directory.
+ * Update verifies the inferred npm module root again before writing.
+ * Ambiguous owners remain unknown rather than becoming global installations.
  */
 function detectInstallMode() {
-  const self = process.argv[1] || "";
-  // npx caches keep packages under `_npx` directories on every platform.
-  if (self.includes(`${path.sep}_npx${path.sep}`) || self.includes("/_npx/")) {
+  if ([pkgRoot, process.argv[1] ?? ""].some((value) => /(?:^|[\\/])_npx(?:[\\/]|$)/.test(value))) {
     return "npx";
   }
-  // Project install: the wrapper resolves from a `node_modules` belonging to
-  // cwd OR any ancestor. Monorepos hoist dependencies to the workspace root, so
-  // a command run in `packages/foo` loads its bin from `<repo-root>/node_modules`
-  // — still a project install, not global. Walk up the tree to catch that.
-  let dir = process.cwd();
-  for (;;) {
-    const nm = path.join(dir, "node_modules") + path.sep;
-    if (self.startsWith(nm)) {
-      return "project";
+  const samePath = (left, right) => process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase() : left === right;
+  const parts = pkg.name.split("/");
+  const modules = path.resolve(pkgRoot, ...parts.map(() => ".."));
+  if (!samePath(path.basename(modules), "node_modules")
+      || !samePath(path.join(modules, ...parts), pkgRoot)) return "unknown";
+  const owner = path.dirname(modules);
+  const project = projectOwner(owner);
+  if (project !== null) return project;
+
+  if (process.platform !== "win32") return path.basename(owner) === "lib" ? "global" : "unknown";
+  const prefixes = [
+    process.env.npm_config_prefix,
+    process.env.NPM_CONFIG_PREFIX,
+    process.env.APPDATA && path.join(process.env.APPDATA, "npm"),
+    path.dirname(process.execPath),
+  ];
+  for (const prefix of prefixes) {
+    if (!prefix || !path.isAbsolute(prefix)) continue;
+    try {
+      if (samePath(fs.realpathSync(prefix), owner)) return "global";
+    } catch {
+      // Unavailable prefix evidence cannot establish an installation scope.
     }
-    const parent = path.dirname(dir);
-    if (parent === dir) break; // reached the filesystem root
-    dir = parent;
   }
-  // Heuristic for global install: bin path lands under a directory whose
-  // name suggests global npm (e.g. /usr/local/lib/node_modules, ~/.npm-global,
-  // C:\\Program Files\\nodejs\\node_modules). Any node_modules path that
-  // isn't under cwd qualifies.
-  if (self.includes(`${path.sep}node_modules${path.sep}`)) {
-    return "global";
+  return "unknown";
+}
+
+function projectOwner(owner) {
+  const metadata = path.join(owner, "package.json");
+  let stat;
+  try { stat = fs.lstatSync(metadata); }
+  catch (error) { return error.code === "ENOENT" ? null : "unknown"; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) return "unknown";
+  try {
+    const project = JSON.parse(fs.readFileSync(metadata, "utf8"));
+    if ((project.packageManager && !/^npm@/.test(project.packageManager))
+        || fs.existsSync(path.join(owner, "pnpm-lock.yaml"))
+        || fs.existsSync(path.join(owner, "yarn.lock"))) return "unknown";
+    const kinds = ["dependencies", "devDependencies", "optionalDependencies"]
+      .filter((kind) => Object.hasOwn(project[kind] ?? {}, pkg.name));
+    if (kinds.length === 1) {
+      const source = project[kinds[0]][pkg.name];
+      if (typeof source === "string" && source.trim() && !/[/:#\\]/.test(source)) return "project";
+    }
+  } catch {
+    // Invalid ownership metadata is handled by the explicit update workflow.
   }
   return "unknown";
 }
@@ -96,6 +114,7 @@ const env = {
   MASTERMIND_PACKAGE: pkg.name,
   MASTERMIND_SHARE_DIR: path.join(pkgRoot, "share"),
   MASTERMIND_INSTALLER_JS: path.join(pkgRoot, "bin", "install.js"),
+  MASTERMIND_LAUNCHER_JS: path.join(pkgRoot, "bin", "mastermind.js"),
   MASTERMIND_NODE: process.execPath,
 };
 

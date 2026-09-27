@@ -10,6 +10,7 @@ pub mod ci;
 pub mod demo;
 pub mod init;
 pub mod new_spec;
+pub mod onboard;
 pub mod pr_comment;
 pub mod query;
 pub mod run_task;
@@ -21,7 +22,6 @@ mod verification;
 
 pub use ci::run as ci;
 pub use demo::run as demo;
-pub use init::do_init;
 pub use new_spec::run as new_spec;
 pub use pr_comment::run as pr_comment;
 pub use query::dispatch as dispatch_query;

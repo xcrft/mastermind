@@ -534,7 +534,29 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
     }))
 }
 
+/// Start a new bounded run, explicitly renewing a terminal run's budget.
 pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, Error> {
+    start_with_mode(client, root, options, StartMode::Restart)
+}
+
+/// Configure the first run or report the existing run without renewing its
+/// budget. Changed settings, capture generation or processor require `start`.
+pub fn ensure(client: &str, root: &Path, options: StartOptions) -> Result<Value, Error> {
+    start_with_mode(client, root, options, StartMode::Ensure)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartMode {
+    Restart,
+    Ensure,
+}
+
+fn start_with_mode(
+    client: &str,
+    root: &Path,
+    options: StartOptions,
+    mode: StartMode,
+) -> Result<Value, Error> {
     platform()?;
     let (id, root) = slot(client, root)?;
     let grant = Journal::open(false)?
@@ -575,6 +597,11 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         settings: selected,
         processor: fingerprint,
     };
+    if mode == StartMode::Ensure {
+        if let Some(report) = ensured_report(&store, &id, previous.as_ref(), &config)? {
+            return Ok(report);
+        }
+    }
     let owner = acquire_start_owner(
         &store,
         previous.as_ref(),
@@ -658,6 +685,35 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+// Called only while the lifecycle lock is held. A valid prior run is retained
+// even when its owner exited or its attempt/runtime budget was exhausted.
+fn ensured_report(
+    store: &Store,
+    id: &str,
+    previous: Option<&Stored<Config>>,
+    selected: &Config,
+) -> Result<Option<Value>, Error> {
+    let Some(previous) = previous else {
+        if store.read::<State>("state.json")?.is_some() {
+            return Err("worker_configuration_missing".into());
+        }
+        return Ok(None);
+    };
+    if previous.value != *selected {
+        return Err("worker_configuration_differs_explicit_restart_required".into());
+    }
+    let mut report = status_at(store, id)?;
+    if report["config_revision"] != revision(selected)?
+        || store
+            .read::<Config>("config.json")?
+            .is_none_or(|current| current.identity != previous.identity)
+    {
+        return Err("worker_configuration_changed".into());
+    }
+    report["started"] = json!(false);
+    Ok(Some(report))
 }
 
 fn acquire_start_owner(
@@ -1314,6 +1370,169 @@ mod tests {
             self.store
                 .write("state.json", &state.value, Some(state.identity))
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn ensure_retains_terminal_and_interrupted_runs_without_renewing_budgets() {
+        for recorded in ["stopped", "failed", "budget_exhausted", "running"] {
+            let f = Fixture::new();
+            f.change_state(|state| {
+                state.status = recorded.into();
+                state.pid = Some(42);
+                state.started_at_ms = 0;
+                state.attempts = 2;
+                state.completed = 1;
+                state.drafts = 3;
+                state.next_after = Some("retained-checkpoint".into());
+            });
+            let _lifecycle = f.store.lifecycle().unwrap();
+            let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+            let config_bytes = std::fs::read(f.store.path("config.json")).unwrap();
+            let state_bytes = std::fs::read(f.store.path("state.json")).unwrap();
+            for _ in 0..2 {
+                let report = ensured_report(&f.store, &f.id, Some(&config), &config.value)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(report["started"], false);
+                assert_eq!(report["run"]["run_id"], f.run_id);
+                assert_eq!(report["run"]["attempts"], 2);
+                assert_eq!(report["run"]["completed"], 1);
+                assert_eq!(report["run"]["drafts"], 3);
+                assert_eq!(report["run"]["started_at_ms"], 0);
+                assert_eq!(report["run"]["next_after"], "retained-checkpoint");
+                assert_eq!(
+                    report["status"],
+                    if recorded == "running" {
+                        "interrupted"
+                    } else {
+                        recorded
+                    }
+                );
+                assert_eq!(
+                    std::fs::read(f.store.path("config.json")).unwrap(),
+                    config_bytes
+                );
+                assert_eq!(
+                    std::fs::read(f.store.path("state.json")).unwrap(),
+                    state_bytes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_observes_the_existing_running_owner_without_starting_another() {
+        let f = Fixture::new();
+        f.change_state(|state| {
+            state.status = "running".into();
+            state.pid = Some(42);
+            state.attempts = 1;
+        });
+        let _owner = f.store.owner().unwrap().unwrap();
+        let _lifecycle = f.store.lifecycle().unwrap();
+        let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+        let state_bytes = std::fs::read(f.store.path("state.json")).unwrap();
+        for _ in 0..2 {
+            let report = ensured_report(&f.store, &f.id, Some(&config), &config.value)
+                .unwrap()
+                .unwrap();
+            assert_eq!(report["started"], false);
+            assert_eq!(report["status"], "running");
+            assert_eq!(report["owner"], "held");
+            assert_eq!(report["run"]["run_id"], f.run_id);
+            assert_eq!(report["run"]["attempts"], 1);
+            assert!(f.store.owner().unwrap().is_none());
+            assert_eq!(
+                std::fs::read(f.store.path("state.json")).unwrap(),
+                state_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_refuses_changed_settings_generation_or_processor_without_writes() {
+        let f = Fixture::new();
+        f.change_state(|state| state.status = "budget_exhausted".into());
+        let _lifecycle = f.store.lifecycle().unwrap();
+        let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+        let config_bytes = std::fs::read(f.store.path("config.json")).unwrap();
+        let state_bytes = std::fs::read(f.store.path("state.json")).unwrap();
+        for mutation in ["settings", "capture_generation", "processor"] {
+            let mut selected = config.value.clone();
+            match mutation {
+                "settings" => selected.settings.max_calls += 1,
+                "capture_generation" => selected.capture_generation += 1,
+                "processor" => selected.processor = json!({"synthetic":"changed"}),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                ensured_report(&f.store, &f.id, Some(&config), &selected)
+                    .unwrap_err()
+                    .to_string(),
+                "worker_configuration_differs_explicit_restart_required",
+                "{mutation}"
+            );
+            assert_eq!(
+                std::fs::read(f.store.path("config.json")).unwrap(),
+                config_bytes
+            );
+            assert_eq!(
+                std::fs::read(f.store.path("state.json")).unwrap(),
+                state_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_accepts_only_a_new_slot_or_complete_bound_records() {
+        for mutation in [
+            "new",
+            "missing_config",
+            "missing_state",
+            "invalid_state",
+            "malformed_state",
+            "replaced_config",
+        ] {
+            let f = Fixture::new();
+            let _lifecycle = f.store.lifecycle().unwrap();
+            let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+            match mutation {
+                "new" | "missing_config" => {
+                    std::fs::remove_file(f.store.path("config.json")).unwrap();
+                    if mutation == "new" {
+                        std::fs::remove_file(f.store.path("state.json")).unwrap();
+                    }
+                }
+                "missing_state" => {
+                    std::fs::remove_file(f.store.path("state.json")).unwrap();
+                }
+                "invalid_state" => {
+                    f.change_state(|state| state.config_revision = "b".repeat(64));
+                }
+                "malformed_state" => {
+                    std::fs::write(f.store.path("state.json"), b"{").unwrap();
+                }
+                "replaced_config" => {
+                    f.store
+                        .write("config.json", &config.value, Some(config.identity))
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let previous = if matches!(mutation, "new" | "missing_config") {
+                None
+            } else {
+                Some(&config)
+            };
+            let result = ensured_report(&f.store, &f.id, previous, &config.value);
+            if mutation == "new" {
+                assert!(result.unwrap().is_none());
+                assert!(!f.store.path("config.json").exists());
+                assert!(!f.store.path("state.json").exists());
+            } else {
+                assert!(result.is_err(), "{mutation}");
+            }
         }
     }
 

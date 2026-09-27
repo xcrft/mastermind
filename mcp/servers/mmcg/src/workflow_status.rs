@@ -3606,7 +3606,8 @@ fn first_coactivatable_pair<'a>(
     None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskPhase {
     Ready,
     AwaitingExecutor,
@@ -3653,7 +3654,7 @@ pub struct TaskState {
     pub last_artifact: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskInfo {
     pub folder: String,
     pub spec_path: PathBuf,
@@ -3661,6 +3662,7 @@ pub struct TaskInfo {
     pub state: Option<TaskState>,
 }
 
+#[derive(serde::Serialize)]
 pub struct IndexInfo {
     pub index_path: PathBuf,
     pub db_exists: bool,
@@ -3687,12 +3689,14 @@ pub(crate) struct IndexFreshnessScan {
     pub(crate) history_freshness_error: Option<String>,
 }
 
+#[derive(serde::Serialize)]
 pub struct InstallInfo {
     pub claude_md_present: bool,
     pub agents_count: usize,
     pub skills_count: usize,
 }
 
+#[derive(serde::Serialize)]
 pub struct WorkflowStatus {
     pub root: PathBuf,
     pub index: IndexInfo,

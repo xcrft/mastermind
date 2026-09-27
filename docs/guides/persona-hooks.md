@@ -13,7 +13,20 @@ capture → inspect → analyze → attest authorship → review habit → selec
 
 ## 1. Enable local capture
 
-From the repository you want to collect, preview and install hooks:
+For project onboarding:
+
+```bash
+mastermind init --client codex --mining capture
+mastermind status --json
+```
+
+The choice is saved for this repository. To also run bounded semantic mining,
+select `--mining on --provider claude`. `mastermind miner start`, `stop` and
+`status` use those saved choices. Repeated `init` preserves the run and its
+spent budget. `miner start` explicitly renews a run. Personal profile delivery
+requires the separate `--profile-access on` option.
+
+For direct hook control, preview and install hooks:
 
 ```bash
 mastermind miner hooks setup --client codex --project-root .
@@ -36,7 +49,7 @@ execution currently require macOS or Linux.
 | Native hook trust and profile reads | Require separate authorization |
 | Activation | Restart the client to capture `SessionStart` |
 | Installed receiver | Local capture. Prompt refinement requires a selected processor. Habit analysis uses a separate worker |
-| Background mining | Optional `worker start`, never started by hook installation or status checks |
+| Background mining | Started by `init --mining on` or explicit `miner start` / `hooks worker start`. Direct hook setup and status do not start it |
 
 ### Check each boundary
 

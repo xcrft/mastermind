@@ -133,6 +133,16 @@ def model_report() -> dict:
 
 # Exact selectors are part of the evidence contract. Missing/ignored tests fail.
 CASES = {
+    "onboarding_cli": (
+        "dry_run_and_unconfigured_status_leave_project_and_home_unchanged",
+        "local_init_indexes_source_and_context_and_preserves_existing_documents",
+        "explicit_capture_registers_audience_without_claiming_activation_or_profile_access",
+        "partial_setup_retries_saved_client_selection_after_client_installation",
+        "repeated_init_preserves_a_stopped_worker_budget_and_explicit_start_renews_it",
+        "failed_client_removal_stays_pending_and_reader_access_is_revoked_independently",
+        "status_reads_registrations_without_executing_a_native_client_or_server",
+        "failed_file_commits_do_not_report_a_successful_index_build",
+    ),
     "acceptance_cli": (
         "unix::every_check_is_required_and_executor_pass_cannot_supply_missing_proof",
     ),

@@ -1,137 +1,154 @@
 # Getting started
 
-Install the CLI, index a repository, and inspect a change. Task control and
-personal-profile mining are optional.
-
-## 1. Install
-
-| Method | Requirement | Commands |
-|---|---|---|
-| Global npm | Node.js 24+ | `mastermind`, `mmcg` |
-| Project npm | Node.js 24+ | `npx mastermind` |
-| Cargo | Rust 1.96+ | `mmcg` |
-
-Sources: [npm manifest](../npm/mastermind/package.json),
-[Cargo manifest](../mcp/servers/mmcg/Cargo.toml).
-npm ships native macOS, Linux, and Windows binaries.
+Run these commands inside your repository:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-mastermind --version
+mastermind init
 ```
 
-Alternatives:
+Requires Node.js 24+. The first interactive `init` asks for a client and mining
+mode. It creates project guidance, indexes code and documentation, and applies
+the selected client configuration. Choices are saved in `.mastermind/setup.json`.
+
+## 1. Choose your setup
+
+| First run | Behavior |
+|---|---|
+| Interactive terminal | Ask for `claude`, `codex`, `all`, or `none`, then mining for selected clients |
+| Unattended, without `--client` | Local scaffold and index only |
+| `--client claude`, `codex`, or `all` | Configure the selected clients, default to local capture |
+| `--client none` | Local project setup without client integration |
+| `--dry-run --json` | Show selected settings and proposed steps without writes or client calls |
+| Repeated `init` | Reuse saved choices and reconcile the requested components |
+
+For an explicit setup:
 
 ```bash
-npm install -D @xcraftmind/mastermind
-npx mastermind --version
+mastermind init --client codex --mining capture
+mastermind status --json
 ```
 
-```bash
-cargo install mmcg --locked
-mmcg --version
-```
+Restart the client after setup. Complete any trust prompt in that client.
+Mastermind does not grant native client trust.
 
-## 2. Index your repository
+| State | What it establishes |
+|---|---|
+| Saved settings | Requested choices for this project |
+| MCP and hook registration | Configuration was inspected or written |
+| Session observation | A local `SessionStart` was captured for the current generation |
+| Client trust and live MCP connection | Not independently established by those records |
+| `status --json` | Observed component states, missing evidence, and the next task action |
 
-```bash
-cd your-repository
-mastermind index .
-mastermind status
-```
+An incomplete setup reports failed components. Fix the reported issue and repeat
+`init`. Existing `CONTEXT.md` and `CLAUDE.md` are preserved unless `--force` is used.
 
-The index is `.mastermind/mmcg.db`. Add `.mastermind/` to `.gitignore`:
+## 2. Select mining and profile access
 
-```gitignore
-.mastermind/
-```
-
-| Action | Command | Result |
+| Option | Effect | Provider calls |
 |---|---|---|
-| Refresh | `mastermind index .` | Re-index changed files |
-| Rebuild | `mastermind index . --force` | Reparse all discovered files |
-| Watch | `mastermind watch` | Refresh while the process runs |
-| Inspect | `mastermind status` | Freshness and workflow blockers |
+| `--mining off` | Disable capture and stop the managed miner | None from mining |
+| `--mining capture` | Record local interaction evidence for later inspection | None unless the refiner is enabled |
+| `--mining on --provider claude` | Capture and start bounded semantic mining | Sends eligible episodes to Claude through the local CLI |
+| `--profile-access on` | Allow the selected clients to read this project's personal-profile view | None from the grant |
+| `--refiner on --provider claude` | Refine user prompts through Claude | Extra calls outside the miner budget |
 
-Discovery follows ignore rules. Code, documentation, and history have separate
-freshness checks. Resolve warnings before relying on their results.
+Profile access and prompt refinement default to off. Refinement requires
+`--mining capture` or `on`. Capture alone grants no profile read access, and
+mined drafts require review before becoming active habits. See
+[Persona hooks](guides/persona-hooks.md) for evidence and review boundaries.
 
-## 3. Review the current change
+```bash
+mastermind init --client claude --mining on --provider claude \
+  --max-calls 64 --max-runtime 3600
+```
+
+| Budget or lifecycle | Contract |
+|---|---|
+| `--max-calls` | Default 64 processor attempts per client run |
+| `--max-runtime` | Default 3600 seconds per client run, including idle time |
+| `--client all` | Each client has its own run and budget |
+| Repeated `init` | Keeps the existing run and counters, even when stopped, failed, interrupted, or exhausted |
+| Changed settings, capture generation, or processor | Requires an explicit restart instead of silently renewing a run |
+| `mastermind miner start` | Explicitly start or renew a run using saved choices |
+| `mastermind miner stop` | Stop the selected project's miners without deleting evidence |
+| `mastermind miner status --json` | Inspect those miners without starting them |
+
+The short miner commands use the saved client selection. Add `--client claude`
+or `--client codex` to target one selected client. A running worker with the same
+configuration is reused. Stop it before restarting with changed worker settings.
+
+## 3. Inspect the repository
 
 ```bash
 mastermind impact --since main
 mastermind ui --since main
 ```
 
-Replace `main` with an existing Git baseline. Staged, unstaged, and untracked
-changes count.
+Replace `main` with an existing Git baseline. Lens serves on loopback and shows
+change impact, architecture, and context profiles. Missing or withheld profile
+data is explicit, and private personal data stays out of standalone exports.
 
-| Lens view | Shows |
+| Need | Command |
 |---|---|
-| Review | Changed symbols, callers, boundaries, and test candidates |
-| Audit | Surrounding architecture |
-| Profiles | Selected person, project, code, documentation, and work layers |
-
-Profiles shows missing or withheld data explicitly. Its private personal layer
-requires a grant and stays out of standalone exports.
-
-| Research need | Command |
-|---|---|
+| Refresh the index | `mastermind index .` |
+| Reparse discovered files | `mastermind index . --force` |
+| Refresh while a process runs | `mastermind watch` |
 | Repository map | `mastermind map .` |
-| Compact code briefing | `mastermind brief --role planner --since main --budget-tokens 2000` |
+| Compact briefing | `mastermind brief --role planner --since main --budget-tokens 2000` |
 | Combined context | `mastermind context preview --role planner --since main --query "service boundaries"` |
+| Diagnose project state | `mastermind doctor` |
 
-Previews show source revisions and omissions. They do not establish model delivery.
+Discovery follows ignore rules. Code, documentation, and history have separate
+freshness checks. Context previews show revisions and omissions, not proof that
+a model received or used them.
 
-## 4. Connect a coding client
+## 4. Update
 
 ```bash
-mastermind install --client all
-mastermind doctor --workflow --client all
+mastermind update
 ```
 
-| Selection | Effect |
+| Mode or condition | Behavior |
 |---|---|
-| `--client claude` | Claude Code workflow |
-| `--client codex` | Codex portable skills |
-| `--client all` | Both |
-| `--profile core` | Default skill selection |
-| `--profile frontend`, `security`, `full` | Additional skills |
+| Proven global or project npm installation | Update in that same scope, then run the new workflow installer and verify the native binary version and workflow files |
+| `--dry-run --json` | Local read-only plan without network calls or installation |
+| `--workflow-only` | Refresh workflows from the current package without updating the package or native binary |
+| `--client claude`, `codex`, or `all` | Select clients explicitly, otherwise use valid installed ownership manifests |
+| `--profile core`, `frontend`, `security`, or `full` | Change the workflow profile, otherwise preserve each installed selection |
+| Locally edited or conflicting workflow files | Block overwrite and report the conflict |
+| npx, manual, or unknown installation | Return `manual_required` with instructions instead of guessing an npm scope |
+| Failure after an update step | Report a partial result and recovery instructions |
 
-Updates retain the selected profile unless you change it. For MCP alone:
+Inspect configuration independently with
+`mastermind doctor --workflow --client all --json`. Restart the client after
+workflow updates.
 
-```bash
-mastermind setup claude --scope user
-mastermind setup claude --scope user --write
-```
+## Optional setup controls
 
-The first command previews configuration. Restart the client after applying it.
-See [Claude Code](integrations/claude-code.md), [Codex](integrations/codex.md),
-[Cursor](integrations/cursor.md), [Continue](integrations/continue.md), or
-[generic MCP](integrations/generic-mcp.md).
+| Option | Effect |
+|---|---|
+| `--workflow on\|off` | Save whether `init` installs bundled workflows for selected clients |
+| `--no-global` | Alias for `--workflow off` |
+| `--draft-with claude` | Explicitly use Claude to draft new scaffold documents, which may edit files and use provider calls |
+| `--seed-style` | Explicitly seed the personal profile from authored Git history |
+| `--no-index` | Skip this index refresh |
+| `--force` | Replace scaffold documents with backups, while client customization conflicts remain protected |
+
+Workflows default to on for selected clients. Context drafting and Git profile
+seeding are off by default. `--workflow off` skips workflow installation and
+leaves MCP and mining choices separate. See `mastermind init --help` for all
+options. The hidden compatibility flag `--no-claude` is no longer needed.
 
 ## Optional: use task control
 
 ```bash
-mastermind init --no-claude --no-global
 mastermind new-spec "Add account recovery"
 ```
 
-| Option | Effect |
-|---|---|
-| `--no-claude` | Leave context drafting local, without a model call |
-| `--no-global` | Skip reconciliation into `~/.claude/` |
-| Default file handling | Preserve existing `CONTEXT.md` and `CLAUDE.md` |
-| `--force` | Replace existing generated guidance |
-
-Fill the generated spec before approval. Follow [Workflow](workflow.md) through
-checks, audit, review, and completion. Indexing and MCP do not require `init`.
-
-## Optional: build a personal profile
-
-[Persona hooks](guides/persona-hooks.md) covers capture, analysis, authorship
-review, and profile access. Workflow installation enables neither capture nor
-global-profile reading.
+Fill the goal, scope, acceptance criteria, and checks before approval.
+[Workflow](workflow.md) covers checks, audit, semantic review, and completion.
+Indexing and MCP can also be used without task control.
 
 ## Optional: export a review
 
@@ -140,33 +157,52 @@ mastermind review export --since main --out mastermind-review
 ```
 
 The new directory contains offline HTML, SARIF, a summary, an evidence manifest,
-and a GitHub Actions workflow. Existing output paths are rejected.
-See the [export reference](reference/mmcg.md#pr-evidence-package-mmcg-review-export).
+and a GitHub Actions workflow. Existing output paths are rejected. See the
+[export reference](reference/mmcg.md#pr-evidence-package-mmcg-review-export).
+
+## Platforms and alternative installations
+
+| Platform | Support |
+|---|---|
+| macOS and Linux | Local tools, native hooks, and managed mining |
+| Windows | Local indexing and client setup with `--mining off`. Native hooks and the managed miner are unsupported |
+
+| Method | Commands | Requirement |
+|---|---|---|
+| Global npm | `npm install -g @xcraftmind/mastermind`, then `mastermind init` | Node.js 24+ |
+| Project npm | `npm install -D @xcraftmind/mastermind`, then `npx mastermind init` | Node.js 24+ |
+| Cargo | `cargo install mmcg --locked`, then `mmcg init --workflow off` | Rust 1.96+ |
+
+Cargo supplies the native CLI without the npm workflow bundle. Sources:
+[npm manifest](../npm/mastermind/package.json),
+[Cargo manifest](../mcp/servers/mmcg/Cargo.toml).
+
+For component-level setup, use `mastermind install`, `mastermind setup`, or
+`mastermind miner hooks`. Client guides cover advanced scope and removal:
+[Claude Code](integrations/claude-code.md), [Codex](integrations/codex.md),
+[Cursor](integrations/cursor.md), [Continue](integrations/continue.md), and
+[generic MCP](integrations/generic-mcp.md).
 
 ## Storage and provider access
 
 | Location | Contents |
 |---|---|
-| `.mastermind/mmcg.db` | Repository index and scratchpad |
+| `.mastermind/setup.json` | Project-bound setup choices, not permission or runtime proof |
+| `.mastermind/mmcg.db` | Code and documentation index and scratchpad |
 | `.mastermind/tasks/` | Specs, checks, execution, audit, and review records |
 | `CONTEXT.md` | Maintained project knowledge |
-| `~/.mastermind/` | Optional global personal profile and capture journal |
+| `~/.mastermind/` | Optional personal profile, capture journal, and worker records |
 | Client configuration | MCP registration and workflow adapters |
+
+`init` creates `.mastermind/.gitignore` for local working data. Preserve that
+ignore policy when sharing project files.
 
 | Operation | Model access |
 |---|---|
-| Indexing, deterministic queries, Lens, export | None |
-| `init` without `--no-claude` | Claude-assisted context drafting |
-| Native execution and review | Configured Claude provider |
-| AI mining | Explicitly selected processor or provider |
+| Default scaffold, indexing, deterministic queries, Lens, export | None |
+| `init --draft-with claude` | Explicit Claude-assisted document drafting |
+| Mining or refinement with an explicit provider | Captured episodes or user prompts sent through the selected provider |
+| Native task execution and review | Explicit Claude operations |
 
-## Update
-
-```bash
-npm install -g @xcraftmind/mastermind@latest
-mastermind update --client all
-mastermind doctor --workflow --client all
-```
-
-Use `--profile` only to change the installed selection.
-Use the client guide for scope-specific removal.
+Use `mastermind --help` for the short command catalog and `mmcg --help` for the
+full native catalog.

@@ -1,0 +1,685 @@
+{
+  "schema_version": 1,
+  "kind": "mastermind-control-loop-eval",
+  "runtime": {
+    "python": "3.13.15",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O"
+  },
+  "bounded_model_safety": {
+    "status": "passed",
+    "states": 65,
+    "transitions": 586,
+    "publication_edges": 1,
+    "violations": [],
+    "open_states": 64,
+    "recoverable_open_states": 64,
+    "recovery_steps_bound": 7,
+    "mutants": [
+      {
+        "omitted_guard": "authorized",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "contract_changed",
+            "publish"
+          ],
+          "before": {
+            "authorized": false,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "executed",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "invocation_invalidated",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": false,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "verified",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "check_failed_or_inputs_changed",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": false,
+            "audited": true,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "audited",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "history_resolved",
+            "audit_invalidated",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": false,
+            "reviewed": true,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "reviewed",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "history_resolved",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": false,
+            "history": true,
+            "completed": false
+          }
+        }
+      },
+      {
+        "omitted_guard": "history",
+        "detected": true,
+        "counterexample": {
+          "trace": [
+            "preflight",
+            "executor_succeeded",
+            "checks_passed",
+            "audit_held",
+            "review_satisfied",
+            "publish"
+          ],
+          "before": {
+            "authorized": true,
+            "executed": true,
+            "verified": true,
+            "audited": true,
+            "reviewed": true,
+            "history": false,
+            "completed": false
+          }
+        }
+      }
+    ]
+  },
+  "sampled_cli_conformance": "passed",
+  "sampled_ui_conformance": "passed",
+  "cli_cases": [
+    {
+      "status": "passed",
+      "expected": [
+        "dry_run_and_unconfigured_status_leave_project_and_home_unchanged",
+        "local_init_indexes_source_and_context_and_preserves_existing_documents",
+        "explicit_capture_registers_audience_without_claiming_activation_or_profile_access",
+        "partial_setup_retries_saved_client_selection_after_client_installation",
+        "repeated_init_preserves_a_stopped_worker_budget_and_explicit_start_renews_it",
+        "failed_client_removal_stays_pending_and_reader_access_is_revoked_independently",
+        "status_reads_registrations_without_executing_a_native_client_or_server",
+        "failed_file_commits_do_not_report_a_successful_index_build"
+      ],
+      "passed": [
+        "dry_run_and_unconfigured_status_leave_project_and_home_unchanged",
+        "failed_client_removal_stays_pending_and_reader_access_is_revoked_independently",
+        "explicit_capture_registers_audience_without_claiming_activation_or_profile_access",
+        "failed_file_commits_do_not_report_a_successful_index_build",
+        "local_init_indexes_source_and_context_and_preserves_existing_documents",
+        "partial_setup_retries_saved_client_selection_after_client_installation",
+        "repeated_init_preserves_a_stopped_worker_budget_and_explicit_start_renews_it",
+        "status_reads_registrations_without_executing_a_native_client_or_server"
+      ],
+      "missing": [],
+      "target": "onboarding_cli",
+      "elapsed_seconds": 5.825711875004345,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "unix::every_check_is_required_and_executor_pass_cannot_supply_missing_proof"
+      ],
+      "passed": [
+        "unix::every_check_is_required_and_executor_pass_cannot_supply_missing_proof"
+      ],
+      "missing": [],
+      "target": "acceptance_cli",
+      "elapsed_seconds": 6.620719625003403,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "unix::observed_failure_overrules_reported_pass_and_revokes_a_previous_success",
+        "unix::late_external_executable_change_cannot_close_legacy_repeated_postflight",
+        "unix::a_receipt_from_another_repository_cannot_satisfy_the_same_task_name"
+      ],
+      "passed": [
+        "unix::a_receipt_from_another_repository_cannot_satisfy_the_same_task_name",
+        "unix::observed_failure_overrules_reported_pass_and_revokes_a_previous_success",
+        "unix::late_external_executable_change_cannot_close_legacy_repeated_postflight"
+      ],
+      "missing": [],
+      "target": "verification_receipts_cli",
+      "elapsed_seconds": 11.478239624993876,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "prepare_is_read_only_and_unknown_until_typed_positive_review_closes_across_processes",
+        "unknown_or_negative_judgments_are_stored_and_block_completion_despite_green_checks",
+        "compare_and_swap_rejects_a_queued_positive_after_a_newer_negative",
+        "accepted_semantics_with_unknown_or_required_history_updates_cannot_close_via_markdown",
+        "repeated_postflight_preserves_current_review_and_keeps_ignored_lesson_changes_reviewable",
+        "follow_up_returns_exact_bound_history_work_and_conditional_steps_without_side_effects"
+      ],
+      "passed": [
+        "compare_and_swap_rejects_a_queued_positive_after_a_newer_negative",
+        "follow_up_returns_exact_bound_history_work_and_conditional_steps_without_side_effects",
+        "prepare_is_read_only_and_unknown_until_typed_positive_review_closes_across_processes",
+        "accepted_semantics_with_unknown_or_required_history_updates_cannot_close_via_markdown",
+        "unknown_or_negative_judgments_are_stored_and_block_completion_despite_green_checks",
+        "repeated_postflight_preserves_current_review_and_keeps_ignored_lesson_changes_reviewable"
+      ],
+      "missing": [],
+      "target": "task_review_cli",
+      "elapsed_seconds": 38.78905133299122,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "review_resume_completes_manual_and_native_held_tasks_without_execution",
+        "review_holds_the_controller_lock_until_native_completion",
+        "review_resume_revokes_stale_pending_approval_before_any_native_or_check_launch",
+        "auto_follow_up_retries_one_current_criterion_with_bound_feedback_and_fresh_review",
+        "auto_follow_up_stops_on_unknown_history_scope_and_native_permission_failures",
+        "auto_follow_up_shares_the_iteration_budget_and_never_repeats_semantic_rejection",
+        "auto_follow_up_revalidates_review_and_hidden_sources_after_iteration_advance",
+        "auto_follow_up_requires_exec_review_and_a_finite_unforced_budget",
+        "auto_follow_up_does_not_approve_or_retry_new_failed_checks"
+      ],
+      "passed": [
+        "auto_follow_up_requires_exec_review_and_a_finite_unforced_budget",
+        "auto_follow_up_does_not_approve_or_retry_new_failed_checks",
+        "auto_follow_up_retries_one_current_criterion_with_bound_feedback_and_fresh_review",
+        "auto_follow_up_revalidates_review_and_hidden_sources_after_iteration_advance",
+        "auto_follow_up_shares_the_iteration_budget_and_never_repeats_semantic_rejection",
+        "review_holds_the_controller_lock_until_native_completion",
+        "auto_follow_up_stops_on_unknown_history_scope_and_native_permission_failures",
+        "review_resume_completes_manual_and_native_held_tasks_without_execution",
+        "review_resume_revokes_stale_pending_approval_before_any_native_or_check_launch"
+      ],
+      "missing": [],
+      "target": "review_invocation_cli",
+      "elapsed_seconds": 109.4022054579982,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "auto_repair_respects_iteration_budget_and_plain_exec_does_not_retry",
+        "native_denial_and_terminal_failures_cannot_enter_postflight_with_complete_report",
+        "successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_out_of_receipt",
+        "native_context_retrieves_documents_from_literal_task_title_terms",
+        "intake_binding_reaches_native_checks_review_and_historical_completion",
+        "context_preview_withholds_mismatched_or_malformed_invocation_metadata"
+      ],
+      "passed": [
+        "context_preview_withholds_mismatched_or_malformed_invocation_metadata",
+        "auto_repair_respects_iteration_budget_and_plain_exec_does_not_retry",
+        "native_context_retrieves_documents_from_literal_task_title_terms",
+        "intake_binding_reaches_native_checks_review_and_historical_completion",
+        "native_denial_and_terminal_failures_cannot_enter_postflight_with_complete_report",
+        "successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_out_of_receipt"
+      ],
+      "missing": [],
+      "target": "invocation_cli",
+      "elapsed_seconds": 26.03414870800043,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "guarded_executor_reconciles_exact_calls_and_keeps_payloads_private",
+        "guarded_executor_denies_protected_outside_alias_and_unknown_actions_before_effects",
+        "guarded_executor_refuses_missing_mismatched_and_conflicting_mediation",
+        "guarded_executor_rejects_receipt_replay_and_changed_decision_artifacts",
+        "guarded_executor_requires_explicit_scope_and_observed_shell_declarations"
+      ],
+      "passed": [
+        "guarded_executor_reconciles_exact_calls_and_keeps_payloads_private",
+        "guarded_executor_denies_protected_outside_alias_and_unknown_actions_before_effects",
+        "guarded_executor_rejects_receipt_replay_and_changed_decision_artifacts",
+        "guarded_executor_requires_explicit_scope_and_observed_shell_declarations",
+        "guarded_executor_refuses_missing_mismatched_and_conflicting_mediation"
+      ],
+      "missing": [],
+      "target": "invocation_guard_cli",
+      "elapsed_seconds": 41.899116540997056,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "context_withholds_changed_markdown_until_explicit_reindex",
+        "context_person_layer_requires_configured_audience_scope_and_current_source",
+        "context_review_queue_requires_exact_root_access_and_withholds_candidate_content",
+        "context_review_queue_preserves_stale_and_malformed_source_boundaries",
+        "context_delivery_revalidates_selected_document_evidence_before_native_use"
+      ],
+      "passed": [
+        "context_delivery_revalidates_selected_document_evidence_before_native_use",
+        "context_person_layer_requires_configured_audience_scope_and_current_source",
+        "context_review_queue_preserves_stale_and_malformed_source_boundaries",
+        "context_withholds_changed_markdown_until_explicit_reindex",
+        "context_review_queue_requires_exact_root_access_and_withholds_candidate_content"
+      ],
+      "missing": [],
+      "target": "context_cli",
+      "elapsed_seconds": 7.190709165995941,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "collection_preview_is_read_only_and_collection_does_not_publish_candidates",
+        "preference_acceptance_binds_review_and_live_sources_through_mcp_and_refresh"
+      ],
+      "passed": [
+        "collection_preview_is_read_only_and_collection_does_not_publish_candidates",
+        "preference_acceptance_binds_review_and_live_sources_through_mcp_and_refresh"
+      ],
+      "missing": [],
+      "target": "persona_transcripts_cli",
+      "elapsed_seconds": 4.324012583994772,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "malformed_binding_and_timeout_failures_preserve_original_without_workflow_handoff",
+        "replay_closed_turn_and_conflicting_native_identity_never_repeat_the_processor",
+        "revocation_or_a_new_prompt_withholds_a_blocked_processors_old_result",
+        "durable_capture_fences_block_refinement_before_processing_and_before_publication",
+        "disabling_refiner_revokes_processing_even_when_native_configuration_is_malformed",
+        "bound_intake_survives_tool_events_and_routes_only_its_session",
+        "refiner_exposure_is_event_scoped_and_recovery_cannot_erase_it",
+        "marker_loss_or_a_conflicting_event_blocks_the_first_preflight",
+        "binding_rejects_ordinary_stale_and_cross_project_sources",
+        "prepared_handoff_blocks_run_and_allows_exact_cas_recovery",
+        "missing_intake_marker_exact_recovery_requires_latest_cas_without_changing_session",
+        "missing_intake_marker_replacement_requires_cas_and_rejects_superseded_intakes"
+      ],
+      "passed": [
+        "binding_rejects_ordinary_stale_and_cross_project_sources",
+        "disabling_refiner_revokes_processing_even_when_native_configuration_is_malformed",
+        "bound_intake_survives_tool_events_and_routes_only_its_session",
+        "durable_capture_fences_block_refinement_before_processing_and_before_publication",
+        "marker_loss_or_a_conflicting_event_blocks_the_first_preflight",
+        "missing_intake_marker_exact_recovery_requires_latest_cas_without_changing_session",
+        "malformed_binding_and_timeout_failures_preserve_original_without_workflow_handoff",
+        "missing_intake_marker_replacement_requires_cas_and_rejects_superseded_intakes",
+        "prepared_handoff_blocks_run_and_allows_exact_cas_recovery",
+        "replay_closed_turn_and_conflicting_native_identity_never_repeat_the_processor",
+        "refiner_exposure_is_event_scoped_and_recovery_cannot_erase_it",
+        "revocation_or_a_new_prompt_withholds_a_blocked_processors_old_result"
+      ],
+      "missing": [],
+      "target": "persona_hooks_refiner_cli",
+      "elapsed_seconds": 11.228567083991948,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "semantic_hook_habit_requires_attestation_independent_sources_review_and_current_mcp_receipts",
+        "offered_profile_preserves_original_observation_and_restricts_later_echo_promotion",
+        "ordinary_mcp_profile_tool_read_marks_following_echo_as_influenced",
+        "unreviewed_draft_history_does_not_hide_a_later_selected_attestation"
+      ],
+      "passed": [
+        "ordinary_mcp_profile_tool_read_marks_following_echo_as_influenced",
+        "offered_profile_preserves_original_observation_and_restricts_later_echo_promotion",
+        "unreviewed_draft_history_does_not_hide_a_later_selected_attestation",
+        "semantic_hook_habit_requires_attestation_independent_sources_review_and_current_mcp_receipts"
+      ],
+      "missing": [],
+      "target": "persona_hooks_cli",
+      "elapsed_seconds": 7.408644374998403,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "status_is_read_only_and_capture_setup_does_not_start_a_worker",
+        "restart_preserves_settings_and_completed_checkpoints_but_observes_revised_episodes",
+        "independent_client_slots_charge_only_their_own_eligible_episodes",
+        "concurrent_start_has_one_owner_and_stop_cancels_the_processor_and_releases_its_lease",
+        "failed_and_timed_out_attempts_stop_without_retry_until_explicit_restart",
+        "capture_revocation_and_processor_drift_withhold_inflight_results",
+        "stop_cancels_a_pending_start_without_an_owner_and_allows_a_fresh_run",
+        "interrupted_idle_worker_can_restart_without_replaying_completed_work_or_an_old_stop",
+        "status_preserves_files_and_rejects_replaced_worker_storage"
+      ],
+      "passed": [
+        "concurrent_start_has_one_owner_and_stop_cancels_the_processor_and_releases_its_lease",
+        "capture_revocation_and_processor_drift_withhold_inflight_results",
+        "failed_and_timed_out_attempts_stop_without_retry_until_explicit_restart",
+        "independent_client_slots_charge_only_their_own_eligible_episodes",
+        "interrupted_idle_worker_can_restart_without_replaying_completed_work_or_an_old_stop",
+        "status_is_read_only_and_capture_setup_does_not_start_a_worker",
+        "status_preserves_files_and_rejects_replaced_worker_storage",
+        "restart_preserves_settings_and_completed_checkpoints_but_observes_revised_episodes",
+        "stop_cancels_a_pending_start_without_an_owner_and_allows_a_fresh_run"
+      ],
+      "missing": [],
+      "target": "persona_hooks_worker_cli",
+      "elapsed_seconds": 14.080583250004565,
+      "exit_code": 0,
+      "stop_reason": null
+    },
+    {
+      "status": "passed",
+      "expected": [
+        "absent_optional_hooks_are_not_failures_and_status_does_not_install_anything",
+        "installed_capture_and_observed_current_sessions_are_separate_boundaries",
+        "native_drift_disabled_hooks_and_malformed_config_do_not_hide_the_capture_grant",
+        "configured_refiner_is_not_a_provider_test_or_a_background_miner",
+        "unavailable_capture_journal_preserves_other_readiness_observations"
+      ],
+      "passed": [
+        "absent_optional_hooks_are_not_failures_and_status_does_not_install_anything",
+        "configured_refiner_is_not_a_provider_test_or_a_background_miner",
+        "installed_capture_and_observed_current_sessions_are_separate_boundaries",
+        "unavailable_capture_journal_preserves_other_readiness_observations",
+        "native_drift_disabled_hooks_and_malformed_config_do_not_hide_the_capture_grant"
+      ],
+      "missing": [],
+      "target": "persona_hooks_readiness_cli",
+      "elapsed_seconds": 4.216066458000569,
+      "exit_code": 0,
+      "stop_reason": null
+    }
+  ],
+  "ui_suites": [
+    {
+      "status": "passed",
+      "suite": "mcp/servers/mmcg/assets/lens/app.test.cjs",
+      "aggregation": "one_file_suite",
+      "expected_suites": 1,
+      "passed_suites": 1,
+      "elapsed_seconds": 0.5353756249969592,
+      "exit_code": 0,
+      "stop_reason": null
+    }
+  ],
+  "semantic_goal_success": null,
+  "token_savings": null,
+  "cost_savings": null,
+  "limitations": [
+    "Finite abstraction, no refinement proof of all Rust executions.",
+    "CLI cases sample local behavior with synthetic native clients, without model inference.",
+    "Persona, worker, readiness, intake and UI checks are adjacent boundaries, not extra model obligations.",
+    "The UI harness is one aggregate DOM/static suite, not a browser or model-use measurement.",
+    "Recovery assumes a stable environment and successful checks and judgments.",
+    "Owner-writable local evidence, no sandbox or independent reviewer attestation.",
+    "No semantic quality, long-task convergence, token or cost improvement is measured."
+  ],
+  "source": {
+    "sha256": "96299444178e85ed2d5c586acc00ae8ae245637da597e2a6a47300b84cecaeaa",
+    "files": {
+      "evals/benchmark_process.py": "d13a82dd275da9716751bcb6dccfa667975b69f35ff78237ff2e68f75be3f11c",
+      "evals/control_loop.py": "419eb6ebda242e0b4251125dda7bff31c54d136313b83f69a110bdfca411f348",
+      "evals/test_control_loop.py": "01fe54d262f8524a7e86d197c322837795113ecce0a4488dfd5d99351c53f073",
+      "mcp/servers/mmcg/Cargo.lock": "5b417c87c5576f5209105fe6758141131bee34e7ddd185629c366f7718c41fbc",
+      "mcp/servers/mmcg/Cargo.toml": "6e509851edf2458068fd89219137b53e10cddb330b1341beba5a9a4143514c97",
+      "mcp/servers/mmcg/assets/lens/app.js": "24f4d908e41733060acdc53f3363cd859c9f0c0e337d63708cd69e84c9b7d3ca",
+      "mcp/servers/mmcg/assets/lens/app.test.cjs": "3320502a084255f946eec6820835b4cbdbfb5102286be4bfbf3ec75c300cbc05",
+      "mcp/servers/mmcg/assets/lens/index.html": "9d81b8ad52ffedd75b16f62a3b83ccebf83dbd4eebe88f931f82c649475b818d",
+      "mcp/servers/mmcg/assets/lens/mastermind-mark.svg": "0ca6ea9b32af13abe980e78927fd035992d2fbb05209d8447982b5a6a29d0438",
+      "mcp/servers/mmcg/assets/lens/styles.css": "ed84d30f69b5786c8df01ea311bae51b6a7b9329e679c25a08dd5968a9ab06c1",
+      "mcp/servers/mmcg/assets/mastermind-review-pr.yml": "96bfeeb0366c6c586be02c7101c839439a3d5c161c7ed5a4cfb97b102b23b293",
+      "mcp/servers/mmcg/build.rs": "a66de2284ce4e8318b0b15b3ed45506519c0238f822c09e861329d55be3237b7",
+      "mcp/servers/mmcg/src/acceptance.rs": "f8b0088eb25187d7571d39f22285aad8bc88767f6293ce132e2be089e3bce054",
+      "mcp/servers/mmcg/src/audit_bundle.rs": "ee39433016e5020f607df2e7db57b0245586f8516823720b0a00879f23ce5a7d",
+      "mcp/servers/mmcg/src/audit_spec.rs": "12a91b6736c4fb0a666af83dd983e016fc4a6543969390e0ee5b3c6d9de9e24d",
+      "mcp/servers/mmcg/src/auto_repair.rs": "47a45b4a3900546c56c0034aec9436d38b6bc1bbacdad722f47207206c3c2c19",
+      "mcp/servers/mmcg/src/bounded_fs.rs": "406373eb6854fcd7e0a85cfc82b7256f2f09e1e13ac242e6abffc37633141d66",
+      "mcp/servers/mmcg/src/commands/acceptance.rs": "9643c0284caed31b7c9cd46c1226d0336a0880337c82337fef8d1ececb639010",
+      "mcp/servers/mmcg/src/commands/audit.rs": "cf49d4351e25f93d425f25cd88509ddf76b0f62d0ee81437fd904197e698e9eb",
+      "mcp/servers/mmcg/src/commands/ci.rs": "c10a512e426f4ab20f8a7b29951e1f48aa019f2cfb6241a56e690f0ae832197b",
+      "mcp/servers/mmcg/src/commands/demo.rs": "bb2f92a296cf826656802e865e4fb4f2ebaff3e9532618e6711a703bb59663ed",
+      "mcp/servers/mmcg/src/commands/init.rs": "2bae3c80e6923958c0b686f7d7947b708d4ebd6372da46be9b53cd5b93ff8fec",
+      "mcp/servers/mmcg/src/commands/mod.rs": "a85b00190d2256a22a38fd9e88d771b9c2b7bef10d1b325bc84f470a022c1400",
+      "mcp/servers/mmcg/src/commands/new_spec.rs": "65267414155718f3557c198afb8b2e04c2c2c4dc94cf611b33490ad4ef730a0c",
+      "mcp/servers/mmcg/src/commands/onboard.rs": "22ecba3e5783a65ccc690f81f997f39dab11a88fd3f1a50014a49a27101b4e1e",
+      "mcp/servers/mmcg/src/commands/pr_comment.rs": "b705f05fd20331f231ff668c5e91320cc7f1134cf6fd18b716d1e2b2acb65a5a",
+      "mcp/servers/mmcg/src/commands/query.rs": "a1343860d40109e34843f14aa7c1cd95fafe84e506b689b528b1af1f00f3eb54",
+      "mcp/servers/mmcg/src/commands/run_task.rs": "0b5e211d92aad2427da618381333eb140e5318e73aed9e30bf44994f5c22607e",
+      "mcp/servers/mmcg/src/commands/spec_gate.rs": "d7403c05fdcb718e6a84936260b4f561080f0ac23c882cde24eb164c3f17a56f",
+      "mcp/servers/mmcg/src/commands/task_review.rs": "2c9e26d87c04df385e64621124405438d3e5185fef8a2124359cf09c7e33cceb",
+      "mcp/servers/mmcg/src/commands/tour.rs": "fcf5754bb82bd07ad5c6b1f1a8cff49f19dd78260773722cabd122e42ff54ef5",
+      "mcp/servers/mmcg/src/commands/uninstall.rs": "6ac57c97b1c320577ebaa7ee361ed8e881c20ad4497b2f7b105f0c9d4b35edd8",
+      "mcp/servers/mmcg/src/commands/verification.rs": "318612963654803f18e77d450cbc4195670ce674b45f81eb59ef4d4bbb4deb16",
+      "mcp/servers/mmcg/src/context.rs": "a70b15d50a8765ae4549a0f6164efee02d9cee4667387980ff5f4a395c91217b",
+      "mcp/servers/mmcg/src/context_doctor.rs": "3dd24121dc9b2f11aeaa20c3ee44d9073df22c004ff4593622e2aad57ac0c299",
+      "mcp/servers/mmcg/src/declared_files.rs": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a",
+      "mcp/servers/mmcg/src/diff.rs": "6868c33df04ee3273b3afda7bed47e252a3151df3870d7153fcf866b645376c7",
+      "mcp/servers/mmcg/src/doctor.rs": "3b5a0618d95bdb1dcb56ceda14d4b5643c7366321c78692fa475dd6c2e7875ed",
+      "mcp/servers/mmcg/src/document_graph.rs": "690f12a1c3d23e4e27e6032bcbb75c07d7fb3df31f00a65b93f44fba34a4ef73",
+      "mcp/servers/mmcg/src/document_sections.rs": "8f8d18d885d11b11371d5f980f192a5c426f50c3247deaddfe699170298c2e37",
+      "mcp/servers/mmcg/src/evidence/junit.rs": "f4c2a7fd2c4ca75bb8d783b90c3ac1aa5b3909f782a19d747668a286957decd1",
+      "mcp/servers/mmcg/src/evidence/otel.rs": "c05fbb998eb0f7c221724e9b02fc735b833ad5fc8d552f4552d742c7c183d152",
+      "mcp/servers/mmcg/src/evidence.rs": "77ee49301a14eb23ca824306c7537ef32d61d9be5c29d532c6b54b0adffa6a9b",
+      "mcp/servers/mmcg/src/executor_claims.rs": "adf32891bc91c4555b9f41cb1174c34aa38adfc4e2124e7faf89e258df3a3591",
+      "mcp/servers/mmcg/src/executor_report.rs": "523d4331cd05ed12cc8ced111f4d9a1ee5080dcd7ee03c9090856ca3643bbe5d",
+      "mcp/servers/mmcg/src/fact_adapter.rs": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d",
+      "mcp/servers/mmcg/src/fact_signature.rs": "573cf37167427f60b4dce10a97dd8e20e5961608878d21b30dce8f18907a37ce",
+      "mcp/servers/mmcg/src/facts.rs": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce",
+      "mcp/servers/mmcg/src/find_checks.rs": "c661f42546ec4d722ff425a17832e773ab89c0e3e3a852250053e3a8810ea998",
+      "mcp/servers/mmcg/src/fingerprint.rs": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f",
+      "mcp/servers/mmcg/src/hex.rs": "56726fd8bdbe08f32aaeeff716c21a91d14ecf02fe106a88847dcd10a85d118a",
+      "mcp/servers/mmcg/src/history_disposition.rs": "3be781710ab2aa945263fd517a550ce817a2e48b0a1a2f2aeab549965eccdae0",
+      "mcp/servers/mmcg/src/indexer/cpp.rs": "46c4981a218c95b5035bcd7513c5de967f61f152cd5e6c03a6f7bb43fdf39aae",
+      "mcp/servers/mmcg/src/indexer/csharp.rs": "dae69b56c39bc77611a888808e110e30c1f13f30731ffb63951552f381dc3a94",
+      "mcp/servers/mmcg/src/indexer/go.rs": "f8c969195b690abfb2b8f72f1d622530965ae14e1c99b76cb467561dabce2888",
+      "mcp/servers/mmcg/src/indexer/java.rs": "82929ce78bcc928eec38fc24684d26c647f66ce67a256718c36ad726453ff648",
+      "mcp/servers/mmcg/src/indexer/javascript.rs": "10036243b5c82056285c8b699280b94b4103e378f0b96d4b6ba91fe7f091373b",
+      "mcp/servers/mmcg/src/indexer/php.rs": "aa2e3c1a2b714a7ba738b2574ce9127402e085fdb38c235423481b810f1f2150",
+      "mcp/servers/mmcg/src/indexer/python.rs": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1",
+      "mcp/servers/mmcg/src/indexer/rust_lang.rs": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0",
+      "mcp/servers/mmcg/src/indexer/typescript.rs": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda",
+      "mcp/servers/mmcg/src/indexer/vue.rs": "b9ed6f06a535b7732ac8cb3cde79ed85ab70be5297d862fb89dfe7ea300b7513",
+      "mcp/servers/mmcg/src/indexer.rs": "178fdafc330504bea4489e7b3566116f3833ca2d1990234d389fbe53b4b9b8dc",
+      "mcp/servers/mmcg/src/invocation/guard.rs": "83822f664ca1d5c8a31b501360d326e4f371db6cb6007b1d565e2a6ab101068b",
+      "mcp/servers/mmcg/src/invocation.rs": "6b9681f851b6328d1ab477438c2e49c6f2d86072e4f44d73ed1ecda00a16e1e5",
+      "mcp/servers/mmcg/src/lens.rs": "a66e3224993edfeedee8ed3d39ff09223b95d75aeb454b152fccaaff45f030b4",
+      "mcp/servers/mmcg/src/lessons.rs": "3dc2341d5e3e7f6e2f2b62de95949db78a1ea906522a5fb9d237672619d164cb",
+      "mcp/servers/mmcg/src/lib.rs": "04797590acb305f11a4e17222dced9cb28a688078df1e5af5843b8b58213b635",
+      "mcp/servers/mmcg/src/main.rs": "c6862f82f7b4197b82520d427c72b3f7a24a572313ca5f0f8ea4a79455997d0b",
+      "mcp/servers/mmcg/src/mcp.rs": "1b6ad0c7e2c63804c0478689df37f77f2e4498e6ca4383ebfd1241d18abf9cdf",
+      "mcp/servers/mmcg/src/miner/access.rs": "1634225e40c8ae20cc31327ff8135fcca7b38175a9a754d62833049b3f440c8a",
+      "mcp/servers/mmcg/src/miner/codex_transcript.rs": "17989e9fda7ce8070475f5e94d7c393f1c0899751edc9ebef0e36a5472a403b1",
+      "mcp/servers/mmcg/src/miner/collection/evaluation.rs": "6266c716d2dd75336570970a55ef7c23a72ad7762c4ed6f97f891b8ea310dd3f",
+      "mcp/servers/mmcg/src/miner/collection/search.rs": "98262a98e126010e551afda765664b0503c22d33db83aa1bfbff1bab69008d1e",
+      "mcp/servers/mmcg/src/miner/collection/sources.rs": "9afafb6b5b10a6c73ad61f7ff0f0ac272212e37f655eb98a6fb20ff52e84adee",
+      "mcp/servers/mmcg/src/miner/collection.rs": "2ea77096eb6bcb8ac70c827053741493daa87fb0493ed7041fd14e8a54f14be4",
+      "mcp/servers/mmcg/src/miner/curation.rs": "fc62c7a02fec20be40dc649ec427a8a2d041271cebb0f24b9af0f90e3d5cfe85",
+      "mcp/servers/mmcg/src/miner/feedback.rs": "4a20c5802c2b3fc91de36d4f75a6683f13c9a51eb63d91746cd6af5887b1292a",
+      "mcp/servers/mmcg/src/miner/habit.rs": "45ee940aa15ba6425bda7d915d6218a6964664c7e4bb7e4c1e3b51d9c3bbd376",
+      "mcp/servers/mmcg/src/miner/hooks/background.rs": "51483041253b520e6eccbcd304e21c12e0b87ed59c4ad85164ba906be0bd7739",
+      "mcp/servers/mmcg/src/miner/hooks/evaluate.rs": "36dab7b1653776b80eb6a87221b46e3d15747a94f292deaa100e72723299ad76",
+      "mcp/servers/mmcg/src/miner/hooks/fence.rs": "d02abbbaf7dec0602625fc734641045e6b0ccfb08896d74c4391328a8a98070a",
+      "mcp/servers/mmcg/src/miner/hooks/influence.rs": "f2f9e5489b7c6e96a20b39b524d4eac18d24608d6f0b2467ce802227a6d7fe2c",
+      "mcp/servers/mmcg/src/miner/hooks/install.rs": "2f340b2a876ae908af945b0c95a98971a3000d4c0976977955731cec11709ac0",
+      "mcp/servers/mmcg/src/miner/hooks/journal/intake.rs": "bd6f2ca43720f09aa38c7f2e406599c69ad137c6e33512381f96f3436cb7c06b",
+      "mcp/servers/mmcg/src/miner/hooks/journal/task.rs": "42ff163efb726909cedbbb51fb01d4c098518fdd17c4ba7ff2500fff1e32f350",
+      "mcp/servers/mmcg/src/miner/hooks/journal.rs": "5ef2160b73e6f1d0359026f4ab599ff7e61f4e30824cb231641eb522552692b2",
+      "mcp/servers/mmcg/src/miner/hooks/mod.rs": "32b0a9ea1defb3aa1d55edbe4c3b73e32c42561503c4a0c4e25ba383c09839d2",
+      "mcp/servers/mmcg/src/miner/hooks/readiness.rs": "441bacf0c6066e8778a77c9ae7749d0ce13fa95fc815031ee161a24375454fbf",
+      "mcp/servers/mmcg/src/miner/hooks/refiner.rs": "9f7fcd6e5cb2d7fa63c6366ab8442563944d0e80349362e6705692d44cd5c3f2",
+      "mcp/servers/mmcg/src/miner/hooks/semantic.rs": "1273b5cd787e02e6fa1cf1f93830e2afa696fa03b4cc47e8db1f3e42a72b6210",
+      "mcp/servers/mmcg/src/miner/hooks/worker.rs": "998aff2c9ac6dace2ef5f7cfe4a19af58bb8bcb46e18c6b2760b20aed2feabf2",
+      "mcp/servers/mmcg/src/miner/mod.rs": "487970160d129c9e7bff370a2cef9bbcf93c114894458e00f091c75fcee71af9",
+      "mcp/servers/mmcg/src/miner/profile.rs": "4cb2a68436477dfe9522982a1e56f4fe1c629c68965be8e9eb5272a81ecb7949",
+      "mcp/servers/mmcg/src/miner/range.rs": "9a7159c110ecd7e16b091c04ac3d59a5470df5ce07529474bd23075ce2d360cc",
+      "mcp/servers/mmcg/src/miner/stats.rs": "e6989c987de7d3431484beb76c4771d4330d66b1b5f471023a7b99a670617cfc",
+      "mcp/servers/mmcg/src/miner/store/collection/search.rs": "5cc4962eb7bec922acc3db867d6458233d9e5aaf6109ee7ead510978e454dc06",
+      "mcp/servers/mmcg/src/miner/store/collection.rs": "dd7397c50b136e2b8f48e4de563b32ee77477675fa8f24f99f9b5f61635fee20",
+      "mcp/servers/mmcg/src/miner/store/curation.rs": "9b4bec031115d1dcb0c7c99d4f2339051c300d12f15b52206ae528789d233f7d",
+      "mcp/servers/mmcg/src/miner/store/habit_generations/tests.rs": "9c5c2efd4670eb6347f6d77b2943c9da8c9db401ad311c67f919983c1d56c94a",
+      "mcp/servers/mmcg/src/miner/store/habit_generations.rs": "9214969d8342202c15050a4ef954d803760cb27a640f964ec46818798f1c4065",
+      "mcp/servers/mmcg/src/miner/store/habit_review.rs": "0f8aad803bd28c8f2ce6938da0dae3b80cdf3975628b641998163b877faa2328",
+      "mcp/servers/mmcg/src/miner/store/habit_supersession/tests.rs": "0997a2abb185e9377d6c338fe2ceeff00c199d0739fecd1c0c492771b8f18a51",
+      "mcp/servers/mmcg/src/miner/store/habit_supersession.rs": "dced5171167fddc2f9538f75da7fc4e8d0e0fb67132a08e0ef1f52c93e830f21",
+      "mcp/servers/mmcg/src/miner/store/preferences.rs": "9df0be024ad0a3ca6cb9474675ebf23a6e37b7a310123f524320ced1892f1b38",
+      "mcp/servers/mmcg/src/miner/store/supersession.rs": "7934906c4d48939722fa1458bf43387535651629523af048e730117f5a96045e",
+      "mcp/servers/mmcg/src/miner/store.rs": "9848bcd1a3c3d4b9b3c7a1d583ad4067967b63695e6fe7e8785b11ea71f1fd61",
+      "mcp/servers/mmcg/src/miner/tooling.rs": "a0e3a6bf2b2a014cefa6d5a045249434fa44b62c33c4eac1822fa04b8a621a48",
+      "mcp/servers/mmcg/src/miner/workflow.rs": "6216490a5182ec664a7e1b12a22c163a15b090750e4796c70840d0a2b93c8f2b",
+      "mcp/servers/mmcg/src/onboarding.rs": "9ecad1c5b78389888a26e7eff8f829759d7acf372ce55739388e3d328ef3ea47",
+      "mcp/servers/mmcg/src/policy/evidence.rs": "f5b826337a06c282530dd9eda5aa86e73af7fb28bb05c2b347c6356921f8b8cc",
+      "mcp/servers/mmcg/src/policy.rs": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23",
+      "mcp/servers/mmcg/src/project_claims.rs": "cd0be21e2aaf33713361e6a3c979c2b8e18eeff15af935528cb61846d33b4d77",
+      "mcp/servers/mmcg/src/queries.rs": "6e9869b64d1e385e8c739f7dcb2f3e91c5ef5bc2d391d0bf95cbaa1771a5cb7d",
+      "mcp/servers/mmcg/src/review_invocation.rs": "8bc3b2ceb2bd36d883e5ca596f498d9066bffe201bb861c8534bb098f97a3dce",
+      "mcp/servers/mmcg/src/review_package.rs": "a3928259c8c6cd7a962a238b43b3c49a048757ddf2c8d440aa6751997dd0dcc8",
+      "mcp/servers/mmcg/src/run_task.rs": "8e5b7ec9a2a2ff6355d762898ff0497b6d16c11448a591c59e39baa878f6a533",
+      "mcp/servers/mmcg/src/sarif_export.rs": "ad5b527bd89de43a0ff0ef7cb956a3fe63000721e19a8035f2fa3681cebc29e9",
+      "mcp/servers/mmcg/src/scip_overlay.rs": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17",
+      "mcp/servers/mmcg/src/setup.rs": "4903e5b026251c74ab3a43737fdb6db24eee433a95f15af00582afc0c87fb9bb",
+      "mcp/servers/mmcg/src/spec.rs": "f73b1ae303193943376cadb021a754ebceb9ea64817fd463b0c9eee316a315d4",
+      "mcp/servers/mmcg/src/spec_removals.rs": "c95bab325c8eab1904eb4e10ee734803713d4484ddd336d5e9d8363e6c14388a",
+      "mcp/servers/mmcg/src/spec_symbols.rs": "e0cf607dd5acc5afd9603fdf6637801ba0ed1b1c4fc471c0dd7b26fd8ca7ff1f",
+      "mcp/servers/mmcg/src/store.rs": "19850f874498f7c53292e4341ee38962f335dd8acb69d3fa2d7df8191db6fde7",
+      "mcp/servers/mmcg/src/task_review.rs": "483cfd94ac3f7ede4e10eb64bfe916520fbc9ecdf3cd8ef620e4c5f21ce78f30",
+      "mcp/servers/mmcg/src/task_scaffold.rs": "2f30e61e7ebe38c177691f024672ed93967a6cd6ae9a380d3f008cf00ce72bf3",
+      "mcp/servers/mmcg/src/team.rs": "7ee8ff16eb2f63ce7a215075a1ac7bbcb224eee151acc6e84b69be2e33c05d15",
+      "mcp/servers/mmcg/src/templates.rs": "cedc114fb9a88a174053a3f051ad92649cdc8cc1fd3403fdb5ae09d8e4b5ffc2",
+      "mcp/servers/mmcg/src/temporal.rs": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01",
+      "mcp/servers/mmcg/src/terminal.rs": "9a31ff078802c805b56042cf3e4121061670915087a14e687df19f58dbb8f930",
+      "mcp/servers/mmcg/src/test_scan.rs": "0c3f77f99a45f6681f2e8246ecf4ec79a6d086802be9732c66412991273b803d",
+      "mcp/servers/mmcg/src/verification.rs": "4b44c5de6d37097811c19e96e85f23a37ef49952864a340e238aa65876c6bead",
+      "mcp/servers/mmcg/src/verification_receipts.rs": "fab9cb2e5df2b6113733d5d507ba9cb3f527fdd76d4f78b61e2b1dfb747e7b45",
+      "mcp/servers/mmcg/src/verify_spec.rs": "9a2564670cb48f99bc44e2376a4f6b36903a1e085c7309a08d81748b32307de5",
+      "mcp/servers/mmcg/src/watcher.rs": "51f72c062260c469fb57d96dcd04af6b3449d776d1fca857cadae7dfff4965f5",
+      "mcp/servers/mmcg/src/workflow_status.rs": "c613a3b8cb068e6dce69c6e8a4423c0f34821222462384223506d9700847efd2",
+      "mcp/servers/mmcg/templates/context.md": "29d594c0a62f2c2e3498823813c37a12ff944de1b820502ed5f211920efc9ff3",
+      "mcp/servers/mmcg/templates/workflow.md": "b897f0c140b17d2a6bb673ba6785ff10b0528a5c95aa9f462745ee009ec16fec",
+      "mcp/servers/mmcg/tests/acceptance_cli.rs": "ffb85c12358cdc8f8024295d3e2dd1808d61c6cce216b3d9e2b91e696406b3e8",
+      "mcp/servers/mmcg/tests/attribute_impact_cli.rs": "8514f2ddb6d95d9fb2304e483d575a72e89b320f96f4d976d80b171de143e8ed",
+      "mcp/servers/mmcg/tests/context_cli.rs": "1924a379b56d246ee5a3a0a77cc0faad751b5f01a7c36b86878f54a61f203390",
+      "mcp/servers/mmcg/tests/declared_files_cli.rs": "9a72cb1470871b2f3d87d52de75f6f3f62c1ee54a5c99a6167f180181c9ccf87",
+      "mcp/servers/mmcg/tests/executor_claims_cli.rs": "81240058c1e20a952b782d41f85a26fc515cd206afbf920586de794afcb88350",
+      "mcp/servers/mmcg/tests/executor_report_cli.rs": "9c403250d959ca250dc0cdfe9ce28c8675bee369f2921ce845b7f812a22b12e9",
+      "mcp/servers/mmcg/tests/fact_lifecycle_cli.rs": "c6fd8797caf27b0be13340434d5de658eb3825294d43f34f7b72bc5bc5112f6d",
+      "mcp/servers/mmcg/tests/find_preflight_cli.rs": "05be6a9689d9c407ee5cd2708b1e36f2c2cc042cc6e5d133fb069af74e7ad764",
+      "mcp/servers/mmcg/tests/fixtures/change-impact-schema-v1.json": "bb2d853c0820e2360e48b74e944c24901414b66059a732ae7b5e229c8a9b9ee1",
+      "mcp/servers/mmcg/tests/fixtures/change-impact-test-projection-v1.json": "1cf3d3129cef9f35e656601bac7b314aa4b7d7447b849901a382b308aff8c21d",
+      "mcp/servers/mmcg/tests/fixtures/executor-report-v1.md": "9f3a196fd68b45b6d1294aea29bc633c2c2eb5a681a488cb53f9154e164ba596",
+      "mcp/servers/mmcg/tests/fixtures/persona_detector.json": "9bedcf1c80fc26e7fe2f1d144c18036d71ed0231193ce1325c5ff438b82a02f8",
+      "mcp/servers/mmcg/tests/golden.rs": "5b256962da890a82f35d2428e9e1d4311c9f91418e0f4036aa6fa77866f5148a",
+      "mcp/servers/mmcg/tests/invocation_cli.rs": "a1b8b79096394fcaecccd55a7ed6bb27f8edb080d2f6416756756872010804f0",
+      "mcp/servers/mmcg/tests/invocation_guard_cli.rs": "abc61b0d3b0a2d00df41a2f530d2c73d447ec83dd33222b62e1bac2b2bbe4f16",
+      "mcp/servers/mmcg/tests/onboarding_cli.rs": "9ce6d44f1fcdcca709249d5e4725f4ba82c84642773640749abb939cfea3cc8e",
+      "mcp/servers/mmcg/tests/persona_hooks_cli.rs": "82409d434e41a18346d2e1cf6a003794a6bec8b1ec0d5354e7b30cca522b704a",
+      "mcp/servers/mmcg/tests/persona_hooks_controller_origin_cli.rs": "568494c057e343b009008fd47eb97026a0ef1f366447d043cd3dbb9b6fbaaff1",
+      "mcp/servers/mmcg/tests/persona_hooks_install_cli.rs": "5ba3e4d5a58ac0bac638bf2e7de5772b9b62b6b077c35315dc34edcfdf2b5faa",
+      "mcp/servers/mmcg/tests/persona_hooks_readiness_cli.rs": "1dec5f6a4b78cf86511cbcdd9217dee3c69288d6825b78468acf689631be9ccd",
+      "mcp/servers/mmcg/tests/persona_hooks_refiner_cli.rs": "538e21e19f3c703938f0301e1645170f694fe24b467a33f0f48b96612128c177",
+      "mcp/servers/mmcg/tests/persona_hooks_worker_cli.rs": "302b0f5ca11b6b07e7ea9f0c463f5b637f379f5b87fbbc12429f4b6a46914573",
+      "mcp/servers/mmcg/tests/persona_transcripts/composition.rs": "587f186aaf45b66d9e14a09a455ea7c17abd8ebddc1d07c68eaa2b07f3028909",
+      "mcp/servers/mmcg/tests/persona_transcripts/search.rs": "d044939cc1c72173056397b9c0599d152e241f06de1157fea45c0dd8eef5e13a",
+      "mcp/servers/mmcg/tests/persona_transcripts/source_sync.rs": "013978459a8f59fc5bbdae29befdb0f1f37ea12cc57d3dee206233138ed2e886",
+      "mcp/servers/mmcg/tests/persona_transcripts_cli.rs": "c727dca8a3b26ab49266cb26459532bc862fa07d9f5bd7e1b1e8a58991a66aec",
+      "mcp/servers/mmcg/tests/policy_cli.rs": "99dba2d21a4377a9eb442300b12a28293973568f37900c1d3da3d015bfd6b26e",
+      "mcp/servers/mmcg/tests/query_explain_cli.rs": "1202be2beccff1324d4ec59b0d744ad2c0c29b6c0a41edf65234d82989097855",
+      "mcp/servers/mmcg/tests/research_graph.rs": "2d2d159d72f9fb9a372d9d4643c734a006d3648f50ffd3caea59fc199b7f40c6",
+      "mcp/servers/mmcg/tests/review_invocation_cli.rs": "c22b2baaa37090607f3662aad9ef322da2bf0d10d45b6690efcecbf4eeda9599",
+      "mcp/servers/mmcg/tests/scoped_removals_cli.rs": "213bbfc6158eef287f29ab8c735cb31c7bc7568cd9c00ce38a1e4389c6b61d7e",
+      "mcp/servers/mmcg/tests/scoped_snapshot_cli.rs": "440b4cc9d4d6bf141ae09c568f95044d8da076314bca961cde32bee7b09c0c2a",
+      "mcp/servers/mmcg/tests/task_review_cli.rs": "426e900cd2438fe2564a6453f42d863ffdc18ac1ba42024d838de7b770ad0f4a",
+      "mcp/servers/mmcg/tests/verification_coverage_cli.rs": "129fcf9d2a0503cdaac9f79d3a1040f1b6405bcb3ccf88050ad9ad87bef93b2b",
+      "mcp/servers/mmcg/tests/verification_receipts_cli.rs": "bd226ad1c534a9ba52abcfd1385b446878348659891b1527fdce0bc51b83189e",
+      "schemas/invocation-receipt-v1.schema.json": "63f87f10b38ad24c38e9ec39ebbaa4d0e7a4e2ed660eec5f58f80a030bc1a37a",
+      "schemas/invocation-receipt-v2.schema.json": "34ee9a8530741e193829611f5bb0505ce5dd568f638668db19bce3ba3b033092"
+    }
+  },
+  "revision": "e8333f0c8d8f90a2605fd18b51533dd73d2ed8c2",
+  "working_tree_dirty": false,
+  "source_unchanged": true,
+  "status": "passed",
+  "elapsed_seconds": 289.1897292079957
+}

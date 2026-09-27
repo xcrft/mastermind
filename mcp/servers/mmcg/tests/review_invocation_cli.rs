@@ -38,6 +38,14 @@ case "$1" in
   --help)
     printf '%s\n' '--input-format text --output-format stream-json --verbose --tools --permission-mode acceptEdits dontAsk --permission-prompts none --no-session-persistence --no-chrome --max-turns --restricted --strict-mcp-config --mcp-config --disable-slash-commands'
     if test "$mode" != missing_safe_mode; then printf '%s\n' '--safe-mode'; fi
+    if test -f "$HARNESS/reviewer-calls" && test "$(/bin/cat "$HARNESS/reviewer-calls")" = 1; then
+      case "$mode" in
+        follow_up_stale_dependency) printf 'changed after the retry preflight\n' > dependency.txt ;;
+        follow_up_stale_review) printf '{}\n' > .mastermind/tasks/001-native-review/semantic-review.json ;;
+        follow_up_stale_lessons) printf '# Changed during the next native probe\n' > .mastermind/tasks/_lessons.md ;;
+        follow_up_stale_check) printf '\n# Changed after the retry preflight\n' >> .mastermind/check.sh ;;
+      esac
+    fi
     exit 0 ;;
 esac
 kind=unknown
@@ -423,7 +431,29 @@ fn native_fixture_helper() {
         let (_, packet) = review_packet(&input);
         let mut assessment = judged(&packet["output_template"], false);
         assert!(assessment.get("reviewer").is_none());
+        if mode.starts_with("follow_up_") && (attempt == 1 || mode == "follow_up_negative") {
+            assessment["criteria"][0]["status"] = json!("unsatisfied");
+            assessment["criteria"][0]["reason"] = json!("The conditional return expression selects three because its condition is false. The declared criterion requires the existing function to return two.");
+            assessment["criteria"][0]["evidence"] = json!(["spec", "worktree", "check:unit"]);
+        }
         match mode.as_str() {
+            "follow_up_unknown" => {
+                assessment["criteria"][0]["status"] = json!("unknown");
+                assessment["criteria"][0]["reason"] = json!(
+                    "The reviewer has insufficient evidence to determine the runtime behavior."
+                );
+            }
+            "follow_up_verification_unknown" => {
+                assessment["verification_quality"]["status"] = json!("unknown");
+            }
+            "follow_up_scope" => {
+                assessment["scope_control"]["status"] = json!("unsatisfied");
+                assessment["scope_control"]["reason"] = json!("The proposed remedy would require changing an undeclared interface, so a planner must revise the contract first.");
+            }
+            "follow_up_history" => {
+                assessment["history"]["lessons"]["decision"] = json!("update_required");
+                assessment["history"]["lessons"]["reason"] = json!("The reviewer requests a durable lesson that requires separate inspection before changing the knowledge file.");
+            }
             "negative" | "repair_then_negative" => {
                 assessment["criteria"][0]["status"] = json!("unsatisfied");
                 assessment["criteria"][0]["reason"] = json!("The declared check inspects source text only, so this fixture reviewer rejects its support for the intended runtime behavior.");
@@ -529,15 +559,46 @@ fn native_fixture_helper() {
             serde_json::to_string_pretty(&assessment).unwrap()
         }
     } else {
-        let fail = mode == "repair_then_negative" && attempt == 1;
+        let fail = (mode == "repair_then_negative" && attempt == 1)
+            || (mode == "follow_up_failed_check" && attempt == 2);
         if mode == "repair_then_negative" && attempt > 1 {
             assert!(input.contains("<mastermind-repair-json>"));
         }
-        fs::write(
-            root.join("service.py"),
-            format!("def keep():\n    return {}\n", if fail { 3 } else { 2 }),
-        )
-        .unwrap();
+        if mode.starts_with("follow_up_") && attempt == 2 {
+            let feedback = input
+                .split_once("<mastermind-semantic-follow-up-json>\n")
+                .unwrap()
+                .1
+                .split_once("\n</mastermind-semantic-follow-up-json>")
+                .unwrap()
+                .0;
+            let feedback: Value = serde_json::from_str(feedback).unwrap();
+            assert_eq!(
+                feedback["failed_checks"],
+                json!([]),
+                "semantic rejection is not a failed command"
+            );
+            assert_eq!(feedback["source_iteration"], 1);
+            assert_eq!(feedback["source_binding"]["spec_path"], SPEC);
+            let review = fs::read(root.join(REVIEW)).unwrap();
+            assert_eq!(feedback["semantic_review"]["review_revision"], sha(&review));
+            fs::write(harness.join("source-semantic-review.json"), review).unwrap();
+            let state: Value =
+                serde_json::from_slice(&fs::read(root.join(STATE)).unwrap()).unwrap();
+            assert!(
+                state["semantic_review_sha256"].is_null(),
+                "new preflight must revoke the old review pin"
+            );
+        }
+        // The text check deliberately passes this wrong branch. The synthetic
+        // reviewer authors a separate source-level objection; this is a control
+        // flow regression, not an estimate of real reviewer accuracy.
+        let implementation = if mode.starts_with("follow_up_") && attempt == 1 {
+            "def keep():\n    return 2 if False else 3\n".to_string()
+        } else {
+            format!("def keep():\n    return {}\n", if fail { 3 } else { 2 })
+        };
+        fs::write(root.join("service.py"), implementation).unwrap();
         if mode == "packet_overflow" {
             fs::OpenOptions::new()
                 .append(true)
@@ -1118,6 +1179,278 @@ fn auto_review_runs_once_after_held_and_never_turns_negative_review_into_another
     );
     assert!(fixture.state()["semantic_review_sha256"].is_null());
     assert!(!fixture.root.join(REVIEW).exists());
+}
+
+#[test]
+fn auto_follow_up_retries_one_current_criterion_with_bound_feedback_and_fresh_review() {
+    let fixture = Fixture::new();
+    fixture.mode("follow_up_positive");
+    let output = fixture.run(&[
+        "run-task",
+        SPEC,
+        "--exec",
+        "--auto-review",
+        "--auto-follow-up",
+        "--max-iterations",
+        "3",
+    ]);
+    assert_success(&output);
+    assert_eq!(fixture.calls("executor"), 2);
+    assert_eq!(fixture.calls("reviewer"), 2);
+    assert_eq!(fixture.state()["iteration"], 2);
+    assert_eq!(fixture.state()["status"], "learned");
+    assert_eq!(fixture.status().1["status"], "accepted");
+    assert_eq!(
+        fs::read_to_string(fixture.root.join(".mastermind/check-runs")).unwrap(),
+        "run\nrun\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("service.py")).unwrap(),
+        "def keep():\n    return 2\n"
+    );
+    let first = fs::read_to_string(fixture.harness.join("executor-stdin-1")).unwrap();
+    let second = fs::read_to_string(fixture.harness.join("executor-stdin-2")).unwrap();
+    assert!(!first.contains("<mastermind-semantic-follow-up-json>"));
+    assert!(!second.contains("<mastermind-repair-json>"));
+    let wire = second
+        .split_once("<mastermind-semantic-follow-up-json>\n")
+        .unwrap()
+        .1
+        .split_once("\n</mastermind-semantic-follow-up-json>")
+        .unwrap()
+        .0;
+    let feedback: Value = serde_json::from_str(wire).unwrap();
+    assert_eq!(feedback["failed_checks"], json!([]));
+    assert_eq!(feedback["unmet_criteria"], json!(["service-result"]));
+    assert_eq!(feedback["source_iteration"], 1);
+    assert_eq!(feedback["source_binding"]["iteration"], 1);
+    let source: Value = serde_json::from_slice(
+        &fs::read(fixture.harness.join("source-semantic-review.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        feedback["semantic_review"]["target_revision"],
+        source["report"]["target_revision"]
+    );
+    assert_eq!(
+        feedback["semantic_review"]["target"]["binding"],
+        source["target"]["binding"]
+    );
+    assert_eq!(feedback["semantic_review"]["kind"], "semantic_follow_up");
+    assert_eq!(
+        feedback["semantic_review"]["repository_content_untrusted"],
+        true
+    );
+    assert_eq!(
+        feedback["semantic_review"]["semantic_accuracy"],
+        "reviewer_assertion_not_independently_verified"
+    );
+    assert_eq!(
+        feedback["semantic_review"]["working_directory"],
+        fixture.root.to_str().unwrap()
+    );
+    assert_eq!(
+        feedback["semantic_review"]["source_feedback_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_ne!(
+        feedback["semantic_review"]["review_revision"],
+        fixture.state()["semantic_review_sha256"]
+    );
+    assert_eq!(
+        fixture.value(EXECUTOR_RECEIPT)["context_delivery"]["prompt_sha256"],
+        sha(second.as_bytes())
+    );
+    assert_eq!(
+        fixture.value(NATIVE_RECEIPT)["invocation"]["binding"]["iteration"],
+        2
+    );
+    for secret in [
+        "PRIVATE_REVIEW_PROFILE_NOT_AUTHORIZED",
+        "PRIVATE_NATIVE_REVIEW_AUTH",
+        "PRIVATE_REVIEW_CHECK_OUTPUT",
+        "PRIVATE_NATIVE_REVIEW_STDERR",
+    ] {
+        assert!(!second.contains(secret), "{secret}");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.matches("Task complete —").count(), 1);
+}
+
+#[test]
+fn auto_follow_up_stops_on_unknown_history_scope_and_native_permission_failures() {
+    for mode in [
+        "follow_up_unknown",
+        "follow_up_verification_unknown",
+        "follow_up_scope",
+        "follow_up_history",
+        "denial",
+    ] {
+        let fixture = Fixture::new();
+        fixture.mode(mode);
+        let output = fixture.run(&[
+            "run-task",
+            SPEC,
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+        ]);
+        assert!(!output.status.success(), "{mode}: {output:?}");
+        assert_eq!(fixture.calls("executor"), 1, "{mode}");
+        assert_eq!(fixture.calls("reviewer"), 1, "{mode}");
+        assert_eq!(fixture.state()["iteration"], 1, "{mode}");
+        assert_eq!(
+            fixture.state()["status"],
+            "history_review_required",
+            "{mode}"
+        );
+        assert!(!fixture.harness.join("executor-stdin-2").exists());
+    }
+}
+
+#[test]
+fn auto_follow_up_shares_the_iteration_budget_and_never_repeats_semantic_rejection() {
+    for (mode, budget, repair, executors, reviewers) in [
+        ("follow_up_positive", "1", false, 1, 1),
+        ("repair_then_negative", "2", true, 2, 1),
+        ("follow_up_negative", "5", false, 2, 2),
+    ] {
+        let fixture = Fixture::new();
+        fixture.mode(mode);
+        let mut args = vec![
+            "run-task",
+            SPEC,
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+            "--max-iterations",
+            budget,
+        ];
+        if repair {
+            args.push("--auto-repair");
+        }
+        let output = fixture.run(&args);
+        assert!(!output.status.success(), "{mode}: {output:?}");
+        assert_eq!(fixture.calls("executor"), executors, "{mode}");
+        assert_eq!(fixture.calls("reviewer"), reviewers, "{mode}");
+        assert_eq!(fixture.state()["iteration"], executors, "{mode}");
+        assert_eq!(
+            fixture.state()["status"],
+            "history_review_required",
+            "{mode}"
+        );
+        assert!(!fixture
+            .harness
+            .join(format!("executor-stdin-{}", executors + 1))
+            .exists());
+    }
+}
+
+#[test]
+fn auto_follow_up_revalidates_review_and_hidden_sources_after_iteration_advance() {
+    for mode in [
+        "follow_up_stale_dependency",
+        "follow_up_stale_review",
+        "follow_up_stale_lessons",
+        "follow_up_stale_check",
+    ] {
+        let fixture = Fixture::new();
+        fixture.mode(mode);
+        let output = fixture.run(&[
+            "run-task",
+            SPEC,
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+        ]);
+        assert!(!output.status.success(), "{mode}: {output:?}");
+        assert_eq!(
+            fixture.calls("executor"),
+            1,
+            "stale source must stop before the second model call: {mode}"
+        );
+        assert_eq!(fixture.calls("reviewer"), 1, "{mode}");
+        assert_eq!(
+            fixture.state()["iteration"],
+            2,
+            "the mutation occurs after new preflight: {mode}"
+        );
+        assert_eq!(fixture.state()["next_step"], "run_preflight", "{mode}");
+        assert!(
+            fixture.state()["semantic_review_sha256"].is_null(),
+            "{mode}"
+        );
+        assert_ne!(
+            fixture.value(EXECUTOR_RECEIPT)["status"],
+            "passed",
+            "{mode}"
+        );
+        assert!(!fixture.harness.join("executor-stdin-2").exists());
+    }
+}
+
+#[test]
+fn auto_follow_up_requires_exec_review_and_a_finite_unforced_budget() {
+    let fixture = Fixture::new();
+    for options in [
+        vec!["--auto-follow-up"],
+        vec!["--exec", "--auto-follow-up"],
+        vec!["--auto-review", "--auto-follow-up"],
+        vec![
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+            "--force-iteration",
+        ],
+        vec![
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+            "--max-iterations",
+            "0",
+        ],
+        vec![
+            "--exec",
+            "--auto-review",
+            "--auto-follow-up",
+            "--max-iterations",
+            "21",
+        ],
+    ] {
+        let output = fixture
+            .cli(&["run-task", SPEC])
+            .args(&options)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{options:?}: {output:?}");
+        assert_eq!(fixture.calls("executor"), 0);
+        assert_eq!(fixture.calls("reviewer"), 0);
+        assert!(!fixture.root.join(STATE).exists());
+    }
+}
+
+#[test]
+fn auto_follow_up_does_not_approve_or_retry_new_failed_checks() {
+    let fixture = Fixture::new();
+    fixture.mode("follow_up_failed_check");
+    let output = fixture.run(&[
+        "run-task",
+        SPEC,
+        "--exec",
+        "--auto-review",
+        "--auto-follow-up",
+    ]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fixture.calls("executor"), 2);
+    assert_eq!(fixture.calls("reviewer"), 1);
+    assert_eq!(fixture.state()["iteration"], 2);
+    assert_ne!(fixture.state()["status"], "learned");
+    let check = fixture.value(&format!("{TASK}/verification/unit.json"));
+    assert_eq!(check["status"], "failed");
+    assert!(!fixture.harness.join("executor-stdin-3").exists());
 }
 
 #[test]

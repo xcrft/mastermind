@@ -72,6 +72,8 @@ pub(crate) struct CheckEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_revision: Option<String>,
     pub repository_identity: String,
     pub spec_path: String,
     pub spec_sha256: String,
@@ -309,7 +311,9 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
     } else {
         state_path.with_extension("verification")
     };
+    crate::run_task::validate_intake_binding(root.canonical_root(), Path::new(&spec_path), &state)?;
     let binding = Binding {
+        intake_revision: state.intake_revision,
         repository_identity: repository,
         spec_path,
         spec_sha256: sha(body.as_bytes()),
@@ -1392,6 +1396,7 @@ mod tests {
         let root = RootCapability::open(directory.path()).unwrap();
         root.ensure_directory(Path::new("verification")).unwrap();
         let binding = Binding {
+            intake_revision: None,
             repository_identity: "test-repository".into(),
             spec_path: "spec.md".into(),
             spec_sha256: sha(b"spec"),

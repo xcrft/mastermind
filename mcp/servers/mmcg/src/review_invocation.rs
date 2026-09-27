@@ -351,6 +351,7 @@ fn execute(
         wall_timeout_secs: options.timeout_secs,
         max_turns: options.max_turns,
         profile_client: None,
+        guarded: false,
     };
     let (native, terminal) = invocation::execute_review_native(
         repository,

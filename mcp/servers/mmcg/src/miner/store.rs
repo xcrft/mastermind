@@ -436,15 +436,9 @@ impl ProfileStore {
     pub fn open(path: &Path) -> SqlResult<Self> {
         let (root, target) = crate::bounded_fs::prepare_file_target(path)
             .map_err(|error| sqlite_path_error("prepare style store", error))?;
-        let existing_identity = match crate::bounded_fs::read_regular_file_with_capability(
-            &root,
-            &target,
-            MAX_STYLE_STORE_SIZE,
-            0,
-            ReadControl::default(),
-        ) {
-            Ok(file) => Some(file.identity),
-            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+        let existing_identity = match inspect_store_identity(&root, &target) {
+            Ok(Some(identity)) => Some(identity),
+            Ok(None) => {
                 crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())
                     .map_err(|error| sqlite_path_error("inspect style store", error))?
                     .ok_or_else(sqlite_snapshot_changed)?;
@@ -452,14 +446,14 @@ impl ProfileStore {
             }
             Err(error) => return Err(sqlite_path_error("inspect style store", error)),
         };
-        let mut created_file = None;
         let expected_identity = match existing_identity {
             Some(identity) => identity,
             None => {
                 let (file, identity) =
                     crate::bounded_fs::create_regular_file_with_capability(&root, &target, true)
                         .map_err(|error| sqlite_path_error("create style store", error))?;
-                created_file = Some(file);
+                // Close the creation descriptor before SQLite can own locks.
+                drop(file);
                 identity
             }
         };
@@ -475,7 +469,6 @@ impl ProfileStore {
             expected_identity,
             existing_identity.is_some(),
         )?;
-        drop(created_file);
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS repo (
                  repo_key            TEXT PRIMARY KEY,
@@ -629,15 +622,9 @@ impl ProfileStore {
             }
             Err(error) => return Err(sqlite_path_error("open style store parent", error)),
         };
-        let expected = match crate::bounded_fs::read_regular_file_with_capability(
-            &root,
-            &target,
-            MAX_STYLE_STORE_SIZE,
-            0,
-            ReadControl::default(),
-        ) {
-            Ok(file) => file.identity,
-            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+        let expected = match inspect_store_identity(&root, &target) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
                 match crate::bounded_fs::inspect_absent_path(&root, &target, ReadControl::default())
                     .map_err(|error| sqlite_path_error("inspect style store", error))?
                 {
@@ -1611,6 +1598,28 @@ fn delete_repo(transaction: &rusqlite::Transaction<'_>, repo_key: &str) -> SqlRe
     Ok(())
 }
 
+fn inspect_store_identity(
+    root: &crate::bounded_fs::RootCapability,
+    target: &Path,
+) -> Result<Option<StableFileIdentity>, BoundedReadError> {
+    // Closing an unrelated Unix descriptor for a live SQLite database releases
+    // its process-scoped locks. Metadata inspection must leave ownership to SQLite.
+    let identity = crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+        root,
+        target,
+        ReadControl::default(),
+    )?;
+    match identity {
+        Some(identity) if identity.length() > MAX_STYLE_STORE_SIZE => {
+            Err(BoundedReadError::TooLarge {
+                size: identity.length(),
+                limit: MAX_STYLE_STORE_SIZE,
+            })
+        }
+        identity => Ok(identity),
+    }
+}
+
 fn verify_store_identity(
     root: &crate::bounded_fs::RootCapability,
     target: &Path,
@@ -1619,18 +1628,13 @@ fn verify_store_identity(
 ) -> SqlResult<()> {
     root.verify()
         .map_err(|error| sqlite_path_error("verify style store parent", error))?;
-    let opened = crate::bounded_fs::read_regular_file_with_capability(
-        root,
-        target,
-        MAX_STYLE_STORE_SIZE,
-        0,
-        ReadControl::default(),
-    )
-    .map_err(|error| sqlite_path_error("verify style store identity", error))?;
+    let opened = inspect_store_identity(root, target)
+        .map_err(|error| sqlite_path_error("verify style store identity", error))?
+        .ok_or_else(sqlite_snapshot_changed)?;
     let matches = if exact {
-        opened.identity == expected
+        opened == expected
     } else {
-        opened.identity.same_object(expected)
+        opened.same_object(expected)
     };
     if matches {
         Ok(())
@@ -2623,5 +2627,79 @@ mod tests {
             .query_row("PRAGMA query_only", [], |row| row.get(0))
             .unwrap();
         assert_eq!(query_only, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_reopens_preserve_active_sqlite_transaction_locks() {
+        const CHILD_DATABASE: &str = "MMCG_PROFILE_LOCK_TEST_DATABASE";
+        const CHILD_EXPECT_BUSY: &str = "MMCG_PROFILE_LOCK_TEST_EXPECT_BUSY";
+        if let Some(path) = std::env::var_os(CHILD_DATABASE) {
+            let connection = Connection::open_with_flags(
+                Path::new(&path),
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .unwrap();
+            connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+            let result = connection.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+            if std::env::var(CHILD_EXPECT_BUSY).unwrap() == "1" {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ref error)
+                            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    ),
+                    "another process acquired the active profile transaction's lock: {result:?}"
+                );
+            } else {
+                result.unwrap();
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("style.db");
+        let store = ProfileStore::open(&path).unwrap();
+        let check_child = |phase: &str, expect_busy: bool| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "miner::store::tests::profile_reopens_preserve_active_sqlite_transaction_locks",
+                    "--nocapture",
+                ])
+                .env(CHILD_DATABASE, &path)
+                .env(CHILD_EXPECT_BUSY, if expect_busy { "1" } else { "0" })
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{phase}, busy={expect_busy}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        store.conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        check_child("before reopening", true);
+        let observer = ProfileStore::open_read_only(&path).unwrap();
+        check_child("after read-only open", true);
+        drop(observer);
+        check_child("after observer drop", true);
+        // Schema initialization may contend with this transaction. Whether it
+        // succeeds or returns busy, opening it must preserve the owner's lock.
+        let writable = ProfileStore::open(&path);
+        if let Err(error) = &writable {
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+        }
+        check_child("after writable open", true);
+        drop(writable);
+        check_child("after writable drop", true);
+        store.conn.execute_batch("ROLLBACK;").unwrap();
+        check_child("after rollback", false);
     }
 }

@@ -1,4 +1,4 @@
-//! Cooperative foreground cancellation. Signal handlers only set an atomic;
+//! Cooperative worker cancellation. Signal handlers only set an atomic;
 //! normal Rust unwinding owns processor termination and lease release.
 
 use super::Error;
@@ -10,9 +10,13 @@ pub(super) fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 
+pub(super) fn request_stop() {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
 #[cfg(unix)]
 extern "C" fn interrupt(_signal: libc::c_int) {
-    INTERRUPTED.store(true, Ordering::Relaxed);
+    request_stop();
 }
 
 pub(super) struct Cancellation {

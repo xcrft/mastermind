@@ -21,6 +21,8 @@
 //! | 11 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
 //! | 12 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
 //! | 13 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
+//! | 14 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
+//! | 15 | `Codex hook readiness` | the same independent boundaries for Codex |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -252,8 +254,69 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_workflow_mcp_contract(workflow_audit.as_ref()),
         check_workflow_runtime_contract(workflow_audit.as_ref()),
         check_style_profile(root),
+        hook_readiness_check(
+            "claude",
+            crate::miner::hooks::readiness::report("claude", root),
+        ),
+        hook_readiness_check(
+            "codex",
+            crate::miner::hooks::readiness::report("codex", root),
+        ),
     ];
     Report::from_checks(root, checks)
+}
+
+fn hook_readiness_check(
+    client: &str,
+    report: Result<serde_json::Value, Box<dyn std::error::Error>>,
+) -> Check {
+    let name = if client == "claude" {
+        "Claude hook readiness"
+    } else {
+        "Codex hook readiness"
+    };
+    let hint = Some(format!(
+        "inspect `mastermind miner hooks status --client {client}` for each boundary and client activation instructions"
+    ));
+    let report = match report {
+        Ok(report) => report,
+        Err(_) => {
+            return Check {
+                name,
+                status: Status::Warn,
+                message: "hook readiness is unavailable, no provider or worker was started".into(),
+                hint,
+            }
+        }
+    };
+    if report["configured"] == false {
+        return Check {
+            name,
+            status: Status::Ok,
+            message: if report["platform"] == "unsupported" {
+                "optional, not configured, native hooks and managed mining require Unix".into()
+            } else {
+                "optional, not configured, capture and mining are not enabled by this check".into()
+            },
+            hint: None,
+        };
+    }
+    let component = |name: &str| report[name]["status"].as_str().unwrap_or("unavailable");
+    let warning = report["configured"].is_null()
+        || report["warnings"]
+            .as_array()
+            .is_none_or(|warnings| !warnings.is_empty());
+    Check {
+        name,
+        status: if warning { Status::Warn } else { Status::Ok },
+        message: format!(
+            "registration={}{} | capture={} | session={} | refiner={} | miner={} (optional services)",
+            component("native_registration"),
+            if report["native_registration"]["local_hooks_disabled"] == true { " (disabled)" } else { "" },
+            component("capture"), component("activation"), component("refiner"), component("mining"),
+        ),
+        hint: if warning { hint } else { None },
+    }
 }
 
 /// Nudge a re-mine when the author's style profile has fallen behind their
@@ -1925,6 +1988,33 @@ mod tests {
         assert!(txt.contains("v0.14.0"));
         assert!(txt.contains("1 ok, 0 warn, 0 fail"));
         assert!(!report.has_failures());
+    }
+
+    #[test]
+    fn hook_checks_keep_optional_absence_distinct_from_unavailable_state() {
+        let absent = hook_readiness_check(
+            "codex",
+            Ok(serde_json::json!({"configured":false,"platform":"unix"})),
+        );
+        assert_eq!(absent.status, Status::Ok);
+        assert!(absent.hint.is_none());
+        let unknown = hook_readiness_check("codex", Err("synthetic private diagnostic".into()));
+        assert_eq!(unknown.status, Status::Warn);
+        assert!(!unknown.message.contains("private diagnostic"));
+        let incomplete = hook_readiness_check(
+            "claude",
+            Ok(
+                serde_json::json!({"configured":true,"warnings":["capture_incomplete"],
+                "capture":{"status":"incomplete"},
+                "native_registration":{"status":"current","local_hooks_disabled":true},
+                "activation":{"status":"session_start_observed"},
+                "refiner":{"status":"not_configured"},"mining":{"status":"not_configured"}}),
+            ),
+        );
+        assert_eq!(incomplete.status, Status::Warn);
+        assert!(incomplete.message.contains("current (disabled)"));
+        assert!(incomplete.message.contains("refiner=not_configured"));
+        assert!(incomplete.message.contains("miner=not_configured"));
     }
 
     #[test]

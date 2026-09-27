@@ -1520,6 +1520,16 @@
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? displayNumber(value) : "Unknown";
   }
 
+  function contextFlag(value, yes, no) {
+    return value === true ? yes : value === false ? no : "Not supplied";
+  }
+
+  function visibleContextData(layer) {
+    const hidden = ["not_enabled", "access_denied", "unavailable", "error", "omitted"].includes(layer.status)
+      || record(layer.data).status === "access_denied";
+    return !hidden && isRecord(layer.data) ? layer.data : null;
+  }
+
   function contextFacts(parent, entries) {
     const list = createElement("dl", "profiles-facts");
     entries.forEach(function (entry) {
@@ -1571,9 +1581,8 @@
     const badge = layer.omitted_reason === "context_budget" && !isRecord(layer.data) ? "Budget omitted" : contextLabel(layer.status);
     header.appendChild(createElement("span", "profiles-badge", badge));
     card.appendChild(header);
-    const hidden = ["not_enabled", "access_denied", "unavailable", "error", "omitted"].includes(layer.status)
-      || record(layer.data).status === "access_denied";
-    if (!isRecord(layer.data) || hidden) {
+    const data = visibleContextData(layer);
+    if (!data) {
       const message = layer.status === "not_enabled"
         ? title + " context is not enabled for this Lens session."
         : layer.status === "access_denied" ? "Profile access is not granted to this Lens client."
@@ -1581,7 +1590,7 @@
         : "This layer is unavailable or omitted. Its contents and counts are unknown.";
       card.appendChild(createElement("p", "profiles-empty", message));
     } else {
-      renderData(card, layer.data);
+      renderData(card, data, packet);
     }
     if (layer.omitted_reason) { card.appendChild(createElement("p", "profiles-note", "Omission: " + contextLabel(layer.omitted_reason))); }
     const receipt = [["Status", contextLabel(layer.status)], ["Revision", text(layer.revision, "Not supplied")]];
@@ -1622,7 +1631,6 @@
       ["Verification scope", contextLabel(data.source_verification_scope)],
     ]);
     card.appendChild(createElement("p", "profiles-note", "Returned claims describe this selection. Counts do not measure how well a person is understood."));
-    card.appendChild(createElement("p", "profiles-note", "This view contains selected claims. The raw evidence review queue is not included."));
     const basis = record(data.evidence_basis);
     contextDetails(card, "What the evidence establishes", [
       ["Applies to", contextLabel(basis.scope)], ["Source binding", contextLabel(basis.source_binding)],
@@ -1651,14 +1659,64 @@
     const evidence = record(data.evidence);
     const history = contextDetails(card, "Sampled Git observations", [
       ["Repositories", contextCount(evidence.repos)], ["Measured commits", contextCount(evidence.diff_sampled)],
+      ["Reported commits", contextCount(evidence.commits)], ["Listed unique commits", contextCount(evidence.listed_unique)],
+      ["Legacy repositories", contextCount(evidence.legacy_repos)],
       ["Context conflicts", contextCount(evidence.context_conflicts)], ["Identity basis", contextLabel(evidence.git_identity_status)],
     ]);
-    history.appendChild(createElement("p", "profiles-note", "Commit patterns describe a sample; they do not establish a personal trait or skill."));
+    history.appendChild(createElement("p", "profiles-note", "Code and commit patterns describe the available sample. They do not establish a personal trait, skill or coverage of all authored work."));
     contextList(history, "Conventions", omitted.includes("conventions") ? null : data.conventions, function (item, convention) {
       item.appendChild(createElement("p", "profiles-item__title", text(convention.statement)));
-      contextFacts(item, [["Evidence", text(convention.evidence, "Unknown")], ["Counterpattern", text(convention.counterpattern, "Unknown")]]);
+      contextFacts(item, [
+        ["Evidence", text(convention.evidence, "Unknown")], ["Counterpattern", text(convention.counterpattern, "Unknown")],
+        ["Observation kind", contextLabel(convention.kind)], ["Heuristic rating", contextLabel(convention.confidence)],
+      ]);
     });
+    ["workflow", "range"].forEach(function (key) {
+      const values = !omitted.includes(key) && Array.isArray(data[key])
+        ? data[key].map(function (value) { return { statement: text(value, "Observation unavailable") }; }) : null;
+      contextList(history, key === "workflow" ? "Workflow patterns in the sample" : "Change patterns in the sample", values, function (item, observation) {
+        item.appendChild(createElement("p", "profiles-note", observation.statement));
+      });
+    });
+    contextList(history, "Areas in sampled history", omitted.includes("associations") ? null : data.associations, function (item, association) {
+      item.appendChild(createElement("p", "profiles-item__title", text(association.name, "Area unavailable")));
+      contextFacts(item, [["Associated commits", contextCount(association.commits)]]);
+    });
+    renderProfileReviewQueue(card, data.review_queue);
     if (omitted.length) { card.appendChild(createElement("p", "profiles-note", "Not included: " + omitted.map(function (value) { return contextLabel(value); }).join(", "))); }
+  }
+
+  function renderProfileReviewQueue(card, value) {
+    const section = createElement("section", "profiles-review-queue");
+    section.appendChild(createElement("h4", "profiles-subheading", "Evidence review queue"));
+    card.appendChild(section);
+    if (!isRecord(value)) {
+      section.appendChild(createElement("p", "profiles-empty", "Not supplied. Reviewed claims do not reveal the size of the pending queue."));
+      return;
+    }
+    contextFacts(section, [["Status", contextLabel(value.status)]]);
+    if (["access_denied", "unavailable", "error", "omitted", "not_enabled"].includes(value.status)) {
+      section.appendChild(createElement("p", "profiles-empty", "Queue metadata is unavailable. Its contents and counts are unknown."));
+      return;
+    }
+    contextFacts(section, [
+      ["Returned", contextCount(value.returned)], ["Total", contextCount(value.total)],
+      ["Page extent", contextFlag(value.truncated, "Partial page", "No page truncation reported")],
+    ]);
+    contextList(section, "Candidate metadata", value.items, function (item, candidate) {
+      item.appendChild(createElement("p", "profiles-item__title profiles-path", text(candidate.id, "Candidate ID not supplied")));
+      contextFacts(item, [
+        ["Kind", contextLabel(candidate.kind)], ["Review status", contextLabel(candidate.status)],
+        ["Source status", contextLabel(candidate.source_status)], ["Prior context", contextLabel(candidate.evidence_class, "Not supplied")],
+        ["Proposal eligibility", contextFlag(candidate.promotion_eligible, "Eligible for explicit proposal and review", "Not eligible for profile proposal")],
+        ["Support citations", contextCount(candidate.support_count)], ["Contradictions", contextCount(candidate.contradiction_count)],
+      ]);
+      contextDetails(item, "Source linkage", [
+        ["Source ID", text(candidate.source_id, "Not supplied")], ["Episode ID", text(candidate.episode_id, "Not supplied")],
+        ["Source revision", text(candidate.source_revision, "Not supplied")],
+      ]);
+    });
+    section.appendChild(createElement("p", "profiles-note", "Metadata for this project. Dependent or unknown-influence observations are not unexposed support. Eligibility does not approve a claim or prove human authorship."));
   }
 
   function renderProjectContext(card, data) {
@@ -1734,13 +1792,30 @@
       ["Baseline", text(baseline.requested_ref, "Unknown")], ["Baseline revision", text(baseline.baseline_oid, "Unknown")],
       ["Head revision", text(baseline.head_oid, "Unknown")],
       ["Scope", text(record(data.scope).repository_relative_root, "Unknown")],
+      ["Worktree included", contextFlag(baseline.includes_worktree, "Yes", "No")],
+      ["Untracked paths included", contextFlag(baseline.includes_untracked, "Yes", "No")],
     ]);
+    const omissions = record(data.omitted);
+    if (Object.keys(omissions).length) {
+      contextDetails(card, "Code selection limits", [
+        ["changed_files", "Changed files"], ["changed_symbols", "Changed symbols"], ["tests", "Test candidates"],
+        ["callers", "Callers"], ["api_crossings", "Boundary crossings"], ["history_citations", "History citations"],
+      ].map(function (entry) {
+        const limits = record(omissions[entry[0]]);
+        return [entry[1], "Source cap " + (limits.source_limit_exact === false ? "at least " : "") + contextCount(limits.source_limit)
+          + " · content filter " + contextCount(limits.unsafe_content) + " · budget " + contextCount(limits.budget)];
+      }));
+    }
     card.appendChild(createElement("p", "profiles-note", "Code covers the repository diff. Person path filters do not restrict this layer."));
     card.appendChild(createElement("p", "profiles-note", "Candidates identify where to inspect. They do not prove test execution or current behavior."));
   }
 
-  function renderWorkContext(card, data) {
-    contextFacts(card, [["Task records returned", contextCount(data.returned)], ["Current checkout", contextLabel(data.current_checkout)]]);
+  function renderWorkContext(card, data, packet) {
+    contextFacts(card, [
+      ["Task records returned", contextCount(data.returned)], ["Task records total", contextCount(data.total)],
+      ["Scan extent", contextFlag(data.truncated, "Partial scan", "No scan truncation reported")],
+      ["Current checkout", contextLabel(data.current_checkout)],
+    ]);
     if (data.scan_error) { card.appendChild(createElement("p", "profiles-note", "Task scan: " + text(data.scan_error))); }
     contextList(card, "Recorded work", data.tasks, function (item, task) {
       item.appendChild(createElement("p", "profiles-item__title", text(task.folder, "Task unavailable")));
@@ -1754,8 +1829,132 @@
         ["Blocker", text(taskState.blocking_reason, "Not supplied")],
         ["Last artifact", text(taskState.last_artifact, "Not supplied")],
       ]);
+      contextDetails(item, "Recorded review gates", [
+        ["Native invocation required", contextFlag(taskState.invocation_required, "Yes", "No")],
+        ["Structured review required", contextFlag(taskState.semantic_review_required, "Yes", "No")],
+        ["Structured review approved", contextFlag(taskState.semantic_review_approved, "Yes", "No")],
+        ["History review approved", contextFlag(taskState.history_review_approved, "Yes", "No")],
+        ["Review revision", text(taskState.semantic_review_revision, "Not supplied")],
+        ["History snapshot", text(taskState.history_snapshot_sha256, "Not supplied")],
+        ["Review blocker", text(taskState.semantic_review_error, "Not supplied")],
+      ]);
+      renderContextDelivery(item, task.invocation, record(packet).context_revision);
     });
     card.appendChild(createElement("p", "profiles-note", "Stored completion describes prior work. Current checkout verification is separate."));
+  }
+
+  function renderContextDelivery(parent, value, previewRevision) {
+    if (!isRecord(value)) {
+      const details = contextDetails(parent, "Recorded input delivery", [["Invocation metadata", "Not supplied"]]);
+      renderActionMediation(details, null);
+      return;
+    }
+    const binding = record(value.binding);
+    const delivery = record(value.context_delivery);
+    const validRevision = function (value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); };
+    const match = validRevision(previewRevision) && validRevision(delivery.context_revision)
+      ? delivery.context_revision === previewRevision ? "Same declared revision" : "Different declared revision"
+      : "Not comparable";
+    const details = contextDetails(parent, "Recorded input delivery", [
+      ["Native invocation status", contextLabel(value.status)], ["Invocation ID", text(value.invocation_id, "Not supplied")],
+      ["Role", contextLabel(value.role, "Not supplied")], ["Task iteration", contextCount(binding.iteration)],
+      ["Spec revision", text(binding.spec_sha256, "Not supplied")], ["Baseline revision", text(binding.baseline_oid, "Not supplied")],
+      ["Intake revision", text(binding.intake_revision, "Not supplied")],
+      ["Delivery", delivery.status === "offered_to_process" ? "Offered to native process" : contextLabel(delivery.status, "Not supplied")],
+      ["Input origin", contextLabel(delivery.input_origin, "Not supplied")],
+      ["Bytes offered", contextCount(delivery.bytes_offered)], ["Prompt bytes", contextCount(delivery.prompt_bytes)],
+      ["Context bytes", contextCount(delivery.context_bytes)], ["Model use", "Unknown"],
+      ["Context revision", text(delivery.context_revision, "Not supplied")], ["Compared with this preview", match],
+      ["Context bytes SHA-256", text(delivery.context_wire_sha256, "Not supplied")],
+      ["Prompt bytes SHA-256", text(delivery.prompt_sha256, "Not supplied")],
+    ]);
+    details.appendChild(createElement("p", "profiles-note", "This receipt records native input delivery. It does not prove model use, task acceptance or current checkout correctness."));
+    renderActionMediation(details, value.mediation);
+  }
+
+  function renderActionMediation(parent, value) {
+    const section = createElement("section", "profiles-mediation");
+    section.setAttribute("aria-label", "Recorded action mediation");
+    section.appendChild(createElement("p", "profiles-item__title", "Action mediation"));
+    parent.appendChild(section);
+    if (!isRecord(value)) {
+      section.appendChild(createElement("p", "profiles-note", "No recorded mediation. Action counts and hook enforcement are unknown."));
+      return;
+    }
+    const conditional = value.enforcement === "conditional_native_hook_no_os_sandbox_command_failure_fallback";
+    contextFacts(section, [
+      ["Record schema", contextCount(value.schema_version)],
+      ["Observed calls", contextCount(value.observed_calls)], ["Allowed calls", contextCount(value.allowed_calls)],
+      ["Denied calls", contextCount(value.denied_calls)],
+      ["Reconciliation", contextFlag(value.reconciled, "Recorded as reconciled", "Not reconciled")],
+      ["Coverage", value.coverage === "observed_native_tool_use_only" ? "Observed native tool calls only" : contextLabel(value.coverage, "Not supplied")],
+      ["Enforcement", conditional ? "Conditional native hook" : contextLabel(value.enforcement, "Not supplied")],
+      ["Manifest revision", text(value.manifest_sha256, "Not supplied")],
+      ["Decision record revision", text(value.decisions_sha256, "Not supplied")],
+    ]);
+    section.appendChild(createElement("p", "profiles-note", "Counts cover recorded native tool calls. They do not establish coverage of every side effect or task acceptance."));
+    if (conditional) {
+      section.appendChild(createElement("p", "profiles-note", "The native client must run the hook. This is not an OS sandbox. If a command hook fails, native permissions may apply instead."));
+    }
+  }
+
+  function renderContextAvailability(parent, packet) {
+    const section = createElement("section", "profiles-availability");
+    section.setAttribute("aria-label", "Context availability and limits");
+    const scroll = createElement("div", "profiles-table-scroll");
+    scroll.setAttribute("tabindex", "0");
+    scroll.setAttribute("role", "region");
+    scroll.setAttribute("aria-label", "Context availability table");
+    const table = createElement("table", "profiles-table");
+    table.appendChild(createElement("caption", "", "Evidence available in this response"));
+    const head = createElement("thead");
+    const heading = createElement("tr");
+    ["Layer", "Status", "Returned scope", "Known limits"].forEach(function (label) {
+      const cell = createElement("th", "", label);
+      cell.setAttribute("scope", "col");
+      heading.appendChild(cell);
+    });
+    head.appendChild(heading);
+    table.appendChild(head);
+    const body = createElement("tbody");
+    ["person", "project", "documentation", "code", "work"].forEach(function (name) {
+      const layer = record(record(packet.layers)[name]);
+      const data = visibleContextData(layer);
+      let returned = "Not supplied";
+      let limits = contextLabel(layer.omitted_reason, "Not supplied");
+      if (data) {
+        if (name === "person") {
+          const omitted = array(data.omitted);
+          const count = function (key) { return omitted.includes(key) || !Array.isArray(data[key]) ? "Not included" : contextCount(data[key].length); };
+          returned = "Habits: " + count("habits") + " · preferences: " + count("feedback");
+          limits = "Selected claims only · source check " + contextLabel(data.source_verification);
+          if (omitted.length) { limits += " · omitted " + omitted.map(function (key) { return contextLabel(key); }).join(", "); }
+        } else if (name === "project" || name === "documentation") {
+          returned = "Sections: " + contextCount(data.count);
+          const flags = name === "project" ? ["result_truncated", "claim_candidates_truncated", "corpus_truncated", "sections_truncated"]
+            : ["result_truncated", "corpus_truncated", "sections_truncated"];
+          limits = flags.some(function (key) { return data[key] === true; }) ? "Partial result or indexed corpus"
+            : flags.every(function (key) { return data[key] === false; }) ? "No truncation reported" : "Truncation extent unknown";
+        } else if (name === "code") {
+          returned = "Changed files: " + briefContextCount(record(data.changes).files);
+          limits = "Repository diff · candidate counts are not execution evidence";
+        } else {
+          returned = "Task records: " + contextCount(data.returned) + " · " + (data.total === null || data.total === undefined ? "total unknown" : contextCount(data.total) + " total");
+          limits = data.scan_error ? "Scan unavailable" : contextFlag(data.truncated, "Partial scan", "No scan truncation reported");
+        }
+      }
+      const row = createElement("tr");
+      const label = createElement("th", "", name.charAt(0).toUpperCase() + name.slice(1));
+      label.setAttribute("scope", "row");
+      row.appendChild(label);
+      [contextLabel(layer.status), returned, limits].forEach(function (value) { row.appendChild(createElement("td", "", value)); });
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    scroll.appendChild(table);
+    section.appendChild(scroll);
+    section.appendChild(createElement("p", "profiles-note", "Unknown and omitted are not zero. Counts describe this selection, not completeness of a person or project."));
+    parent.appendChild(section);
   }
 
   function renderContext(packet, wire) {
@@ -1771,6 +1970,7 @@
     ]);
     scope.appendChild(createElement("p", "profiles-note", "Selection is fixed by the local server. Layers retain independent snapshots; this is a preview, with no recorded delivery."));
     target.appendChild(scope);
+    renderContextAvailability(target, packet);
     const grid = createElement("div", "profiles-grid");
     contextLayer(grid, "person", "Person", "01", packet, renderPersonContext);
     const project = contextLayer(grid, "project", "Project", "02", packet, renderProjectContext);

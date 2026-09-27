@@ -126,14 +126,16 @@ acceptance:
 |---|---|
 | Preflight | Repeated with the original baseline. Consumes one iteration |
 | Controller lock | Nonblocking, covers preflight through postflight. Rejects another controller but allows declared checks inside the executor |
-| Context selection | Executor role, workflow and declared paths |
+| Context selection | Executor role, workflow and declared paths. Up to 12 literal title terms select up to 4 document hits |
+| Delivery check | Rechecks selected code/project/document revisions, then scoped profile sources and audience access before native launch |
+| Consistency | Optimistic checks across independent stores. Revocation cannot retract bytes already delivered |
 | Invocation binding | Repository, spec, baseline, iteration, exact context bytes, prompt digest, executable/version and permission policy |
-| Stdin delivery | Records `offered_to_process`, without proving model use |
+| Stdin delivery | Records `offered_to_process` and offered byte counts. `model_use` remains `unknown` |
 | `--profile-client ID` | Selects an existing grant. Cannot grant access or change the profile |
 | Receipt | `invocation.json` is pending before execution, then records hashes, policy, byte counts and outcomes |
 | Excluded receipt data | Raw prompts, profiles and process output |
 
-| Native policy or result | Contract |
+| Default native policy or result | Contract |
 |---|---|
 | Requested tools | `Read,Edit,Write,Grep,Glob,Bash` |
 | Permissions | `acceptEdits`, no permission prompts and no blanket Bash grant. Existing native rules decide command access |
@@ -160,6 +162,47 @@ share Unix process-group supervision. Windows is unsupported.
 | File scope | Checked after execution |
 | Completion | Still requires the ordinary report, verification, acceptance and review gates |
 
+Lens shows delivery metadata from the recorded invocation alongside the current
+context preview. Matching revisions compare declared bytes, not model attention,
+task acceptance or current checkout correctness. The preview itself records no
+delivery. See [Profiles](mmcg.md#private-profiles-and-context-preview).
+
+### Guarded execution
+
+```bash
+mastermind run-task .mastermind/tasks/001-feature/spec.md \
+  --exec --guarded-exec --auto-review
+```
+
+| Guarded contract | Rule |
+|---|---|
+| Platform and adapter | Unix, supported Claude Code 2.1.267+ within 2.1, required flags in local help |
+| Task | Explicit file scope, observed `verify[].run` declarations |
+| Edit / Write | Exact declared paths and the task's executor report. Protected controller/configuration paths and static symlink/hardlink aliases are rejected |
+| Read / Grep / Glob | Repository-scoped path checks |
+| Bash | Exact controller-generated `verification run` commands only |
+| Other tools and subagents | Rejected |
+| Native settings | `dontAsk`, restricted mode, isolated settings, private PreToolUse hook, strict empty MCP, disabled slash commands |
+| Binding | Invocation, session, repository, task revision, intake, policy and expiry |
+| Decision log | Tool name, input hash and decision. No raw tool arguments |
+| Successful receipt | Every observed tool call matches a durable allow decision, no denied calls, current artifacts |
+| Failed or missing log | Unknown counts stay null, successful publication is blocked |
+| Receipt schema | [v2](../../schemas/invocation-receipt-v2.schema.json). Default executor and reviewer retain schema v1 |
+
+| Enforcement boundary | Meaning |
+|---|---|
+| Native command-hook failure | The client can fall back to native permissions. Missing observed mediation blocks success but cannot undo an effect |
+| Allowed verification process | Runs with the user's normal filesystem/network access |
+| Managed native policy | Requested isolation is recorded, managed policy is unverified |
+| Race after a path check | No OS-level containment or atomic file-open guarantee |
+| Coverage | Observed native tool calls, not every process or OS effect |
+
+The adapter follows the native [hook failure behavior](https://code.claude.com/docs/en/hooks#timeouts)
+and [permission rules](https://code.claude.com/docs/en/permissions#read-only-commands).
+Lens reports mediation coverage and the recorded invocation separately from the
+current context preview. Reconciliation does not establish model attention or
+semantic correctness.
+
 ## Native semantic reviewer
 
 | Invocation | Effect |
@@ -167,8 +210,9 @@ share Unix process-group supervision. Windows is unsupported.
 | `review-task run` | Records one review of a pending held task |
 | `run-task --auto-review` | Also evaluates completion under the controller lock |
 | Without `--exec` | Keeps the iteration. Runs no preflight, executor or checks |
-| With `--exec` | Can follow repair. Runs once after Held |
-| Negative, unknown, failed or unresolved-history result | Stops. A judgment cannot trigger another repair attempt |
+| With `--exec` | Reviews a Held audit. A qualifying `--auto-follow-up` adds at most one executor retry and one fresh review |
+| Negative result | Stops by default. Only the opt-in [semantic follow-up](#one-semantic-follow-up) can retry |
+| Unknown, failed or unresolved-history result | Stops without an automatic semantic retry |
 
 | Reviewer input | Coverage |
 |---|---|
@@ -235,3 +279,34 @@ share Unix process-group supervision. Windows is unsupported.
 
 Retry eligibility does not identify a failure's cause or prove tests were not
 weakened. Review still checks scope, assertion quality and useful completion.
+
+### One semantic follow-up
+
+```bash
+mastermind run-task .mastermind/tasks/001-feature/spec.md \
+  --exec --auto-review --auto-follow-up --max-iterations 3
+```
+
+| Admission | Requirement |
+|---|---|
+| Mechanical state | Held audit, successful native executor and current checks |
+| Semantic source | Current pinned native review and unchanged supporting files |
+| Criteria | At least one `unsatisfied` criterion with a reason and evidence. No `unknown` criterion |
+| Other judgments | Verification quality, scope control and proportionality all `satisfied` |
+| Project history | Both context and lessons decisions are `no_change` |
+| Contract | Same approved spec, scope, baseline, profile selection and executable pins |
+| Budget | At most one semantic retry in this controller invocation, within the cumulative 1–20 iteration limit |
+| Flags | Requires `--exec --auto-review`. Conflicts with `--pre-only`, `--post-only` and `--force-iteration` |
+
+| Follow-up step | Behavior |
+|---|---|
+| Feedback | Cited unmet criteria and source digests, capped at 32 KiB. Reviewer reasons remain unverified data |
+| Execution | New preflight iteration and native invocation. No invented failed-check result |
+| Validation | Fresh checks, audit and a separate review before completion |
+| Second negative review or changed evidence | Stop. No second semantic retry |
+| Combined `--auto-repair` | Mechanical retries remain governed by their own admission rules and the same iteration budget |
+| Knowledge or scope changes | Require explicit follow-up outside this automatic semantic step |
+
+Limits and eligibility are defined in [auto_repair.rs](../../mcp/servers/mmcg/src/auto_repair.rs)
+and [run_task.rs](../../mcp/servers/mmcg/src/run_task.rs). The deterministic gates
+bind the feedback to its source. They do not verify the reviewer's interpretation.

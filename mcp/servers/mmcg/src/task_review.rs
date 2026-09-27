@@ -298,6 +298,7 @@ pub(crate) fn required(root: &Path, spec: &Path, state: &RunState) -> Result<boo
 
 fn binding(state: &RunState) -> Result<Binding, String> {
     Ok(Binding {
+        intake_revision: state.intake_revision.clone(),
         repository_identity: state
             .repository_identity
             .clone()
@@ -315,6 +316,7 @@ fn collect_target(
     spec_path: &Path,
     state: &RunState,
 ) -> Result<Target, String> {
+    crate::run_task::validate_intake_binding(root.canonical_root(), spec_path, state)?;
     if !matches!(state.status.as_str(), "history_review_required" | "learned")
         || state.next_step.as_deref() == Some("run_preflight")
     {

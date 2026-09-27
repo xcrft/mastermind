@@ -1,0 +1,811 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xcrft/mastermind/schemas/invocation-receipt-v2.schema.json",
+  "title": "Mastermind guarded native executor invocation receipt v2",
+  "description": "Local unsigned observation for the guarded executor. Mediation covers only observed native tool_use events and matching durable hook decisions. Native command-hook failures may fall back to native permissions. This is conditional native enforcement, not an OS sandbox or proof that every effect was mediated. The receipt does not attest task acceptance, model use or semantic correctness. It retains no raw prompt, profile, response or tool output. Runtime admission additionally validates current artifacts, cross-field identity, byte-count equality and digests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "status",
+    "reason",
+    "binding",
+    "root",
+    "agent",
+    "policy",
+    "policy_sha256",
+    "options",
+    "executable",
+    "native",
+    "context_delivery",
+    "started_at",
+    "duration_ms",
+    "exit_code",
+    "signal",
+    "stdout",
+    "stderr",
+    "runner_version",
+    "platform",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "passed",
+        "failed",
+        "runtime_unsupported",
+        "timeout",
+        "interrupted",
+        "output_limit",
+        "input_changed",
+        "spawn_failed",
+        "io_failed",
+        "protocol_error"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^invocation_[a-z_]+$"
+    },
+    "binding": {
+      "$ref": "#/$defs/binding"
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent": {
+      "$ref": "#/$defs/agent"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "policy_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "options": {
+      "$ref": "#/$defs/options"
+    },
+    "executable": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/executable"
+        }
+      ]
+    },
+    "native": {
+      "$ref": "#/$defs/native"
+    },
+    "context_delivery": {
+      "$ref": "#/$defs/context_delivery"
+    },
+    "started_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "signal": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stdout": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/stream"
+        }
+      ]
+    },
+    "stderr": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/stream"
+        }
+      ]
+    },
+    "runner_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "const": "local_runner_unsigned"
+    },
+    "mediation": {
+      "$ref": "#/$defs/mediation"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          },
+          "exit_code": {
+            "const": 0
+          },
+          "signal": {
+            "type": "null"
+          },
+          "executable": {
+            "$ref": "#/$defs/executable"
+          },
+          "stdout": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/stream"
+              },
+              {
+                "properties": {
+                  "bytes": {
+                    "maximum": 16777216
+                  }
+                }
+              }
+            ]
+          },
+          "stderr": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/stream"
+              },
+              {
+                "properties": {
+                  "bytes": {
+                    "maximum": 16777216
+                  }
+                }
+              }
+            ]
+          },
+          "context_delivery": {
+            "properties": {
+              "status": {
+                "const": "offered_to_process"
+              },
+              "context_revision": {
+                "$ref": "#/$defs/sha256"
+              },
+              "context_wire_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "prompt_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "context_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 131072
+              },
+              "prompt_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 131072
+              },
+              "bytes_offered": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 131072
+              }
+            }
+          },
+          "native": {
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "init": {
+                "$ref": "#/$defs/init"
+              },
+              "assistant_error": {
+                "const": false
+              },
+              "result": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/result"
+                  },
+                  {
+                    "properties": {
+                      "subtype": {
+                        "const": "success"
+                      },
+                      "is_error": {
+                        "const": false
+                      },
+                      "permission_denials": {
+                        "const": 0
+                      },
+                      "final_message_present": {
+                        "const": true
+                      }
+                    }
+                  }
+                ]
+              },
+              "events": {
+                "type": "integer",
+                "minimum": 2
+              }
+            }
+          },
+          "mediation": {
+            "properties": {
+              "decisions_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "observed_calls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              },
+              "allowed_calls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              },
+              "denied_calls": {
+                "const": 0
+              },
+              "reconciled": {
+                "const": true
+              }
+            }
+          }
+        },
+        "required": [
+          "mediation"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullable_sha256": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_identity",
+        "spec_path",
+        "spec_sha256",
+        "baseline_oid",
+        "iteration",
+        "preflight_started_at"
+      ],
+      "properties": {
+        "repository_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intake_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "spec_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spec_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "baseline_oid": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "preflight_started_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "duty",
+        "contract_sha256"
+      ],
+      "properties": {
+        "role": {
+          "const": "executor"
+        },
+        "duty": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "builtin_tools",
+        "permission_mode",
+        "permission_prompts",
+        "task_scope",
+        "filesystem",
+        "network",
+        "mcp",
+        "hooks",
+        "native_configuration",
+        "authentication",
+        "session_persistence",
+        "chrome"
+      ],
+      "properties": {
+        "builtin_tools": {
+          "const": [
+            "Read",
+            "Edit",
+            "Write",
+            "Grep",
+            "Glob",
+            "Bash"
+          ]
+        },
+        "permission_mode": {
+          "const": "dontAsk"
+        },
+        "permission_prompts": {
+          "const": "none"
+        },
+        "task_scope": {
+          "const": "conditional_native_pretooluse_v1"
+        },
+        "filesystem": {
+          "const": "supported_native_paths_scoped_no_os_sandbox"
+        },
+        "network": {
+          "const": "not_enforced_by_mastermind"
+        },
+        "mcp": {
+          "const": "native_strict_empty_requested"
+        },
+        "hooks": {
+          "const": "private_guard_requested_observed_calls_reconciled_command_failure_fallback"
+        },
+        "native_configuration": {
+          "const": "restricted_settings_isolation_requested_managed_policy_unverified"
+        },
+        "authentication": {
+          "const": "inherited"
+        },
+        "session_persistence": {
+          "const": "native_disabled"
+        },
+        "chrome": {
+          "const": "native_disabled"
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_timeout_secs",
+        "max_turns",
+        "profile_client",
+        "guarded"
+      ],
+      "properties": {
+        "wall_timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7200
+        },
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "profile_client": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "guarded": {
+          "const": true
+        }
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocation_path",
+        "resolved_path",
+        "sha256"
+      ],
+      "properties": {
+        "invocation_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resolved_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "init",
+        "result",
+        "events",
+        "tool_errors",
+        "assistant_error"
+      ],
+      "properties": {
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "init": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/init"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/result"
+            }
+          ]
+        },
+        "events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assistant_error": {
+          "type": "boolean"
+        }
+      }
+    },
+    "init": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cwd",
+        "permission_mode",
+        "version",
+        "model",
+        "session_id",
+        "tools"
+      ],
+      "properties": {
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permission_mode": {
+          "const": "dontAsk"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^2\\.1\\.[0-9]+$",
+          "description": "Runtime admission requires a numeric 2.1 patch version of at least 267 that fits in u32."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "Read",
+              "Edit",
+              "Write",
+              "Grep",
+              "Glob",
+              "Bash",
+              "EndConversation"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "Read"
+              }
+            },
+            {
+              "contains": {
+                "const": "Edit"
+              }
+            },
+            {
+              "contains": {
+                "const": "Write"
+              }
+            },
+            {
+              "contains": {
+                "const": "Grep"
+              }
+            },
+            {
+              "contains": {
+                "const": "Glob"
+              }
+            },
+            {
+              "contains": {
+                "const": "Bash"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subtype",
+        "is_error",
+        "session_id",
+        "permission_denials",
+        "final_message_present"
+      ],
+      "properties": {
+        "subtype": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "permission_denials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "final_message_present": {
+          "type": "boolean"
+        }
+      }
+    },
+    "context_delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "input_origin",
+        "model_use",
+        "context_revision",
+        "context_wire_sha256",
+        "context_bytes",
+        "prompt_sha256",
+        "prompt_bytes",
+        "bytes_offered"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_prepared",
+            "prepared",
+            "partially_offered",
+            "offered_to_process"
+          ]
+        },
+        "input_origin": {
+          "const": "controller_generated"
+        },
+        "model_use": {
+          "const": "unknown"
+        },
+        "context_revision": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "context_wire_sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "context_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "prompt_sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "prompt_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "bytes_offered": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "mediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional until guard preparation succeeds. Null allow/deny counts mean the bound ledger was unavailable or invalid, not zero calls. Reconciliation covers the observed native stream. Runtime completion also requires allowed_calls == observed_calls and the same native_session_id as native.init.session_id.",
+      "required": [
+        "schema_version",
+        "manifest_sha256",
+        "native_session_id",
+        "decisions_sha256",
+        "observed_calls",
+        "allowed_calls",
+        "denied_calls",
+        "reconciled",
+        "coverage",
+        "enforcement"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "native_session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "decisions_sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "observed_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 512
+        },
+        "allowed_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 512
+        },
+        "denied_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 512
+        },
+        "reconciled": {
+          "type": "boolean"
+        },
+        "coverage": {
+          "const": "observed_native_tool_use_only"
+        },
+        "enforcement": {
+          "const": "conditional_native_hook_no_os_sandbox_command_failure_fallback"
+        }
+      }
+    }
+  }
+}

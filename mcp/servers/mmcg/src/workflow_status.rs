@@ -4929,6 +4929,7 @@ fn count_workflow_skill_dirs(dir: &Path) -> usize {
 #[derive(Default)]
 struct TaskScan {
     tasks: Vec<TaskInfo>,
+    state_revisions: std::collections::BTreeMap<PathBuf, String>,
     error: Option<String>,
     truncated: bool,
 }
@@ -4937,6 +4938,7 @@ impl TaskScan {
     fn failed(error: impl Into<String>) -> Self {
         Self {
             tasks: Vec::new(),
+            state_revisions: std::collections::BTreeMap::new(),
             error: Some(error.into()),
             truncated: false,
         }
@@ -4965,6 +4967,7 @@ pub fn task_overview(root: &Path, limit: usize) -> serde_json::Value {
             "folder":task.folder,
             "phase":phase,
             "state":task.state,
+            "invocation":task_invocation_preview(root, &task.spec_path, scan.state_revisions.get(&task.spec_path).map(String::as_str), deadline),
             "completion_basis":if task.phase == TaskPhase::Complete { "historical_record" } else { "in_progress" },
             "current_checkout":"not_verified",
         })
@@ -4978,6 +4981,86 @@ pub fn task_overview(root: &Path, limit: usize) -> serde_json::Value {
         "current_checkout":"not_verified",
         "tasks":tasks,
     })
+}
+
+fn task_invocation_preview(
+    root: &Path,
+    spec: &Path,
+    scanned_state_revision: Option<&str>,
+    deadline: std::time::Instant,
+) -> serde_json::Value {
+    use crate::bounded_fs::{self, ReadControl, RootCapability};
+    use serde_json::json;
+    let result = (|| -> Result<serde_json::Value, String> {
+        let scanned_state_revision = scanned_state_revision.ok_or("unavailable")?;
+        let capability = RootCapability::open(root).map_err(|_| "unavailable")?;
+        let read = |path: &Path| {
+            bounded_fs::read_regular_file_with_capability(
+                &capability,
+                path,
+                128 * 1024,
+                128 * 1024,
+                ReadControl {
+                    deadline: Some(deadline),
+                    interrupted: None,
+                },
+            )
+            .map(|file| file.bytes)
+            .map_err(|_| "unavailable".to_owned())
+        };
+        let state_path = crate::run_task::state_file_path(root, spec);
+        let state_bytes = read(&state_path)?;
+        let state = crate::run_task::parse_run_state(&state_bytes)?;
+        if task_state_revision(&state).as_deref() != Some(scanned_state_revision) {
+            return Err("task state changed after scan".into());
+        }
+        if !state.invocation_required {
+            return Ok(json!({"status":"not_required","delivery":"not_recorded"}));
+        }
+        let bytes = read(&crate::invocation::receipt_path(root, spec))?;
+        let value = crate::setup::parse_json_unique(&bytes).map_err(|_| "unavailable")?;
+        let receipt: crate::invocation::InvocationReceipt =
+            serde_json::from_value(value).map_err(|_| "unavailable")?;
+        let relative = bounded_fs::normalize_repository_relative_path(
+            &capability
+                .repository_relative(spec)
+                .map_err(|_| "unavailable")?,
+        )
+        .map_err(|_| "unavailable")?;
+        if !matches!(receipt.schema_version, 1 | 2)
+            || Path::new(&receipt.root) != capability.canonical_root()
+            || receipt.binding.spec_path != relative
+            || state.spec_path != relative
+            || Some(&receipt.binding.repository_identity) != state.repository_identity.as_ref()
+            || receipt.binding.spec_sha256 != state.spec_hash
+            || receipt.binding.baseline_oid != state.baseline_ref
+            || receipt.binding.iteration != state.iteration
+            || receipt.binding.preflight_started_at != state.started_at
+            || receipt.binding.intake_revision != state.intake_revision
+            || receipt.invocation_id.len() != 32
+            || !receipt.invocation_id.bytes().all(|c| c.is_ascii_hexdigit())
+            || receipt.agent.role != "executor"
+            || read(&state_path)? != state_bytes
+        {
+            return Err("unavailable".into());
+        }
+        capability.verify().map_err(|_| "unavailable")?;
+        // The preview binds recorded metadata to recorded state. It does not
+        // repeat live source, executable, permission or completion validation.
+        let mut result = json!({"status":receipt.status,"invocation_id":receipt.invocation_id,"role":"executor",
+            "binding":receipt.binding,"context_delivery":receipt.context_delivery,
+            "validation":"matches_recorded_iteration","current_inputs":"not_rechecked",
+            "provenance":"local_unsigned_record"});
+        if let Some(mediation) = receipt.mediation {
+            result["mediation"] = json!({"schema_version":mediation.schema_version,
+                "manifest_sha256":mediation.manifest_sha256,"decisions_sha256":mediation.decisions_sha256,
+                "observed_calls":mediation.observed_calls,"allowed_calls":mediation.allowed_calls,
+                "denied_calls":mediation.denied_calls,"reconciled":mediation.reconciled,
+                "coverage":mediation.coverage,"enforcement":mediation.enforcement});
+        }
+        Ok(result)
+    })();
+    result.unwrap_or_else(|_| json!({"status":"unavailable","delivery":"not_verified"}))
 }
 
 fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Instant>) -> TaskScan {
@@ -5021,6 +5104,7 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
     let inflight_spec = read_inflight_spec(&root_capability, root, &repository_identity);
 
     let mut tasks = Vec::new();
+    let mut state_revisions = std::collections::BTreeMap::new();
     for file_name in entries.iter().take(limit) {
         if deadline.is_some_and(|value| std::time::Instant::now() >= value) {
             return TaskScan::failed("task inventory exceeded the read budget");
@@ -5095,6 +5179,7 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
             }
         };
 
+        let mut state_revision = None;
         let mut state = match read_task_state(&root_capability, &task_dir) {
             Ok(Some(run_state)) => {
                 match crate::run_task::validate_bound_state_identity(
@@ -5102,7 +5187,10 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
                     &spec_identity,
                     &run_state,
                 ) {
-                    Ok(()) => Some(project_task_state(root, &spec_path, run_state)),
+                    Ok(()) => {
+                        state_revision = task_state_revision(&run_state);
+                        Some(project_task_state(root, &spec_path, run_state))
+                    }
                     Err(error)
                         if run_state.repository_identity.is_none()
                             && crate::run_task::legacy_state_matches_spec(
@@ -5143,6 +5231,9 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
             state.as_ref(),
             executor_report_is_regular,
         );
+        if let Some(revision) = state_revision {
+            state_revisions.insert(spec_path.clone(), revision);
+        }
         tasks.push(TaskInfo {
             folder,
             spec_path,
@@ -5159,6 +5250,7 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
     ) {
         Ok(current) if current == entries => TaskScan {
             tasks,
+            state_revisions,
             error: None,
             truncated: entries.len() > limit,
         },
@@ -5265,6 +5357,12 @@ fn project_task_state(
         blocking_reason: state.blocking_reason,
         last_artifact: state.last_artifact,
     }
+}
+
+fn task_state_revision(state: &crate::run_task::RunState) -> Option<String> {
+    serde_json::to_vec(state)
+        .ok()
+        .map(|bytes| crate::hex::encode(&Sha256::digest(bytes)))
 }
 
 fn held_task(folder: String, spec_path: PathBuf, reason: String) -> TaskInfo {
@@ -5414,6 +5512,7 @@ mod tests {
             last_artifact: Some("spec.md".into()),
             spec_path: crate::bounded_fs::normalize_repository_relative_path(spec_path).unwrap(),
             repository_identity: Some(crate::facts::repository_identity(root).unwrap()),
+            intake_revision: None,
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,
@@ -6639,6 +6738,38 @@ mod tests {
         let prompt = structured_review_prompt(&task);
         assert!(prompt.contains("guarded completion"));
         assert!(!prompt.contains("review-task prepare"));
+    }
+
+    #[test]
+    fn invocation_preview_rejects_state_from_a_later_task_scan_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let spec = Path::new(".mastermind/tasks/001-state/spec.md");
+        let path = crate::run_task::state_file_path(&root, spec);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut state: crate::run_task::RunState = serde_json::from_value(serde_json::json!({
+            "status":"approved","spec_path":spec,"spec_hash":"a".repeat(64),
+            "baseline_ref":"b".repeat(40),"started_at":1,"iteration":1
+        }))
+        .unwrap();
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let scanned = task_state_revision(&state).unwrap();
+        let deadline = std::time::Instant::now() + STATUS_FRESHNESS_TIMEOUT;
+        assert_eq!(
+            task_invocation_preview(&root, spec, Some(&scanned), deadline)["status"],
+            "not_required"
+        );
+        state.iteration += 1;
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            task_invocation_preview(&root, spec, Some(&scanned), deadline),
+            serde_json::json!({"status":"unavailable","delivery":"not_verified"})
+        );
+        let current = task_state_revision(&state).unwrap();
+        assert_eq!(
+            task_invocation_preview(&root, spec, Some(&current), deadline)["status"],
+            "not_required"
+        );
     }
 
     #[test]

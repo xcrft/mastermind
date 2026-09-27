@@ -7,6 +7,7 @@ use mmcg::miner::store::ProfileStore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -256,6 +257,24 @@ impl Fixture {
     fn receipt(&self) -> Value {
         self.json(RECEIPT)
     }
+    fn context_preview(&self) -> Value {
+        let output = self.run(&[
+            "context",
+            "preview",
+            "--since",
+            "baseline",
+            "--role",
+            "executor",
+            "--workflow",
+            "verified",
+            "--path",
+            "service.py",
+            "--budget-tokens",
+            "8000",
+        ]);
+        assert_success(&output);
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
     fn calls(&self) -> u32 {
         fs::read_to_string(self.harness.join("calls"))
             .map(|value| value.parse().unwrap())
@@ -479,6 +498,120 @@ fn no_running_process(pid: i32) {
 }
 
 #[test]
+fn intake_binding_reaches_native_checks_review_and_historical_completion() {
+    let fixture = Fixture::new("repair");
+    // Local hook installation is not a product change in this task.
+    fixture.write(".git/info/exclude", ".claude/\n");
+    let interpreter = Command::new("python3")
+        .args(["-I", "-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert_success(&interpreter);
+    let python = PathBuf::from(String::from_utf8(interpreter.stdout).unwrap().trim())
+        .canonicalize()
+        .unwrap();
+    let processor = fixture.harness.join("refiner.py");
+    fs::write(&processor, "import json,sys\ni=json.load(sys.stdin)['input']\nprint(json.dumps(dict(schema=1,intake_id=i['id'],prompt_digest=i['prompt_digest'],action='passthrough',workflow_intent='activate_mastermind',intent_evidence=i['original'],refined_prompt=i['original'],questions=[])))\n").unwrap();
+    assert_success(
+        &fixture
+            .cli(&[
+                "miner",
+                "hooks",
+                "setup",
+                "--client",
+                "claude",
+                "--write",
+                "--refiner-processor",
+            ])
+            .arg(python)
+            .arg("--refiner-arg=-I")
+            .arg(format!("--refiner-arg={}", processor.display()))
+            .output()
+            .unwrap(),
+    );
+    let original = "Use Mastermind to make service.py return two, without expanding the scope.";
+    for (kind, prompt) in [("SessionStart", ""), ("UserPromptSubmit", original)] {
+        let input = json!({"session_id":"source-session", "event_id":kind, "turn_id":"one", "hook_event_name":kind,
+            "source":"startup","cwd":fixture.root,"prompt":prompt});
+        let mut child = fixture
+            .cli(&["miner", "hooks", "receive", "--client", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        assert_success(&child.wait_with_output().unwrap());
+    }
+    let db =
+        rusqlite::Connection::open(fixture.home.join(".mastermind/persona-events.db")).unwrap();
+    let data: String = db
+        .query_row("SELECT data FROM hook_intake", [], |row| row.get(0))
+        .unwrap();
+    let source: Value = serde_json::from_str(&data).unwrap();
+    let id = source["input"]["id"].as_str().unwrap();
+    let output = fixture.run(&["miner", "hooks", "bind-task", id, "--spec", SPEC]);
+    assert_success(&output);
+    let binding: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_success(&fixture.execute(&[]));
+    let revision = &binding["binding"]["revision"];
+    assert_eq!(&fixture.state()["intake_revision"], revision);
+    assert_eq!(&fixture.receipt()["binding"]["intake_revision"], revision);
+    assert_eq!(
+        &fixture.json(".mastermind/tasks/001-invocation/verification/unit.json")["binding"]
+            ["intake_revision"],
+        revision
+    );
+    let input = fixture.attempt_input(1);
+    assert!(input.contains("<mastermind-intake-json>"));
+    assert!(input.contains(original));
+    assert!(!fs::read_to_string(fixture.root.join(RECEIPT))
+        .unwrap()
+        .contains(original));
+    let preview = fixture.context_preview();
+    let invocation = &preview["layers"]["work"]["data"]["tasks"][0]["invocation"];
+    assert_eq!(&invocation["binding"]["intake_revision"], revision);
+    assert_eq!(
+        invocation["invocation_id"],
+        fixture.receipt()["invocation_id"]
+    );
+    assert_eq!(invocation["validation"], "matches_recorded_iteration");
+    assert!(
+        !preview.to_string().contains(original),
+        "the source link contains only its revision"
+    );
+    fixture.resolve_history_review();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+    let episode = source["input"]["episode_id"].as_str().unwrap();
+    let shown = fixture.run(&["miner", "hooks", "show", episode]);
+    assert_success(&shown);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let forgotten = fixture.run(&[
+        "miner",
+        "hooks",
+        "forget",
+        episode,
+        "--revision",
+        shown["episode"]["revision"].as_str().unwrap(),
+    ]);
+    assert_success(&forgotten);
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+    assert!(!fixture.execute(&[]).status.success());
+    assert_eq!(
+        fixture.calls(),
+        1,
+        "forgotten source cannot start another executor"
+    );
+}
+
+#[test]
 fn successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_out_of_receipt() {
     let fixture = Fixture::new("repair");
     fixture.seed_private_preference();
@@ -539,6 +672,60 @@ fn successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_ou
             "receipt persisted private content: {private}"
         );
     }
+    let preview = fixture.context_preview();
+    let task = &preview["layers"]["work"]["data"]["tasks"][0];
+    assert_eq!(task["phase"], "awaiting_history_review");
+    assert_eq!(task["completion_basis"], "in_progress");
+    assert_eq!(task["current_checkout"], "not_verified");
+    let projected = &task["invocation"];
+    assert_eq!(projected["invocation_id"], receipt["invocation_id"]);
+    assert_eq!(projected["role"], "executor");
+    assert_eq!(projected["status"], "passed");
+    assert_eq!(projected["binding"], receipt["binding"]);
+    assert_eq!(projected["context_delivery"], receipt["context_delivery"]);
+    assert_eq!(projected["validation"], "matches_recorded_iteration");
+    assert_eq!(projected["current_inputs"], "not_rechecked");
+    assert_eq!(projected["provenance"], "local_unsigned_record");
+    let keys = projected
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            "binding",
+            "context_delivery",
+            "current_inputs",
+            "invocation_id",
+            "provenance",
+            "role",
+            "status",
+            "validation"
+        ]
+    );
+    for private in [
+        PREFERENCE,
+        QUOTE,
+        "PRIVATE_NATIVE_FINAL_MESSAGE",
+        "PRIVATE_NATIVE_STDERR",
+        "PRIVATE_SYNTHETIC_AUTH",
+        "PRIVATE_VERIFICATION_OUTPUT",
+        "<mastermind-context-json>",
+        fixture.bin.to_str().unwrap(),
+        fixture.home.to_str().unwrap(),
+    ] {
+        assert!(
+            !preview.to_string().contains(private),
+            "context preview exposed private invocation data: {private}"
+        );
+    }
+    assert_eq!(
+        fixture.calls(),
+        1,
+        "preview is read-only and does not execute a client"
+    );
     let args = fs::read_to_string(fixture.harness.join("argv")).unwrap();
     assert!(args.contains("--permission-mode\nacceptEdits\n--permission-prompts\nnone\n"));
     assert!(args.contains("--tools\nRead,Edit,Write,Grep,Glob,Bash\n"));
@@ -576,6 +763,107 @@ fn successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_ou
     fixture.resolve_history_review();
     assert_success(&fixture.run(&["run-task", SPEC]));
     assert_eq!(fixture.state()["status"], "learned");
+}
+
+#[test]
+fn native_context_retrieves_documents_from_literal_task_title_terms() {
+    let fixture = Fixture::new("success");
+    let spec = fs::read_to_string(fixture.root.join(SPEC)).unwrap();
+    fixture.write(
+        SPEC,
+        &spec.replacen(
+            "---\n",
+            "---\ntitle: 'Runtime OR \"symbolicneedle\" NOT absentterm'\n",
+            1,
+        ),
+    );
+    assert_success(&fixture.execute(&[]));
+    let (_, packet) = fixture.packet();
+    assert_eq!(
+        packet["selection"]["query"],
+        "\"Runtime\" OR \"symbolicneedle\" OR \"NOT\" OR \"absentterm\""
+    );
+    let documents = &packet["layers"]["documentation"];
+    assert_eq!(documents["status"], "ok");
+    assert_eq!(documents["data"]["freshness"], "fresh");
+    assert!(documents["data"]["observed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["path"] == "CONTEXT.md"));
+    assert_eq!(
+        fixture.receipt()["context_delivery"]["context_revision"],
+        packet["context_revision"]
+    );
+}
+
+#[test]
+fn context_preview_withholds_mismatched_or_malformed_invocation_metadata() {
+    let fixture = Fixture::new("success");
+    assert_success(&fixture.execute(&[]));
+    let original = fs::read_to_string(fixture.root.join(RECEIPT)).unwrap();
+    let receipt: Value = serde_json::from_str(&original).unwrap();
+    let state = fs::read(fixture.root.join(STATE)).unwrap();
+    assert_eq!(
+        fixture.context_preview()["layers"]["work"]["data"]["tasks"][0]["invocation"]["status"],
+        "passed"
+    );
+
+    for (field, value) in [
+        ("spec_sha256", json!("0".repeat(64))),
+        (
+            "repository_identity",
+            json!("git-worktree:sha256:".to_owned() + &"0".repeat(64)),
+        ),
+        ("baseline_oid", json!("0".repeat(40))),
+        (
+            "iteration",
+            json!(receipt["binding"]["iteration"].as_u64().unwrap() + 1),
+        ),
+        ("intake_revision", json!("a".repeat(64))),
+    ] {
+        let mut altered = receipt.clone();
+        altered["binding"][field] = value;
+        fixture.write(RECEIPT, &altered.to_string());
+        let preview = fixture.context_preview();
+        let invocation = &preview["layers"]["work"]["data"]["tasks"][0]["invocation"];
+        assert_eq!(
+            *invocation,
+            json!({"status":"unavailable","delivery":"not_verified"}),
+            "binding mismatch: {field}"
+        );
+        assert!(!preview
+            .to_string()
+            .contains(receipt["invocation_id"].as_str().unwrap()));
+        assert_eq!(
+            fs::read(fixture.root.join(STATE)).unwrap(),
+            state,
+            "preview does not repair task state"
+        );
+    }
+    fixture.write(
+        RECEIPT,
+        "{\"private\":\"PRIVATE_MALFORMED_INVOCATION_PAYLOAD\"",
+    );
+    let preview = fixture.context_preview();
+    assert_eq!(
+        preview["layers"]["work"]["data"]["tasks"][0]["invocation"],
+        json!({"status":"unavailable","delivery":"not_verified"})
+    );
+    assert!(!preview
+        .to_string()
+        .contains("PRIVATE_MALFORMED_INVOCATION_PAYLOAD"));
+    fixture.write(RECEIPT, &original);
+    assert_eq!(
+        fixture.context_preview()["layers"]["work"]["data"]["tasks"][0]["invocation"]
+            ["invocation_id"],
+        receipt["invocation_id"]
+    );
+    assert_eq!(
+        fixture.calls(),
+        1,
+        "reading receipt metadata must not invoke the client again"
+    );
 }
 
 #[test]

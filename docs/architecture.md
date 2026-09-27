@@ -33,7 +33,8 @@ flowchart TD
     A -->|Held| R[Criterion and history review]
     A -->|Repairable failure within budget| E
     A -->|Scope change or unresolved failure| F[Planner or user decision]
-    R -->|Unknown or unsatisfied| F
+    R -->|One eligible opted-in semantic retry| E
+    R -->|Unknown or unresolved| F
     R -->|Context or lesson update needed| H[Update canonical history]
     H --> R
     R -->|Satisfied and current| G[Final evidence checks]
@@ -47,6 +48,7 @@ flowchart TD
 | Bound project inputs change | Refresh the affected checks, audit and reviews |
 | An ignored lesson changes | Review the new history revision |
 | Mechanical failure within the repair budget | Run the bounded repair path |
+| Concrete negative criterion eligible for `--auto-follow-up` | One executor retry with fresh checks, audit and review under the same contract and iteration budget |
 | Scope change or unresolved semantic judgment | Return a bound follow-up to the planner or user |
 
 Native execution and review use the supported Claude CLI contract. Other clients
@@ -77,6 +79,21 @@ Context preview reads independently checked layers. It does not re-index files,
 activate candidates or create one atomic snapshot across all stores.
 See the [context contract](reference/persona-context.md).
 
+## Hooks and personal evidence
+
+| Stage | Stored result | Boundary |
+|---|---|---|
+| Native capture | Original events, identities, gaps and recorded profile/refiner influence | A user channel does not prove human authorship |
+| Refiner | Original-bound intake, typed route and revision | An advisory is not execution or new permission |
+| Task binding | Current session/intake/spec relation with compare-and-swap | Stale or conflicting revisions cannot replace the current relation |
+| Managed mining | Bounded worker attempts and durable checkpoints | Collection and extraction do not activate habits |
+| Candidate review | Decision on exact evidence | Dependent observations cannot increase independent support |
+| Context delivery | Selected sources, audience grant and offered byte digests | Model use and benefit remain unknown |
+
+Readiness reports registration, capture, observed sessions, refiner and worker
+separately. Lens displays layer coverage, private review metadata and recorded
+delivery without a personality completeness score. See [persona hooks](guides/persona-hooks.md).
+
 ## What completion establishes
 
 | Gate for a structured task | Required evidence | Completion blocked by |
@@ -100,7 +117,7 @@ proof chain. Schemas are in the [reference](reference/mmcg.md).
 
 | Boundary | Implemented control | Remaining gap |
 |---|---|---|
-| Tool effects | Invocation admission and postflight scope checks | Filesystem/network enforcement belongs to the client runtime |
+| Tool effects | Admission, optional guarded native calls and postflight scope checks | Command-hook failure can fall back to client permissions. No OS sandbox |
 | Verification freshness | Repository inputs and top-level executable binding | External dependencies and network responses are not fully captured |
 | Semantic acceptance | Revision-bound criterion judgments | Judgment truth and reviewer independence need outcome evaluation |
 | Completion | Finite guard model and selected real CLI regressions | Full Rust refinement and concurrent-transition proof remain open |

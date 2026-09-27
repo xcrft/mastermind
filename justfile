@@ -111,26 +111,11 @@ npm-smoke-native:
     smoke_root=$(mktemp -d)
     trap 'rm -rf "$smoke_root"' EXIT
     pack_dir="$smoke_root/packed"
-    install_dir="$smoke_root/install"
-    mkdir -p "$pack_dir" "$install_dir"
+    mkdir -p "$pack_dir"
     (cd npm/mastermind && npm pack --pack-destination "$pack_dir")
     (cd "npm/platforms/$variant" && npm pack --pack-destination "$pack_dir")
 
-    version=$(node -p "require('./npm/mastermind/package.json').version")
-    root_tgz="$pack_dir/xcraftmind-mastermind-${version}.tgz"
-    platform_tgz="$pack_dir/xcraftmind-mmcg-${variant}-${version}.tgz"
-    test -f "$root_tgz" && test -f "$platform_tgz"
-    cd "$install_dir"
-    npm init -y >/dev/null
-    npm install --no-save --offline "$root_tgz" "$platform_tgz"
-    actual=$(./node_modules/.bin/mastermind --version)
-    test "$actual" = "mastermind $version" || {
-        echo "wrapper version mismatch: expected mastermind $version, got $actual" >&2
-        exit 1
-    }
-    ./node_modules/.bin/mastermind doctor --json >doctor.json || true
-    python3 -c 'import json; value=json.load(open("doctor.json")); assert "checks" in value, value'
-    echo "Native npm tarball smoke passed for $target ($version)."
+    bash scripts/smoke-packed-npm-release.sh "$pack_dir" npm/mastermind/package.json "$variant"
 
 # Test audit publication, document snapshots, and eval harnesses without a model or build.
 eval-harness:

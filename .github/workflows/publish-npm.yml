@@ -94,7 +94,17 @@ jobs:
 
       - name: Install musl-tools
         if: matrix.install_musl
-        run: sudo apt-get update -qq && sudo apt-get install -yq musl-tools
+        run: |
+          # musl-tools needs Ubuntu archives; unrelated vendor indexes can fail independently.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          musl_apt_sources=$(mktemp -d)
+          trap 'rmdir "$musl_apt_sources"' EXIT
+          musl_apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o "Dir::Etc::sourceparts=$musl_apt_sources"
+          )
+          sudo apt-get "${musl_apt_options[@]}" update -qq
+          sudo apt-get "${musl_apt_options[@]}" install -yq musl-tools
 
       - name: Cache cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -213,50 +223,12 @@ jobs:
           done
 
       - name: Smoke — install root + native platform from tarballs and run
-        run: |
-          set -e
-          # Derive version dynamically — no hardcoded tarball names (they'd
-          # rot on every release).
-          VERSION=$(node -p "require('./npm/mastermind/package.json').version")
-          ROOT_TGZ="$GITHUB_WORKSPACE/packed/xcraftmind-mastermind-${VERSION}.tgz"
-          PLAT_TGZ="$GITHUB_WORKSPACE/packed/xcraftmind-mmcg-linux-x64-gnu-${VERSION}.tgz"
-          test -f "$ROOT_TGZ" || { echo "::error::root tarball not found: $ROOT_TGZ"; ls packed/; exit 1; }
-          test -f "$PLAT_TGZ" || { echo "::error::platform tarball not found: $PLAT_TGZ"; ls packed/; exit 1; }
-          SMOKE_DIR=$(mktemp -d)
-          cd "$SMOKE_DIR"
-          npm init -y > /dev/null
-          # Install both tarballs at once so npm resolves the optional dep
-          # locally instead of fetching @xcraftmind/mmcg-linux-x64-gnu from the
-          # registry (it isn't published yet at this point).
-          npm install --no-save "$ROOT_TGZ" "$PLAT_TGZ"
-          echo "--- mastermind --version"
-          ./node_modules/.bin/mastermind --version
-          echo "--- mastermind doctor --json (shape check)"
-          ./node_modules/.bin/mastermind doctor --json > doctor.json || true
-          python3 -c "import json; d = json.load(open('doctor.json')); assert 'checks' in d, d"
-          echo "--- mastermind setup claude (dry-run, project mode)"
-          # Project-local install — install-mode detection should write
-          # `./node_modules/.bin/mastermind` as the MCP command.
-          ./node_modules/.bin/mastermind setup claude --project . > mcp-diff.txt 2>&1 || true
-          grep -q "node_modules/.bin/mastermind" mcp-diff.txt || {
-            echo "::error::project-mode setup claude did not propose ./node_modules/.bin/mastermind"
-            cat mcp-diff.txt
-            exit 1
-          }
-          echo "✓ project-mode MCP command form verified"
-          echo "--- workflow bundle ships + init installs it globally"
-          test -d node_modules/@xcraftmind/mastermind/share/agents || {
-            echo "::error::root tarball missing share/agents — did stage-npm-share.sh run?"; exit 1;
-          }
-          FAKE_HOME=$(mktemp -d); mkdir -p "$FAKE_HOME/.claude"
-          HOME="$FAKE_HOME" ./node_modules/.bin/mastermind init --no-claude --no-index > init.txt 2>&1 || { cat init.txt; exit 1; }
-          test -f "$FAKE_HOME/.claude/agents/mastermind-critic.md" || {
-            echo "::error::init did not install subagents to ~/.claude/agents"; cat init.txt; exit 1;
-          }
-          test -f "$FAKE_HOME/.claude/skills/mastermind-task-planning/SKILL.md" || {
-            echo "::error::init did not install skills to ~/.claude/skills"; cat init.txt; exit 1;
-          }
-          echo "✓ workflow bundle ships + init installs it to ~/.claude/"
+        run: bash scripts/smoke-packed-npm-release.sh "$GITHUB_WORKSPACE/packed" npm/mastermind/package.json linux-x64-gnu
+
+      - name: Project onboarding with the release binary
+        env:
+          MMCG_TEST_BINARY: ${{ github.workspace }}/npm/platforms/linux-x64-gnu/bin/mmcg
+        run: node --test npm/mastermind/test/onboarding.test.js
 
       - name: Upload assembled tarballs for the publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

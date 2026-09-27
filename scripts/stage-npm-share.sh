@@ -5,7 +5,7 @@
 # `npm/mastermind/share/` tree is gitignored and (re)built from the canonical
 # `agents/subagents/` + `skills/` trees by this script. Run it:
 #   - in the publish workflow (assemble) and the ci-npm smoke, before `npm pack`
-#   - locally, before testing `init`'s global install
+#   - locally, before testing the packaged workflow installation
 #
 # Every skill under `skills/` is staged. The installer selects a profile;
 # `--profile full` installs the complete staged catalog.

@@ -2,22 +2,25 @@
 //! pending counter fences readers before stdin is consumed; an interrupted
 //! capture cannot leave its older evidence apparently current.
 
+use super::influence::Influence;
 use super::semantic::{EpisodeInput, EventInput, SemanticDraft};
 use super::{hash, Error, EXTRACTOR};
-use crate::bounded_fs::{self, BoundedReadError, ReadControl};
+use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability, StableFileIdentity};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod intake;
+pub(in crate::miner) mod task;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_EPISODES: i64 = 2000;
 const CAPTURE_VERSION: u32 = 2;
+const INSPECTION_ATTEMPTS: usize = 3;
 
 const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_grant (
@@ -42,12 +45,56 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                     client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
                     data TEXT, PRIMARY KEY(client,project_root));
                 CREATE TABLE IF NOT EXISTS hook_intake (
-                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);";
+                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS hook_task_binding (
+                    revision TEXT PRIMARY KEY, intake TEXT NOT NULL UNIQUE,
+                    project_root TEXT NOT NULL, spec_path TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_task_binding_target ON hook_task_binding(project_root,spec_path);";
 
 pub(super) fn path() -> Result<PathBuf, Error> {
     Ok(std::env::home_dir()
         .ok_or("could not resolve home")?
         .join(".mastermind/persona-events.db"))
+}
+
+fn inspect_journal_file(
+    root: &RootCapability,
+    target: &Path,
+    control: ReadControl<'_>,
+) -> Result<Option<StableFileIdentity>, BoundedReadError> {
+    let limit = Instant::now() + Duration::from_secs(2);
+    let control = ReadControl {
+        deadline: Some(
+            control
+                .deadline
+                .map_or(limit, |deadline| deadline.min(limit)),
+        ),
+        ..control
+    };
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        // SQLite owns its descriptors and process-scoped POSIX locks. Inspect
+        // metadata without opening another descriptor on Unix: closing one
+        // would release an active connection's locks in this process.
+        match bounded_fs::inspect_direct_regular_file_identity_with_capability(
+            root, target, control,
+        ) {
+            Ok(Some(identity)) if identity.length() > MAX_BYTES => {
+                return Err(BoundedReadError::TooLarge {
+                    size: identity.length(),
+                    limit: MAX_BYTES,
+                });
+            }
+            Ok(identity) => return Ok(identity),
+            Err(BoundedReadError::SnapshotChanged) if attempt < INSPECTION_ATTEMPTS => {
+                // Commits change DB metadata and create/remove sidecars. Retry
+                // only that observation, under the same root and deadline.
+                root.verify()?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(super) struct Journal {
@@ -81,7 +128,13 @@ struct Session {
     active: Option<String>,
     previous_assistant: Option<EventInput>,
     exposures: Vec<Value>,
+    #[serde(default)]
+    influence: Influence,
     episode_count: usize,
+    #[serde(default)]
+    task_binding: Option<String>,
+    #[serde(default)]
+    task_epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,66 +179,58 @@ pub(super) struct Incoming {
     pub tool_id: Option<String>,
     pub gap: Option<String>,
     pub forked: bool,
+    pub fresh_start: bool,
     pub profile_exposure: Option<Value>,
 }
 
 impl Journal {
     pub fn open(write: bool) -> Result<Self, Error> {
-        let target = path()?;
+        Self::open_target(&path()?, write)
+    }
+
+    fn open_target(target: &Path, write: bool) -> Result<Self, Error> {
         let (root, target) = if write {
-            bounded_fs::prepare_file_target(&target)?
+            bounded_fs::prepare_file_target(target)?
         } else {
-            bounded_fs::open_file_target(&target)?
+            bounded_fs::open_file_target(target)?
         };
-        let identity = match bounded_fs::read_regular_file_with_capability(
-            &root,
-            &target,
-            MAX_BYTES,
-            0,
-            ReadControl::default(),
-        ) {
-            Ok(file) => file.identity,
-            Err(BoundedReadError::Io(error))
-                if write && error.kind() == std::io::ErrorKind::NotFound =>
-            {
+        let control = ReadControl {
+            deadline: Some(Instant::now() + Duration::from_secs(2)),
+            interrupted: None,
+        };
+        let identity = match inspect_journal_file(&root, &target, control)? {
+            Some(identity) => identity,
+            None if write => {
                 match bounded_fs::create_regular_file_with_capability(&root, &target, true) {
                     Ok((file, identity)) => {
                         file.sync_all()?;
+                        // The private creation descriptor must close before
+                        // SQLite can acquire any locks on the new database.
+                        drop(file);
                         identity
                     }
                     Err(BoundedReadError::Io(error))
                         if error.kind() == std::io::ErrorKind::AlreadyExists =>
                     {
-                        bounded_fs::read_regular_file_with_capability(
-                            &root,
-                            &target,
-                            MAX_BYTES,
-                            0,
-                            ReadControl::default(),
-                        )?
-                        .identity
+                        inspect_journal_file(&root, &target, control)?
+                            .ok_or(BoundedReadError::SnapshotChanged)?
                     }
                     Err(error) => return Err(error.into()),
                 }
             }
-            Err(error) => return Err(error.into()),
+            None => {
+                return Err(BoundedReadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "hook journal does not exist",
+                ))
+                .into())
+            }
         };
         // SQLite owns the rollback journal. Reject planted special files before
         // SQLite can open them. WAL is deliberately not enabled for this store.
         for suffix in ["-journal", "-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{suffix}", target.display()));
-            match bounded_fs::read_regular_file_with_capability(
-                &root,
-                &sidecar,
-                MAX_BYTES,
-                0,
-                ReadControl::default(),
-            ) {
-                Ok(_) => {}
-                Err(BoundedReadError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
+            inspect_journal_file(&root, &sidecar, control)?;
         }
         let flags = if write {
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -197,16 +242,9 @@ impl Journal {
             flags | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         root.verify()?;
-        if !bounded_fs::read_regular_file_with_capability(
-            &root,
-            &target,
-            MAX_BYTES,
-            0,
-            ReadControl::default(),
-        )?
-        .identity
-        .same_object(identity)
-        {
+        let current = inspect_journal_file(&root, &target, control)?
+            .ok_or(BoundedReadError::SnapshotChanged)?;
+        if !current.same_object(identity) {
             return Err("hook journal changed while opening".into());
         }
         conn.busy_timeout(Duration::from_millis(500))?;
@@ -276,6 +314,45 @@ impl Journal {
             .transpose()
     }
 
+    pub fn capture_activation(
+        &self,
+        client: &str,
+        root: &Path,
+        generation: i64,
+    ) -> Result<Value, Error> {
+        let project = super::profile::persona_project_id(root);
+        let repository = super::profile::persona_repository_id(root).unwrap_or_default();
+        let mut statement = self.conn.prepare("SELECT data FROM hook_session WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 AND json_extract(data,'$.generation')=?3 LIMIT 129")?;
+        let rows = statement
+            .query_map(params![client, root.to_string_lossy(), generation], |row| {
+                row.get::<_, String>(0)
+            })?;
+        let mut scanned = 0;
+        let mut active = 0;
+        let mut complete = project.is_some();
+        for row in rows {
+            scanned += 1;
+            if scanned > 128 {
+                complete = false;
+                break;
+            }
+            let session: Session = serde_json::from_str(&row?)?;
+            if session.capture_version == CAPTURE_VERSION
+                && session.started
+                && session.gaps.is_empty()
+                && Some(&session.project) == project.as_ref()
+                && session.repository == repository
+            {
+                active += 1;
+            }
+        }
+        Ok(
+            json!({"status":if !complete {"incomplete"} else if active > 0 {"session_start_observed"} else {"not_observed"},
+            "capture_generation":generation,"source":"local_unverified_native_event",
+            "current_sessions":if complete {Some(active)} else {None},"complete":complete}),
+        )
+    }
+
     pub fn episode(&self, id: &str) -> Result<Episode, Error> {
         let data: String =
             self.conn
@@ -336,7 +413,14 @@ impl Journal {
             active: None,
             previous_assistant: None,
             exposures: vec![],
+            influence: if incoming.fresh_start {
+                Influence::fresh()
+            } else {
+                Influence::default()
+            },
             episode_count: 0,
+            task_binding: None,
+            task_epoch: 0,
         });
         let key = incoming
             .native_key
@@ -355,6 +439,14 @@ impl Journal {
             .optional()?
         {
             session = serde_json::from_str(&data)?;
+        } else {
+            // A capture generation is not a new human interaction. Reusing a
+            // native session after recovery cannot erase prior context offers.
+            let known: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM hook_session WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 AND json_extract(data,'$.native_id')=?3)",
+                params![grant.client,grant.project_root,incoming.native_session], |row| row.get(0))?;
+            if known {
+                session.influence = Influence::default();
+            }
         }
         let active_generation = tx.prepare("SELECT 1 FROM hook_grant WHERE client=?1 AND project_root=?2 AND generation=?3 AND enabled=1")?
             .exists(params![grant.client,grant.project_root,grant.generation])?;
@@ -399,6 +491,7 @@ impl Journal {
             add_gap(&mut session.gaps, gap);
         }
         if let Some(exposure) = &incoming.profile_exposure {
+            session.influence.offer_profile();
             if !session.exposures.contains(exposure) {
                 if session.exposures.len() >= 32 {
                     add_gap(&mut session.gaps, "profile_exposure_limit");
@@ -408,6 +501,7 @@ impl Journal {
             }
         }
         let event = EventInput {
+            influence: session.influence,
             id: event_id.clone(),
             kind: incoming.kind.clone(),
             actor: incoming.actor,
@@ -595,6 +689,7 @@ impl Journal {
             }
         }
         ep.exposures.push(receipt);
+        session.influence.offer_profile();
         save_session(&tx, &session)?;
         save_episode(&tx, &ep)?;
         tx.commit()?;
@@ -713,10 +808,7 @@ impl Journal {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = snapshot_at(&tx, id)?;
-        if current.revision != revision
-            || !current.coverage_gaps.is_empty()
-            || current.profile_influenced
-        {
+        if current.revision != revision || !current.coverage_gaps.is_empty() {
             return Ok(None);
         }
         let claimed=tx.execute("INSERT INTO hook_analysis(episode,revision,processor,lease_until) VALUES(?1,?2,?3,unixepoch()+?4)
@@ -745,12 +837,56 @@ impl Journal {
     }
 
     pub fn draft_receipts(&self, episode: &str) -> Result<Vec<Value>, Error> {
+        let snapshot = self.snapshot(episode)?;
         let mut stmt = self
             .conn
             .prepare("SELECT data FROM hook_draft WHERE episode=?1 ORDER BY id LIMIT 101")?;
         let rows = stmt.query_map([episode], |r| r.get::<_, String>(0))?;
         rows.map(|row| { let draft:Draft=serde_json::from_str(&row?)?;
-            Ok(json!({"id":draft.id,"revision":draft.revision,"episode_revision":draft.episode_revision,"attested":draft.attested})) }).collect()
+            Ok(json!({"id":draft.id,"revision":draft.revision,"episode_revision":draft.episode_revision,"attested":draft.attested,
+                "evidence_class":super::semantic::evidence_class(&snapshot,&draft.content).ok(),
+                "promotion_eligible":snapshot.revision==draft.episode_revision && super::semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok()})) }).collect()
+    }
+
+    pub fn review_queue(&self, root: &Path) -> Result<Value, Error> {
+        // Metadata only, bounded to the selected repository. Finish the SQL
+        // cursor before verifying any source or calling Git.
+        let mut statement = self.conn.prepare("SELECT d.data FROM hook_draft d JOIN hook_episode e ON d.episode=e.id WHERE json_extract(e.data,'$.project_root')=?1 AND json_extract(d.data,'$.attested')=0 ORDER BY d.id LIMIT 9")?;
+        let rows = statement
+            .query_map([root.to_string_lossy()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let truncated = rows.len() > 8;
+        let mut items = Vec::new();
+        let mut snapshots = std::collections::BTreeMap::new();
+        for row in rows.iter().take(8) {
+            let draft: Draft = serde_json::from_str(row)?;
+            let snapshot = snapshots
+                .entry(draft.episode.clone())
+                .or_insert_with(|| self.snapshot(&draft.episode).ok());
+            let current = snapshot.as_ref().filter(|source| {
+                source.revision == draft.episode_revision && source.coverage_gaps.is_empty()
+            });
+            let class = current
+                .and_then(|source| super::semantic::evidence_class(source, &draft.content).ok());
+            let eligible = current.is_some_and(|source| {
+                super::semantic::validate_for_promotion(
+                    source,
+                    std::slice::from_ref(&draft.content),
+                )
+                .is_ok()
+            });
+            items.push(json!({"id":draft.id,"kind":"hook_habit_candidate","status":"authorship_review_required",
+                "source_status":if current.is_some() {"current"} else {"stale_or_unavailable"},
+                "evidence_class":class,"promotion_eligible":eligible,"source_id":draft.episode,
+                "episode_id":draft.episode,"source_revision":draft.episode_revision,
+                "support_count":draft.content.supports.len(),"contradiction_count":draft.content.contradictions.len()}));
+        }
+        Ok(
+            json!({"status":"observed","scope":"unattested_hook_drafts_in_selected_repository",
+            "total":if truncated {None} else {Some(items.len())},"returned":items.len(),"truncated":truncated,
+            "items":items,"authority":"unreviewed_observations_only"}),
+        )
     }
 
     pub fn attested_drafts(&self, session: &str) -> Result<Vec<Draft>, Error> {
@@ -772,7 +908,10 @@ impl Journal {
     pub fn attest(&mut self, id: &str, revision: &str, episode: &str) -> Result<Draft, Error> {
         let prepared = self.draft(id)?;
         let verified = self.snapshot(&prepared.episode)?;
-        super::semantic::validate(&verified, std::slice::from_ref(&prepared.content))?;
+        super::semantic::validate_for_promotion(
+            &verified,
+            std::slice::from_ref(&prepared.content),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -796,7 +935,7 @@ impl Journal {
         if input.revision != draft.episode_revision {
             return Err("episode changed; analyze and inspect again".into());
         }
-        super::semantic::validate(&input, std::slice::from_ref(&draft.content))?;
+        super::semantic::validate_for_promotion(&input, std::slice::from_ref(&draft.content))?;
         draft.attested = true;
         draft.attested_episode = Some(episode.to_owned());
         tx.execute(
@@ -951,6 +1090,7 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     let revision = hash(&json!([
         EXTRACTOR,
         super::semantic::PROSE_VERSION,
+        super::influence::VERSION,
         ep,
         session.capture_version,
         session.gaps,
@@ -973,6 +1113,233 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_reopen_preserves_active_sqlite_transaction_locks() {
+        const CHILD_DATABASE: &str = "MMCG_HOOK_JOURNAL_LOCK_TEST_DATABASE";
+        const CHILD_EXPECT_BUSY: &str = "MMCG_HOOK_JOURNAL_LOCK_TEST_EXPECT_BUSY";
+        if let Some(path) = std::env::var_os(CHILD_DATABASE) {
+            let connection = Connection::open_with_flags(
+                Path::new(&path),
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            let result = connection.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+            if std::env::var(CHILD_EXPECT_BUSY).unwrap() == "1" {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ref error)
+                            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    ),
+                    "another process acquired the active transaction's lock: {result:?}"
+                );
+            } else {
+                result.unwrap();
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("events.db");
+        let journal = Journal::open_target(&path, true).unwrap();
+        let check_child = |phase: &str, expect_busy: bool| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "miner::hooks::journal::tests::journal_reopen_preserves_active_sqlite_transaction_locks",
+                    "--nocapture",
+                ])
+                .env(CHILD_DATABASE, &path)
+                .env(CHILD_EXPECT_BUSY, if expect_busy { "1" } else { "0" })
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{phase}, busy={expect_busy}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        journal.conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        check_child("before second open", true);
+        let observer = Journal::open_target(&path, false).unwrap();
+        check_child("after second open", true);
+        drop(observer);
+        check_child("after observer drop", true);
+        journal.conn.execute_batch("ROLLBACK;").unwrap();
+        check_child("after rollback", false);
+    }
+
+    #[test]
+    fn journal_inspection_resamples_metadata_with_bounded_attempts_and_deadline() {
+        use std::cell::Cell;
+        use std::io::Write;
+
+        for continuous in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("changing.db");
+            std::fs::write(&path, b"initial").unwrap();
+            let root = RootCapability::open(directory.path()).unwrap();
+            let checks = Cell::new(0);
+            let changes = Cell::new(0);
+            let mutate_after_metadata = || {
+                checks.set(checks.get() + 1);
+                if checks.get() % 3 == 2 && (continuous || changes.get() == 0) {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap();
+                    file.write_all(b"+").unwrap();
+                    changes.set(changes.get() + 1);
+                }
+                false
+            };
+            let result = inspect_journal_file(
+                &root,
+                &path,
+                ReadControl {
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
+                    interrupted: Some(&mutate_after_metadata),
+                },
+            );
+            if continuous {
+                assert!(matches!(result, Err(BoundedReadError::SnapshotChanged)));
+                assert_eq!(changes.get(), INSPECTION_ATTEMPTS);
+            } else {
+                assert_eq!(result.unwrap().unwrap().length(), 8);
+                assert_eq!(checks.get(), 6, "repeat the entire metadata inspection");
+                assert_eq!(changes.get(), 1);
+            }
+            assert!(matches!(
+                inspect_journal_file(
+                    &root,
+                    &path,
+                    ReadControl {
+                        deadline: Some(Instant::now()),
+                        interrupted: None,
+                    }
+                ),
+                Err(BoundedReadError::DeadlineExceeded)
+            ));
+        }
+    }
+
+    #[test]
+    fn journal_open_keeps_missing_private_size_and_sqlite_settings_contracts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private").join("events.db");
+        assert!(Journal::open_target(&path, false).is_err());
+        assert!(!path.parent().unwrap().exists());
+        let journal = Journal::open_target(&path, true).unwrap();
+        assert_eq!(
+            journal
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            500
+        );
+        assert_eq!(
+            journal
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(journal);
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("events.db");
+            drop(Journal::open_target(&path, true).unwrap());
+            let oversized = PathBuf::from(format!("{}{suffix}", path.display()));
+            std::fs::File::create(&oversized)
+                .unwrap()
+                .set_len(MAX_BYTES + 1)
+                .unwrap();
+            let error = Journal::open_target(&path, false)
+                .err()
+                .expect("oversized SQLite file must fail before open");
+            assert!(
+                matches!(
+                    error.downcast_ref::<BoundedReadError>(),
+                    Some(BoundedReadError::TooLarge { .. })
+                ),
+                "{suffix}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_inspection_never_reopens_a_replaced_root_or_follows_symlinks() {
+        use std::cell::Cell;
+        use std::os::unix::fs::symlink;
+
+        for replace_root in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let parent = directory.path().join("parent");
+            std::fs::create_dir(&parent).unwrap();
+            let path = parent.join("events.db");
+            std::fs::write(&path, b"initial").unwrap();
+            let root = RootCapability::open(&parent).unwrap();
+            let checks = Cell::new(0);
+            let replace_after_metadata = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    if replace_root {
+                        std::fs::rename(&parent, directory.path().join("old")).unwrap();
+                        std::fs::create_dir(&parent).unwrap();
+                        std::fs::write(&path, b"replacement").unwrap();
+                    } else {
+                        let outside = directory.path().join("outside.db");
+                        std::fs::write(&outside, b"outside").unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        symlink(&outside, &path).unwrap();
+                    }
+                }
+                false
+            };
+            assert!(inspect_journal_file(
+                &root,
+                &path,
+                ReadControl {
+                    deadline: None,
+                    interrupted: Some(&replace_after_metadata)
+                }
+            )
+            .is_err());
+            assert_eq!(checks.get(), 2, "unsafe paths must not be resampled");
+        }
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("events.db");
+            drop(Journal::open_target(&path, true).unwrap());
+            let linked = PathBuf::from(format!("{}{suffix}", path.display()));
+            if suffix.is_empty() {
+                std::fs::remove_file(&linked).unwrap();
+            }
+            let outside = directory.path().join("outside.db");
+            std::fs::write(&outside, b"unchanged").unwrap();
+            symlink(&outside, &linked).unwrap();
+            assert!(Journal::open_target(&path, true).is_err(), "{suffix}");
+            assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        }
+    }
 
     fn journal() -> Journal {
         let conn = Connection::open_in_memory().unwrap();

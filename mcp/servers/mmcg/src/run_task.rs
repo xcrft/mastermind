@@ -64,6 +64,9 @@ pub struct RunState {
     /// its approval can be consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_identity: Option<String>,
+    /// Exact explicit hook handoff. Missing for tasks created without an intake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_revision: Option<String>,
     /// SHA-256 of the approved spec body. Legacy 16-digit hashes remain readable.
     /// Post-flight requires an exact match or a new explicit pre-flight.
     pub spec_hash: String,
@@ -273,6 +276,8 @@ pub struct RunOpts {
     pub exec: bool,
     /// Retry only fresh observed failures after a complete mechanical audit.
     pub auto_repair: bool,
+    /// Permit one bounded retry for a concrete negative semantic criterion.
+    pub auto_follow_up: bool,
     pub invocation: crate::invocation::InvocationOptions,
     /// Review once after a held audit; without exec, use the existing pending task.
     pub auto_review: bool,
@@ -306,6 +311,7 @@ impl Default for RunOpts {
             post_only: false,
             exec: false,
             auto_repair: false,
+            auto_follow_up: false,
             invocation: crate::invocation::InvocationOptions::default(),
             auto_review: false,
             review_invocation: crate::review_invocation::Options::default(),
@@ -1239,6 +1245,21 @@ pub(crate) fn validate_bound_state_identity(
     Ok(())
 }
 
+pub(crate) fn validate_intake_binding(
+    root: &Path,
+    spec: &Path,
+    state: &RunState,
+) -> Result<(), String> {
+    if state.status == "learned" {
+        return Ok(());
+    }
+    let current = crate::miner::hooks::task_intake(root, spec)?.map(|(revision, _)| revision);
+    if current != state.intake_revision {
+        return Err("task intake changed; an explicit pre-flight is required".into());
+    }
+    Ok(())
+}
+
 fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerIdentity, String> {
     let root = RootCapability::open(repo_root)
         .map_err(|error| format!("opening repository capability: {error}"))?;
@@ -1836,6 +1857,17 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         eprintln!("error: --auto-repair requires --exec, max-iterations 1..=20, and no pre-only, post-only, or force-iteration");
         return Outcome::PreFailed;
     }
+    if opts.auto_follow_up
+        && (!opts.exec
+            || !opts.auto_review
+            || opts.pre_only
+            || opts.post_only
+            || opts.force_iteration
+            || !(1..=crate::auto_repair::MAX_ITERATIONS).contains(&opts.max_iterations))
+    {
+        eprintln!("error: --auto-follow-up requires --exec and --auto-review, max-iterations 1..=20, and no pre-only, post-only, or force-iteration");
+        return Outcome::PreFailed;
+    }
     if opts.post_only && (opts.pre_only || opts.reset || opts.exec) {
         eprintln!("error: --post-only cannot be combined with --pre-only, --reset, or --exec");
         return Outcome::PreFailed;
@@ -1875,6 +1907,18 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             state,
             opts.pre_only || opts.reset || opts.exec,
         ) {
+            eprintln!("error: {error}");
+            return Outcome::PreFailed;
+        }
+    }
+
+    // Completed historical state is inspectable after source retention expires.
+    // Fresh work and unfinished completion require the exact live intake.
+    if let Some(state) = existing
+        .as_ref()
+        .filter(|state| state.status != "learned" && !(opts.pre_only || opts.reset || opts.exec))
+    {
+        if let Err(error) = validate_intake_binding(repo_root, spec_path, state) {
             eprintln!("error: {error}");
             return Outcome::PreFailed;
         }
@@ -2034,7 +2078,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
 }
 
 /// Both entry points retain the caller's controller lock through one review
-/// and final completion. Judgments never start another executor/repair iteration.
+/// and final completion. This helper itself never starts another iteration.
 fn review_and_complete_task(
     spec_path: &Path,
     repo_root: &Path,
@@ -2125,6 +2169,7 @@ fn complete_reviewed_task(
     // Recheck observed obligations only at this new completion;
     // already completed tasks retain their historical meaning.
     let receipts_current = read_preflight_spec(repo_root, spec_path).and_then(|body| {
+        validate_intake_binding(repo_root, spec_path, state)?;
         if state.invocation_required {
             crate::invocation::validate_completed(spec_path, repo_root, state)?;
         }
@@ -2161,6 +2206,7 @@ fn complete_reviewed_task(
         != state.history_snapshot_sha256.as_ref()
         || history_review_resolved(repo_root, spec_path, state).is_err()
         || crate::task_review::validate_current(repo_root, spec_path, state).is_err()
+        || validate_intake_binding(repo_root, spec_path, state).is_err()
     {
         eprintln!("error: audited inputs or semantic review changed during history refresh; re-run run-task");
         return Outcome::PostBroken;
@@ -2191,7 +2237,7 @@ fn complete_reviewed_task(
 pub(crate) fn controller_lock(
     repo_root: &Path,
     state_path: &Path,
-) -> Result<std::fs::File, String> {
+) -> Result<crate::bounded_fs::StableFileLock, String> {
     let root = RootCapability::open(repo_root).map_err(|_| "controller_root_unavailable")?;
     let path = state_path.with_extension("controller.lock");
     let parent = path.parent().ok_or("controller_lock_unavailable")?;
@@ -2238,6 +2284,8 @@ fn run_native_loop(
     let mut feedback: Option<Feedback> = None;
     let mut original: Option<RunState> = None;
     let mut executable_pins = None;
+    let bounded_retry = opts.auto_repair || opts.auto_follow_up;
+    let mut semantic_retried = false;
     if opts.auto_review {
         let contract = read_preflight_spec(repo_root, spec_path)
             .map(|body| spec::parse_str(&identity.spec_path, &body))
@@ -2253,7 +2301,7 @@ fn run_native_loop(
             return Outcome::PreFailed;
         }
     }
-    if opts.auto_repair {
+    if bounded_retry {
         let contract = read_preflight_spec(repo_root, spec_path)
             .map(|body| spec::parse_str(&identity.spec_path, &body))
             .map_err(|_| "auto_repair_contract_unavailable")
@@ -2274,7 +2322,8 @@ fn run_native_loop(
                     &prior.baseline_ref,
                     std::time::Instant::now() + crate::diff::git_timeout(),
                 )
-                .is_ok_and(|revision| revision == feedback.source_verification_inputs_sha256);
+                .is_ok_and(|revision| revision == feedback.source_verification_inputs_sha256)
+                && feedback.semantic_sources_current(repo_root).is_ok();
             if !unchanged {
                 return stop_auto_repair(
                     repo_root,
@@ -2311,7 +2360,7 @@ fn run_native_loop(
                 return stop_auto_repair(repo_root, state_path, &state, "invocation_task_changed");
             }
         };
-        if opts.auto_repair {
+        if bounded_retry {
             if let Err(reason) = crate::auto_repair::validate_contract(&parsed) {
                 return stop_auto_repair(repo_root, state_path, &state, reason);
             }
@@ -2319,6 +2368,7 @@ fn run_native_loop(
                 if state.spec_hash != first.spec_hash
                     || state.spec_path != first.spec_path
                     || state.repository_identity != first.repository_identity
+                    || state.intake_revision != first.intake_revision
                     || state.baseline_ref != first.baseline_ref
                     || state.strict != first.strict
                     || state.allow_no_index != first.allow_no_index
@@ -2372,6 +2422,7 @@ fn run_native_loop(
                         std::time::Instant::now() + crate::diff::git_timeout(),
                     )
                     .is_ok_and(|revision| revision == feedback.source_verification_inputs_sha256)
+                    || feedback.semantic_sources_current(repo_root).is_err()
                 {
                     return stop_auto_repair(
                         repo_root,
@@ -2411,7 +2462,7 @@ fn run_native_loop(
         let invocation = match invocation {
             Ok(receipt) => receipt,
             Err(reason) => {
-                if opts.auto_repair {
+                if bounded_retry {
                     return stop_auto_repair(
                         repo_root,
                         state_path,
@@ -2427,7 +2478,7 @@ fn run_native_loop(
                 return Outcome::ExecFailed;
             }
         };
-        if opts.auto_repair {
+        if bounded_retry {
             let current = receipts::repair_executable_revisions(
                 &parsed,
                 repo_root,
@@ -2451,16 +2502,79 @@ fn run_native_loop(
             index_path,
             &state,
             state_path,
-            opts.auto_repair.then_some(&mut evidence),
+            bounded_retry.then_some(&mut evidence),
         );
         if outcome == Outcome::PostHeld && opts.auto_review {
-            return review_and_complete_task(
+            let reviewed_outcome = review_and_complete_task(
                 spec_path,
                 repo_root,
                 index_path,
                 state_path,
                 &opts.review_invocation,
             );
+            if !opts.auto_follow_up || semantic_retried || reviewed_outcome == Outcome::PostHeld {
+                return reviewed_outcome;
+            }
+            let stopped = match load_state(state_path) {
+                Ok(Some(state)) if state.status == "history_review_required" => state,
+                _ => return reviewed_outcome,
+            };
+            let packet = match crate::task_review::follow_up(spec_path, repo_root) {
+                Ok(packet) => packet,
+                Err(reason) => {
+                    eprintln!("Automatic semantic follow-up stopped: {reason}");
+                    return reviewed_outcome;
+                }
+            };
+            if let Err(reason) = crate::auto_repair::assess_semantic(&packet) {
+                eprintln!("Automatic semantic follow-up stopped: {reason}");
+                return reviewed_outcome;
+            }
+            if stopped.iteration >= opts.max_iterations {
+                eprintln!("Automatic semantic follow-up stopped: auto_follow_up_iteration_budget_exhausted");
+                return reviewed_outcome;
+            }
+            let Some(evidence) = evidence else {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    &stopped,
+                    "auto_follow_up_audit_unavailable",
+                );
+            };
+            if !crate::invocation::validate_completed(spec_path, repo_root, &state)
+                .is_ok_and(|current| current == invocation)
+                || !history_input_snapshot(repo_root, spec_path, &state)
+                    .is_ok_and(|inputs| inputs.snapshot == evidence.inputs_snapshot)
+                || !receipts::repair_input_revision(
+                    repo_root,
+                    &state.baseline_ref,
+                    std::time::Instant::now() + crate::diff::git_timeout(),
+                )
+                .is_ok_and(|revision| revision == packet.target.verification_inputs_sha256)
+            {
+                return stop_auto_repair(
+                    repo_root,
+                    state_path,
+                    &stopped,
+                    "auto_follow_up_inputs_changed",
+                );
+            }
+            feedback = match Feedback::new_semantic(
+                &evidence.audit,
+                &invocation,
+                evidence.inputs_snapshot,
+                packet,
+                executable_pins.clone().unwrap_or_default(),
+                opts.max_iterations,
+            ) {
+                Ok(feedback) => Some(feedback),
+                Err(reason) => return stop_auto_repair(repo_root, state_path, &stopped, reason),
+            };
+            semantic_retried = true;
+            println!("\nAutomatic semantic follow-up: one criterion-focused retry, iteration {} of {}. Reviewer assertions do not grant new scope or prove correctness.", stopped.iteration + 1, opts.max_iterations);
+            previous = Some(stopped);
+            continue;
         }
         if !opts.auto_repair || outcome == Outcome::PostHeld {
             return outcome;
@@ -2613,6 +2727,17 @@ fn run_pre(
         return Outcome::PreFailed;
     }
 
+    let intake_revision = match crate::miner::hooks::task_intake(repo_root, spec_path) {
+        Ok(source) => source.map(|(revision, _)| revision),
+        Err(error) => {
+            eprintln!("error: task intake is unavailable: {error}");
+            return Outcome::PreFailed;
+        }
+    };
+    if previous.is_some_and(|state| state.intake_revision.is_some()) && intake_revision.is_none() {
+        eprintln!("error: task intake binding disappeared; restore or explicitly replace it");
+        return Outcome::PreFailed;
+    }
     let spec_body = match read_preflight_spec(repo_root, spec_path) {
         Ok(body) => body,
         Err(error) => {
@@ -2752,6 +2877,15 @@ fn run_pre(
             return Outcome::PreFailed;
         }
     };
+    if crate::miner::hooks::task_intake(repo_root, spec_path)
+        .map(|source| source.map(|(revision, _)| revision))
+        .ok()
+        .as_ref()
+        != Some(&intake_revision)
+    {
+        eprintln!("error: task intake changed during pre-flight");
+        return Outcome::PreFailed;
+    }
     let state = RunState {
         status: "approved".into(),
         risk: Some(declared_risk.into()),
@@ -2760,6 +2894,7 @@ fn run_pre(
         last_artifact: Some("spec.md".into()),
         spec_path: final_identity.spec_path,
         repository_identity: Some(final_identity.repository),
+        intake_revision,
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         held_snapshot_sha256: None,
@@ -3405,6 +3540,7 @@ verifications: []\n\
             last_artifact: Some("spec.md".into()),
             spec_path: "specs/foo.md".into(),
             repository_identity: Some(format!("git-worktree:sha256:{}", "a".repeat(64))),
+            intake_revision: None,
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             held_snapshot_sha256: Some("feedface".into()),

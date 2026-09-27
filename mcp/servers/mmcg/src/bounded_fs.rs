@@ -698,7 +698,7 @@ pub(crate) fn create_regular_file_with_capability(
 pub(crate) fn open_locked_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     open_locked_regular_file(root, path, true)
 }
 
@@ -706,15 +706,116 @@ pub(crate) fn open_locked_regular_file_with_capability(
 pub(crate) fn try_locked_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     open_locked_regular_file(root, path, false)
+}
+
+/// Probe an existing stable lock without creating or changing filesystem state.
+/// `None` means a verified file is locked by another handle. Missing paths and
+/// all other failures remain errors, never evidence of a live owner.
+pub(crate) fn try_locked_existing_regular_file_with_capability(
+    root: &RootCapability,
+    path: &Path,
+) -> Result<Option<StableFileLock>, BoundedReadError> {
+    root.verify()?;
+    let relative = root.relative(path)?;
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_relative_directory_nofollow(&root.directory, parent_relative)?;
+    let parent_identity = directory_identity(&parent)?;
+    let name = relative.file_name().ok_or(BoundedReadError::InvalidPath)?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let open = |directory: &Dir| {
+        directory
+            .open_with(name, &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(classify_nofollow_open_error)
+    };
+    let file = open(&parent)?;
+    let before = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
+    if !file.metadata().map_err(BoundedReadError::Io)?.is_file() {
+        return Err(BoundedReadError::NotRegular);
+    }
+    let acquired = match file.try_lock() {
+        Ok(()) => true,
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(error)) => return Err(BoundedReadError::Io(error)),
+    };
+    let verified = (|| {
+        root.verify()?;
+        let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)
+            .map_err(|_| BoundedReadError::SnapshotChanged)?;
+        if !directory_identity(&current_parent)?.same_object(parent_identity) {
+            return Err(BoundedReadError::SnapshotChanged);
+        }
+        let current = open(&current_parent).map_err(|_| BoundedReadError::SnapshotChanged)?;
+        let after = stable_file_identity(&file).map_err(BoundedReadError::Io)?;
+        let current_identity = stable_file_identity(&current).map_err(BoundedReadError::Io)?;
+        root.verify()?;
+        if before != after || after != current_identity {
+            return Err(BoundedReadError::SnapshotChanged);
+        }
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        if acquired {
+            let _ = file.unlock();
+        }
+        return Err(error);
+    }
+    Ok(if acquired {
+        Some(StableFileLock::from_locked_file(file))
+    } else {
+        None
+    })
+}
+
+/// Own an acquired lock, not just its descriptor. On Unix, another thread's
+/// fork can briefly retain the same open file description before exec, even
+/// with close-on-exec enabled. Explicit unlock ends our critical section at
+/// guard drop instead of waiting for all inherited descriptors to close.
+#[derive(Debug)]
+pub(crate) struct StableFileLock {
+    file: std::fs::File,
+    released: bool,
+}
+
+impl StableFileLock {
+    /// The caller must already own the lock on this open file description.
+    pub(crate) fn from_locked_file(file: std::fs::File) -> Self {
+        Self {
+            file,
+            released: false,
+        }
+    }
+
+    /// Release explicitly when the caller needs to propagate an unlock error.
+    /// A failure still leaves Drop a best-effort release before closing.
+    pub(crate) fn unlock(mut self) -> std::io::Result<()> {
+        let result = self.file.unlock();
+        self.released = result.is_ok();
+        result
+    }
+}
+
+impl Drop for StableFileLock {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.file.unlock();
+        }
+    }
 }
 
 fn open_locked_regular_file(
     root: &RootCapability,
     path: &Path,
     wait: bool,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     root.verify()?;
     let relative = root.relative(path)?;
     let components = relative
@@ -826,7 +927,7 @@ fn open_locked_regular_file(
         let _ = file.unlock();
         return Err(error);
     }
-    Ok(file)
+    Ok(StableFileLock::from_locked_file(file))
 }
 
 /// Atomically replace one repository-owned regular file through a retained
@@ -1859,6 +1960,98 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read.bytes, b"fn main() {}\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_guard_drop_releases_before_inherited_descriptor_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RootCapability::open(temp.path()).unwrap();
+        for mode in ["blocking", "nonblocking", "existing"] {
+            let path = temp.path().join(format!("{mode}.lock"));
+            let owner = match mode {
+                "blocking" => open_locked_regular_file_with_capability(&root, &path).unwrap(),
+                "nonblocking" => try_locked_regular_file_with_capability(&root, &path).unwrap(),
+                "existing" => {
+                    std::fs::write(&path, b"").unwrap();
+                    try_locked_existing_regular_file_with_capability(&root, &path)
+                        .unwrap()
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            };
+            // A fork before exec holds the same open file description, even
+            // when the descriptor is close-on-exec. Dup models that lifetime
+            // deterministically without forking the threaded test harness.
+            let inherited = owner.file.try_clone().unwrap();
+            drop(owner);
+            let acquired = try_locked_existing_regular_file_with_capability(&root, &path)
+                .unwrap()
+                .expect("guard drop must release while inherited descriptor remains open");
+            drop(acquired);
+            drop(inherited);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_lock_probe_distinguishes_missing_busy_and_free_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RootCapability::open(temp.path()).unwrap();
+        let path = temp.path().join("owner.lock");
+        assert!(matches!(
+            try_locked_existing_regular_file_with_capability(&root, &path),
+            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!path.exists());
+        let owner = try_locked_regular_file_with_capability(&root, &path).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert!(
+            try_locked_existing_regular_file_with_capability(&root, &path)
+                .unwrap()
+                .is_none()
+        );
+        drop(owner);
+        let acquired = try_locked_existing_regular_file_with_capability(&root, &path)
+            .unwrap()
+            .unwrap();
+        assert!(
+            try_locked_existing_regular_file_with_capability(&root, &path)
+                .unwrap()
+                .is_none()
+        );
+        drop(acquired);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert!(std::fs::read(&path).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_lock_probe_rejects_symlinks_special_files_and_replaced_parent() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("locks");
+        std::fs::create_dir(&directory).unwrap();
+        let root = RootCapability::open(&directory).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let path = directory.join("owner.lock");
+        symlink(&outside, &path).unwrap();
+        assert!(try_locked_existing_regular_file_with_capability(&root, &path).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(try_locked_existing_regular_file_with_capability(&root, &path).is_err());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&directory, temp.path().join("old-locks")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert!(matches!(
+            try_locked_existing_regular_file_with_capability(&root, &path),
+            Err(BoundedReadError::SnapshotChanged)
+        ));
     }
 
     #[test]

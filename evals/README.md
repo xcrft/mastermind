@@ -8,6 +8,8 @@ answer quality. Every published result identifies its source, inputs and runtime
 | Question | Evaluation | Result |
 |---|---|---|
 | Can an iteration complete without required evidence? | [Control loop](control-loop.md) | Finite guard model and selected production CLI regressions |
+| Do hook intake and profile boundaries hold? | [Control loop](control-loop.md#connection-to-the-implementation) | Fixture checks for binding, influence, worker lifecycle, readiness and private UI metadata |
+| Does the prompt refiner preserve intent? | [Hook intake runner](control-loop.md#refiner-protocol-and-model-evaluation) | Production parser plus retained processor outputs, semantic quality needs independent review |
 | Are persona measurements reproducible? | [Persona replay](../docs/reference/persona-mining-contract.md) | Frozen Git attribution, measured diff accounting and cache consistency |
 | Does a shipped role follow its instructions? | `runner.py` | Focused model-backed behavioral cases |
 | Does retrieval improve a research answer? | [Research benchmark](benchmark/README.md) | Matched conditions, retained answers and offline assessments |
@@ -22,7 +24,8 @@ python3 -m evals.control_loop --output .mastermind/research/control-loop/run-01
 python3 -m evals.benchmark_corpus --source-repo .
 ```
 
-The control-loop command requires Rust and Git on POSIX and runs real CLI tests.
+Run the control-loop command after sources stop changing. It requires Rust, Git
+and Node on POSIX, runs real CLI tests and one aggregate Lens DOM/static suite.
 The Python harness tests use fixtures. Neither command calls a model.
 
 ## Behavioral suites
@@ -35,10 +38,20 @@ The Python harness tests use fixtures. Neither command calls a model.
 | `intake` | [intake.jsonl](intake.jsonl) | Goal refinement | Refine, pass through or ask |
 | `workflow` | [workflow.jsonl](workflow.jsonl) | Portable workflow skills | Required behavior in a focused scenario |
 
-[Hook intake cases](hook-intake.jsonl) are a separate, author-labeled synthetic
-corpus for the automatic refiner. They are not wired to `runner.py` and no model
-quality result is published for them. Production protocol and lifecycle checks
-run in Rust's `persona_hooks_refiner_cli` suite using deterministic processors.
+[Hook intake cases](hook-intake.jsonl) use the separate `evals.hook_intake` runner:
+
+```sh
+python3 -m evals.hook_intake --binary /absolute/path/to/mmcg \
+  --processor /absolute/path/to/protocol-processor \
+  --output /private/new-report-directory
+```
+
+It invokes the production parser with task admission disabled and retains every
+attempt. The processor is explicit, labels stay hidden from it, and failed
+attempts stay in the denominator. See the [bounds and output contract](control-loop.md#refiner-protocol-and-model-evaluation).
+No model-quality result is published for this corpus. Rust's
+`persona_hooks_refiner_cli` checks protocol and lifecycle with deterministic
+processors.
 
 | Hook corpus | Cases |
 |---|---:|

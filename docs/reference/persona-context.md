@@ -36,11 +36,11 @@ The MCP equivalent is:
 
 | Layer | Content and selection |
 |---|---|
-| `person` | Applicable reviewed preferences/habits and Git observations, filtered by `paths`, role and workflow |
+| `person` | Applicable reviewed preferences/habits and Git observations, filtered by `paths`, role and workflow. Granted readers can also see bounded review metadata |
 | `project` | Root CONTEXT sections and candidate claims selected by `query` |
 | `documentation` | Relevant Markdown sections, `not_requested` without a query |
 | `code` | Repository diff against `since`. Personal path filters do not narrow this diff |
-| `work` | At most 20 task records, with completion marked historical and `current_checkout: not_verified` |
+| `work` | At most 20 task records with invocation metadata pinned to the same recorded iteration. Completion is historical, `current_checkout: not_verified` |
 
 | Layer state or property | Consumer contract |
 |---|---|
@@ -71,6 +71,10 @@ The MCP equivalent is:
 | Surface | Contract |
 |---|---|
 | Profiles tab | Selected advice, source freshness, code evidence and task history |
+| Review queue | At most 8 unattested hook draft IDs in the selected repository, source/influence status and counts. No candidate wording or source quotes |
+| Queue access | Existing exact-root audience grant, including a profile with no accepted preferences yet. Denial or unavailable evidence returns no private rows |
+| Recorded invocation | Delivery revisions and mediation counts for the scanned iteration. Does not revalidate the current checkout |
+| Model use | Unknown, even when matching context bytes were offered to a process |
 | Counts | Describe selection and corpus limits, not character or competence |
 | `/api/context` | Separate from `/api/lens`, loopback, same-origin, read-only, `no-store` |
 | Private data lifetime | Lazy load. Clear on refresh or leaving the tab |

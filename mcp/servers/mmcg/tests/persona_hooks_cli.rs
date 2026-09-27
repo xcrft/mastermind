@@ -412,7 +412,7 @@ fn fabricated_semantic_citation_is_rejected_without_profile_side_effects() {
 }
 
 #[test]
-fn offered_profile_is_recorded_before_native_context_and_blocks_own_echo_mining() {
+fn offered_profile_preserves_original_observation_and_restricts_later_echo_promotion() {
     let f = Fixture::new();
     let one = f.capture("s1", "t1");
     f.propose(&f.analyze(&one));
@@ -441,20 +441,30 @@ fn offered_profile_is_recorded_before_native_context_and_blocks_own_echo_mining(
     assert_eq!(ep["profile_influenced"], true);
     let show = f.success(&["miner", "hooks", "show", ep["id"].as_str().unwrap()]);
     assert!(show["capture"]["exposures"][0]["habits"][0]["review_revision"].is_string());
-    let p = f.processor(&ep, QUOTE);
-    assert!(!f
-        .run(&[
-            "miner",
-            "hooks",
-            "analyze",
-            ep["id"].as_str().unwrap(),
-            "--revision",
-            ep["revision"].as_str().unwrap(),
-            "--processor",
-            p.to_str().unwrap()
-        ])
-        .status
-        .success());
+    let first = f.analyze(&ep);
+    let inspected = f.success(&["miner", "hooks", "draft", first["id"].as_str().unwrap()]);
+    assert_eq!(inspected["evidence_class"], "no_recorded_prior_exposure");
+    assert_eq!(inspected["promotion_eligible"], true);
+    f.event("s3", "t4", "UserPromptSubmit", json!({"prompt":QUOTE,"influence":{"prior_unknown":false,"prior_profile_context":false,"prior_refiner_context":false}}));
+    f.event("s3", "t4", "Stop", json!({"last_assistant_message":"Done"}));
+    let later = f.analyze(&f.episode("t4"));
+    let inspected = f.success(&["miner", "hooks", "draft", later["id"].as_str().unwrap()]);
+    assert_eq!(inspected["evidence_class"], "dependent_observation");
+    assert_eq!(inspected["promotion_eligible"], false);
+    let count = f.habit().episodes;
+    let result = f.tty(&[
+        "miner",
+        "hooks",
+        "propose",
+        later["id"].as_str().unwrap(),
+        "--revision",
+        later["revision"].as_str().unwrap(),
+        "--episode",
+        "echo-task",
+        "--attest-human",
+    ]);
+    assert!(!result.status.success());
+    assert_eq!(f.habit().episodes, count);
 }
 
 #[test]
@@ -480,20 +490,10 @@ fn ordinary_mcp_profile_tool_read_marks_following_echo_as_influenced() {
         f.event("s", "t2", "Stop", json!({"last_assistant_message":"Done"}));
         let input = f.episode("t2");
         assert_eq!(input["profile_influenced"], true);
-        let p = f.processor(&input, QUOTE);
-        assert!(!f
-            .run(&[
-                "miner",
-                "hooks",
-                "analyze",
-                input["id"].as_str().unwrap(),
-                "--revision",
-                input["revision"].as_str().unwrap(),
-                "--processor",
-                p.to_str().unwrap()
-            ])
-            .status
-            .success());
+        let draft = f.analyze(&input);
+        let inspected = f.success(&["miner", "hooks", "draft", draft["id"].as_str().unwrap()]);
+        assert_eq!(inspected["evidence_class"], "dependent_observation");
+        assert_eq!(inspected["promotion_eligible"], false);
     }
 }
 

@@ -2870,19 +2870,23 @@ fn view_at_with_verifier(
 
     // Scope is a retrieval boundary, including the source I/O budget. Never
     // open another project's or role's transcripts just to discard its claim.
-    agg.feedback.retain(|entry| {
-        feedback_applies(
-            &entry.scope,
-            &languages,
-            &codes,
-            repo,
-            paths,
-            role,
-            workflow,
-        )
-    });
-    agg.habits
-        .retain(|habit| habit_applies(habit, repo, role, workflow));
+    let select = |agg: &mut store::Aggregate| {
+        agg.feedback.retain(|entry| {
+            feedback_applies(
+                &entry.scope,
+                &languages,
+                &codes,
+                repo,
+                paths,
+                role,
+                workflow,
+            )
+        });
+        agg.habits
+            .retain(|habit| habit_applies(habit, repo, role, workflow));
+    };
+    select(&mut agg);
+    let selected_store_revision = agg.profile_revision();
     let source_verification_complete = mark_unavailable_claims(&db, &mut agg, verify);
     let selection_revision = crate::hex::encode(&Sha256::digest(
         json!([
@@ -3065,6 +3069,17 @@ fn view_at_with_verifier(
     }
     if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
         return Err("profile response metadata exceeds the requested budget".into());
+    }
+    // Source verification can perform slow filesystem reads. A dismissed
+    // selected claim or revoked grant cannot authorize the assembled response.
+    // Unrelated scoped claims do not invalidate this selection.
+    let mut current = db.aggregate()?;
+    select(&mut current);
+    if !db.reader_allowed(&root, client)? {
+        return Ok(denied());
+    }
+    if current.profile_revision() != selected_store_revision {
+        return Ok(json!({"schema_version":2,"status":"source_changed","precision_notes":notes}));
     }
     Ok(packet)
 }
@@ -4229,7 +4244,7 @@ diff --git a/app/bar.ts b/app/bar.ts
             let script = root.path().join("claude");
             std::fs::write(
                 &script,
-                "#!/bin/sh\nsleep 5 &\necho $!\nprintf '## Design patterns & tendencies (interpreted)\\n\\n- bounded\\n'\nexit 0\n",
+                "#!/bin/sh\nsleep 30 &\necho $!\nprintf '## Design patterns & tendencies (interpreted)\\n\\n- bounded\\n'\nexit 0\n",
             )
             .unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -4239,13 +4254,15 @@ diff --git a/app/bar.ts b/app/bar.ts
                 &script,
                 root.path(),
                 "prompt",
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
             .unwrap();
             let mut lines = output.lines();
             let pid: u32 = lines.next().unwrap().parse().unwrap();
             assert!(lines.any(|line| line == "- bounded"));
-            assert!(started.elapsed() < Duration::from_secs(1));
+            // Test group cleanup, not sub-second process startup under the
+            // full parallel suite. Waiting for the descendant still fails.
+            assert!(started.elapsed() < Duration::from_secs(5));
             let check = Command::new("ps")
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
@@ -5539,6 +5556,95 @@ diff --git a/src/a.rs b/src/a.rs
         assert!(denied.get("evidence_basis").is_none());
         assert!(denied.get("feedback").is_none());
         assert!(denied.get("habits").is_none());
+    }
+
+    #[test]
+    fn source_verification_cannot_publish_a_revoked_grant_or_rejected_claim() {
+        struct ChangeDuringRead {
+            writer: store::ProfileStore,
+            root: String,
+            entry: store::Feedback,
+            action: &'static str,
+            called: bool,
+        }
+        impl QuoteVerifier for ChangeDuringRead {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                assert!(!self.called);
+                self.called = true;
+                match self.action {
+                    "revoke" => self
+                        .writer
+                        .set_reader_grant(&self.root, "test", false)
+                        .unwrap(),
+                    "reject" => {
+                        self.writer
+                            .review_feedback(
+                                &self.entry.key,
+                                "rejected",
+                                Some(&self.entry.review_revision()),
+                            )
+                            .unwrap();
+                    }
+                    "unrelated" => {
+                        store::fixture_preference(
+                            &mut self.writer,
+                            "Other project preference",
+                            "project:other",
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                panic!("only the selected preference is verified")
+            }
+        }
+        for (action, status) in [
+            ("revoke", "access_denied"),
+            ("reject", "source_changed"),
+            ("unrelated", "ok"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let path = root.join("style.db");
+            let mut writer = store::ProfileStore::open(&path).unwrap();
+            writer
+                .set_reader_grant(root.to_str().unwrap(), "test", true)
+                .unwrap();
+            store::fixture_preference(&mut writer, "Selected private preference", "global");
+            let entry = writer.feedback().unwrap().remove(0);
+            writer
+                .review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+                .unwrap();
+            let entry = writer.feedback().unwrap().remove(0);
+            let mut verify = ChangeDuringRead {
+                writer,
+                root: root.to_str().unwrap().into(),
+                entry,
+                action,
+                called: false,
+            };
+            let packet = view_at_with_verifier(
+                &path,
+                &[],
+                None,
+                4000,
+                Some((&root, "test")),
+                None,
+                None,
+                &mut verify,
+            )
+            .unwrap();
+            assert!(verify.called);
+            assert_eq!(packet["status"], status);
+            if action != "unrelated" {
+                assert!(packet.get("feedback").is_none());
+                assert!(!packet.to_string().contains("Selected private preference"));
+            } else {
+                assert_eq!(packet["feedback"].as_array().unwrap().len(), 1);
+            }
+        }
     }
 
     #[test]

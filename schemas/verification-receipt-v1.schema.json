@@ -39,6 +39,7 @@
       "required": ["repository_identity", "spec_path", "spec_sha256", "baseline_oid", "iteration", "preflight_started_at"],
       "properties": {
         "repository_identity": {"type": "string", "minLength": 1},
+        "intake_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "spec_path": {"type": "string", "minLength": 1},
         "spec_sha256": {"$ref": "#/$defs/sha256"},
         "baseline_oid": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},

@@ -415,11 +415,11 @@ pub(super) fn context(input: &Input, response: &Response) -> Result<String, Erro
         match response.workflow_intent {
             Intent::ActivateMastermind => (
                 "mastermind-task-planning",
-                "Use the existing mastermind-task-planning skill for the user's requested scope. This activation is not task execution or a permission grant.",
+                "Use the existing mastermind-task-planning skill for the user's requested scope. After creating the exact spec, run mastermind miner hooks bind-task <intake_id> --spec <spec> --project-root <project_root>. Bind before preflight. This activation does not approve or execute the task.",
             ),
             Intent::ContinueActive => (
                 "bound_active_task",
-                "Continue only the task explicitly named by active_task after checking its current lifecycle through existing task commands. Do not create a new task from this continuation.",
+                "Continue only active_task after checking its current lifecycle. For a new iteration, bind this intake to that spec with mastermind miner hooks bind-task <intake_id> --spec <active_task> --expected-binding <current revision from state.intake.json>, then use the existing controller. Do not create another task from this continuation.",
             ),
             Intent::Ordinary => (
                 "native_work",

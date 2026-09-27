@@ -449,6 +449,9 @@ enum Cmd {
     /// Run explicitly declared verification commands and record bound results.
     #[command(subcommand)]
     Verification(VerificationCmd),
+    /// Internal native invocation mediation.
+    #[command(subcommand, hide = true)]
+    Invocation(InvocationCmd),
     /// Inspect current evidence for structured acceptance criteria.
     #[command(subcommand)]
     Acceptance(AcceptanceCmd),
@@ -550,12 +553,18 @@ enum Cmd {
         /// Run Claude with bound context and permission policy in a new preflight iteration.
         #[arg(long, conflicts_with = "post_only")]
         exec: bool,
+        /// Mediate supported native tool requests against the approved file and check scope.
+        #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only"])]
+        guarded_exec: bool,
         /// Retry fresh failed checks inside the approved scope and finite iteration budget.
         #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
         auto_repair: bool,
         /// Review a held task once and complete if resolved. Without --exec, resume its existing audit.
         #[arg(long, conflicts_with_all = ["pre_only", "post_only"])]
         auto_review: bool,
+        /// Allow one concrete negative-criterion repair followed by a fresh review.
+        #[arg(long, requires_all = ["exec", "auto_review"], conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
+        auto_follow_up: bool,
         /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
         #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
         review_timeout: u64,
@@ -827,6 +836,14 @@ enum ReviewCmd {
 }
 
 #[derive(Subcommand)]
+enum InvocationCmd {
+    Guard {
+        #[arg(long)]
+        manifest: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum VerificationCmd {
     /// Execute one observed check from a spec with a completed preflight.
     Run {
@@ -1057,6 +1074,11 @@ enum MinerCmd {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    /// Manage one explicitly configured, bounded background mining worker.
+    Worker {
+        #[command(subcommand)]
+        cmd: HookWorkerCmd,
+    },
     /// Preview or install project-local hooks. Collection is local and opt-in.
     Setup {
         #[arg(long, value_parser=["claude","codex"])]
@@ -1098,6 +1120,32 @@ enum HookCmd {
     /// Inspect the immutable prompt and result of a hook refiner attempt.
     Intake {
         id: String,
+    },
+    /// Evaluate one synthetic refiner input through the production protocol. No admission.
+    EvaluateRefiner {
+        input: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "provider",
+            conflicts_with = "provider"
+        )]
+        processor: Option<PathBuf>,
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u64).range(1..=20))]
+        timeout: u64,
+    },
+    /// Bind one admitted intake to an exact task. Does not approve or execute it.
+    BindTask {
+        intake: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        expected_binding: Option<String>,
     },
     Status {
         #[arg(long, value_parser=["claude","codex"])]
@@ -1189,6 +1237,49 @@ enum HookCmd {
         episode: String,
         #[arg(long)]
         revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookWorkerCmd {
+    Start {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, conflicts_with = "provider")]
+        processor: Option<PathBuf>,
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=120))]
+        timeout: Option<u64>,
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1..=16))]
+        limit: Option<u16>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=10000))]
+        max_calls: Option<u64>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=86400))]
+        max_runtime: Option<u64>,
+    },
+    Status {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    Stop {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    #[command(hide = true)]
+    Run {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        run_id: String,
     },
 }
 
@@ -2416,6 +2507,16 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
+        Cmd::Invocation(InvocationCmd::Guard { manifest }) => {
+            match mmcg::invocation::guard_hook(&manifest) {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(2),
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    std::process::exit(2);
+                }
+            }
+        }
         Cmd::Verification(VerificationCmd::Run {
             spec,
             root,
@@ -2627,8 +2728,10 @@ fn run_cli_inner(
             pre_only,
             post_only,
             exec,
+            guarded_exec,
             auto_repair,
             auto_review,
+            auto_follow_up,
             review_timeout,
             review_max_turns,
             exec_timeout,
@@ -2652,6 +2755,7 @@ fn run_cli_inner(
                     exec,
                     auto_repair,
                     auto_review,
+                    auto_follow_up,
                     review_invocation: mmcg::review_invocation::Options {
                         timeout_secs: review_timeout,
                         max_turns: review_max_turns,
@@ -2660,6 +2764,7 @@ fn run_cli_inner(
                         wall_timeout_secs: exec_timeout,
                         max_turns: exec_max_turns,
                         profile_client,
+                        guarded: guarded_exec,
                     },
                     allow_no_index,
                     strict,
@@ -2694,6 +2799,43 @@ fn run_cli_inner(
         Cmd::Miner(MinerCmd::Hooks(command)) => {
             use mmcg::miner::hooks;
             match command {
+                HookCmd::Worker { cmd } => {
+                    let result = match cmd {
+                        HookWorkerCmd::Start {
+                            client,
+                            project_root,
+                            processor,
+                            provider,
+                            args,
+                            timeout,
+                            limit,
+                            max_calls,
+                            max_runtime,
+                        } => hooks::background::start(
+                            &client,
+                            &project_root,
+                            hooks::background::StartOptions {
+                                processor,
+                                provider,
+                                args,
+                                timeout,
+                                limit: limit.map(usize::from),
+                                max_calls,
+                                max_runtime,
+                            },
+                        )?,
+                        HookWorkerCmd::Status {
+                            client,
+                            project_root,
+                        } => hooks::background::status(&client, &project_root)?,
+                        HookWorkerCmd::Stop {
+                            client,
+                            project_root,
+                        } => hooks::background::stop(&client, &project_root)?,
+                        HookWorkerCmd::Run { id, run_id } => hooks::background::run(&id, &run_id)?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
                 HookCmd::Setup {
                     client,
                     project_root,
@@ -2724,6 +2866,31 @@ fn run_cli_inner(
                     )?;
                 }
                 HookCmd::Intake { id } => hooks::intake(&id)?,
+                HookCmd::EvaluateRefiner {
+                    input,
+                    processor,
+                    provider,
+                    args,
+                    timeout,
+                } => {
+                    hooks::evaluate_refiner(
+                        &input,
+                        &hooks::RefinerConfig {
+                            processor,
+                            provider,
+                            args,
+                            timeout_secs: timeout,
+                        },
+                    )?;
+                }
+                HookCmd::BindTask {
+                    intake,
+                    spec,
+                    project_root,
+                    expected_binding,
+                } => {
+                    hooks::bind_task(&intake, &spec, &project_root, expected_binding.as_deref())?;
+                }
                 HookCmd::Receive {
                     client,
                     project_root,

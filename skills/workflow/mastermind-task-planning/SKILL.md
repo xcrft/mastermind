@@ -9,8 +9,7 @@ metadata:
 
 # Mastermind task planning
 
-Plan only when a durable implementation contract adds value. The product has
-three modes; ceremony is a risk control, not a default.
+Choose the mode by risk.
 
 ## Choose the mode first
 
@@ -57,15 +56,12 @@ Use [[mastermind-codegraph-research]] for structural claims:
 5. `mmcg_history` when prior decisions, failed approaches, audits, or lessons can
    affect the design. Use `mmcg_tasks` only when the task-spec-only view is useful.
 
-History search is retrieval evidence, not proof of rationale or current truth.
-Read the returned Markdown, honor active/superseding records, and let a relevant
-dead end constrain the new plan. User approval records provenance and authority;
-it does not verify a technical claim without code, test, or runtime evidence.
+History retrieval is not current proof. Read sources and active/superseding
+records. User approval records scope and authority, not technical truth.
 
-The graph is syntactic evidence, not runtime proof. Preserve collision,
-precision, stale-index, and truncation notes. For one or two lookups work
-inline; use the researcher for a bounded batch and the investigator only for an
-unknown-cause bug.
+The graph is syntactic evidence. Preserve collision, precision, stale-index and
+truncation notes. Work inline for one or two lookups. Use the researcher for
+bounded batches and the investigator for unknown-cause bugs.
 
 When the author has a profile, call `mmcg_profile` with the planned paths,
 `role: planner`, and `workflow` equal to the selected task mode (`direct`,
@@ -112,6 +108,11 @@ unknowns never cancel that finding. Preserve the final verdict and remaining
 unknowns in the handoff rather than converting them to approval.
 
 ## Create a verified contract
+
+For a hook intake, read `mastermind miner hooks intake <id>` and preserve its
+original scope. Before preflight, run `mastermind miner hooks bind-task <id>
+--spec <spec>`. Continuation uses only `active_task`, with `--expected-binding`
+from `state.intake.json`. Binding grants no approval.
 
 Start from the CLI template:
 

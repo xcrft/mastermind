@@ -1132,6 +1132,7 @@ mod tests {
             )
             .unwrap(),
             repository_identity: Some(crate::facts::repository_identity(root).unwrap()),
+            intake_revision: None,
             spec_hash: crate::run_task::hash_text(&spec_body),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,

@@ -1039,6 +1039,131 @@ async function testPrivateProfiles() {
   assert.equal(embedded.nodes.get("profiles-content").textContent, "");
 }
 
+async function testProfileEvidenceMetadata() {
+  const packet = contextFixture();
+  packet.layers.person.data.evidence = {
+    repos: 3, legacy_repos: 1, commits: 90, listed_unique: 35, diff_sampled: 20,
+    context_conflicts: 2, git_identity_status: "unverified_author_filter",
+  };
+  packet.layers.person.data.workflow = ["Verification commands occur in the sample."];
+  packet.layers.person.data.range = ["Small and large changes both occur."];
+  packet.layers.person.data.associations = [{ name: "project/api", commits: 12 }];
+  packet.layers.person.data.review_queue = {
+    status: "ok", returned: 2, total: null, truncated: true,
+    items: [
+      { id: "dependent-candidate", kind: "hook_draft", status: "pending", source_status: "current",
+        evidence_class: "dependent_observation", promotion_eligible: false, source_id: "hook:session-1",
+        episode_id: "episode-1", source_revision: "c".repeat(64), support_count: 2, contradiction_count: 1,
+        quote: "PRIVATE_RAW_QUOTE_MUST_NOT_RENDER", statement: "PRIVATE_RAW_STATEMENT_MUST_NOT_RENDER" },
+      { id: "untracked-candidate <script>alert(1)</script>", kind: "hook_draft", status: "pending",
+        evidence_class: "unknown_influence", source_status: "unknown", source_id: "hook:session-2" },
+    ],
+  };
+  const task = packet.layers.work.data.tasks[0];
+  task.phase = "awaiting_history_review";
+  task.completion_basis = "in_progress";
+  task.state = {
+    invocation_required: true, semantic_review_required: true, semantic_review_approved: false,
+    history_review_approved: false, semantic_review_revision: "d".repeat(64),
+    history_snapshot_sha256: "e".repeat(64), blocking_reason: "Structured review still required",
+  };
+  task.invocation = {
+    invocation_id: "native-run-1", status: "passed", role: "executor",
+    binding: { spec_sha256: "1".repeat(64), baseline_oid: "2".repeat(40), iteration: 2, intake_revision: "3".repeat(64) },
+    context_delivery: { status: "offered_to_process", input_origin: "controller_generated", model_use: "confirmed",
+      context_revision: packet.context_revision, context_wire_sha256: "4".repeat(64),
+      prompt_sha256: "5".repeat(64), prompt_bytes: 1200, context_bytes: 400, bytes_offered: 1200 },
+    mediation: { schema_version: 1, manifest_sha256: "6".repeat(64), decisions_sha256: "7".repeat(64),
+      observed_calls: 3, allowed_calls: 3, denied_calls: 0, reconciled: true,
+      coverage: "observed_native_tool_use_only", enforcement: "conditional_native_hook_no_os_sandbox_command_failure_fallback",
+      native_session_id: "PRIVATE_NATIVE_SESSION_MUST_NOT_RENDER", tool_input: "PRIVATE_NATIVE_TOOL_INPUT_MUST_NOT_RENDER" },
+    prompt: "RAW_NATIVE_PROMPT_MUST_NOT_RENDER", executable: { resolved_path: "/PRIVATE_EXECUTABLE_MUST_NOT_RENDER" },
+  };
+  const harness = await renderFixture(fixture(), { width: 390, contextResponse: { payload: packet } });
+  assert.equal(harness.contextFetchCalls(), 0);
+  harness.nodes.get("mode-profiles").dispatch("click");
+  await harness.settle();
+  const content = harness.nodes.get("profiles-content");
+  const availability = content.querySelectorAll(".profiles-availability")[0];
+  assert.equal(availability.querySelectorAll("tbody")[0].querySelectorAll("tr").length, 5);
+  assert.equal(availability.querySelectorAll(".profiles-table-scroll")[0].getAttribute("tabindex"), "0");
+  assert.match(availability.textContent, /Changed files: 1 returned · total unknown/);
+  assert.match(availability.textContent, /Partial result or indexed corpus/);
+  assert.doesNotMatch(availability.textContent, /\d+%|fully understood|fully indexed/i);
+
+  const person = content.querySelectorAll(".profiles-card--person")[0];
+  assert.match(person.textContent, /Reported commits90Listed unique commits35Legacy repositories1/);
+  assert.match(person.textContent, /Workflow patterns in the sampleVerification commands occur in the sample/);
+  assert.match(person.textContent, /project\/apiAssociated commits12/);
+  const queue = person.querySelectorAll(".profiles-review-queue")[0];
+  assert.match(queue.textContent, /Returned2TotalUnknownPage extentPartial page/);
+  assert.match(queue.textContent, /Prior contextdependent observationProposal eligibilityNot eligible for profile proposal/);
+  assert.match(queue.textContent, /Prior contextunknown influenceProposal eligibilityNot supplied/);
+  assert.match(queue.textContent, /Source IDhook:session-1Episode IDepisode-1Source revision/);
+  assert.match(queue.textContent, /untracked-candidate <script>alert\(1\)<\/script>/);
+  assert.doesNotMatch(queue.textContent, /PRIVATE_RAW_/);
+  assert.equal(queue.querySelectorAll("script").length, 0);
+
+  const work = content.querySelectorAll(".profiles-card--work")[0];
+  assert.match(work.textContent, /Structured review approvedNoHistory review approvedNo/);
+  assert.match(work.textContent, /Invocation IDnative-run-1/);
+  assert.match(work.textContent, /Intake revision333333/);
+  assert.match(work.textContent, /DeliveryOffered to native process/);
+  assert.match(work.textContent, /Model useUnknown/);
+  assert.match(work.textContent, /Compared with this previewSame declared revision/);
+  assert.doesNotMatch(work.textContent, /Completed in stored history|Model useconfirmed|RAW_NATIVE|PRIVATE_EXECUTABLE/);
+  const mediation = work.querySelectorAll(".profiles-mediation")[0];
+  assert.equal(mediation.getAttribute("aria-label"), "Recorded action mediation");
+  assert.match(mediation.textContent, /Observed calls3Allowed calls3Denied calls0/);
+  assert.match(mediation.textContent, /ReconciliationRecorded as reconciledCoverageObserved native tool calls only/);
+  assert.match(mediation.textContent, /EnforcementConditional native hook/);
+  assert.match(mediation.textContent, /Manifest revision666666/);
+  assert.match(mediation.textContent, /Decision record revision777777/);
+  assert.match(mediation.textContent, /not an OS sandbox/);
+  assert.match(mediation.textContent, /command hook fails, native permissions may apply/);
+  assert.doesNotMatch(work.textContent, /PRIVATE_NATIVE_SESSION|PRIVATE_NATIVE_TOOL_INPUT|protected=true|all actions protected/);
+  harness.nodes.get("mode-review").dispatch("click");
+  assert.equal(content.textContent, "", "Queue and receipt metadata follow the existing private clearing boundary");
+
+  const missing = contextFixture();
+  missing.layers.person.data.review_queue = { status: "unavailable", returned: 0, total: 0, items: [{ id: "DO_NOT_SHOW_DENIED_QUEUE" }] };
+  missing.layers.person.data.omitted = ["habits"];
+  missing.layers.person.data.habits = [];
+  missing.layers.work.data.tasks[0].invocation = {
+    status: "failed", invocation_id: "partial-run", context_delivery: { status: "partially_offered", bytes_offered: 0 },
+  };
+  const limited = await renderFixture(fixture(), { contextResponse: { payload: missing } });
+  limited.nodes.get("mode-profiles").dispatch("click");
+  await limited.settle();
+  const limitedContent = limited.nodes.get("profiles-content");
+  const unavailable = limitedContent.querySelectorAll(".profiles-review-queue")[0];
+  assert.match(unavailable.textContent, /contents and counts are unknown/);
+  assert.doesNotMatch(unavailable.textContent, /DO_NOT_SHOW_DENIED_QUEUE|Returned0|Total0/);
+  assert.match(limitedContent.querySelectorAll(".profiles-availability")[0].textContent, /Habits: Not included/);
+  assert.match(limitedContent.querySelectorAll(".profiles-card--work")[0].textContent, /Bytes offered0Prompt bytesUnknown/);
+  assert.match(limitedContent.querySelectorAll(".profiles-card--work")[0].textContent, /Compared with this previewNot comparable/);
+  assert.doesNotMatch(limitedContent.querySelectorAll(".profiles-card--work")[0].textContent, /Same declared revision/);
+  const absentMediation = limitedContent.querySelectorAll(".profiles-mediation")[0];
+  assert.match(absentMediation.textContent, /No recorded mediation/);
+  assert.doesNotMatch(absentMediation.textContent, /Denied calls0|Allowed calls0|Observed calls0|Recorded as reconciled/);
+
+  const partialPacket = contextFixture();
+  partialPacket.layers.work.data.tasks[0].invocation = {
+    status: "pending", mediation: { schema_version: 1, observed_calls: 0, denied_calls: null, reconciled: false,
+      manifest_sha256: "partial <script>alert(1)</script>" },
+  };
+  const partial = await renderFixture(fixture(), { contextResponse: { payload: partialPacket } });
+  partial.nodes.get("mode-profiles").dispatch("click");
+  await partial.settle();
+  const partialMediation = partial.nodes.get("profiles-content").querySelectorAll(".profiles-mediation")[0];
+  assert.match(partialMediation.textContent, /Observed calls0Allowed callsUnknownDenied callsUnknown/);
+  assert.match(partialMediation.textContent, /ReconciliationNot reconciledCoverageNot suppliedEnforcementNot supplied/);
+  assert.match(partialMediation.textContent, /Decision record revisionNot supplied/);
+  assert.match(partialMediation.textContent, /partial <script>alert\(1\)<\/script>/);
+  assert.equal(partialMediation.querySelectorAll("script").length, 0);
+  assert.doesNotMatch(partialMediation.textContent, /Denied calls0|Recorded as reconciled|Conditional native hook/);
+}
+
 async function main() {
   assert.doesNotMatch(
     APP_SOURCE,
@@ -2271,6 +2396,7 @@ async function main() {
   assert.doesNotMatch(harness.nodes.get("inspector-body").textContent, /CODEOWNERS/i);
 
   await testPrivateProfiles();
+  await testProfileEvidenceMetadata();
 
   process.stdout.write("Lens focused DOM/static regressions passed\n");
 }

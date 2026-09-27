@@ -288,6 +288,45 @@ pub(in crate::miner) fn bind(
     let path = marker_path(root.canonical_root(), Path::new(&relative));
     let old = read_marker(&root, &path)?;
     let mut db = Journal::open(true)?;
+    // A missing local marker does not erase SQL history or its compare-and-swap
+    // boundary. Only an explicit retry of the latest binding can restore it.
+    let missing_predecessor = if old.is_none() {
+        let saved: Option<String> = db.conn.query_row(
+            "SELECT data FROM hook_task_binding WHERE project_root=?1 AND spec_path=?2 ORDER BY rowid DESC LIMIT 1",
+            params![root.canonical_root().to_string_lossy(), relative],
+            |row| row.get(0),
+        ).optional()?;
+        saved
+            .map(|data| serde_json::from_str::<TaskBinding>(&data))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(binding) = &missing_predecessor {
+        if binding.schema != 1
+            || binding.revision != revision(binding)?
+            || binding.project_root != root.canonical_root().to_string_lossy()
+            || binding.spec_path != relative
+        {
+            return Err("saved task binding is invalid".into());
+        }
+        if expected != Some(binding.revision.as_str()) {
+            return Err("task intake marker is missing; recovery requires --expected-binding for the latest journal binding".into());
+        }
+        if binding.intake_id == id {
+            validate_task(&root, binding)?;
+            write_marker(
+                &root,
+                &path,
+                &Marker {
+                    status: "bound".into(),
+                    binding: binding.clone(),
+                },
+                None,
+            )?;
+            return Ok(json!({"status":"bound","recovered":true,"binding":binding}));
+        }
+    }
     // An exact retry only finishes the local publication. It must not reactivate
     // an ended session or move a newer session pointer back to this task.
     if let Some((marker, file)) = &old {
@@ -311,7 +350,7 @@ pub(in crate::miner) fn bind(
                 "task already has an intake; replacement requires --expected-binding".into(),
             );
         }
-    } else if expected.is_some() {
+    } else if expected.is_some() && missing_predecessor.is_none() {
         return Err("expected task binding is absent".into());
     }
     let used: bool = db.conn.query_row(
@@ -336,13 +375,20 @@ pub(in crate::miner) fn bind(
     {
         return Err("intake is no longer the current admitted prompt".into());
     }
-    let predecessor = old.as_ref().and_then(|(marker, _)| {
-        if marker.status == "prepared" && marker.binding.intake_id == id {
-            marker.binding.previous_revision.as_deref()
-        } else {
-            Some(marker.binding.revision.as_str())
-        }
-    });
+    let predecessor = old
+        .as_ref()
+        .map(|(marker, _)| {
+            if marker.status == "prepared" && marker.binding.intake_id == id {
+                marker.binding.previous_revision.as_deref()
+            } else {
+                Some(marker.binding.revision.as_str())
+            }
+        })
+        .unwrap_or_else(|| {
+            missing_predecessor
+                .as_ref()
+                .map(|binding| binding.revision.as_str())
+        });
     if receipt
         .response
         .as_ref()
@@ -370,7 +416,12 @@ pub(in crate::miner) fn bind(
             .ok_or("task epoch exhausted")?,
         previous_revision: old
             .as_ref()
-            .map(|(marker, _)| marker.binding.revision.clone()),
+            .map(|(marker, _)| marker.binding.revision.clone())
+            .or_else(|| {
+                missing_predecessor
+                    .as_ref()
+                    .map(|binding| binding.revision.clone())
+            }),
     };
     // The prepared retry retains its original predecessor, hence its revision.
     if let Some((marker, _)) = &old {

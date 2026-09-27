@@ -1057,6 +1057,11 @@ enum MinerCmd {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    /// Manage one explicitly configured, bounded background mining worker.
+    Worker {
+        #[command(subcommand)]
+        cmd: HookWorkerCmd,
+    },
     /// Preview or install project-local hooks. Collection is local and opt-in.
     Setup {
         #[arg(long, value_parser=["claude","codex"])]
@@ -1215,6 +1220,49 @@ enum HookCmd {
         episode: String,
         #[arg(long)]
         revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookWorkerCmd {
+    Start {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, conflicts_with = "provider")]
+        processor: Option<PathBuf>,
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=120))]
+        timeout: Option<u64>,
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1..=16))]
+        limit: Option<u16>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=10000))]
+        max_calls: Option<u64>,
+        #[arg(long, value_parser=clap::value_parser!(u64).range(1..=86400))]
+        max_runtime: Option<u64>,
+    },
+    Status {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    Stop {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    #[command(hide = true)]
+    Run {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        run_id: String,
     },
 }
 
@@ -2720,6 +2768,43 @@ fn run_cli_inner(
         Cmd::Miner(MinerCmd::Hooks(command)) => {
             use mmcg::miner::hooks;
             match command {
+                HookCmd::Worker { cmd } => {
+                    let result = match cmd {
+                        HookWorkerCmd::Start {
+                            client,
+                            project_root,
+                            processor,
+                            provider,
+                            args,
+                            timeout,
+                            limit,
+                            max_calls,
+                            max_runtime,
+                        } => hooks::background::start(
+                            &client,
+                            &project_root,
+                            hooks::background::StartOptions {
+                                processor,
+                                provider,
+                                args,
+                                timeout,
+                                limit: limit.map(usize::from),
+                                max_calls,
+                                max_runtime,
+                            },
+                        )?,
+                        HookWorkerCmd::Status {
+                            client,
+                            project_root,
+                        } => hooks::background::status(&client, &project_root)?,
+                        HookWorkerCmd::Stop {
+                            client,
+                            project_root,
+                        } => hooks::background::stop(&client, &project_root)?,
+                        HookWorkerCmd::Run { id, run_id } => hooks::background::run(&id, &run_id)?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
                 HookCmd::Setup {
                     client,
                     project_root,

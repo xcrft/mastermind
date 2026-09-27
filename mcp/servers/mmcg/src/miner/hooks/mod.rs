@@ -1,10 +1,13 @@
 //! Native client capture, semantic hypotheses and a reviewed bridge to the
 //! existing profile. Hooks record observations; they do not grant tool access.
 
+pub mod background;
 mod evaluate;
 mod fence;
+mod influence;
 mod install;
 mod journal;
+pub mod readiness;
 mod refiner;
 mod semantic;
 mod worker;
@@ -101,8 +104,9 @@ pub fn setup(
         receipt["capture_grant"] = serde_json::to_value(grant)?;
     }
     receipt["refiner"] = refiner_status(effective_refiner.as_ref());
+    receipt["readiness"] = readiness::report(client_id, &root)?;
     receipt["profile_delivery"] = json!({"client_id":profile_client,"requires_existing_read_grant":true,
-        "note":"Known profile exposure disqualifies independent habit mining in v1."});
+        "note":"Each event retains prior context exposure. Dependent observations can be inspected but cannot count as unexposed habit support."});
     receipt["next"]=json!("Restart a client session after setup. Collection remains local; analyze explicitly selects a processor. User-channel citations require authorship attestation and habit review.");
     print(&receipt)
 }
@@ -110,17 +114,28 @@ pub fn setup(
 pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {
     client(client_id)?;
     let root = root.canonicalize()?;
-    if !journal::path()?.exists() {
-        return print(&json!({"status":"not_configured"}));
-    }
-    let db = Journal::open(false)?;
-    let config = db.refiner_config(client_id, &root)?;
-    print(
-        &json!({"grant":db.grant(client_id,&root)?,"capture_pending":fence::pending(client_id,&root)?,"journal":journal::path()?,
+    let observed = readiness::report(client_id, &root)?;
+    let legacy = (|| -> Result<Value, Error> {
+        match std::fs::symlink_metadata(journal::path()?) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(json!({"status":"not_configured"}));
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let db = Journal::open(false)?;
+        let config = db.refiner_config(client_id, &root)?;
+        Ok(
+            json!({"grant":db.grant(client_id,&root)?,"capture_pending":fence::pending(client_id,&root)?,"journal":journal::path()?,
         "coverage":"Native hook events only; no hidden reasoning, complete transcript or universal tool mediation.",
         "protection":"capture_only","source_attribution":"user_channel_requires_attestation",
         "refiner":refiner_status(config.as_ref())}),
-    )
+        )
+    })();
+    let mut packet = legacy
+        .unwrap_or_else(|_| json!({"status":"unavailable","reason":"capture_journal_unavailable"}));
+    packet["readiness"] = observed;
+    print(&packet)
 }
 
 fn refiner_status(config: Option<&RefinerConfig>) -> Value {
@@ -460,6 +475,9 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         tool_id: tool,
         gap,
         forked,
+        fresh_start: kind == "SessionStart"
+            && v.get("source").and_then(Value::as_str) == Some("startup")
+            && !forked,
         profile_exposure,
     })
 }
@@ -618,6 +636,20 @@ fn mine_page(
     limit: usize,
     after: Option<&str>,
 ) -> Result<Value, Error> {
+    mine_page_controlled(root, processor, provider, args, timeout, limit, after, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mine_page_controlled(
+    root: &Path,
+    processor: Option<&Path>,
+    provider: Option<&str>,
+    args: &[String],
+    timeout: u64,
+    limit: usize,
+    after: Option<&str>,
+    mut control: Option<&mut dyn background::BatchControl>,
+) -> Result<Value, Error> {
     let root = root.canonicalize()?;
     if let Some(after) = after {
         check_id(after)?;
@@ -625,7 +657,7 @@ fn mine_page(
     if !journal::path()?.exists() {
         return Ok(json!({"results":[],"next_after":null,"failed":false}));
     }
-    let processor_receipt = json!({"path":processor,"provider":provider,"arguments_digest":hash(&json!(args)),"protocol":EXTRACTOR});
+    let processor_receipt = background::processor_fingerprint(&root, processor, provider, args)?;
     let mut db = Journal::open(true)?;
     let rows = db.list(&root, 33, after.unwrap_or(""))?;
     let mut results = vec![];
@@ -642,8 +674,14 @@ fn mine_page(
         next = Some(id.to_owned());
         visited += 1;
         let input = db.snapshot(id)?;
-        if !input.coverage_gaps.is_empty() || input.profile_influenced {
-            skipped.push(json!({"episode":id,"reason":"incomplete_or_influenced"}));
+        if control
+            .as_ref()
+            .is_some_and(|control| control.client() != input.client)
+        {
+            continue;
+        }
+        if !input.coverage_gaps.is_empty() {
+            skipped.push(json!({"episode":id,"reason":"incomplete"}));
             continue;
         }
         let Some(lease) = db.claim_analysis(id, &input.revision, &processor_receipt, timeout)?
@@ -653,6 +691,9 @@ fn mine_page(
         };
         attempts += 1;
         let result = (|| -> Result<Vec<journal::Draft>, Error> {
+            if let Some(control) = control.as_mut() {
+                control.before_attempt()?;
+            }
             let drafts = match (processor, provider) {
                 (Some(processor), None) => semantic::analyze(&input, processor, args, timeout)?,
                 (None, Some("claude")) if args.is_empty() => {
@@ -668,6 +709,9 @@ fn mine_page(
             if current.revision != input.revision || !current.coverage_gaps.is_empty() {
                 return Err("episode changed during analysis".into());
             }
+            if let Some(control) = control.as_mut() {
+                control.before_publish()?;
+            }
             db.store_drafts(&input, &drafts, processor_receipt.clone())
         })();
         match result {
@@ -680,9 +724,7 @@ fn mine_page(
                     break;
                 }
                 if db.snapshot(id).is_ok_and(|current| {
-                    current.revision != input.revision
-                        || !current.coverage_gaps.is_empty()
-                        || current.profile_influenced
+                    current.revision != input.revision || !current.coverage_gaps.is_empty()
                 }) {
                     // A new turn can supersede a draft while a provider runs.
                     // Retry its new revision on the next pass without forcing
@@ -709,7 +751,10 @@ pub fn draft(id: &str) -> Result<(), Error> {
     let draft = db.draft(id)?;
     let snapshot = db.snapshot(&draft.episode)?;
     print(
-        &json!({"draft":draft,"current":snapshot.revision==draft.episode_revision && snapshot.coverage_gaps.is_empty(),"episode":snapshot}),
+        &json!({"draft":draft,"current":snapshot.revision==draft.episode_revision && snapshot.coverage_gaps.is_empty(),
+        "evidence_class":semantic::evidence_class(&snapshot,&draft.content).ok(),
+        "promotion_eligible":snapshot.revision==draft.episode_revision && semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok(),
+        "episode":snapshot}),
     )
 }
 
@@ -734,7 +779,7 @@ fn candidate(db: &Journal, draft: &Draft) -> Result<store::CollectedCandidate, E
     if !draft.attested || input.revision != draft.episode_revision {
         return Err("draft needs current human authorship attestation".into());
     }
-    semantic::validate(&input, std::slice::from_ref(&draft.content))?;
+    semantic::validate_for_promotion(&input, std::slice::from_ref(&draft.content))?;
     let citation = draft
         .content
         .supports

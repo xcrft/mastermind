@@ -2,6 +2,7 @@
 //! pending counter fences readers before stdin is consumed; an interrupted
 //! capture cannot leave its older evidence apparently current.
 
+use super::influence::Influence;
 use super::semantic::{EpisodeInput, EventInput, SemanticDraft};
 use super::{hash, Error, EXTRACTOR};
 use crate::bounded_fs::{self, BoundedReadError, ReadControl};
@@ -86,6 +87,8 @@ struct Session {
     active: Option<String>,
     previous_assistant: Option<EventInput>,
     exposures: Vec<Value>,
+    #[serde(default)]
+    influence: Influence,
     episode_count: usize,
     #[serde(default)]
     task_binding: Option<String>,
@@ -135,6 +138,7 @@ pub(super) struct Incoming {
     pub tool_id: Option<String>,
     pub gap: Option<String>,
     pub forked: bool,
+    pub fresh_start: bool,
     pub profile_exposure: Option<Value>,
 }
 
@@ -285,6 +289,45 @@ impl Journal {
             .transpose()
     }
 
+    pub fn capture_activation(
+        &self,
+        client: &str,
+        root: &Path,
+        generation: i64,
+    ) -> Result<Value, Error> {
+        let project = super::profile::persona_project_id(root);
+        let repository = super::profile::persona_repository_id(root).unwrap_or_default();
+        let mut statement = self.conn.prepare("SELECT data FROM hook_session WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 AND json_extract(data,'$.generation')=?3 LIMIT 129")?;
+        let rows = statement
+            .query_map(params![client, root.to_string_lossy(), generation], |row| {
+                row.get::<_, String>(0)
+            })?;
+        let mut scanned = 0;
+        let mut active = 0;
+        let mut complete = project.is_some();
+        for row in rows {
+            scanned += 1;
+            if scanned > 128 {
+                complete = false;
+                break;
+            }
+            let session: Session = serde_json::from_str(&row?)?;
+            if session.capture_version == CAPTURE_VERSION
+                && session.started
+                && session.gaps.is_empty()
+                && Some(&session.project) == project.as_ref()
+                && session.repository == repository
+            {
+                active += 1;
+            }
+        }
+        Ok(
+            json!({"status":if !complete {"incomplete"} else if active > 0 {"session_start_observed"} else {"not_observed"},
+            "capture_generation":generation,"source":"local_unverified_native_event",
+            "current_sessions":if complete {Some(active)} else {None},"complete":complete}),
+        )
+    }
+
     pub fn episode(&self, id: &str) -> Result<Episode, Error> {
         let data: String =
             self.conn
@@ -345,6 +388,11 @@ impl Journal {
             active: None,
             previous_assistant: None,
             exposures: vec![],
+            influence: if incoming.fresh_start {
+                Influence::fresh()
+            } else {
+                Influence::default()
+            },
             episode_count: 0,
             task_binding: None,
             task_epoch: 0,
@@ -366,6 +414,14 @@ impl Journal {
             .optional()?
         {
             session = serde_json::from_str(&data)?;
+        } else {
+            // A capture generation is not a new human interaction. Reusing a
+            // native session after recovery cannot erase prior context offers.
+            let known: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM hook_session WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 AND json_extract(data,'$.native_id')=?3)",
+                params![grant.client,grant.project_root,incoming.native_session], |row| row.get(0))?;
+            if known {
+                session.influence = Influence::default();
+            }
         }
         let active_generation = tx.prepare("SELECT 1 FROM hook_grant WHERE client=?1 AND project_root=?2 AND generation=?3 AND enabled=1")?
             .exists(params![grant.client,grant.project_root,grant.generation])?;
@@ -410,6 +466,7 @@ impl Journal {
             add_gap(&mut session.gaps, gap);
         }
         if let Some(exposure) = &incoming.profile_exposure {
+            session.influence.offer_profile();
             if !session.exposures.contains(exposure) {
                 if session.exposures.len() >= 32 {
                     add_gap(&mut session.gaps, "profile_exposure_limit");
@@ -419,6 +476,7 @@ impl Journal {
             }
         }
         let event = EventInput {
+            influence: session.influence,
             id: event_id.clone(),
             kind: incoming.kind.clone(),
             actor: incoming.actor,
@@ -606,6 +664,7 @@ impl Journal {
             }
         }
         ep.exposures.push(receipt);
+        session.influence.offer_profile();
         save_session(&tx, &session)?;
         save_episode(&tx, &ep)?;
         tx.commit()?;
@@ -724,10 +783,7 @@ impl Journal {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = snapshot_at(&tx, id)?;
-        if current.revision != revision
-            || !current.coverage_gaps.is_empty()
-            || current.profile_influenced
-        {
+        if current.revision != revision || !current.coverage_gaps.is_empty() {
             return Ok(None);
         }
         let claimed=tx.execute("INSERT INTO hook_analysis(episode,revision,processor,lease_until) VALUES(?1,?2,?3,unixepoch()+?4)
@@ -756,12 +812,15 @@ impl Journal {
     }
 
     pub fn draft_receipts(&self, episode: &str) -> Result<Vec<Value>, Error> {
+        let snapshot = self.snapshot(episode)?;
         let mut stmt = self
             .conn
             .prepare("SELECT data FROM hook_draft WHERE episode=?1 ORDER BY id LIMIT 101")?;
         let rows = stmt.query_map([episode], |r| r.get::<_, String>(0))?;
         rows.map(|row| { let draft:Draft=serde_json::from_str(&row?)?;
-            Ok(json!({"id":draft.id,"revision":draft.revision,"episode_revision":draft.episode_revision,"attested":draft.attested})) }).collect()
+            Ok(json!({"id":draft.id,"revision":draft.revision,"episode_revision":draft.episode_revision,"attested":draft.attested,
+                "evidence_class":super::semantic::evidence_class(&snapshot,&draft.content).ok(),
+                "promotion_eligible":snapshot.revision==draft.episode_revision && super::semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok()})) }).collect()
     }
 
     pub fn attested_drafts(&self, session: &str) -> Result<Vec<Draft>, Error> {
@@ -783,7 +842,10 @@ impl Journal {
     pub fn attest(&mut self, id: &str, revision: &str, episode: &str) -> Result<Draft, Error> {
         let prepared = self.draft(id)?;
         let verified = self.snapshot(&prepared.episode)?;
-        super::semantic::validate(&verified, std::slice::from_ref(&prepared.content))?;
+        super::semantic::validate_for_promotion(
+            &verified,
+            std::slice::from_ref(&prepared.content),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -807,7 +869,7 @@ impl Journal {
         if input.revision != draft.episode_revision {
             return Err("episode changed; analyze and inspect again".into());
         }
-        super::semantic::validate(&input, std::slice::from_ref(&draft.content))?;
+        super::semantic::validate_for_promotion(&input, std::slice::from_ref(&draft.content))?;
         draft.attested = true;
         draft.attested_episode = Some(episode.to_owned());
         tx.execute(
@@ -962,6 +1024,7 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     let revision = hash(&json!([
         EXTRACTOR,
         super::semantic::PROSE_VERSION,
+        super::influence::VERSION,
         ep,
         session.capture_version,
         session.gaps,

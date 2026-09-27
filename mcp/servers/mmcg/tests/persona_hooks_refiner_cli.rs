@@ -179,6 +179,71 @@ fn bound_intake_survives_tool_events_and_routes_only_its_session() {
 }
 
 #[test]
+fn refiner_exposure_is_event_scoped_and_recovery_cannot_erase_it() {
+    let f = Fixture::new("ordinary");
+    f.setup("codex", "8");
+    f.start("codex", "influence");
+    let quote = "Before changing an API, check its callers and preserve the contract.";
+    let inspect = |turn: &str, expected: &str| {
+        let mut prompt = f.prompt("influence", turn, quote);
+        prompt["influence"] = json!({"prior_unknown":false,"prior_profile_context":false,"prior_refiner_context":false});
+        f.native("codex", &prompt);
+        f.native("codex", &f.event("influence", turn, "Stop"));
+        let receipt = f.receipts().pop().unwrap();
+        let episode = f.success(&[
+            "miner",
+            "hooks",
+            "show",
+            receipt["input"]["episode_id"].as_str().unwrap(),
+        ])["episode"]
+            .clone();
+        let event = episode["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["origin"] == "user_channel_unverified")
+            .unwrap();
+        let response = json!({"schema":1,"episode_id":episode["id"],"episode_revision":episode["revision"],"drafts":[{
+            "when":"When changing a public API contract","behavior":"Checks callers before changing an API contract",
+            "rationale":null,"outcome":null,"exception":"No exception was observed.","role":null,"workflow":null,
+            "evidence_kind":"technical_approach","supports":[{"event_id":event["id"],"quote":quote}],"contradictions":[]}]});
+        let output_path = f.harness.join("semantic-response.json");
+        fs::write(&output_path, response.to_string()).unwrap();
+        let processor = f.harness.join("semantic.py");
+        fs::write(&processor, "import sys,json\nfrom pathlib import Path\njson.load(sys.stdin)\nprint(Path(sys.argv[1]).read_text())\n").unwrap();
+        let output = f
+            .cli()
+            .args([
+                "miner",
+                "hooks",
+                "analyze",
+                episode["id"].as_str().unwrap(),
+                "--revision",
+                episode["revision"].as_str().unwrap(),
+                "--processor",
+            ])
+            .arg(&f.python)
+            .arg("--processor-arg=-I")
+            .arg(format!("--processor-arg={}", processor.display()))
+            .arg(format!("--processor-arg={}", output_path.display()))
+            .output()
+            .unwrap();
+        let draft = parse(output)["drafts"][0].clone();
+        let inspected = f.success(&["miner", "hooks", "draft", draft["id"].as_str().unwrap()]);
+        assert_eq!(inspected["evidence_class"], expected);
+        assert_eq!(
+            inspected["promotion_eligible"],
+            expected == "no_recorded_prior_exposure"
+        );
+    };
+    inspect("first", "no_recorded_prior_exposure");
+    inspect("second", "dependent_observation");
+    f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    f.start("codex", "influence");
+    inspect("recovered", "unknown_influence");
+}
+
+#[test]
 fn marker_loss_or_a_conflicting_event_blocks_the_first_preflight() {
     let f = Fixture::new("activation");
     f.setup("codex", "8");
@@ -347,6 +412,241 @@ fn prepared_handoff_blocks_run_and_allows_exact_cas_recovery() {
         ])
         .status
         .success());
+}
+
+#[test]
+fn missing_intake_marker_exact_recovery_requires_latest_cas_without_changing_session() {
+    let f = Fixture::new("activation");
+    f.setup("codex", "8");
+    f.start("codex", "missing-marker");
+    f.native(
+        "codex",
+        &f.prompt(
+            "missing-marker",
+            "one",
+            "Use Mastermind to inspect this code.",
+        ),
+    );
+    let intake = f.receipts().remove(0);
+    let id = intake["input"]["id"].as_str().unwrap();
+    let session = intake["input"]["session_id"].as_str().unwrap();
+    let spec = ".mastermind/tasks/001-missing/spec.md";
+    let text = "# Inspect this code\n";
+    fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+    fs::write(f.project.join(spec), text).unwrap();
+    let bound = f.success(&["miner", "hooks", "bind-task", id, "--spec", spec]);
+    let revision = bound["binding"]["revision"].as_str().unwrap();
+    let marker = f
+        .project
+        .join(".mastermind/tasks/001-missing/state.intake.json");
+    fs::remove_file(&marker).unwrap();
+    let before = f.binding_state(session);
+    let missing = f.run(&["miner", "hooks", "bind-task", id, "--spec", spec]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--expected-binding"));
+    assert!(!f
+        .run(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            id,
+            "--spec",
+            spec,
+            "--expected-binding",
+            &"0".repeat(64)
+        ])
+        .status
+        .success());
+    assert!(!marker.exists());
+    assert_eq!(f.binding_state(session), before);
+
+    fs::write(f.project.join(spec), "# A different task scope\n").unwrap();
+    assert!(
+        !f.run(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            id,
+            "--spec",
+            spec,
+            "--expected-binding",
+            revision
+        ])
+        .status
+        .success(),
+        "exact recovery must retain the task identity"
+    );
+    assert!(!marker.exists());
+    assert_eq!(f.binding_state(session), before);
+    fs::write(f.project.join(spec), text).unwrap();
+    let recovered = f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        id,
+        "--spec",
+        spec,
+        "--expected-binding",
+        revision,
+    ]);
+    assert_eq!(recovered["status"], "bound");
+    assert_eq!(recovered["recovered"], true);
+    assert_eq!(recovered["binding"], bound["binding"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&marker).unwrap()).unwrap(),
+        bound
+    );
+    assert_eq!(
+        f.binding_state(session),
+        before,
+        "exact recovery only restores the missing local marker"
+    );
+    assert_eq!(
+        f.calls().len(),
+        1,
+        "recovery must not invoke the refiner again"
+    );
+
+    f.native("codex", &f.event("missing-marker", "one", "Stop"));
+    f.mode("continuation");
+    let continued = f.native(
+        "codex",
+        &f.prompt("missing-marker", "two", "Continue that task."),
+    );
+    assert!(continued.to_string().contains("bound_active_task"));
+    let intake = f.receipts().remove(1);
+    assert_eq!(intake["input"]["active_task"], spec);
+    assert_eq!(intake["task_binding_revision"], revision);
+    assert_eq!(intake["session_epoch"], before["session"]["task_epoch"]);
+}
+
+#[test]
+fn missing_intake_marker_replacement_requires_cas_and_rejects_superseded_intakes() {
+    let f = Fixture::new("activation");
+    f.setup("claude", "8");
+    f.start("claude", "replace-marker");
+    f.native(
+        "claude",
+        &f.prompt(
+            "replace-marker",
+            "one",
+            "Use Mastermind to inspect this code.",
+        ),
+    );
+    let first = f.receipts().remove(0);
+    let first_id = first["input"]["id"].as_str().unwrap();
+    let session = first["input"]["session_id"].as_str().unwrap();
+    let spec = ".mastermind/tasks/001-replacement/spec.md";
+    fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+    fs::write(f.project.join(spec), "# Inspect this code\n").unwrap();
+    let initial = f.success(&["miner", "hooks", "bind-task", first_id, "--spec", spec]);
+    let initial_revision = initial["binding"]["revision"].as_str().unwrap();
+    f.native("claude", &f.event("replace-marker", "one", "Stop"));
+    f.mode("continuation");
+    f.native(
+        "claude",
+        &f.prompt("replace-marker", "two", "Continue the existing inspection."),
+    );
+    let next = f.receipts().remove(1);
+    let next_id = next["input"]["id"].as_str().unwrap();
+    assert_eq!(next["task_binding_revision"], initial_revision);
+    let marker = f
+        .project
+        .join(".mastermind/tasks/001-replacement/state.intake.json");
+    fs::remove_file(&marker).unwrap();
+    let before = f.binding_state(session);
+    for args in [
+        vec!["miner", "hooks", "bind-task", next_id, "--spec", spec],
+        vec![
+            "miner",
+            "hooks",
+            "bind-task",
+            next_id,
+            "--spec",
+            spec,
+            "--expected-binding",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+    ] {
+        assert!(!f.run(&args).status.success());
+        assert!(!marker.exists());
+        assert_eq!(f.binding_state(session), before);
+    }
+    let replacement = f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        next_id,
+        "--spec",
+        spec,
+        "--expected-binding",
+        initial_revision,
+    ]);
+    let revision = replacement["binding"]["revision"].as_str().unwrap();
+    assert_ne!(revision, initial_revision);
+    assert_eq!(
+        replacement["binding"]["previous_revision"],
+        initial_revision
+    );
+    assert_eq!(replacement["binding"]["intake_id"], next_id);
+    let after = f.binding_state(session);
+    assert_eq!(after["bindings"].as_array().unwrap().len(), 2);
+    assert_eq!(after["session"]["task_binding"], revision);
+    assert_eq!(
+        after["session"]["task_epoch"].as_u64().unwrap(),
+        before["session"]["task_epoch"].as_u64().unwrap() + 1
+    );
+
+    fs::remove_file(&marker).unwrap();
+    for expected in [initial_revision, revision] {
+        let output = f.run(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            first_id,
+            "--spec",
+            spec,
+            "--expected-binding",
+            expected,
+        ]);
+        assert!(
+            !output.status.success(),
+            "a superseded intake cannot restore an old marker"
+        );
+        assert!(!marker.exists());
+        assert_eq!(f.binding_state(session), after);
+    }
+    let restored = f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        next_id,
+        "--spec",
+        spec,
+        "--expected-binding",
+        revision,
+    ]);
+    assert_eq!(restored["binding"], replacement["binding"]);
+    assert_eq!(restored["recovered"], true);
+    assert_eq!(f.binding_state(session), after);
+    assert_eq!(f.calls().len(), 2);
+    f.native("claude", &f.event("replace-marker", "two", "Stop"));
+    let native = f.native(
+        "claude",
+        &f.prompt("replace-marker", "three", "Continue the same task."),
+    );
+    assert!(native.to_string().contains("bound_active_task"));
+    let continuation = f.receipts().remove(2);
+    assert_eq!(continuation["input"]["active_task"], spec);
+    assert_eq!(continuation["task_binding_revision"], revision);
+    assert_eq!(
+        continuation["session_epoch"],
+        after["session"]["task_epoch"]
+    );
+    assert!(!f
+        .project
+        .join(".mastermind/tasks/001-replacement/state.json")
+        .exists());
 }
 
 #[test]
@@ -573,6 +873,30 @@ impl Fixture {
             .unwrap()
             .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
             .collect()
+    }
+
+    fn binding_state(&self, session: &str) -> Value {
+        let db = Connection::open_with_flags(
+            self.home.join(".mastermind/persona-events.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = db
+            .prepare("SELECT data FROM hook_task_binding ORDER BY rowid")
+            .unwrap();
+        let bindings = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        let data: String = db
+            .query_row(
+                "SELECT data FROM hook_session WHERE id=?1",
+                [session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        json!({"bindings":bindings, "session":serde_json::from_str::<Value>(&data).unwrap()})
     }
 
     fn intake(&self, id: &str) -> Value {

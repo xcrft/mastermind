@@ -4,6 +4,7 @@
 //! identity. A user-channel hook is still `user_channel_unverified`. Its draft
 //! needs source attestation and the normal profile review before publication.
 
+use super::influence::{self, EvidenceClass, Influence};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,7 +20,7 @@ const MAX_DRAFTS: usize = 8;
 const MAX_CITATIONS: usize = 8;
 // Included in episode revisions so earlier source interpretations cannot keep
 // certifying a claim after eligibility rules change.
-pub(super) const PROSE_VERSION: &str = "hook-user-prose-v2";
+pub(super) const PROSE_VERSION: &str = "hook-user-prose-v3";
 const EVIDENCE_KINDS: &[&str] = &[
     "technical_approach",
     "workflow_pattern",
@@ -38,6 +39,8 @@ pub(super) struct EpisodeInput {
     pub project: String,
     pub events: Vec<EventInput>,
     pub coverage_gaps: Vec<String>,
+    // Historical episode summary, not the timing of exposure for a citation.
+    // Event-level provenance governs admission as unexposed support.
     pub profile_influenced: bool,
 }
 
@@ -49,6 +52,8 @@ pub(super) struct EventInput {
     pub actor: String,
     pub origin: String,
     pub text: String,
+    #[serde(default)]
+    pub influence: Influence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +95,12 @@ drafts array when evidence is insufficient. Extract work-related technical appro
 workflow patterns, communication preferences, tool preferences, or review preferences. \
 Reason about a person's observable choice or correction in its task context; no keyword \
 formula is required. A user-channel event is unverified and does not establish that a \
-human authored it. Do not infer psychology, sensitive traits, identity, permissions, \
+human authored it. Each event's influence records context offered before its capture. \
+Eligible original user-channel prose with prior or unknown influence may support a \
+provisional dependent observation, never an independent habit claim. Preserve that \
+context in your interpretation. The host derives influence classification from cited \
+events, so do not add or choose a classification in the response. Do not infer psychology, \
+sensitive traits, identity, permissions, \
 authority, consent, or a global habit from one task. Preserve the situation and exceptions. \
 Assistant suggestions, silence, successful tools or tests, and injected profile statements \
 are not evidence of a human habit. Supports must quote exact prose from actor=user, \
@@ -281,9 +291,6 @@ fn validate_input(input: &EpisodeInput) -> Result<(), Box<dyn Error>> {
     if !input.coverage_gaps.is_empty() {
         return Err("semantic analysis requires an episode without coverage gaps".into());
     }
-    if input.profile_influenced {
-        return Err("profile-influenced episodes cannot provide independent habit drafts".into());
-    }
     plain_field(&input.id, "episode id", 1, 128)?;
     plain_field(&input.revision, "episode revision", 1, 128)?;
     plain_field(&input.project, "project identity", 1, 256)?;
@@ -317,6 +324,7 @@ fn validate_input(input: &EpisodeInput) -> Result<(), Box<dyn Error>> {
 
 /// Deterministic checks bind every personal assertion to retained user-channel
 /// prose. They cannot establish semantic entailment, authorship, or recurrence.
+/// Dependent observations remain candidates. Promotion uses a separate gate.
 pub(super) fn validate(
     input: &EpisodeInput,
     drafts: &[SemanticDraft],
@@ -386,6 +394,48 @@ pub(super) fn validate(
         }
     }
     Ok(())
+}
+
+/// A host-derived classification of all cited events. It is not supplied by
+/// the semantic processor and does not establish statistical independence.
+pub(super) fn evidence_class(
+    input: &EpisodeInput,
+    draft: &SemanticDraft,
+) -> Result<EvidenceClass, Box<dyn Error>> {
+    validate(input, std::slice::from_ref(draft))?;
+    classify_validated_sources(input, draft)
+}
+
+/// The existing authored-source attestation and profile review still apply.
+/// This gate only prevents dependent or untracked observations from entering
+/// the current profile store as if they were unexposed support.
+pub(super) fn validate_for_promotion(
+    input: &EpisodeInput,
+    drafts: &[SemanticDraft],
+) -> Result<(), Box<dyn Error>> {
+    validate(input, drafts)?;
+    for draft in drafts {
+        if classify_validated_sources(input, draft)? != EvidenceClass::NoRecordedPriorExposure {
+            return Err("dependent or unknown-influence observations are inspectable candidates, not unexposed profile support".into());
+        }
+    }
+    Ok(())
+}
+
+fn classify_validated_sources(
+    input: &EpisodeInput,
+    draft: &SemanticDraft,
+) -> Result<EvidenceClass, Box<dyn Error>> {
+    let mut sources = Vec::new();
+    for citation in draft.supports.iter().chain(&draft.contradictions) {
+        let event = input
+            .events
+            .iter()
+            .find(|event| event.id == citation.event_id)
+            .ok_or("influence classification requires every cited event")?;
+        sources.push(&event.influence);
+    }
+    Ok(influence::classify_sources(sources))
 }
 
 fn validate_citation(
@@ -890,6 +940,7 @@ mod tests {
                 text:
                     "Move transaction state behind an explicit boundary and check rollback first."
                         .into(),
+                influence: Influence::fresh(),
             }],
             coverage_gaps: vec![],
             profile_influenced: false,
@@ -921,12 +972,113 @@ mod tests {
     }
 
     #[test]
+    fn context_offered_after_capture_cannot_backdate_source_influence() {
+        let mut episode = input();
+        // The episode also contains a later context offer. Only the event's
+        // snapshot describes what had been offered before these words.
+        episode.profile_influenced = true;
+        assert_eq!(
+            evidence_class(&episode, &draft()).unwrap(),
+            EvidenceClass::NoRecordedPriorExposure
+        );
+        assert!(validate_for_promotion(&episode, &[draft()]).is_ok());
+    }
+
+    #[test]
+    fn influenced_originals_are_inspectable_but_not_unexposed_support() {
+        for influence in [
+            Influence {
+                prior_profile_context: true,
+                prior_refiner_context: false,
+                prior_unknown: false,
+            },
+            Influence {
+                prior_profile_context: false,
+                prior_refiner_context: true,
+                prior_unknown: false,
+            },
+            Influence {
+                prior_profile_context: true,
+                prior_refiner_context: true,
+                prior_unknown: false,
+            },
+            Influence::default(),
+        ] {
+            let mut episode = input();
+            episode.events[0].influence = influence;
+            // Clearing the old episode summary cannot clear source tags.
+            episode.profile_influenced = false;
+            assert!(validate(&episode, &[draft()]).is_ok());
+            assert_eq!(
+                evidence_class(&episode, &draft()).unwrap(),
+                influence.class()
+            );
+            assert!(validate_for_promotion(&episode, &[draft()]).is_err());
+        }
+    }
+
+    #[test]
+    fn every_support_and_contradiction_retains_its_influence() {
+        for contradiction in [false, true] {
+            let mut episode = input();
+            let mut later = episode.events[0].clone();
+            later.id = "event-2".into();
+            later.text = "For this migration, keep the existing transaction boundary.".into();
+            later.influence.offer_refiner();
+            if contradiction {
+                later.origin = "next_turn_context".into();
+            }
+            let citation = Citation {
+                event_id: later.id.clone(),
+                quote: later.text.clone(),
+            };
+            episode.events.push(later);
+            let mut candidate = draft();
+            if contradiction {
+                candidate.contradictions.push(citation);
+            } else {
+                candidate.supports.push(citation);
+            }
+            assert!(validate(&episode, std::slice::from_ref(&candidate)).is_ok());
+            assert_eq!(
+                evidence_class(&episode, &candidate).unwrap(),
+                EvidenceClass::DependentObservation
+            );
+            assert!(validate_for_promotion(&episode, &[candidate]).is_err());
+        }
+    }
+
+    #[test]
+    fn missing_legacy_influence_is_not_invented_from_an_episode_summary() {
+        let mut value = serde_json::to_value(input()).unwrap();
+        value["events"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("influence");
+        let episode: EpisodeInput = serde_json::from_value(value).unwrap();
+        assert!(!episode.profile_influenced);
+        assert!(validate(&episode, &[draft()]).is_ok());
+        assert_eq!(
+            evidence_class(&episode, &draft()).unwrap(),
+            EvidenceClass::UnknownInfluence
+        );
+        assert!(validate_for_promotion(&episode, &[draft()]).is_err());
+
+        let mut content = serde_json::to_value(draft()).unwrap();
+        content["evidence_class"] = json!("no_recorded_prior_exposure");
+        assert!(serde_json::from_value::<SemanticDraft>(content).is_err());
+    }
+
+    #[test]
     fn rejects_assistant_tool_and_injected_evidence() {
         for (actor, origin, kind) in [
             ("assistant", "assistant", "Stop"),
             ("tool", "tool", "PostToolUse"),
             ("user", "profile_context", "UserPromptSubmit"),
             ("user", "prior_turn_context", "UserPromptSubmit"),
+            ("user", "refiner_generated", "UserPromptSubmit"),
+            ("user", "automation_or_agent", "UserPromptSubmit"),
+            ("user", "controller", "UserPromptSubmit"),
         ] {
             let mut episode = input();
             episode.events[0].actor = actor.into();
@@ -1085,14 +1237,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_gaps_profile_echoes_and_duplicate_sources() {
+    fn refuses_gaps_and_duplicate_sources() {
         let mut episode = input();
         episode.coverage_gaps.push("lost_event".into());
         assert!(validate(&episode, &[draft()]).is_err());
         episode.coverage_gaps.clear();
-        episode.profile_influenced = true;
-        assert!(validate(&episode, &[draft()]).is_err());
-        episode.profile_influenced = false;
         episode.events.push(episode.events[0].clone());
         assert!(validate(&episode, &[draft()]).is_err());
         let mut candidate = draft();
@@ -1261,13 +1410,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn incomplete_influenced_or_secret_episodes_never_start_the_processor() {
+    fn incomplete_or_secret_episodes_never_start_the_processor() {
         let (directory, args) = processor_fixture("cat > \"$1\"\ncat \"$2\"\n", response());
-        for issue in ["gap", "influence", "secret", "size"] {
+        for issue in ["gap", "secret", "size"] {
             let mut episode = input();
             match issue {
                 "gap" => episode.coverage_gaps.push("missing correction".into()),
-                "influence" => episode.profile_influenced = true,
                 "secret" => episode.events[0].text.push_str(" password=example"),
                 "size" => episode.events[0].text = "x".repeat(MAX_EVENT_BYTES + 1),
                 _ => unreachable!(),
@@ -1275,6 +1423,29 @@ mod tests {
             assert!(analyze(&episode, Path::new("/bin/sh"), &args, 5).is_err());
             assert!(!directory.path().join("request.json").exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn processor_can_extract_dependent_candidates_without_admitting_promotion() {
+        let (directory, args) = processor_fixture("cat > \"$1\"\ncat \"$2\"\n", response());
+        let mut episode = input();
+        episode.profile_influenced = true;
+        episode.events[0].influence.offer_refiner();
+        let drafts = analyze(&episode, Path::new("/bin/sh"), &args, 5).unwrap();
+        assert_eq!(drafts, vec![draft()]);
+        assert!(validate_for_promotion(&episode, &drafts).is_err());
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("request.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            request["episode"]["events"][0]["influence"]["prior_refiner_context"],
+            true
+        );
+        assert_eq!(
+            request["episode"]["events"][0]["origin"],
+            "user_channel_unverified"
+        );
     }
 
     #[cfg(unix)]

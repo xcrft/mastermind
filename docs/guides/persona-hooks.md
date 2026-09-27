@@ -36,6 +36,23 @@ execution currently require macOS or Linux.
 | Native hook trust and profile reads | Require separate authorization |
 | Activation | Restart the client to capture `SessionStart` |
 | Installed receiver | Local capture. Prompt refinement requires a selected processor. Habit analysis uses a separate worker |
+| Background mining | Optional `worker start`, never started by hook installation or status checks |
+
+### Check each boundary
+
+`hooks setup`, `hooks status` and `mastermind doctor` expose the same read-only
+readiness observations:
+
+| Component | What the state establishes |
+|---|---|
+| Native registration | Expected definitions are current, missing/stale, unavailable or unsupported. Local disable flags are separate |
+| Capture | This client and project have a grant, a revocation or an incomplete delivery |
+| Session | `SessionStart` was observed in the current capture generation. Client trust/loading remains unverified |
+| Refiner | A processor is configured. Provider execution and interpretation quality are not tested |
+| Managed miner | Worker ownership, state and budget. Foreground workers are not observed by this check |
+
+An absent refiner or miner is optional. Unknown or missing evidence is never a
+successful provider test. Status starts no process and changes no configuration.
 
 ### Refine every admitted prompt
 
@@ -124,10 +141,22 @@ session → admitted intake → explicit spec binding → preflight → invocati
 The executor receives original and proposed text as source data inside its hashed
 prompt. Receipt hashes establish which bytes were offered, not how the model used them.
 
-Refiner-exposed episodes remain captured but are conservatively excluded from
-independent habit evidence. Event-level influence accounting is still required
-to mine unaffected observations from those episodes. Structural validation binds
-the result to its source and does not prove preservation of meaning.
+Each event records prior profile/refiner exposure before a new advisory is
+offered. Structural validation binds the result to its source and does not prove
+preservation of meaning.
+
+| Evidence class | Candidate extraction | Habit promotion |
+|---|---|---|
+| `no_recorded_prior_exposure` | Allowed for original eligible user prose | Requires authorship attestation and review |
+| `dependent_observation` | Allowed, with exposure flags | Cannot count as unexposed habit support |
+| `unknown_influence` | Allowed for inspection | Requires new eligible evidence |
+| Generated/refined text | Context only | Never human habit evidence |
+
+A current offer cannot reclassify the already captured original. Later messages
+retain prior exposure, including a refiner `passthrough` that adds routing advice.
+The host combines every support and contradiction when classifying a draft.
+Resume and capture recovery cannot establish that earlier exposure disappeared.
+No class establishes statistical independence, human authorship or semantic truth.
 
 ## 2. Inspect captured episodes
 
@@ -184,7 +213,8 @@ mastermind miner hooks analyze '<capture-episode-id>' \
 | Input / output | JSON episode and response example / one matching JSON object |
 | Empty draft list | Valid result |
 | Source checks | Exact revision and citations required |
-| Incomplete or known profile-influenced evidence | Analysis rejected |
+| Incomplete evidence | Analysis rejected |
+| Prior profile/refiner exposure | Inspectable candidates, promotion restricted by event provenance |
 | Schema 1 rationale and outcome | Unknown |
 | Validated binding | Does not establish interpretation accuracy |
 
@@ -205,6 +235,35 @@ mastermind miner hooks mine --project-root . --provider claude --follow
 | Failure | Stop, leave the attempt retryable |
 | Interruption | Cannot retract a request already received by the provider |
 | Single-episode `analyze` | Explicitly re-evaluates a revision despite its batch checkpoint |
+
+### Run a managed worker
+
+```bash
+mastermind miner hooks worker start --client codex --project-root . \
+  --provider claude --max-calls 64 --max-runtime 3600
+mastermind miner hooks worker status --client codex --project-root .
+mastermind miner hooks worker stop --client codex --project-root .
+```
+
+| Managed worker | Contract |
+|---|---|
+| Ownership | One worker per client and canonical project root |
+| Repeated start | Returns the running owner. Does not reset its budget |
+| Saved selection | Restart without processor/budget options preserves settings and starts a new bounded run |
+| Call budget | Reserved durably before each processor invocation. Default 64, range 1–10,000. Provider-internal retries and token costs are not measured |
+| Runtime budget | Default 3,600 s, range 1–86,400 s |
+| Processor timeout / batch | 60 s / 4 by default, maximum 120 s / 16 |
+| Checkpoint | Episode revision and processor fingerprint, including direct executable digest |
+| Transitive scripts/model version | Not fingerprinted. Explicit restart/re-analysis remains available |
+| Failure | Stops. Retry requires an explicit start |
+| Stop/revocation | Cancels the owned process group and withholds unfinished drafts. Cannot retract input already sent |
+| Crash/SIGKILL | Lost ownership reports `interrupted`. Restart respects completed checkpoints and outstanding lease expiry. Cleanup of an already running external processor is not guaranteed |
+| Boot/session restart | No automatic startup or budget renewal |
+| Output | Local unreviewed drafts. No automatic habit acceptance |
+
+Settings and run state live in `~/.mastermind/persona-workers/<id>/`. Completed
+revisions use the existing journal checkpoints. No separate queue or login service
+is installed. Bounds come from [background.rs](../../mcp/servers/mmcg/src/miner/hooks/background.rs).
 
 ## 4. Review authorship and the habit
 
@@ -242,6 +301,7 @@ Do not relabel one task to manufacture independent support.
 | Storage or interface | Purpose |
 |---|---|
 | `~/.mastermind/persona-events.db` | Raw hook observations, coverage, exposures, and drafts |
+| `~/.mastermind/persona-workers/<id>/` | Managed worker settings, current run, heartbeat and locks |
 | `~/.mastermind/style.db` | Global profile claims, citations, and review history |
 | `~/.mastermind/style.md` | Generated static inspection snapshot |
 | `mmcg_profile` | Live source-checked selection for the project, role, workflow, and paths |
@@ -269,8 +329,9 @@ mastermind miner hooks setup --client codex --project-root . \
 
 | Exposure | Mining effect |
 |---|---|
-| Mastermind profile/refiner injection or recognized MCP/profile-file read | Excludes affected episodes from independent habit mining |
-| Repetition of injected advice | Not independent evidence |
+| Mastermind profile/refiner offer or recognized MCP/profile-file read | Marks later captured events as exposed. Original eligible prose stays inspectable |
+| Draft citing any exposed or unknown-influence event | Cannot count as unexposed habit support, including exposed counterevidence |
+| Generated text or repetition of injected advice | Does not establish an independent human preference |
 | Other delivery paths | Detection is limited to supported paths |
 
 ## Maintain or remove evidence

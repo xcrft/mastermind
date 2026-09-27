@@ -305,8 +305,9 @@ fn mark_refiner_exposure(conn: &Connection, receipt: &IntakeReceipt) -> Result<(
         [&ep.session],
         |r| r.get::<_, String>(0),
     )?)?;
-    // Conservative until event-level influence accounting is available. The
-    // original remains an observation, not independent habit proof.
+    // Preserve the already captured prompt's influence snapshot. Future input
+    // has prior advisory exposure even if native use remains unverified.
+    session.influence.offer_refiner();
     let exposure = json!({"status":"refiner_context_offered"});
     if !session.exposures.contains(&exposure) {
         if session.exposures.len() >= 32 {

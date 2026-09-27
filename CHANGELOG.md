@@ -7,51 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- The style miner now counts evidence per commit instead of per line. Each
-  sampled commit votes once on each convention, and a rule needs at least eight
-  commits with the opportunity plus a Wilson-bounded majority, so one large or
-  formatter-rewritten commit can no longer produce a `high` rule. Small samples
-  render as insufficient evidence, and repositories mined by the older
-  line-level store stay listed as legacy until re-mined.
-- Style mining samples diffs across the author's history instead of only the
-  newest commits: up to 400 non-bulk commits are drawn round-robin across
-  months from the 2000 newest, and commits over 2000 added source lines count
-  only for commit voice. Re-mining reuses stored commit tallies for the same
-  author and detector contract and measures only new commits.
-- Style mining no longer credits the author with conventions a repository's
-  own tooling decides. Formatter and linter configuration at the mined
-  snapshot, plus tools run from CI or task files, route those lines to a
-  Repository tooling summary instead of the personal rules.
-- The style profile gains a Workflow (process) section measured per commit:
-  delivery through squash-merged pull requests, tests and documentation
-  changed with source, tracker keys in subjects, typical change size, and
-  reverts. Commit voice now reads squash-merged pull-request titles without
-  their `(#123)` suffix instead of skipping them, and leaves their generated
-  bodies out of the body rule.
-- The style profile gains a Range section: languages (including SQL, HCL,
-  Shell and PowerShell), repository areas and libraries from added imports,
-  each counted in commits with the number of recent commits and the last
-  month active. Imports of the repository's own crates, packages and Go
-  modules, standard libraries and path aliases are left out.
+## [3.0.0] - 2026-09-28
+
+### Upgrade from 2.x
+
+```bash
+npm install -g @xcraftmind/mastermind@3.0.0
+mastermind init
+```
+
+| Changed behavior | Migration |
+|---|---|
+| `init` saves project setup and asks for client and mining choices in a terminal | Repeat `init` to reconcile those saved choices |
+| An unattended first `init` stays local | Pass `--client claude`, `codex`, or `all` to configure integrations |
+| Scaffold drafting and Git profile seeding are explicit | Use `--draft-with claude` or `--seed-style` when needed |
+| `update` updates the owning npm package and installed workflows | Use `update --workflow-only` for the previous workflow-only operation |
+| MCP project registration uses the resolved Node launcher | Re-run setup after moving or replacing the owning installation |
+| Profile reads, capture, mining, and refinement have separate settings | Select profile access and a provider explicitly |
 
 ### Added
-- `mastermind miner feedback` records preferences the author stated to coding
-  agents in the same profile: `scan` prints the human turns of a Claude Code
-  session transcript under `~/.claude/projects`, `add` stores one preference
-  whose quote must appear verbatim in a human turn, `import-memory` imports
-  Claude Code memory files of type `feedback` or `user`, and `list`, `accept`
-  and `reject` review them. Every recorded or imported statement is a
-  candidate. Only `accept` in an interactive terminal makes it active, and
-  only active feedback outranks mined preferences in the rendered profile.
-- `mastermind-feedback-collector` subagent collects those preferences at the
-  end of a session and records them through the CLI.
-- `mmcg_profile` read-only MCP tool returns the part of the user's own profile
-  that applies to the paths being changed: session feedback whose scope
-  matches exactly (without the local quotes), personal rules for their languages, workflow habits, range, and the
-  libraries that co-occurred with the changed areas in the author's commits,
-  within a token budget. The task executor is granted it. Independent
-  reviewers are not.
+
+- One project setup command for workflows, MCP, hooks, and code/documentation
+  indexing, with retryable component failures and read-only readiness status.
+- `miner start`, `stop`, and `status` use the project's saved client choices.
+  Semantic mining has per-client call and time budgets. Repeated `init` preserves
+  the existing run and counters.
+- Hook capture, bounded semantic mining, multilingual prompt refinement, and
+  session-bound task intake. Original human observations remain separate from
+  later profile or refiner influence.
+- Human-global profile evidence and project knowledge with source, authorship,
+  freshness, and review boundaries. Scoped MCP retrieval exposes reviewed habits
+  relevant to the current role and paths. Capturing evidence creates no active
+  habit or profile-read grant.
+- Task completion connects criteria to required observed checks, invocation
+  scope, mechanical audit, semantic review, and canonical project history.
+  Automatic follow-up uses a finite shared retry budget.
+- Lens shows profile coverage, missing evidence, and context delivery metadata.
+  Private profile content stays out of standalone exports.
+
+### Changed
+
+- Style evidence is counted per eligible authored commit. Repeated mining reuses
+  compatible commit tallies. Formatter-controlled conventions stay in repository
+  tooling evidence rather than becoming personal preferences.
+- Git sampling is bounded and spread across history. Workflow, communication,
+  language, library, and repository-area observations retain their sample scope.
+- `update` verifies npm ownership and preserves workflow profiles and local edits.
+  Ambiguous installations return a manual update action.
+- CLI help and installation documentation use the same `init → status → update`
+  command flow.
+
+### Fixed
+
+- Readiness inspection no longer starts native clients or configured MCP servers.
+- Partial client removal stays retryable, and profile-read revocation runs even
+  when hook cleanup fails.
+- Failed index writes cannot become a successful onboarding result.
+- Replayed, revoked, stale, or incorrectly bound observations cannot silently
+  supply fresh workflow evidence.
+
+### Evaluation boundary
+
+The [scorecard](evals/scorecard.md) links retained conformance results and their
+source manifests. The finite completion model has six required obligations.
+These checks do not measure semantic goal success, hallucination rates, or token
+savings. Hooks and managed mining remain Unix-only. Windows supports local setup
+and MCP with mining off.
 
 ## [2.1.1] - 2026-09-19
 
@@ -1456,7 +1477,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v2.1.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.0.0...HEAD
+[3.0.0]: https://github.com/xcrft/mastermind/compare/npm-v2.1.1...npm-v3.0.0
 [2.1.1]: https://github.com/xcrft/mastermind/compare/npm-v2.1.0...npm-v2.1.1
 [2.1.0]: https://github.com/xcrft/mastermind/compare/npm-v2.0.1...npm-v2.1.0
 [2.0.1]: https://github.com/xcrft/mastermind/compare/npm-v2.0.0...npm-v2.0.1

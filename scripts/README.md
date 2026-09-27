@@ -66,16 +66,20 @@ scripts/configure-github-protections.sh \
   --reviewer another-maintainer --prevent-self-review --apply
 ```
 
-## Registry smoke tests
+## Package smoke tests
 
-Publish workflows run these against public packages after publication:
+Release workflows check candidate tarballs before publication and public
+packages afterward:
 
 | Script | What it checks |
 |---|---|
+| `smoke-packed-npm-release.sh` | Candidate tarballs, setup, index, npm update scope and all four workflow profiles, shared by CI and the local recipe |
 | `smoke-installed-npm-release.sh` | Exact npm version, platform binary, indexing, facts adaptation/signing/import and a two-repository team map |
 | `smoke-installed-crate-release.sh` | Exact crates.io version, binary version and the shipped facts/team/review command surfaces |
 
-Both install into temporary locations, retry registry propagation for a bounded
-period and fail when the package cannot be installed or exercised. They do not
-publish packages. The local `npm-smoke-native` recipe instead uses workspace
-tarballs and does not establish public-registry availability.
+The two public-registry checks install into temporary locations, retry registry
+propagation for a bounded period and fail when the package cannot be installed
+or exercised. The shared tarball check installs offline in a temporary project.
+The local `npm-smoke-native` recipe calls it with workspace tarballs. These
+scripts do not publish packages. A tarball smoke does not establish
+public-registry availability.

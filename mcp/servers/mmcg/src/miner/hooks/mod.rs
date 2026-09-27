@@ -52,6 +52,26 @@ pub fn setup(
     refiner: Option<&RefinerConfig>,
     disable_refiner: bool,
 ) -> Result<(), Error> {
+    print(&setup_report(
+        client_id,
+        root,
+        write,
+        remove,
+        profile_client,
+        refiner,
+        disable_refiner,
+    )?)
+}
+
+pub fn setup_report(
+    client_id: &str,
+    root: &Path,
+    write: bool,
+    remove: bool,
+    profile_client: Option<&str>,
+    refiner: Option<&RefinerConfig>,
+    disable_refiner: bool,
+) -> Result<Value, Error> {
     client(client_id)?;
     let root = root.canonicalize()?;
     if let Some(config) = refiner {
@@ -108,7 +128,7 @@ pub fn setup(
     receipt["profile_delivery"] = json!({"client_id":profile_client,"requires_existing_read_grant":true,
         "note":"Each event retains prior context exposure. Dependent observations can be inspected but cannot count as unexposed habit support."});
     receipt["next"]=json!("Restart a client session after setup. Collection remains local; analyze explicitly selects a processor. User-channel citations require authorship attestation and habit review.");
-    print(&receipt)
+    Ok(receipt)
 }
 
 pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {

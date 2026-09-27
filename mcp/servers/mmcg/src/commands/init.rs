@@ -1,8 +1,6 @@
-//! `mastermind init` command handler.
-//!
-//! Scaffolds a project for the Mastermind workflow: creates `.mastermind/`,
-//! writes CONTEXT.md (and optionally CLAUDE.md), builds the index, and
-//! optionally reconciles the npm workflow bundle into `~/.claude/`.
+//! Local scaffolding and explicitly selected drafting for the init coordinator.
+//! Existing documents survive normal initialization. Index failures remain
+//! separate from successful scaffold writes in the returned report.
 
 use mmcg::indexer::Indexer;
 use mmcg::store::Store;
@@ -11,11 +9,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::process::Command;
 
 use crate::templates;
 
-/// Options for [`do_init`].
+/// Options for [`scaffold`].
 pub struct InitOpts {
     /// Explicit index location from the global `--index` option.
     pub index_path: Option<PathBuf>,
@@ -25,26 +24,39 @@ pub struct InitOpts {
     pub index: bool,
     /// Auto-fill CONTEXT.md / CLAUDE.md via `claude -p`.
     pub claude: bool,
-    /// Reconcile the npm workflow bundle into `~/.claude/`.
-    pub global: bool,
+    /// Write the Claude workflow file for a selected Claude client.
+    pub claude_file: bool,
     /// Enrich `~/.mastermind/style.md` from this repository's authored history.
     /// Re-mining is idempotent and preserves manual and interpreted sections.
     pub seed_style: bool,
 }
 
 /// Scaffold a Mastermind project at `root`.
-pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(serde::Serialize)]
+pub struct ScaffoldReport {
+    pub created: Vec<String>,
+    pub skipped: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub index_ready: bool,
+    pub index_stats: Option<serde_json::Value>,
+    pub context_fill_prompt: Option<String>,
+}
+
+pub fn scaffold(root: &Path, opts: InitOpts) -> Result<ScaffoldReport, Box<dyn std::error::Error>> {
     let InitOpts {
         index_path,
         force,
         index,
         claude,
-        global,
+        claude_file,
         seed_style,
     } = opts;
     let mut created: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut index_stats = None;
     let mut context_fill_prompt: Option<String> = None;
 
     // Stack detection informs the drafting prompt, but CONTEXT stays lean and
@@ -132,10 +144,9 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         skipped.push("CONTEXT.md (already exists — pass --force to overwrite)".into());
     }
 
-    // The workflow CLAUDE.md is always dropped — it IS Mastermind (skipped only
-    // if the repo already has its own CLAUDE.md, unless --force).
+    // Preserve existing client instructions unless explicitly replacing them.
     let mut claude_md_created = false;
-    {
+    if claude_file {
         let claude_path = root.join("CLAUDE.md");
         let claude_body = templates::strip_comment(templates::WORKFLOW_TEMPLATE);
         let claude_write =
@@ -178,7 +189,19 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
         let indexer = Indexer::new(root);
         match indexer.index_all(&mut store, false) {
             Ok(stats) => {
-                index_ready = true;
+                index_ready = stats.files_failed == 0;
+                index_stats = Some(serde_json::json!({
+                    "scanned":stats.files_scanned,"indexed":stats.files_indexed,"failed":stats.files_failed,
+                    "unchanged":stats.files_unchanged,"skipped_unsupported":stats.files_skipped,
+                    "skipped_binary":stats.files_skipped_binary,"skipped_too_large":stats.files_skipped_too_large,
+                    "duration_ms":stats.duration_ms,
+                }));
+                if stats.files_failed > 0 {
+                    errors.push(format!(
+                        "{} supported source files failed indexing",
+                        stats.files_failed
+                    ));
+                }
                 // Report the index's *totals* (from the db), not just this run's
                 // delta — an incremental no-op indexes 0 files but the index is
                 // still fully populated, and "indexed 0 files" reads as empty.
@@ -196,7 +219,7 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
                     ));
                 }
             }
-            Err(e) => warnings.push(format!(
+            Err(e) => errors.push(format!(
                 "index build failed: {e} — run `mastermind index .` manually"
             )),
         }
@@ -225,23 +248,16 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
                         Ok(indexed) => created.push(format!(
                             "refreshed {indexed} durable history artifact(s) after scaffold drafting"
                         )),
-                        Err(error) => warnings.push(format!(
+                        Err(error) => errors.push(format!(
                             "post-draft history refresh failed: {error} — run `mastermind index .`"
                         )),
                     }
                 }
             }
             Err(e) => {
-                warnings.push(format!("claude -p auto-fill skipped: {e}"));
+                errors.push(format!("claude -p auto-fill failed: {e}"));
                 context_fill_prompt = Some(prompt);
             }
-        }
-    }
-
-    if global {
-        match install_workflow_global() {
-            Ok(msg) => created.push(msg),
-            Err(e) => warnings.push(format!("global workflow install skipped — {e}")),
         }
     }
 
@@ -260,50 +276,19 @@ pub fn do_init(root: &Path, opts: InitOpts) -> Result<(), Box<dyn std::error::Er
             Ok(mmcg::miner::profile::SeedOutcome::NoCommits { .. }) => {
                 skipped.push("~/.mastermind/style.md (no commits by you in this repo yet)".into())
             }
-            Err(e) => warnings.push(format!("style profile seed skipped — {e}")),
+            Err(e) => errors.push(format!("style profile seed failed — {e}")),
         }
     }
 
-    println!("Mastermind workflow initialized at {}", root.display());
-    if !created.is_empty() {
-        println!("\nCreated:");
-        for c in &created {
-            println!("  + {c}");
-        }
-    }
-    if !warnings.is_empty() {
-        println!("\nWarnings:");
-        for w in &warnings {
-            println!("  ! {w}");
-        }
-    }
-    if !skipped.is_empty() {
-        println!("\nSkipped:");
-        for s in &skipped {
-            println!("  - {s}");
-        }
-    }
-
-    println!("\nNext steps:");
-    println!("  1. Register with Claude Code:  mastermind setup claude --write");
-    println!("     (run once — the global server serves whichever project you open)");
-    println!("  2. Add `.mastermind/` to your project's root `.gitignore` (local working state)");
-    println!("  3. (Optional) Keep the index fresh in another terminal:  mastermind watch");
-    if claude {
-        println!(
-            "  4. Review the drafted CLAUDE.md — placeholders were filled from your codebase."
-        );
-    } else {
-        println!("  4. Fill CLAUDE.md's <PLACEHOLDER> sections (--no-claude skipped auto-fill).");
-    }
-    println!("  5. (Optional) mine your own profile explicitly: mastermind miner profile .");
-    if let Some(prompt) = context_fill_prompt {
-        println!(
-            "\nScaffold files were left as templates. To fill them, paste this into Claude Code:\n\n  {prompt}"
-        );
-    }
-
-    Ok(())
+    Ok(ScaffoldReport {
+        created,
+        skipped,
+        warnings,
+        errors,
+        index_ready,
+        index_stats,
+        context_fill_prompt,
+    })
 }
 
 fn refresh_project_history(root: &Path, db_path: &Path) -> Result<u32, String> {
@@ -752,7 +737,7 @@ fn draft_prompt(context: Option<&Path>, claude_md: Option<&Path>) -> String {
 }
 
 fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
-    println!("\nDrafting scaffold files via `claude -p` (pass --no-claude to skip)...\n");
+    eprintln!("Drafting scaffold files via the explicitly selected Claude provider...");
     let claude = mmcg::setup::resolve_native_cli("claude", root)
         .map_err(|error| format!("resolve claude: {error}"))?;
     let status = std::process::Command::new(claude)
@@ -762,6 +747,7 @@ fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
         .arg("acceptEdits")
         .current_dir(root)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
         .status()
         .map_err(|e| {
             format!("spawn claude: {e} — is the Claude Code CLI installed and on PATH?")
@@ -770,33 +756,6 @@ fn run_claude_draft(root: &Path, prompt: &str) -> Result<(), String> {
         return Err(format!("claude exited with {status}"));
     }
     Ok(())
-}
-
-fn install_workflow_global() -> Result<String, String> {
-    let installer = std::env::var("MASTERMIND_INSTALLER_JS")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            "no workflow bundle (a cargo install ships only the mmcg binary) — \
-             install via npm for the full workflow: \
-             `npm install -g @xcraftmind/mastermind`"
-                .to_string()
-        })?;
-    let node = std::env::var("MASTERMIND_NODE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "npm wrapper did not provide the Node.js executable".to_string())?;
-    let status = Command::new(node)
-        .arg(installer)
-        .arg("update")
-        .arg("--client")
-        .arg("claude")
-        .status()
-        .map_err(|e| format!("spawn workflow installer: {e}"))?;
-    if !status.success() {
-        return Err(format!("workflow installer exited with {status}"));
-    }
-    Ok("reconciled the Claude workflow bundle and ownership manifest".into())
 }
 
 #[cfg(test)]

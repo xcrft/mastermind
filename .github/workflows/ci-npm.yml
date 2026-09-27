@@ -128,12 +128,30 @@ jobs:
           ./node_modules/.bin/mastermind doctor --json > doctor.json || true
           python3 -c "import json; d = json.load(open('doctor.json')); assert 'checks' in d, d"
 
-          echo "--- install-mode: project (this is a project-local install)"
-          ./node_modules/.bin/mastermind setup claude --project . > diff.txt 2>&1 || true
-          grep -q "node_modules/.bin/mastermind" diff.txt || {
-            echo "::error::project-mode should propose ./node_modules/.bin/mastermind"; cat diff.txt; exit 1;
-          }
-          echo "✓ project-mode command form correct"
+          echo "--- install-mode: unowned tarball requires a manual package update"
+          if ./node_modules/.bin/mastermind update --dry-run --json > manual-update.json; then
+            echo "::error::an unowned tarball must not guess its package update scope"
+            exit 1
+          fi
+          python3 -c 'import json; d = json.load(open("manual-update.json")); assert d["status"] == "manual_required" and d["package"]["install_mode"] == "unknown", d'
+
+          # Emulate a direct registry dependency while retaining the locally
+          # built tarballs. A file: dependency intentionally stays manual.
+          npm pkg set "devDependencies.@xcraftmind/mastermind=$VERSION"
+          echo "--- install-mode: project uses its absolute Node launcher"
+          ./node_modules/.bin/mastermind setup claude --project . --write
+          node -e '
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const entry = JSON.parse(fs.readFileSync(".mcp.json", "utf8")).mcpServers.mmcg;
+            assert.deepEqual(entry, {
+              command: process.execPath,
+              args: [fs.realpathSync("node_modules/@xcraftmind/mastermind/bin/mastermind.js"), "serve"],
+            });
+          '
+          ./node_modules/.bin/mastermind update --dry-run --json > project-update.json
+          python3 -c 'import json; from pathlib import Path; d = json.load(open("project-update.json")); p = d["package"]; assert d["status"] == "planned" and p["install_mode"] == "project", d; assert Path(p["command"]["cwd"]) == Path.cwd() and "--save-dev" in p["command"]["argv"], d'
+          echo "✓ project launcher and update scope correct"
 
           echo "--- install-mode: cargo (mmcg compat wrapper → absolute path)"
           ./node_modules/.bin/mmcg setup claude --project . > diff2.txt 2>&1 || true
@@ -145,7 +163,7 @@ jobs:
           echo "--- workflow adapters: Claude + Codex manifest/content parity"
           MASTERMIND_WORKFLOW_HOME=$(mktemp -d)
           export MASTERMIND_WORKFLOW_HOME
-          ./node_modules/.bin/mastermind update --client all
+          ./node_modules/.bin/mastermind update --workflow-only --client all
           ./node_modules/.bin/mastermind doctor --workflow --client all --json > workflow-doctor.json
           python3 -c "import json; d = json.load(open('workflow-doctor.json')); assert [c['client'] for c in d['clients']] == ['claude', 'codex']; assert all(c['parity'] for c in d['clients']), d"
           test -f "$MASTERMIND_WORKFLOW_HOME/.claude/agents/mastermind-auditor.md"
@@ -155,7 +173,7 @@ jobs:
 
           echo '{"mcpServers":{"mmcg":{"command":"mastermind","args":["serve"]}}}' > "$MASTERMIND_WORKFLOW_HOME/.mcp.json"
           for PROFILE in core frontend security full; do
-            ./node_modules/.bin/mastermind update --client all --profile "$PROFILE"
+            ./node_modules/.bin/mastermind update --workflow-only --client all --profile "$PROFILE"
             for CLIENT_ROOT in .claude .codex; do
               ./node_modules/.bin/mastermind workflow audit \
                 --root "$MASTERMIND_WORKFLOW_HOME/$CLIENT_ROOT" --json > "workflow-audit-${PROFILE}-${CLIENT_ROOT#.}.json"

@@ -384,7 +384,9 @@ recorded when they were captured. See [setup, budgets and recovery](../guides/pe
 ### Project and client setup
 
 ```bash
-mmcg init --no-claude
+mmcg init
+mmcg init --client codex --workflow off --mining capture
+mmcg status --json
 mmcg doctor --json
 mmcg workflow audit --root . --json
 mmcg setup claude --scope user
@@ -394,9 +396,14 @@ mmcg setup continue --scope project --root . --write
 mmcg setup generic --scope project --config ./mcp.json
 ```
 
-`init` scaffolds the project. `--no-claude` disables model-assisted context
-writing, `--no-index` skips graph construction, `--no-global` skips npm Claude
-workflow reconciliation, and `--seed-style` opts into profile enrichment.
+`init` saves project choices and reconciles scaffolding, the code/document index,
+selected client integrations and mining. Unattended runs without a selected
+client stay local. `--no-index` skips that refresh, `--workflow off` skips bundled
+workflows, and `--seed-style` opts into Git profile enrichment. Drafting requires
+`--draft-with claude`. `--no-claude` remains a compatibility flag.
+`--mining on --provider claude` starts one bounded run per selected client.
+Repeated `init` preserves existing run IDs and spent budgets. `miner start`
+explicitly starts a new run. See [onboarding](../getting-started.md).
 `doctor` checks configuration, handshake, installed agent contracts and optional
 hook readiness. An unconfigured optional hook client is not a failure. Readiness
 inspection neither invokes a provider nor establishes model quality.

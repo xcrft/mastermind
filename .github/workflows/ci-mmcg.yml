@@ -90,6 +90,12 @@ jobs:
           components: clippy, rustfmt
           targets: ${{ matrix.target }}
 
+      - name: Install Node for public CLI integration
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       # musl targets need musl-tools for the linker. Same Ubuntu runner, just
       # `apt install` once. arm64-musl on ubuntu-24.04-arm uses the same package.
       - name: Install musl-tools (musl targets only)
@@ -136,6 +142,12 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Public npm onboarding with the built native binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          MMCG_TEST_BINARY: ${{ github.workspace }}/mcp/servers/mmcg/target/${{ matrix.target }}/release/mmcg
+        run: node --test ../../../npm/mastermind/test/onboarding.test.js
 
       # Smoke pipeline — the binary actually runs through its full surface on
       # this target: indexer, SQLite, tree-sitter, git shellouts, frontmatter

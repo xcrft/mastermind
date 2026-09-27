@@ -19,24 +19,28 @@ evidence before completion.
 ## Quick start
 
 Requires Node.js 24+. The [npm manifest](npm/mastermind/package.json) lists
-prebuilt binaries for macOS, Linux, and Windows.
+prebuilt binaries for macOS, Linux, and Windows. Run these commands inside your repository:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-cd your-repository
-mastermind index .
-mastermind impact --since main
-mastermind ui --since main
+mastermind init
 ```
+
+The first interactive run asks for a client and mining mode. It creates project
+guidance, indexes code and documentation, and configures the selected client.
+An unattended first run stays local unless you pass `--client`.
 
 | Command | Result |
 |---|---|
-| `index .` | Local index at `.mastermind/mmcg.db` |
-| `impact --since main` | Change impact against your chosen Git baseline |
-| `ui --since main` | Read-only Lens UI on loopback |
+| `mastermind init` | Apply saved project choices from `.mastermind/setup.json` |
+| `mastermind status --json` | Inspect the index, client configuration, session observations, and miner |
+| `mastermind update` | Update the package in its existing npm scope and refresh installed workflows |
+| `mastermind ui --since main` | Open the read-only Lens UI against your chosen Git baseline |
 
-Replace `main` with your baseline. Keep `.mastermind/` out of version control.
-See [Getting started](docs/getting-started.md) for other installation paths.
+Restart the selected client to load its configuration. Registration, session
+observations, and client trust are separate states. Keep `.mastermind/` working
+data out of version control. See [Getting started](docs/getting-started.md) for
+mining choices, Windows support, and other installation paths.
 
 ## What you can do
 
@@ -57,13 +61,9 @@ See [Getting started](docs/getting-started.md) for other installation paths.
 
 ## Give an agent useful context
 
-```bash
-mastermind install --client all
-mastermind doctor --workflow --client all
-```
-
-This installs Claude Code and Codex workflow support. Other clients use
-[MCP setup](docs/README.md#start-here).
+`init --client claude|codex|all` connects Claude Code, Codex, or both.
+On first setup, a selected client defaults to local evidence capture.
+Other clients use [MCP setup](docs/README.md#start-here).
 
 | Context | Scope |
 |---|---|
@@ -74,14 +74,15 @@ This installs Claude Code and Codex workflow support. Other clients use
 | Workflow | Planning, execution, verification, and review |
 | Task evidence | Results, blockers, and the reviewed revision |
 
-A personal profile grants no permissions. Context previews expose revisions
+Capture and personal-profile access are separate. `--profile-access on` opts
+the selected project and clients into reading reviewed preferences. Those
+preferences grant no action permissions. Context previews expose revisions
 and omissions, not proof of model use. See [Architecture](docs/architecture.md)
 and [Persona hooks](docs/guides/persona-hooks.md).
 
 ## Take a task through review
 
 ```bash
-mastermind init --no-claude --no-global
 mastermind new-spec "Add account recovery"
 ```
 
@@ -103,11 +104,14 @@ Claude Code. Completion requires current evidence and resolved review.
 | Personal profile | Reviewed preferences remain advisory |
 | Task records | Local evidence does not independently establish correctness |
 | Native process policy | Uses client restrictions, not an OS sandbox |
-| Provider access | Indexing, deterministic queries, and Lens are local. Explicit native execution, review, and AI mining can send content to a provider |
+| Provider access | Indexing, deterministic queries, and Lens are local. Semantic mining, prompt refinement, drafting, execution, and review require explicit opt-in and can send content to a provider |
+| Miner budgets | Repeated `init` preserves each run's counters, including stopped or exhausted runs. `miner start` explicitly starts a new run |
+| Prompt refiner | Optional `--refiner on` uses additional calls outside the miner's call budget |
 
 [Language coverage](docs/reference/mmcg.md#language-coverage) includes Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
-Supervised check and model execution require macOS or Linux. See
+Native hooks, managed mining, and supervised execution require macOS or Linux.
+Windows can use local indexing and client setup with `--mining off`. See
 [runtime support](docs/reference/task-runtime.md#process-supervision).
 
 ## Documentation

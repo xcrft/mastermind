@@ -124,17 +124,16 @@ pub enum UninstallScope {
     name = "mastermind",
     version,
     about = "Mastermind — codegraph-backed workflow CLI for AI coding agents (Python, TS/JS, Rust, C#, Go, Java, PHP, C/C++).",
-    long_about = "Mastermind indexes your codebase into a queryable graph and serves it to Claude Code \
-over MCP, plus runs spec-driven workflow gates (verify-spec / audit-spec).\n\n\
-Onboard a project (run inside your repo):\n  \
-mastermind init                       scaffold .mastermind/, build the index, draft CONTEXT.md\n  \
-mastermind setup claude --write       register the codegraph with Claude Code (run once)\n  \
-mastermind temporal --since main        review architecture drift over time\n  \
-  mastermind ui --since main            inspect this change in the local read-only Lens UI\n  \
-mastermind doctor                     verify the setup\n\n\
-Installed via npm? `mastermind install` does the global setup (workflow agents + skills + MCP) in one step — then `mastermind init` per repo.\n\n\
-Then open the project in Claude Code — the codegraph tools (search, callers, impact, …) are available. \
-Remove it all with `mastermind uninstall`. (`mmcg` is an alias for `mastermind` — same binary.)"
+    long_about = "Mastermind indexes code and documentation, connects AI clients over MCP, and runs evidence-backed workflow gates.\n\n\
+Start inside your repository:\n  \
+mastermind init                     configure this project and selected clients\n  \
+mastermind status                   inspect indexes, client setup and mining\n  \
+mastermind miner status             inspect the saved project's bounded miners\n  \
+mastermind doctor                   diagnose setup and index problems\n\n\
+Install via npm for bundled workflows: npm install -g @xcraftmind/mastermind\n\
+The npm wrapper also provides update, install, list and short help.\n\n\
+Use --help on any command for its options. Local indexing does not call a model.\n\
+Semantic mining, refinement and scaffold drafting require explicit provider selection."
 )]
 struct Cli {
     /// Path to the SQLite index file. Root-scoped commands default to
@@ -352,6 +351,9 @@ enum Cmd {
         /// Project root. Defaults to cwd.
         #[arg(default_value = ".")]
         root: PathBuf,
+        /// Print observed component state as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Search durable project decisions/ADRs, reports, audits, lessons, and context.
     /// Results are observed retrieval evidence; Markdown remains authoritative.
@@ -393,38 +395,8 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
-    /// Scaffold a project for the Mastermind workflow: create .mastermind/tasks/,
-    /// CONTEXT.md (only if missing) and the index, then build the index and
-    /// (unless --no-claude) populate CONTEXT.md from the codebase via `claude -p`.
-    /// Auto-detects the stack as a drafting hint and always drops the workflow CLAUDE.md
-    /// (an existing CLAUDE.md is left alone unless --force).
-    Init {
-        /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// Overwrite existing files (CONTEXT.md, CLAUDE.md). Off by default.
-        #[arg(long)]
-        force: bool,
-        /// Skip the automatic index build (otherwise `init` runs `index .` for you).
-        #[arg(long)]
-        no_index: bool,
-        /// Skip auto-populating CONTEXT.md via `claude -p` (e.g. offline, in CI, or
-        /// when the Claude Code CLI isn't installed). The bare template is left in place.
-        #[arg(long)]
-        no_claude: bool,
-        /// Skip reconciling the npm workflow bundle into ~/.claude/. npm installs do this by
-        /// default so the full workflow (not just the codegraph) is available. Only artifacts
-        /// recorded in Mastermind's ownership manifest are retired on later updates.
-        #[arg(long)]
-        no_global: bool,
-        /// Explicitly enrich the user-global style profile from this repository's Git history.
-        /// Project initialization does not mine a person by default.
-        #[arg(long, conflicts_with = "no_seed_style")]
-        seed_style: bool,
-        /// Compatibility alias from versions where style mining was enabled by default.
-        #[arg(long, hide = true, conflicts_with = "seed_style")]
-        no_seed_style: bool,
-    },
+    /// Configure a project, its client integrations, indexes and bounded mining.
+    Init(commands::onboard::Options),
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
     /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
     /// entry from the project `.mcp.json`. `--scope global` de-registers mmcg
@@ -1004,6 +976,33 @@ enum AuditCmd {
 
 #[derive(Subcommand)]
 enum MinerCmd {
+    /// Start a fresh bounded run using the settings saved by init.
+    Start {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = ["claude", "codex"])]
+        client: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop the selected project's managed miners without deleting evidence.
+    Stop {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = ["claude", "codex"])]
+        client: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect miners selected by init without starting them.
+    Status {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = ["claude", "codex"])]
+        client: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Capture native client interactions and review semantic habit hypotheses.
     #[command(subcommand)]
     Hooks(HookCmd),
@@ -1752,6 +1751,9 @@ enum SetupCmd {
 
 #[derive(clap::Args, Debug)]
 struct SetupArgs {
+    /// Bind MCP personal context to this explicit client identity. A separate project read grant is required.
+    #[arg(long)]
+    profile_client: Option<String>,
     #[arg(long, value_enum, default_value_t = SetupScope::User)]
     scope: SetupScope,
     #[arg(long, default_value = ".")]
@@ -2402,11 +2404,9 @@ fn run_cli_inner(
             let store = Store::open(&index_path)?;
             mmcg::watcher::run(root, store)?;
         }
-        Cmd::Status { root } => {
+        Cmd::Status { root, json } => {
             let root = canonical_root(root)?;
-            let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
-            print!("{}", ws.render_text());
+            commands::onboard::status(&root, index_override.as_deref(), json)?;
         }
         Cmd::History {
             query,
@@ -2437,30 +2437,10 @@ fn run_cli_inner(
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_resume_text(task.as_deref()));
         }
-        Cmd::Init {
-            root,
-            force,
-            no_index,
-            no_claude,
-            no_global,
-            seed_style,
-            no_seed_style,
-        } => {
-            let root = root
-                .canonicalize()
-                .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-            let init_index_path = index_override.as_deref().map(std::path::Path::to_path_buf);
-            commands::do_init(
-                &root,
-                commands::init::InitOpts {
-                    index_path: init_index_path,
-                    force,
-                    index: !no_index,
-                    claude: !no_claude,
-                    global: !no_global,
-                    seed_style: seed_style && !no_seed_style,
-                },
-            )?;
+        Cmd::Init(options) => {
+            if !commands::onboard::init(options, index_override.as_deref())? {
+                std::process::exit(1);
+            }
         }
         Cmd::Uninstall { root, scope, force } => {
             let root = root
@@ -2499,7 +2479,8 @@ fn run_cli_inner(
                 remove: args.remove,
                 force: args.force,
             };
-            let outcome = mmcg::setup::run(&request, &me);
+            let outcome =
+                mmcg::setup::run_with_profile_client(&request, &me, args.profile_client.as_deref());
             if matches!(
                 outcome,
                 mmcg::setup::Outcome::Error | mmcg::setup::Outcome::RefusedOverwrite
@@ -2793,6 +2774,24 @@ fn run_cli_inner(
                 print!("{}", report.render_text());
             }
             if report.has_failures() {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Miner(MinerCmd::Start { root, client, json }) => {
+            let root = canonical_root(root)?;
+            if !commands::onboard::miner("start", &root, client.as_deref(), json)? {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Miner(MinerCmd::Stop { root, client, json }) => {
+            let root = canonical_root(root)?;
+            if !commands::onboard::miner("stop", &root, client.as_deref(), json)? {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Miner(MinerCmd::Status { root, client, json }) => {
+            let root = canonical_root(root)?;
+            if !commands::onboard::miner("status", &root, client.as_deref(), json)? {
                 std::process::exit(1);
             }
         }

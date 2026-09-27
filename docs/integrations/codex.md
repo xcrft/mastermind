@@ -6,18 +6,23 @@ Install portable skills and connect the local graph through user-scope MCP.
 
 ```bash
 npm install -g @xcraftmind/mastermind
-mastermind install --client codex
 cd your-project
-mastermind index .
+mastermind init --client codex
+mastermind status
 mastermind doctor --workflow --client codex
 ```
 
 | Setting | Behavior |
 |---|---|
 | Fresh install | `core` skills |
-| `--profile frontend`, `security`, `full` | Expanded selection |
+| `mastermind update --workflow-only --client codex --profile frontend` | Select frontend skills. Other profiles are `security` and `full` |
 | Update without `--profile` | Keep the selected profile |
 | Agent runtime | Codex uses portable skills, not Claude-native subagent files |
+
+`init` indexes code and documents and configures local capture. Restart Codex,
+trust the project and inspect `/hooks`. Semantic mining requires
+`--mining on --provider claude`. On Windows select `--mining off` because native
+hooks and managed workers require Unix. See [onboarding](../getting-started.md).
 
 ## Register MCP only
 

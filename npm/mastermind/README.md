@@ -6,76 +6,57 @@
 
 Local repository context and task-evidence workflows for coding agents.
 The package supplies a prebuilt binary as `mastermind` and `mmcg`.
+It indexes source code, Markdown documentation, and Vue SFC script blocks with
+source-backed symbols and relationships.
 
-## Install and review a change
+## Quick start
 
-| Requirement | Support |
-|---|---|
-| Node.js | 24+ |
-| macOS | arm64, x64 |
-| Linux | glibc or musl, arm64 or x64 |
-| Windows | x64 |
-| Rust toolchain | Not required |
-
-Source: [package manifest](https://github.com/xcrft/mastermind/blob/main/npm/mastermind/package.json).
+Requires Node.js 24+. Run inside your repository:
 
 ```bash
 npm install -g @xcraftmind/mastermind
-cd your-repository
-mastermind index .
-mastermind impact --since main
-mastermind ui --since main
+mastermind init
 ```
 
-Replace `main` with the baseline. The index lives in `.mastermind/mmcg.db`.
-Keep `.mastermind/` out of Git. Lens serves the review on loopback.
+The first interactive run asks for Claude Code, Codex, both, or no client, then
+the mining mode. It scaffolds the project, indexes code and documentation, and
+configures the selected client. An unattended first run without `--client`
+stays local. Choices are saved in `.mastermind/setup.json`.
 
-| Need | Command |
+| Command | Purpose |
 |---|---|
-| Repository structure | `mastermind map .` |
-| Role briefing | `mastermind brief --role executor --since main --budget-tokens 2000` |
-| Symbol discovery | `mastermind concept "payment retry handler" --top 10` |
-| Offline review | `mastermind review export --since main --out mastermind-review` |
+| `mastermind status --json` | Inspect component state and the next task action |
+| `mastermind update` | Update in the existing npm scope and refresh installed workflows |
+| `mastermind update --dry-run` | Preview locally without changes or network calls |
+| `mastermind ui --since main` | Open a read-only review against your Git baseline |
+| `mastermind --help` | Show onboarding and project commands |
+| `mmcg --help` | Show the complete native CLI |
 
-The static graph supports Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust,
-C#, Go, Java, PHP, and C/C++. See
-[language coverage](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md#language-coverage)
-for extraction limits. SCIP and external facts retain separate provenance.
+Restart the selected client after setup. Registration does not establish client
+trust or a live connection. Local capture is the default for a selected client.
+Semantic mining, profile read access, and prompt refinement require separate
+opt-ins. Repeated `init` preserves miner budgets.
 
-## Connect a coding client
-
-| Client | Setup |
+| Platform | Support |
 |---|---|
-| Claude Code | `mastermind install --client claude` |
-| Codex | `mastermind install --client codex` |
-| Both | `mastermind install --client all` |
-| Cursor or Continue | `mastermind setup cursor --scope user` or `setup continue --scope user`, then add `--write` |
-| Other MCP client | [Generic MCP guide](https://github.com/xcrft/mastermind/blob/main/docs/integrations/generic-mcp.md) |
+| macOS arm64 or x64 | Prebuilt native tools, hooks, and managed mining |
+| Linux arm64 or x64, glibc or musl | Prebuilt native tools, hooks, and managed mining |
+| Windows x64 | Local indexing and client setup with `--mining off` |
+| Rust toolchain | Not required for this package |
 
-```bash
-mastermind doctor --workflow --client all
-```
-
-`core` is the default skill profile. Updates retain the installed profile.
-See [client setup](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
-for scope and removal.
-
-| Boundary | Behavior |
-|---|---|
-| Indexing, deterministic queries, Lens | Local |
-| Managed graph queries | May refresh the derived index |
-| Scratchpad append | Additive local write |
-| Personal profile | Separate project/client read grant |
-| Native execution, review, AI mining | Explicit operations that may send context to the selected provider |
+Native hooks and managed mining are unsupported on Windows. See the
+[package manifest](https://github.com/xcrft/mastermind/blob/main/npm/mastermind/package.json)
+for binary packages.
 
 ## Documentation
 
-- [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
-- [Architecture](https://github.com/xcrft/mastermind/blob/main/docs/architecture.md)
-- [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
-- [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
-- [Fact ingestion](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)
-- [Benchmarks](https://github.com/xcrft/mastermind/blob/main/docs/benchmarks.md)
+| Guide | Covers |
+|---|---|
+| [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) | Mining modes, budgets, permissions, updates, and alternative installations |
+| [Architecture](https://github.com/xcrft/mastermind/blob/main/docs/architecture.md) | Context layers and evidence boundaries |
+| [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) | Scope, checks, review, and completion |
+| [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md) | Native commands, tools, and language coverage |
+| [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations) | Advanced setup, scope, and removal |
 
 Cargo package: [mmcg](https://crates.io/crates/mmcg).
 License: [MIT](https://github.com/xcrft/mastermind/blob/main/LICENSE).

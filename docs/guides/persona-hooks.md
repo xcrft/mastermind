@@ -65,7 +65,7 @@ native prompt → local capture → durable intake → selected processor
 | `ask` | Up to 3 questions. No planner or executor handoff |
 | Workflow activation | Model interprets intent in any language. An exact eligible user-prose citation is required |
 | Activation result | Advisory handoff to the existing `mastermind-task-planning` skill |
-| Continuation | Requires an explicit task binding. Automatic session-to-task binding is not implemented yet |
+| Continuation | Receives only this session's explicitly bound task. Changed specs, incomplete handoffs and completed tasks are withheld |
 | Permission | Intake grants no execution, tools or approval |
 | Native delivery | `additionalContext`. The original prompt still reaches the agent |
 | Incomplete, redacted or generated input | No processor invocation |
@@ -94,6 +94,35 @@ automatically retried. Clients without stable event IDs cannot distinguish
 identical intentional repeats from retries, so ambiguous replay is quarantined.
 Native clients can ignore or truncate context and may continue with the original
 after a hook timeout. An offered advisory does not prove the workflow ran.
+
+### Bind intake to a task
+
+After planning a verified or strict spec, bind its exact source before preflight:
+
+```bash
+mastermind miner hooks bind-task '<intake-id>' --spec .mastermind/tasks/001-example/spec.md
+mastermind run-task .mastermind/tasks/001-example/spec.md --pre-only
+```
+
+```text
+session → admitted intake → explicit spec binding → preflight → invocation
+                                                             → checks → review → completion
+```
+
+| Handoff | Rule |
+|---|---|
+| Source | Current offered activation or continuation, exact original and proposed response digests |
+| Replacement | Requires `--expected-binding <revision>` from the task's `state.intake.json` |
+| Repeat | Same intake and target returns the same receipt. It never creates or executes another task |
+| Continuation | Same session, exact spec and current binding. No repository-wide latest-task selection |
+| Crash | A `prepared` marker blocks execution. Retry the same intake or CAS-replace it with a current admitted intake |
+| Revocation, gaps or forgetting | Block new use. Previously completed task history remains historical |
+| Local marker | Identifiers and digests only. Raw input remains in the global journal |
+| Execution evidence | Preflight, invocation, verification and review bind the same intake revision |
+| Authority | Binding records provenance. It does not approve scope, grant tools or verify preserved meaning |
+
+The executor receives original and proposed text as source data inside its hashed
+prompt. Receipt hashes establish which bytes were offered, not how the model used them.
 
 Refiner-exposed episodes remain captured but are conservatively excluded from
 independent habit evidence. Event-level influence accounting is still required

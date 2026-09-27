@@ -1449,6 +1449,7 @@ mod tests {
                 last_artifact: Some("audit.md".into()),
                 spec_path: ".mastermind/tasks/001-payment/spec.md".into(),
                 repository_identity: Some(crate::facts::repository_identity(root.path()).unwrap()),
+                intake_revision: None,
                 spec_hash: crate::run_task::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 held_snapshot_sha256: Some(held_snapshot),

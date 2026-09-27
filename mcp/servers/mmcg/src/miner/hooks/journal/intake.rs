@@ -13,6 +13,10 @@ pub(in crate::miner::hooks) struct IntakeReceipt {
     pub response: Option<Response>,
     pub reason: Option<String>,
     pub elapsed_ms: u64,
+    #[serde(default)]
+    pub session_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding_revision: Option<String>,
 }
 
 impl Journal {
@@ -94,6 +98,8 @@ impl Journal {
         let capture_clear =
             !crate::miner::hooks::fence::pending(&grant.client, Path::new(&grant.project_root))
                 .unwrap_or(true);
+        let ep = load_episode(&self.conn, episode)?;
+        let (session_epoch, active_task) = super::task::active(&self.conn, &ep.session)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -129,13 +135,14 @@ impl Journal {
             capture_generation: ep.generation,
             prompt_digest: refiner::prompt_digest(&prompt.text),
             original: prompt.text.clone(),
-            active_task: None,
+            active_task: active_task.as_ref().map(|task| task.spec_path.clone()),
         };
         let admissible = capture_clear
             && prompt.text == original
             && !original.trim().is_empty()
             && prompt.origin == "user_channel_unverified"
-            && current_prompt(&tx, grant, &input)?;
+            && current_prompt(&tx, grant, &input)?
+            && super::task::epoch(&tx, &input.session_id)? == session_epoch;
         let receipt = IntakeReceipt {
             schema: 1,
             status: if admissible { "pending" } else { "degraded" }.into(),
@@ -144,6 +151,8 @@ impl Journal {
             response: None,
             reason: (!admissible).then(|| "capture_not_admitted".into()),
             elapsed_ms: 0,
+            session_epoch,
+            task_binding_revision: active_task.map(|task| task.revision),
         };
         tx.execute(
             "INSERT INTO hook_intake(id,episode,data) VALUES(?1,?2,?3)",
@@ -163,6 +172,11 @@ impl Journal {
         let capture_clear =
             !crate::miner::hooks::fence::pending(&grant.client, Path::new(&grant.project_root))
                 .unwrap_or(true);
+        let (session_epoch, active_task) =
+            super::task::active(&self.conn, &receipt.input.session_id)?;
+        let task_current = session_epoch == receipt.session_epoch
+            && active_task.as_ref().map(|task| &task.revision)
+                == receipt.task_binding_revision.as_ref();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -182,7 +196,12 @@ impl Journal {
             .is_some_and(|(revision, config)| {
                 revision == current.config_revision && config.is_some()
             });
-        if !capture_clear || !config_current || !current_prompt(&tx, grant, &current.input)? {
+        if !capture_clear
+            || !config_current
+            || !task_current
+            || super::task::epoch(&tx, &current.input.session_id)? != session_epoch
+            || !current_prompt(&tx, grant, &current.input)?
+        {
             current.status = "withheld".into();
             current.reason = Some("admission_changed".into());
         } else {
@@ -234,6 +253,15 @@ fn read_config(
 }
 
 fn current_prompt(conn: &Connection, grant: &Grant, input: &Input) -> Result<bool, Error> {
+    admitted_prompt(conn, grant, input, false)
+}
+
+pub(super) fn admitted_prompt(
+    conn: &Connection,
+    grant: &Grant,
+    input: &Input,
+    allow_open_tools: bool,
+) -> Result<bool, Error> {
     let Some(current) = read_grant(conn, &grant.client, Path::new(&grant.project_root))? else {
         return Ok(false);
     };
@@ -260,7 +288,7 @@ fn current_prompt(conn: &Connection, grant: &Grant, input: &Input) -> Result<boo
         && ep.session == input.session_id
         && ep.gaps.is_empty()
         && !ep.closed
-        && ep.open_tools.is_empty()
+        && (allow_open_tools || ep.open_tools.is_empty())
         && ep.events.iter().any(|e| {
             e.id == input.event_id
                 && e.kind == "UserPromptSubmit"

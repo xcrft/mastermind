@@ -140,3 +140,25 @@ Real-task false completion, user corrections, unsupported conclusions, tokens
 and time require a fixed, independently reviewed task corpus. See
 [measurement definitions](README.md#measurement-contract) and the
 [current scorecard](scorecard.md).
+
+## Refiner protocol and model evaluation
+
+The 40-case multilingual corpus can run through the production refiner parser:
+
+```sh
+python3 -m evals.hook_intake --binary /absolute/path/to/mmcg \
+  --processor /absolute/path/to/protocol-processor \
+  --output /private/new-report-directory
+```
+
+| Output | Contract |
+|---|---|
+| All attempts | Retained request, bounded raw streams, status and digests, including failures |
+| Protocol | Production parsing with `admission: false`, no capture or task publication |
+| Labels | Hidden from the processor. Agreement is against author-written synthetic labels |
+| Bounds | 1–5 repetitions, 1–20 s native timeout, processor budget 0.25 s shorter for recorder finalization |
+| Independent review | Missing until a separate label review is supplied |
+| Meaning, cost and benefits | Require real provider runs and reviewed outcomes. Fixture success establishes wiring only |
+
+Select a protocol executable explicitly. The runner does not select credentials
+or call a provider by default. Repeat `--processor-arg=VALUE` as needed.

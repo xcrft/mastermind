@@ -5414,6 +5414,7 @@ mod tests {
             last_artifact: Some("spec.md".into()),
             spec_path: crate::bounded_fs::normalize_repository_relative_path(spec_path).unwrap(),
             repository_identity: Some(crate::facts::repository_identity(root).unwrap()),
+            intake_revision: None,
             spec_hash: "0".repeat(64),
             baseline_ref: "0".repeat(40),
             held_snapshot_sha256: None,

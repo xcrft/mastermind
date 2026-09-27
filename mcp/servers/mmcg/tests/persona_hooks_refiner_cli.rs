@@ -25,7 +25,6 @@ assert os.environ.get("MASTERMIND_MINER") == "1", "missing recursion guard"
 request = json.load(sys.stdin)
 assert request["schema"] == 1
 source = request["input"]
-assert source["active_task"] is None
 with (harness / "calls.jsonl").open("a", encoding="utf-8") as stream:
     stream.write(json.dumps({"id": source["id"], "guard": os.environ["MASTERMIND_MINER"]}) + "\n")
 (harness / (source["id"] + ".json")).write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
@@ -59,6 +58,9 @@ if mode == "activation":
     response.update(action="refined", workflow_intent="activate_mastermind",
                     intent_evidence=source["original"],
                     refined_prompt="Inspect the request and draft a plan for approval before implementation.")
+elif mode == "continuation":
+    assert source["active_task"] is not None
+    response.update(workflow_intent="continue_active", intent_evidence=source["original"])
 elif mode == "ask":
     response.update(action="ask", workflow_intent="unclear", refined_prompt=None,
                     questions=["Which repository should this request use?"])
@@ -71,6 +73,147 @@ elif mode == "unknown_field":
 print(json.dumps(response, ensure_ascii=False))
 "#;
 
+#[test]
+fn bound_intake_survives_tool_events_and_routes_only_its_session() {
+    let f = Fixture::new("activation");
+    f.setup("claude", "8");
+    f.start("claude", "bound");
+    f.native(
+        "claude",
+        &f.prompt("bound", "one", "Use Mastermind to inspect this code."),
+    );
+    let first = f.receipts().remove(0);
+    let id = first["input"]["id"].as_str().unwrap();
+    let spec = ".mastermind/tasks/001-inspect/spec.md";
+    fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+    fs::write(f.project.join(spec), "# Inspect this code\n").unwrap();
+    let mut tool = f.event("bound", "one", "PreToolUse");
+    tool["tool_use_id"] = json!("bind-command");
+    tool["tool_name"] = json!("Bash");
+    tool["tool_input"] = json!({"command":"mastermind miner hooks bind-task"});
+    f.native("claude", &tool);
+    let args = ["miner", "hooks", "bind-task", id, "--spec", spec];
+    let binding = f.success(&args);
+    assert_eq!(binding["status"], "bound");
+    assert_eq!(binding["binding"]["spec_path"], spec);
+    assert_eq!(binding["binding"]["intake_id"], id);
+    assert_eq!(
+        f.success(&args),
+        binding,
+        "retry must return the same receipt"
+    );
+    tool["hook_event_name"] = json!("PostToolUse");
+    tool["event_id"] = json!("bound:one:PostToolUse");
+    tool["tool_response"] = json!({"exit_code":0});
+    f.native("claude", &tool);
+    f.native("claude", &f.event("bound", "one", "Stop"));
+    f.mode("continuation");
+    let response = f.native("claude", &f.prompt("bound", "two", "Continue that task."));
+    assert!(response.to_string().contains("bound_active_task"));
+    let second = f.receipts().remove(1);
+    assert_eq!(second["input"]["active_task"], spec);
+    assert_eq!(
+        second["task_binding_revision"],
+        binding["binding"]["revision"]
+    );
+    let second_id = second["input"]["id"].as_str().unwrap();
+    let continued = f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        second_id,
+        "--spec",
+        spec,
+        "--expected-binding",
+        binding["binding"]["revision"].as_str().unwrap(),
+    ]);
+    // Reconstruct a crash after the new marker but before its SQL transaction.
+    let mut prepared = continued.clone();
+    prepared["status"] = json!("prepared");
+    fs::write(
+        f.project
+            .join(".mastermind/tasks/001-inspect/state.intake.json"),
+        prepared.to_string(),
+    )
+    .unwrap();
+    let db = Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    db.execute("DELETE FROM hook_task_binding WHERE intake=?1", [second_id])
+        .unwrap();
+    let session_id = second["input"]["session_id"].as_str().unwrap();
+    let data: String = db
+        .query_row(
+            "SELECT data FROM hook_session WHERE id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut session: Value = serde_json::from_str(&data).unwrap();
+    session["task_epoch"] = second["session_epoch"].clone();
+    session["task_binding"] = binding["binding"]["revision"].clone();
+    db.execute(
+        "UPDATE hook_session SET data=?2 WHERE id=?1",
+        rusqlite::params![session_id, session.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        f.success(&["miner", "hooks", "bind-task", second_id, "--spec", spec]),
+        continued
+    );
+    f.mode("ordinary");
+    f.start("claude", "unbound");
+    f.native("claude", &f.prompt("unbound", "one", "Continue that task."));
+    assert!(f.receipts().remove(2)["input"]["active_task"].is_null());
+    let sidecar = fs::read_to_string(
+        f.project
+            .join(".mastermind/tasks/001-inspect/state.intake.json"),
+    )
+    .unwrap();
+    assert!(
+        !sidecar.contains("Use Mastermind"),
+        "raw source belongs only in the journal"
+    );
+    assert!(!f
+        .project
+        .join(".mastermind/tasks/001-inspect/state.json")
+        .exists());
+}
+
+#[test]
+fn marker_loss_or_a_conflicting_event_blocks_the_first_preflight() {
+    let f = Fixture::new("activation");
+    f.setup("codex", "8");
+    f.start("codex", "source");
+    let prompt = f.prompt("source", "one", "Use Mastermind to inspect the code.");
+    f.native("codex", &prompt);
+    let spec = ".mastermind/tasks/001-marker/spec.md";
+    fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+    fs::write(f.project.join(spec), "# Inspect\n").unwrap();
+    let receipt = f.receipts().remove(0);
+    let id = receipt["input"]["id"].as_str().unwrap();
+    let binding = f.success(&["miner", "hooks", "bind-task", id, "--spec", spec]);
+    let marker = f
+        .project
+        .join(".mastermind/tasks/001-marker/state.intake.json");
+    fs::remove_file(&marker).unwrap();
+    let run = ["run-task", spec, "--pre-only", "--allow-no-index"];
+    let output = f.run(&run);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("marker disappeared"),
+        "{output:?}"
+    );
+    fs::write(marker, binding.to_string()).unwrap();
+    let mut conflict = prompt.clone();
+    conflict["prompt"] = json!("Use Mastermind for a different scope.");
+    f.native("codex", &conflict);
+    let output = f.run(&run);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("evidence is incomplete"),
+        "{output:?}"
+    );
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
@@ -78,6 +221,173 @@ struct Fixture {
     harness: PathBuf,
     python: PathBuf,
     script: PathBuf,
+}
+
+#[test]
+fn binding_rejects_ordinary_stale_and_cross_project_sources() {
+    let f = Fixture::new("ordinary");
+    f.setup("codex", "8");
+    f.start("codex", "admission");
+    f.native("codex", &f.prompt("admission", "one", "Explain the code."));
+    fs::write(f.project.join("spec.md"), "# Inspect\n").unwrap();
+    let first = f.receipts().remove(0);
+    let id = first["input"]["id"].as_str().unwrap();
+    assert!(!f
+        .run(&["miner", "hooks", "bind-task", id, "--spec", "spec.md"])
+        .status
+        .success());
+    f.mode("activation");
+    f.native(
+        "codex",
+        &f.prompt("admission", "two", "Use Mastermind for this task."),
+    );
+    let second = f.receipts().remove(1);
+    let id = second["input"]["id"].as_str().unwrap();
+    fs::create_dir(f.project.join("nested")).unwrap();
+    fs::write(f.project.join("nested/spec.md"), "# Another project\n").unwrap();
+    assert!(!f
+        .run(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            id,
+            "--spec",
+            "spec.md",
+            "--project-root",
+            "nested"
+        ])
+        .status
+        .success());
+    f.native("codex", &f.event("admission", "two", "Stop"));
+    assert!(!f
+        .run(&["miner", "hooks", "bind-task", id, "--spec", "spec.md"])
+        .status
+        .success());
+}
+
+#[test]
+fn prepared_handoff_blocks_run_and_allows_exact_cas_recovery() {
+    let f = Fixture::new("activation");
+    f.setup("codex", "8");
+    f.start("codex", "before-crash");
+    f.native(
+        "codex",
+        &f.prompt(
+            "before-crash",
+            "one",
+            "Use Mastermind to inspect this code.",
+        ),
+    );
+    let spec = ".mastermind/tasks/001-recover/spec.md";
+    fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+    fs::write(f.project.join(spec), "# Inspect\n").unwrap();
+    let first = f.receipts().remove(0);
+    let id = first["input"]["id"].as_str().unwrap();
+    let bound = f.success(&["miner", "hooks", "bind-task", id, "--spec", spec]);
+    let marker = f
+        .project
+        .join(".mastermind/tasks/001-recover/state.intake.json");
+    let mut prepared = bound.clone();
+    prepared["status"] = json!("prepared");
+    fs::write(&marker, prepared.to_string()).unwrap();
+    // Crash after the SQL commit: exact retry completes the local marker.
+    f.native("codex", &f.event("before-crash", "", "SessionEnd"));
+    assert_eq!(
+        f.success(&["miner", "hooks", "bind-task", id, "--spec", spec]),
+        bound
+    );
+    // Crash before SQL publication: durable marker prevents an unbound run.
+    fs::write(&marker, prepared.to_string()).unwrap();
+    let db = Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    db.execute("DELETE FROM hook_task_binding", []).unwrap();
+    let output = f.run(&["run-task", spec, "--pre-only", "--allow-no-index"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("prepared but incomplete"),
+        "{output:?}"
+    );
+    f.start("codex", "after-crash");
+    f.native(
+        "codex",
+        &f.prompt(
+            "after-crash",
+            "one",
+            "Use Mastermind to finish the inspection.",
+        ),
+    );
+    let next = f.receipts().remove(1);
+    let next_id = next["input"]["id"].as_str().unwrap();
+    assert!(!f
+        .run(&["miner", "hooks", "bind-task", next_id, "--spec", spec])
+        .status
+        .success());
+    let recovered = f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        next_id,
+        "--spec",
+        spec,
+        "--expected-binding",
+        bound["binding"]["revision"].as_str().unwrap(),
+    ]);
+    assert_ne!(
+        recovered["binding"]["revision"],
+        bound["binding"]["revision"]
+    );
+    fs::write(f.project.join("another.md"), "# Another\n").unwrap();
+    assert!(!f
+        .run(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            next_id,
+            "--spec",
+            "another.md"
+        ])
+        .status
+        .success());
+}
+
+#[test]
+fn a_changed_active_spec_withholds_an_inflight_continuation() {
+    let f = Fixture::new("activation");
+    f.setup("claude", "8");
+    f.start("claude", "binding");
+    f.native(
+        "claude",
+        &f.prompt("binding", "one", "Use Mastermind to inspect the code."),
+    );
+    let spec = "spec.md";
+    fs::write(f.project.join(spec), "# Inspect\n").unwrap();
+    let first = f.receipts().remove(0);
+    f.success(&[
+        "miner",
+        "hooks",
+        "bind-task",
+        first["input"]["id"].as_str().unwrap(),
+        "--spec",
+        spec,
+    ]);
+    f.native("claude", &f.event("binding", "one", "Stop"));
+    f.mode("blocked");
+    let mut child = f
+        .native_command("claude", &f.prompt("binding", "two", "Continue the task."))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.harness.join("ready").exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pending = f.receipts().remove(1);
+    assert_eq!(pending["input"]["active_task"], spec, "{pending}");
+    fs::write(f.project.join(spec), "# A different scope\n").unwrap();
+    fs::write(f.harness.join("release"), "").unwrap();
+    assert!(child.wait().unwrap().success());
+    let receipt = f.receipts().remove(1);
+    assert_eq!(receipt["status"], "withheld");
+    assert_eq!(receipt["reason"], "admission_changed");
 }
 
 impl Fixture {

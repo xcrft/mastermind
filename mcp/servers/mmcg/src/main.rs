@@ -1099,6 +1099,32 @@ enum HookCmd {
     Intake {
         id: String,
     },
+    /// Evaluate one synthetic refiner input through the production protocol. No admission.
+    EvaluateRefiner {
+        input: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "provider",
+            conflicts_with = "provider"
+        )]
+        processor: Option<PathBuf>,
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u64).range(1..=20))]
+        timeout: u64,
+    },
+    /// Bind one admitted intake to an exact task. Does not approve or execute it.
+    BindTask {
+        intake: String,
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        expected_binding: Option<String>,
+    },
     Status {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
@@ -2724,6 +2750,31 @@ fn run_cli_inner(
                     )?;
                 }
                 HookCmd::Intake { id } => hooks::intake(&id)?,
+                HookCmd::EvaluateRefiner {
+                    input,
+                    processor,
+                    provider,
+                    args,
+                    timeout,
+                } => {
+                    hooks::evaluate_refiner(
+                        &input,
+                        &hooks::RefinerConfig {
+                            processor,
+                            provider,
+                            args,
+                            timeout_secs: timeout,
+                        },
+                    )?;
+                }
+                HookCmd::BindTask {
+                    intake,
+                    spec,
+                    project_root,
+                    expected_binding,
+                } => {
+                    hooks::bind_task(&intake, &spec, &project_root, expected_binding.as_deref())?;
+                }
                 HookCmd::Receive {
                     client,
                     project_root,

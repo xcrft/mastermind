@@ -1,6 +1,7 @@
 //! Native client capture, semantic hypotheses and a reviewed bridge to the
 //! existing profile. Hooks record observations; they do not grant tool access.
 
+mod evaluate;
 mod fence;
 mod install;
 mod journal;
@@ -135,6 +136,22 @@ fn refiner_status(config: Option<&RefinerConfig>) -> Value {
 pub fn intake(id: &str) -> Result<(), Error> {
     check_id(id)?;
     print(&serde_json::to_value(Journal::open(false)?.intake(id)?)?)
+}
+
+pub fn evaluate_refiner(input: &Path, config: &RefinerConfig) -> Result<(), Error> {
+    print(&evaluate::evaluate(input, config)?)
+}
+
+pub fn bind_task(id: &str, spec: &Path, root: &Path, expected: Option<&str>) -> Result<(), Error> {
+    check_id(id)?;
+    if let Some(revision) = expected {
+        check_id(revision)?;
+    }
+    print(&journal::task::bind(id, spec, root, expected)?)
+}
+
+pub(crate) fn task_intake(root: &Path, spec: &Path) -> Result<Option<(String, Value)>, String> {
+    journal::task::load(root, spec).map_err(|error| error.to_string())
 }
 
 pub fn recover(client_id: &str, root: &Path) -> Result<(), Error> {

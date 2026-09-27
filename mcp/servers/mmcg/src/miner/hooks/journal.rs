@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod intake;
+pub(in crate::miner) mod task;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
@@ -42,7 +43,11 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                     client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
                     data TEXT, PRIMARY KEY(client,project_root));
                 CREATE TABLE IF NOT EXISTS hook_intake (
-                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);";
+                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS hook_task_binding (
+                    revision TEXT PRIMARY KEY, intake TEXT NOT NULL UNIQUE,
+                    project_root TEXT NOT NULL, spec_path TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_task_binding_target ON hook_task_binding(project_root,spec_path);";
 
 pub(super) fn path() -> Result<PathBuf, Error> {
     Ok(std::env::home_dir()
@@ -82,6 +87,10 @@ struct Session {
     previous_assistant: Option<EventInput>,
     exposures: Vec<Value>,
     episode_count: usize,
+    #[serde(default)]
+    task_binding: Option<String>,
+    #[serde(default)]
+    task_epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,6 +346,8 @@ impl Journal {
             previous_assistant: None,
             exposures: vec![],
             episode_count: 0,
+            task_binding: None,
+            task_epoch: 0,
         });
         let key = incoming
             .native_key

@@ -64,6 +64,9 @@ pub struct RunState {
     /// its approval can be consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_identity: Option<String>,
+    /// Exact explicit hook handoff. Missing for tasks created without an intake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_revision: Option<String>,
     /// SHA-256 of the approved spec body. Legacy 16-digit hashes remain readable.
     /// Post-flight requires an exact match or a new explicit pre-flight.
     pub spec_hash: String,
@@ -1239,6 +1242,21 @@ pub(crate) fn validate_bound_state_identity(
     Ok(())
 }
 
+pub(crate) fn validate_intake_binding(
+    root: &Path,
+    spec: &Path,
+    state: &RunState,
+) -> Result<(), String> {
+    if state.status == "learned" {
+        return Ok(());
+    }
+    let current = crate::miner::hooks::task_intake(root, spec)?.map(|(revision, _)| revision);
+    if current != state.intake_revision {
+        return Err("task intake changed; an explicit pre-flight is required".into());
+    }
+    Ok(())
+}
+
 fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerIdentity, String> {
     let root = RootCapability::open(repo_root)
         .map_err(|error| format!("opening repository capability: {error}"))?;
@@ -1880,6 +1898,18 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
         }
     }
 
+    // Completed historical state is inspectable after source retention expires.
+    // Fresh work and unfinished completion require the exact live intake.
+    if let Some(state) = existing
+        .as_ref()
+        .filter(|state| state.status != "learned" && !(opts.pre_only || opts.reset || opts.exec))
+    {
+        if let Err(error) = validate_intake_binding(repo_root, spec_path, state) {
+            eprintln!("error: {error}");
+            return Outcome::PreFailed;
+        }
+    }
+
     // Review resume consumes the current approved iteration. It must not fall
     // through to preflight or treat a historical completion as a new review.
     if opts.auto_review && !opts.exec {
@@ -2125,6 +2155,7 @@ fn complete_reviewed_task(
     // Recheck observed obligations only at this new completion;
     // already completed tasks retain their historical meaning.
     let receipts_current = read_preflight_spec(repo_root, spec_path).and_then(|body| {
+        validate_intake_binding(repo_root, spec_path, state)?;
         if state.invocation_required {
             crate::invocation::validate_completed(spec_path, repo_root, state)?;
         }
@@ -2161,6 +2192,7 @@ fn complete_reviewed_task(
         != state.history_snapshot_sha256.as_ref()
         || history_review_resolved(repo_root, spec_path, state).is_err()
         || crate::task_review::validate_current(repo_root, spec_path, state).is_err()
+        || validate_intake_binding(repo_root, spec_path, state).is_err()
     {
         eprintln!("error: audited inputs or semantic review changed during history refresh; re-run run-task");
         return Outcome::PostBroken;
@@ -2613,6 +2645,17 @@ fn run_pre(
         return Outcome::PreFailed;
     }
 
+    let intake_revision = match crate::miner::hooks::task_intake(repo_root, spec_path) {
+        Ok(source) => source.map(|(revision, _)| revision),
+        Err(error) => {
+            eprintln!("error: task intake is unavailable: {error}");
+            return Outcome::PreFailed;
+        }
+    };
+    if previous.is_some_and(|state| state.intake_revision.is_some()) && intake_revision.is_none() {
+        eprintln!("error: task intake binding disappeared; restore or explicitly replace it");
+        return Outcome::PreFailed;
+    }
     let spec_body = match read_preflight_spec(repo_root, spec_path) {
         Ok(body) => body,
         Err(error) => {
@@ -2752,6 +2795,15 @@ fn run_pre(
             return Outcome::PreFailed;
         }
     };
+    if crate::miner::hooks::task_intake(repo_root, spec_path)
+        .map(|source| source.map(|(revision, _)| revision))
+        .ok()
+        .as_ref()
+        != Some(&intake_revision)
+    {
+        eprintln!("error: task intake changed during pre-flight");
+        return Outcome::PreFailed;
+    }
     let state = RunState {
         status: "approved".into(),
         risk: Some(declared_risk.into()),
@@ -2760,6 +2812,7 @@ fn run_pre(
         last_artifact: Some("spec.md".into()),
         spec_path: final_identity.spec_path,
         repository_identity: Some(final_identity.repository),
+        intake_revision,
         spec_hash: hash_text(&spec_body),
         baseline_ref: head.clone(),
         held_snapshot_sha256: None,
@@ -3405,6 +3458,7 @@ verifications: []\n\
             last_artifact: Some("spec.md".into()),
             spec_path: "specs/foo.md".into(),
             repository_identity: Some(format!("git-worktree:sha256:{}", "a".repeat(64))),
+            intake_revision: None,
             spec_hash: "deadbeefcafef00d".into(),
             baseline_ref: "abc1234".into(),
             held_snapshot_sha256: Some("feedface".into()),

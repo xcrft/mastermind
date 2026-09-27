@@ -7,6 +7,7 @@ use mmcg::miner::store::ProfileStore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -476,6 +477,108 @@ fn no_running_process(pid: i32) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn intake_binding_reaches_native_checks_review_and_historical_completion() {
+    let fixture = Fixture::new("repair");
+    // Local hook installation is not a product change in this task.
+    fixture.write(".git/info/exclude", ".claude/\n");
+    let interpreter = Command::new("python3")
+        .args(["-I", "-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert_success(&interpreter);
+    let python = PathBuf::from(String::from_utf8(interpreter.stdout).unwrap().trim())
+        .canonicalize()
+        .unwrap();
+    let processor = fixture.harness.join("refiner.py");
+    fs::write(&processor, "import json,sys\ni=json.load(sys.stdin)['input']\nprint(json.dumps(dict(schema=1,intake_id=i['id'],prompt_digest=i['prompt_digest'],action='passthrough',workflow_intent='activate_mastermind',intent_evidence=i['original'],refined_prompt=i['original'],questions=[])))\n").unwrap();
+    assert_success(
+        &fixture
+            .cli(&[
+                "miner",
+                "hooks",
+                "setup",
+                "--client",
+                "claude",
+                "--write",
+                "--refiner-processor",
+            ])
+            .arg(python)
+            .arg("--refiner-arg=-I")
+            .arg(format!("--refiner-arg={}", processor.display()))
+            .output()
+            .unwrap(),
+    );
+    let original = "Use Mastermind to make service.py return two, without expanding the scope.";
+    for (kind, prompt) in [("SessionStart", ""), ("UserPromptSubmit", original)] {
+        let input = json!({"session_id":"source-session", "event_id":kind, "turn_id":"one", "hook_event_name":kind,
+            "source":"startup","cwd":fixture.root,"prompt":prompt});
+        let mut child = fixture
+            .cli(&["miner", "hooks", "receive", "--client", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        assert_success(&child.wait_with_output().unwrap());
+    }
+    let db =
+        rusqlite::Connection::open(fixture.home.join(".mastermind/persona-events.db")).unwrap();
+    let data: String = db
+        .query_row("SELECT data FROM hook_intake", [], |row| row.get(0))
+        .unwrap();
+    let source: Value = serde_json::from_str(&data).unwrap();
+    let id = source["input"]["id"].as_str().unwrap();
+    let output = fixture.run(&["miner", "hooks", "bind-task", id, "--spec", SPEC]);
+    assert_success(&output);
+    let binding: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_success(&fixture.execute(&[]));
+    let revision = &binding["binding"]["revision"];
+    assert_eq!(&fixture.state()["intake_revision"], revision);
+    assert_eq!(&fixture.receipt()["binding"]["intake_revision"], revision);
+    assert_eq!(
+        &fixture.json(".mastermind/tasks/001-invocation/verification/unit.json")["binding"]
+            ["intake_revision"],
+        revision
+    );
+    let input = fixture.attempt_input(1);
+    assert!(input.contains("<mastermind-intake-json>"));
+    assert!(input.contains(original));
+    assert!(!fs::read_to_string(fixture.root.join(RECEIPT))
+        .unwrap()
+        .contains(original));
+    fixture.resolve_history_review();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+    let episode = source["input"]["episode_id"].as_str().unwrap();
+    let shown = fixture.run(&["miner", "hooks", "show", episode]);
+    assert_success(&shown);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let forgotten = fixture.run(&[
+        "miner",
+        "hooks",
+        "forget",
+        episode,
+        "--revision",
+        shown["episode"]["revision"].as_str().unwrap(),
+    ]);
+    assert_success(&forgotten);
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+    assert!(!fixture.execute(&[]).status.success());
+    assert_eq!(
+        fixture.calls(),
+        1,
+        "forgotten source cannot start another executor"
+    );
 }
 
 #[test]

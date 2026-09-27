@@ -6,12 +6,12 @@ This evaluation checks publication of a new completed iteration.
 |---|---|---|
 | Finite model | Every reachable publication requires all six obligations | 65 states, 586 transitions, 0 violations |
 | Mutation detection | Remove each guard and require a reachable counterexample | 6/6 detected |
-| CLI conformance | Run exact named regressions through the production CLI | 67/67 passed across 12 targets |
+| CLI conformance | Run exact named regressions through the production CLI | 75/75 passed across 13 targets |
 | Lens UI | Check privacy, coverage and delivery metadata | 1 aggregate DOM/static suite passed |
 
-The [2026-09-27 integration report](baselines/control-loop-integration-20260927-03.json)
-records a clean starting revision and 172 unchanged source files. The run took
-246.6 seconds, including local build and fixture overhead. The proof applies to
+The [2026-09-27 integration report](baselines/control-loop-integration-20260927-04.json)
+records a clean starting revision and 175 unchanged source files. The run took
+289.2 seconds, including local build and fixture overhead. The proof applies to
 the finite model. It does not prove full Rust refinement or arbitrary goal achievement.
 
 ## Run
@@ -114,6 +114,7 @@ The source-bound CLI selection in `control_loop.py` covers:
 
 | Direction | Observable scenarios |
 |---|---|
+| Project onboarding | Saved choices, no-write preview, retryable setup/removal, preserved worker budgets, read-only registration inspection and index write failures |
 | Required proof | Missing or failed checks, foreign-repository receipt, late executable change |
 | Acceptance | Positive completion, unknown/negative judgments, review compare-and-swap |
 | Project history | Required updates block completion, changed lessons remain reviewable |
@@ -133,7 +134,8 @@ processors. Lens uses a mocked DOM. The harness counts that file as one aggregat
 suite, not one independent test for each helper function. These are sampled
 conformance checks, not exhaustive coverage of code, interleavings or environments.
 
-Persona, context, intake, worker, readiness, guarded execution and UI checks are adjacent boundaries.
+Onboarding, persona, context, intake, worker, readiness, guarded execution and UI
+checks are adjacent boundaries.
 They do not add obligations to the six-bit theorem or establish model benefit,
 native before-effect enforcement or verified native loading.
 

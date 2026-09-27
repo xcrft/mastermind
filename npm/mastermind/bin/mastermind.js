@@ -8,18 +8,33 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { resolveBinary, runBinary } from "./resolve.js";
+import { printHelp } from "./help.js";
+
+if (printHelp(process.argv.slice(2))) process.exit(0);
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 // Package root (…/npm/mastermind). Its bundled `share/` tree holds the workflow
 // subagents + skills that `init` installs into ~/.claude/.
 const pkgRoot = path.dirname(require.resolve("../package.json"));
+const installMode = detectInstallMode();
+
+if (process.argv[2] === "update") {
+  const updater = await import("./update.js");
+  process.exit(await updater.main(process.argv.slice(2), {
+    packageRoot: pkgRoot,
+    installMode,
+    packageName: pkg.name,
+    version: pkg.version,
+    nodePath: process.execPath,
+  }));
+}
 
 // Workflow bundle management is handled in JS; no native binary is needed.
 // `doctor --workflow` checks package↔installed manifest parity without touching
 // the repository-local codegraph doctor.
 if (
-  ["install", "update", "list"].includes(process.argv[2]) ||
+  ["install", "list"].includes(process.argv[2]) ||
   (process.argv[2] === "doctor" && process.argv.includes("--workflow"))
 ) {
   const installer = await import("./install.js");
@@ -70,7 +85,6 @@ function detectInstallMode() {
 }
 
 const bin = resolveBinary();
-const installMode = detectInstallMode();
 
 // Inject hints for `setup claude` and any other subcommand that benefits from
 // knowing how it was invoked. The Rust side reads these env vars; absence is

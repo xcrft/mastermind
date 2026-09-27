@@ -8,6 +8,7 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { printHelp } from "./help.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_SHARE = path.join(HERE, "..", "share");
@@ -137,7 +138,7 @@ function checkedExistingPath(target, label) {
   return entry;
 }
 
-function artifactDigest(artifact) {
+export function artifactDigest(artifact) {
   const hash = createHash("sha256");
   const visit = (current, relative) => {
     const stat = fs.lstatSync(current);
@@ -691,6 +692,7 @@ export function parseArgs(argv) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  if (argv.length && printHelp(argv[0].startsWith("-") ? ["install", ...argv] : argv)) return 0;
   try {
     const { command, client, json, profile } = parseArgs(argv);
     if (command === "list") {
@@ -751,6 +753,6 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   process.exit(await main());
 }

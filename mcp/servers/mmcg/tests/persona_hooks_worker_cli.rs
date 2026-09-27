@@ -404,7 +404,7 @@ fn independent_client_slots_charge_only_their_own_eligible_episodes() {
     assert_ne!(codex["worker_id"], claude["worker_id"]);
     for client in ["codex", "claude"] {
         let result = f.terminal(client);
-        assert_eq!(result["status"], "budget_exhausted");
+        assert_eq!(result["status"], "budget_exhausted", "{client}: {result}");
         assert_eq!(result["run"]["attempts"], 1);
         assert_eq!(result["run"]["completed"], 1);
     }
@@ -556,6 +556,45 @@ fn capture_revocation_and_processor_drift_withhold_inflight_results() {
         assert_eq!(f.checkpoint(), (1, 0, 0));
         f.assert_drafts_only();
     }
+}
+
+#[test]
+fn stop_cancels_a_pending_start_without_an_owner_and_allows_a_fresh_run() {
+    let f = Fixture::new("ordinary");
+    f.setup("codex");
+    f.start("codex", &["--max-calls", "4", "--max-runtime", "30"]);
+    let stopped = f.stop("codex");
+    assert_eq!(stopped["status"], "stopped", "{stopped}");
+    assert_eq!(stopped["owner"], "available", "{stopped}");
+    let directory = f.directory("codex");
+    let run_id = if stopped["run"]["run_id"] == "0".repeat(32) {
+        "1".repeat(32)
+    } else {
+        "0".repeat(32)
+    };
+    // Persist the state left by an admitted start whose parent exited before
+    // its child acquired ownership. No synthetic child is running yet.
+    let mut pending = stopped["run"].clone();
+    pending["run_id"] = json!(run_id);
+    pending["status"] = json!("starting");
+    pending["pid"] = Value::Null;
+    pending["reason"] = Value::Null;
+    fs::write(directory.join("state.json"), pending.to_string()).unwrap();
+
+    let cancelled = f.stop("codex");
+    assert_eq!(cancelled["stop_requested"], true, "{cancelled}");
+    assert_eq!(cancelled["run"]["run_id"], run_id);
+    assert_eq!(cancelled["owner"], "available");
+    let request: Value =
+        serde_json::from_slice(&fs::read(directory.join("stop.json")).unwrap()).unwrap();
+    assert_eq!(request["run_id"], run_id);
+
+    let restarted = f.restart("codex");
+    assert_eq!(restarted["started"], true);
+    assert_ne!(restarted["run"]["run_id"], run_id);
+    assert_eq!(f.stop("codex")["status"], "stopped");
+    assert!(f.calls().is_empty());
+    f.assert_drafts_only();
 }
 
 #[test]

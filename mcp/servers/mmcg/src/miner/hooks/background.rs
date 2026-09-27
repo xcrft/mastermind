@@ -25,6 +25,7 @@ const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_secs(2);
 const START_WAIT: Duration = Duration::from_secs(8);
 const STOP_WAIT: Duration = Duration::from_secs(5);
+const RECORD_READ_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct StartOptions {
@@ -139,21 +140,52 @@ impl Store {
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<Stored<T>>, Error> {
-        let file = match bounded_fs::read_regular_file_with_capability(
-            &self.root,
-            &self.path(name),
-            DOCUMENT_BYTES,
-            DOCUMENT_BYTES,
+        self.read_control(
+            name,
             ReadControl {
                 deadline: Some(Instant::now() + Duration::from_secs(2)),
                 interrupted: None,
             },
-        ) {
-            Ok(file) => file,
-            Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
+        )
+    }
+
+    fn read_control<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        control: ReadControl<'_>,
+    ) -> Result<Option<Stored<T>>, Error> {
+        let limit = Instant::now() + Duration::from_secs(2);
+        let control = ReadControl {
+            deadline: Some(
+                control
+                    .deadline
+                    .map_or(limit, |deadline| deadline.min(limit)),
+            ),
+            ..control
+        };
+        let mut attempt = 0;
+        let file = loop {
+            attempt += 1;
+            match bounded_fs::read_regular_file_with_capability(
+                &self.root,
+                &self.path(name),
+                DOCUMENT_BYTES,
+                DOCUMENT_BYTES,
+                control,
+            ) {
+                Ok(file) => break file,
+                Err(BoundedReadError::SnapshotChanged) if attempt < RECORD_READ_ATTEMPTS => {
+                    // Mutable direct records are atomically replaced. Re-read
+                    // the entire record, under the same root and deadline.
+                    self.root.verify()?;
+                }
+                Err(BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
         };
         let json = crate::setup::parse_json_unique(&file.bytes)
             .map_err(|_| "worker_record_invalid_json")?;
@@ -229,7 +261,11 @@ impl Store {
     }
 
     fn stopped(&self, run_id: &str) -> Result<bool, Error> {
-        let stop = self.read::<StopRequest>("stop.json")?;
+        self.stopped_control(run_id, ReadControl::default())
+    }
+
+    fn stopped_control(&self, run_id: &str, control: ReadControl<'_>) -> Result<bool, Error> {
+        let stop = self.read_control::<StopRequest>("stop.json", control)?;
         if let Some(stop) = stop {
             if stop.value.schema != 1 {
                 return Err("worker_stop_record_invalid".into());
@@ -463,8 +499,8 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
         .read::<State>("state.json")?
         .ok_or("worker_state_missing")?;
     validate_state(&state.value, &config.value)?;
-    let owner = store.owner()?;
-    let held = owner.is_none();
+    // Do not retain an available-lock probe during heartbeat/stop record I/O.
+    let held = store.owner()?.is_none();
     let pulse = store.read::<Pulse>("heartbeat.json")?;
     let pulse = pulse
         .map(|record| record.value)
@@ -539,16 +575,14 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         settings: selected,
         processor: fingerprint,
     };
-    let owner = match store.owner() {
-        Ok(owner) => owner,
-        Err(error) if missing(&error) && previous.is_none() => {
-            Some(bounded_fs::try_locked_regular_file_with_capability(
-                &store.root,
-                &store.path("owner.lock"),
-            )?)
-        }
-        Err(error) => return Err(error),
-    };
+    let owner = acquire_start_owner(
+        &store,
+        previous.as_ref(),
+        ReadControl {
+            deadline: Some(Instant::now() + START_WAIT),
+            interrupted: None,
+        },
+    )?;
     if owner.is_none() {
         if previous
             .as_ref()
@@ -561,7 +595,8 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         return Ok(report);
     }
     let previous_state = store.read::<State>("state.json")?;
-    store.write("config.json", &config, previous.map(|value| value.identity))?;
+    let config_identity =
+        store.write("config.json", &config, previous.map(|value| value.identity))?;
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| "worker_run_id_unavailable")?;
     let run_id = crate::hex::encode(&nonce);
@@ -596,27 +631,23 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         }
     };
     let deadline = Instant::now() + START_WAIT;
-    let ready = || {
-        let mut report = status_at(&store, &id).ok()?;
-        if report["run"]["run_id"] == run_id
-            && !report["run"]["pid"].is_null()
-            && report["run"]["status"] != "starting"
-        {
-            report["started"] = json!(true);
-            Some(report)
-        } else {
-            None
+    let child_id = child.id();
+    let ready = || match ready_report(&store, &id, &run_id, child_id, config_identity) {
+        Err(error) => {
+            let _ = store.request_stop(&run_id);
+            Err(error)
         }
+        report => report,
     };
     loop {
-        if let Some(report) = ready() {
+        if let Some(report) = ready()? {
             return Ok(report);
         }
         if child.try_wait()?.is_some() {
             // A fast attempt may publish both ready and terminal state between
             // the previous observation and try_wait. Its bound terminal record
             // still proves startup, independently of whether mining succeeded.
-            if let Some(report) = ready() {
+            if let Some(report) = ready()? {
                 return Ok(report);
             }
             return Err("worker_exited_before_ready_inspect_status".into());
@@ -627,6 +658,89 @@ pub fn start(client: &str, root: &Path, options: StartOptions) -> Result<Value, 
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn acquire_start_owner(
+    store: &Store,
+    previous: Option<&Stored<Config>>,
+    control: ReadControl<'_>,
+) -> Result<Option<bounded_fs::StableFileLock>, Error> {
+    loop {
+        control.check()?;
+        match store.owner() {
+            Ok(Some(owner)) => return Ok(Some(owner)),
+            Ok(None) => {
+                if let Some(config) = previous {
+                    let current = store
+                        .read_control::<Config>("config.json", control)?
+                        .ok_or("worker_configuration_missing")?;
+                    if current.identity != config.identity {
+                        return Err("worker_configuration_changed".into());
+                    }
+                    let state = store
+                        .read_control::<State>("state.json", control)?
+                        .ok_or("worker_state_missing")?;
+                    validate_state(&state.value, &config.value)?;
+                    if state.value.status == "running" && state.value.pid.is_some() {
+                        return Ok(None);
+                    }
+                }
+                // A terminal record or a child not yet admitted cannot prove
+                // a running owner; a status reader may hold this brief probe.
+            }
+            Err(error) if missing(&error) && previous.is_none() => {
+                return Ok(Some(bounded_fs::try_locked_regular_file_with_capability(
+                    &store.root,
+                    &store.path("owner.lock"),
+                )?));
+            }
+            Err(error) => return Err(error),
+        }
+        wait_for_owner(control)?;
+    }
+}
+
+fn ready_report(
+    store: &Store,
+    id: &str,
+    run_id: &str,
+    pid: u32,
+    config_identity: StableFileIdentity,
+) -> Result<Option<Value>, Error> {
+    let config = store
+        .read::<Config>("config.json")?
+        .ok_or("worker_configuration_missing")?;
+    validate_config(&config.value, id)?;
+    if config.identity != config_identity {
+        return Err("worker_configuration_changed".into());
+    }
+    let state = store
+        .read::<State>("state.json")?
+        .ok_or("worker_state_missing")?;
+    validate_state(&state.value, &config.value)?;
+    if state.value.run_id != run_id
+        || state.value.pid != Some(pid)
+        || state.value.status == "starting"
+    {
+        return Ok(None);
+    }
+    // Admission is read without probing the lock. Only after this child has
+    // published its PID may status_at perform a liveness observation.
+    let mut report = status_at(store, id)?;
+    if store
+        .read::<Config>("config.json")?
+        .is_none_or(|current| current.identity != config_identity)
+    {
+        return Err("worker_configuration_changed".into());
+    }
+    if report["run"]["run_id"] != run_id
+        || report["run"]["pid"] != pid
+        || report["run"]["status"] == "starting"
+    {
+        return Ok(None);
+    }
+    report["started"] = json!(true);
+    Ok(Some(report))
 }
 
 fn missing(error: &Error) -> bool {
@@ -675,9 +789,11 @@ pub fn stop(client: &str, root: &Path) -> Result<Value, Error> {
     let run_id = report["run"]["run_id"]
         .as_str()
         .ok_or("worker_run_id_missing")?;
-    if report["owner"] != "held" {
+    if report["owner"] != "held" && report["run"]["status"] != "starting" {
         return Ok(report);
     }
+    // A parent can exit while its admitted child is waiting for a status
+    // probe to release owner.lock. Cancel that run before it acquires owner.
     store.request_stop(run_id)?;
     let deadline = Instant::now() + STOP_WAIT;
     loop {
@@ -873,24 +989,126 @@ impl Drop for Watchdog {
     }
 }
 
+struct StartingRecords {
+    config: Stored<Config>,
+    state: Stored<State>,
+}
+
+fn starting_records(
+    store: &Store,
+    id: &str,
+    run_id: &str,
+    control: ReadControl<'_>,
+) -> Result<StartingRecords, Error> {
+    let config = store
+        .read_control::<Config>("config.json", control)?
+        .ok_or("worker_configuration_missing")?;
+    validate_config(&config.value, id)?;
+    let state = store
+        .read_control::<State>("state.json", control)?
+        .ok_or("worker_state_missing")?;
+    validate_state(&state.value, &config.value)?;
+    if state.value.run_id != run_id || state.value.status != "starting" || state.value.pid.is_some()
+    {
+        return Err("worker_run_not_admitted".into());
+    }
+    if store.stopped_control(run_id, control)? {
+        return Err("worker_stop_requested".into());
+    }
+    control.check()?;
+    Ok(StartingRecords { config, state })
+}
+
+fn try_starting_owner(
+    store: &Store,
+    records: &StartingRecords,
+    control: ReadControl<'_>,
+) -> Result<Option<bounded_fs::StableFileLock>, Error> {
+    let validate = || -> Result<(), Error> {
+        let current = starting_records(
+            store,
+            &records.config.value.worker_id,
+            &records.state.value.run_id,
+            control,
+        )?;
+        if current.config.identity != records.config.identity
+            || current.state.identity != records.state.identity
+        {
+            return Err("worker_starting_records_changed".into());
+        }
+        Ok(())
+    };
+    validate()?;
+    let Some(owner) = store.owner()? else {
+        // A status inspection may briefly own the lock. Only this still-bound
+        // starting run may wait; no processor attempt has been reserved yet.
+        return Ok(None);
+    };
+    validate()?;
+    Ok(Some(owner))
+}
+
+fn wait_for_owner(control: ReadControl<'_>) -> Result<(), Error> {
+    control.check()?;
+    let remaining = control
+        .deadline
+        .ok_or("worker_start_deadline_missing")?
+        .checked_duration_since(Instant::now())
+        .ok_or(BoundedReadError::DeadlineExceeded)?;
+    std::thread::sleep(remaining.min(Duration::from_millis(20)));
+    Ok(())
+}
+
+fn acquire_starting_owner(
+    store: &Store,
+    id: &str,
+    run_id: &str,
+    control: ReadControl<'_>,
+) -> Result<(bounded_fs::StableFileLock, StartingRecords), Error> {
+    let records = starting_records(store, id, run_id, control)?;
+    let elapsed = now()?.saturating_sub(records.state.value.started_at_ms);
+    let remaining = records
+        .config
+        .value
+        .settings
+        .max_runtime
+        .saturating_mul(1000)
+        .saturating_sub(elapsed);
+    let limit = Instant::now() + Duration::from_millis(remaining);
+    let control = ReadControl {
+        deadline: Some(
+            control
+                .deadline
+                .ok_or("worker_start_deadline_missing")?
+                .min(limit),
+        ),
+        ..control
+    };
+    loop {
+        control.check()?;
+        if let Some(owner) = try_starting_owner(store, &records, control)? {
+            return Ok((owner, records));
+        }
+        wait_for_owner(control)?;
+    }
+}
+
 pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
     platform()?;
     check_hex(id, 64)?;
     check_hex(run_id, 32)?;
     let store = Store::existing(id)?.ok_or("worker_store_missing")?;
-    let _owner = store.owner()?.ok_or("worker_already_running")?;
-    let config = store
-        .read::<Config>("config.json")?
-        .ok_or("worker_configuration_missing")?;
-    validate_config(&config.value, id)?;
-    let state = store
-        .read::<State>("state.json")?
-        .ok_or("worker_state_missing")?;
-    validate_state(&state.value, &config.value)?;
-    if state.value.run_id != run_id || state.value.status != "starting" {
-        return Err("worker_run_not_admitted".into());
-    }
     let _cancellation = worker::Cancellation::install()?;
+    let (_owner, records) = acquire_starting_owner(
+        &store,
+        id,
+        run_id,
+        ReadControl {
+            deadline: Some(Instant::now() + START_WAIT),
+            interrupted: Some(&worker::interrupted),
+        },
+    )?;
+    let StartingRecords { config, state } = records;
     let elapsed = now()?.saturating_sub(state.value.started_at_ms);
     let remaining = config
         .value
@@ -1011,4 +1229,433 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
     runtime.state.reason = Some(reason);
     runtime.record()?;
     Ok(json!({"schema":1,"worker_id":id,"run":runtime.state,"autostart":false}))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        store: Store,
+        id: String,
+        run_id: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let project = temp.path().join("project");
+            let directory = temp.path().join("worker");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::create_dir(&directory).unwrap();
+            let (id, project) = slot("codex", &project).unwrap();
+            let store = Store {
+                root: RootCapability::open(&directory).unwrap(),
+            };
+            let config = Config {
+                schema: 1,
+                worker_id: id.clone(),
+                client: "codex".into(),
+                project_root: project.clone(),
+                capture_generation: 1,
+                settings: Settings {
+                    processor: Some(project.join("synthetic-processor")),
+                    provider: None,
+                    args: vec![],
+                    timeout: 1,
+                    limit: 1,
+                    max_calls: 2,
+                    max_runtime: 60,
+                },
+                processor: json!({"synthetic":true}),
+            };
+            let run_id = "a".repeat(32);
+            let state = State {
+                schema: 1,
+                worker_id: id.clone(),
+                run_id: run_id.clone(),
+                config_revision: revision(&config).unwrap(),
+                status: "starting".into(),
+                reason: None,
+                pid: None,
+                started_at_ms: now().unwrap(),
+                updated_at_ms: now().unwrap(),
+                attempts: 0,
+                completed: 0,
+                drafts: 0,
+                next_after: None,
+            };
+            store.write("config.json", &config, None).unwrap();
+            store.write("state.json", &state, None).unwrap();
+            drop(
+                bounded_fs::try_locked_regular_file_with_capability(
+                    &store.root,
+                    &store.path("owner.lock"),
+                )
+                .unwrap(),
+            );
+            Self {
+                _temp: temp,
+                store,
+                id,
+                run_id,
+            }
+        }
+
+        fn records(&self) -> StartingRecords {
+            starting_records(&self.store, &self.id, &self.run_id, ReadControl::default()).unwrap()
+        }
+
+        fn change_state(&self, change: impl FnOnce(&mut State)) {
+            let mut state = self.store.read::<State>("state.json").unwrap().unwrap();
+            change(&mut state.value);
+            self.store
+                .write("state.json", &state.value, Some(state.identity))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn starting_owner_waits_for_a_probe_but_never_admits_a_second_running_owner() {
+        let f = Fixture::new();
+        let records = f.records();
+        let probe = f.store.owner().unwrap().unwrap();
+        assert!(
+            try_starting_owner(&f.store, &records, ReadControl::default())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            f.store
+                .read::<State>("state.json")
+                .unwrap()
+                .unwrap()
+                .value
+                .attempts,
+            0
+        );
+        drop(probe);
+        let owner = try_starting_owner(&f.store, &records, ReadControl::default())
+            .unwrap()
+            .unwrap();
+        assert!(f.store.owner().unwrap().is_none());
+        f.change_state(|state| {
+            state.status = "running".into();
+            state.pid = Some(42);
+        });
+        assert!(try_starting_owner(&f.store, &records, ReadControl::default()).is_err());
+        drop(owner);
+    }
+
+    #[test]
+    fn starting_owner_rejects_changed_bindings_stop_and_expired_budget_without_attempts() {
+        for mutation in ["run", "config", "state_identity", "stop"] {
+            let f = Fixture::new();
+            let records = f.records();
+            let probe = f.store.owner().unwrap().unwrap();
+            assert!(
+                try_starting_owner(&f.store, &records, ReadControl::default())
+                    .unwrap()
+                    .is_none()
+            );
+            match mutation {
+                "run" => f.change_state(|state| state.run_id = "b".repeat(32)),
+                "config" => {
+                    f.store
+                        .write(
+                            "config.json",
+                            &records.config.value,
+                            Some(records.config.identity),
+                        )
+                        .unwrap();
+                }
+                "state_identity" => f.change_state(|_| {}),
+                "stop" => f.store.request_stop(&f.run_id).unwrap(),
+                _ => unreachable!(),
+            }
+            drop(probe);
+            assert!(
+                try_starting_owner(&f.store, &records, ReadControl::default()).is_err(),
+                "{mutation}"
+            );
+            assert!(f.store.owner().unwrap().is_some());
+            assert_eq!(
+                f.store
+                    .read::<State>("state.json")
+                    .unwrap()
+                    .unwrap()
+                    .value
+                    .attempts,
+                0
+            );
+        }
+        for old_runtime in [false, true] {
+            let f = Fixture::new();
+            if old_runtime {
+                f.change_state(|state| state.started_at_ms = 0);
+            }
+            let _probe = f.store.owner().unwrap().unwrap();
+            let deadline = if old_runtime {
+                Instant::now() + START_WAIT
+            } else {
+                Instant::now()
+            };
+            assert!(acquire_starting_owner(
+                &f.store,
+                &f.id,
+                &f.run_id,
+                ReadControl {
+                    deadline: Some(deadline),
+                    interrupted: None
+                }
+            )
+            .is_err());
+            assert_eq!(
+                f.store
+                    .read::<State>("state.json")
+                    .unwrap()
+                    .unwrap()
+                    .value
+                    .attempts,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_is_child_and_config_bound_without_a_pre_admission_probe() {
+        let f = Fixture::new();
+        let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+        std::fs::remove_file(f.store.path("owner.lock")).unwrap();
+        // If readiness probes owner before the PID, this missing file is an
+        // error instead of a harmless not-yet-ready observation.
+        assert!(
+            ready_report(&f.store, &f.id, &f.run_id, 42, config.identity)
+                .unwrap()
+                .is_none()
+        );
+        f.change_state(|state| {
+            state.status = "failed".into();
+            state.pid = Some(42);
+        });
+        assert!(
+            ready_report(&f.store, &f.id, &f.run_id, 43, config.identity)
+                .unwrap()
+                .is_none()
+        );
+        drop(
+            bounded_fs::try_locked_regular_file_with_capability(
+                &f.store.root,
+                &f.store.path("owner.lock"),
+            )
+            .unwrap(),
+        );
+        let report = ready_report(&f.store, &f.id, &f.run_id, 42, config.identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report["started"], true);
+        assert_eq!(
+            report["status"], "failed",
+            "startup is independent of mining success"
+        );
+        f.store
+            .write("config.json", &config.value, Some(config.identity))
+            .unwrap();
+        assert!(ready_report(&f.store, &f.id, &f.run_id, 42, config.identity).is_err());
+    }
+
+    #[test]
+    fn start_does_not_report_a_terminal_probe_as_a_running_worker() {
+        let f = Fixture::new();
+        f.change_state(|state| {
+            state.status = "stopped".into();
+            state.pid = Some(42);
+        });
+        let config = f.store.read::<Config>("config.json").unwrap().unwrap();
+        let probe = RefCell::new(f.store.owner().unwrap());
+        assert!(probe.borrow().is_some());
+        let checks = Cell::new(0);
+        let release_after_busy_probe = || {
+            checks.set(checks.get() + 1);
+            // The initial check precedes owner(); the following check starts
+            // reading config only after owner() actually observed contention.
+            if checks.get() == 2 {
+                drop(probe.borrow_mut().take());
+            }
+            false
+        };
+        let owner = acquire_start_owner(
+            &f.store,
+            Some(&config),
+            ReadControl {
+                deadline: Some(Instant::now() + START_WAIT),
+                interrupted: Some(&release_after_busy_probe),
+            },
+        )
+        .unwrap();
+        assert!(checks.get() > 2);
+        assert!(owner.is_some(), "terminal contention must retry admission");
+        drop(owner);
+        let _probe = f.store.owner().unwrap().unwrap();
+        f.change_state(|state| state.status = "running".into());
+        assert!(acquire_start_owner(
+            &f.store,
+            Some(&config),
+            ReadControl {
+                deadline: Some(Instant::now() + START_WAIT),
+                interrupted: None,
+            },
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn mutable_record_read_accepts_a_complete_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store {
+            root: RootCapability::open(temp.path()).unwrap(),
+        };
+        let path = store.path("heartbeat.json");
+        let value = |at_ms| Pulse {
+            schema: 1,
+            run_id: "a".repeat(32),
+            at_ms,
+        };
+        std::fs::write(&path, serde_json::to_vec(&value(1)).unwrap()).unwrap();
+        let checks = Cell::new(0);
+        let replace_after_open = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 2 {
+                let replacement = store.path("replacement.json");
+                std::fs::write(&replacement, serde_json::to_vec(&value(2)).unwrap()).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            false
+        };
+        let read = store
+            .read_control::<Pulse>(
+                "heartbeat.json",
+                ReadControl {
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
+                    interrupted: Some(&replace_after_open),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.value.at_ms, 2);
+        assert!(
+            checks.get() > 4,
+            "a complete fresh read is required after replacement"
+        );
+    }
+
+    #[test]
+    fn mutable_record_read_caps_replacements_and_never_retries_invalid_documents() {
+        let f = Fixture::new();
+        let path = f.store.path("heartbeat.json");
+        let bytes = br#"{"schema":1,"run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","at_ms":1}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let checks = Cell::new(0);
+        let replacements = Cell::new(0);
+        let keep_replacing_after_open = || {
+            checks.set(checks.get() + 1);
+            if checks.get() % 4 == 2 {
+                let replacement = f.store.path("next.json");
+                std::fs::write(&replacement, bytes).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+                replacements.set(replacements.get() + 1);
+            }
+            false
+        };
+        let result = f.store.read_control::<Pulse>(
+            "heartbeat.json",
+            ReadControl {
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                interrupted: Some(&keep_replacing_after_open),
+            },
+        );
+        assert!(matches!(
+            result
+                .err()
+                .expect("repeated replacements must exhaust the read limit")
+                .downcast_ref::<BoundedReadError>(),
+            Some(BoundedReadError::SnapshotChanged)
+        ));
+        assert_eq!(replacements.get(), 3);
+        for document in ["{", "{}"] {
+            std::fs::write(&path, document).unwrap();
+            checks.set(0);
+            let count = || {
+                checks.set(checks.get() + 1);
+                false
+            };
+            assert!(f
+                .store
+                .read_control::<Pulse>(
+                    "heartbeat.json",
+                    ReadControl {
+                        deadline: None,
+                        interrupted: Some(&count)
+                    }
+                )
+                .is_err());
+            assert_eq!(
+                checks.get(),
+                4,
+                "invalid JSON/schema must not trigger another read"
+            );
+        }
+        assert!(f
+            .store
+            .read_control::<Pulse>(
+                "heartbeat.json",
+                ReadControl {
+                    deadline: Some(Instant::now()),
+                    interrupted: None
+                }
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn mutable_record_read_never_reopens_a_replaced_root_or_follows_a_new_symlink() {
+        use std::os::unix::fs::symlink;
+        for replace_root in [false, true] {
+            let f = Fixture::new();
+            let path = f.store.path("heartbeat.json");
+            let bytes = br#"{"schema":1,"run_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","at_ms":1}"#;
+            std::fs::write(&path, bytes).unwrap();
+            let checks = Cell::new(0);
+            let mutate_after_open = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    if replace_root {
+                        let root = f.store.root.canonical_root();
+                        std::fs::rename(root, root.with_extension("old")).unwrap();
+                        std::fs::create_dir(root).unwrap();
+                        std::fs::write(&path, bytes).unwrap();
+                    } else {
+                        let outside = f._temp.path().join("outside.json");
+                        std::fs::write(&outside, bytes).unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        symlink(outside, &path).unwrap();
+                    }
+                }
+                false
+            };
+            assert!(f
+                .store
+                .read_control::<Pulse>(
+                    "heartbeat.json",
+                    ReadControl {
+                        deadline: None,
+                        interrupted: Some(&mutate_after_open)
+                    }
+                )
+                .is_err());
+        }
+    }
 }

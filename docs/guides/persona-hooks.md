@@ -248,6 +248,7 @@ mastermind miner hooks worker stop --client codex --project-root .
 | Managed worker | Contract |
 |---|---|
 | Ownership | One worker per client and canonical project root |
+| Start result | `started: true` confirms the bound child published its run state. Check `status` and `run.reason`, a fast failure may already be terminal |
 | Repeated start | Returns the running owner. Does not reset its budget |
 | Saved selection | Restart without processor/budget options preserves settings and starts a new bounded run |
 | Call budget | Reserved durably before each processor invocation. Default 64, range 1–10,000. Provider-internal retries and token costs are not measured |

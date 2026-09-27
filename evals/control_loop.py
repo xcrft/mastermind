@@ -213,6 +213,7 @@ CASES = {
         "concurrent_start_has_one_owner_and_stop_cancels_the_processor_and_releases_its_lease",
         "failed_and_timed_out_attempts_stop_without_retry_until_explicit_restart",
         "capture_revocation_and_processor_drift_withhold_inflight_results",
+        "stop_cancels_a_pending_start_without_an_owner_and_allows_a_fresh_run",
         "interrupted_idle_worker_can_restart_without_replaying_completed_work_or_an_old_stop",
         "status_preserves_files_and_rejects_replaced_worker_storage",
     ),

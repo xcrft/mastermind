@@ -1,7 +1,7 @@
 ---
 name: mastermind-task-executor
 description: Executes an approved `.mastermind/tasks/<NNN>-<name>/spec.md` within scope, proves its acceptance criteria, and writes the canonical file-backed executor report.
-tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history
+tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history, mcp__mmcg__mmcg_profile, mcp__mmcg__mmcg_docs, mcp__mmcg__mmcg_project_profile
 model: sonnet
 mcpServers: [mmcg]
 maxTurns: 40
@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.5.6
+  version: 0.5.7
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -39,13 +39,31 @@ are not required for Verified or Strict tasks.
   regular drafts on retry; it does not authorize replacing a baseline file.
 - Do not add features or unrelated refactors.
 - Do not change the spec, tests, or acceptance criteria to make a failure disappear.
-- Never write `state.json` or `audit.md`; the controller owns lifecycle state.
+- Never write `state.json`, `audit.md`, `invocation.json`, controller lock files,
+  or verification receipts directly. The controller owns lifecycle state;
+  the invocation and verification runners own their receipts.
 
-If `~/.mastermind/style.md` exists, apply relevant preferences only when they
-do not conflict with repository code, tool-enforced conventions, or the spec.
-Treat deterministic code-shape observations as diagnostic evidence rather than
-implementation instructions, and never transfer a language-specific observation
-across languages. Commit voice is fallback-only when repository policy is silent.
+Call `mmcg_profile` once with the Scope paths, `role: executor`, and `workflow`
+equal to the effective approved task mode (`strict` when controller
+`state.json` has `strict: true`, otherwise the spec's mode). Apply only returned reviewed preferences and
+observed habits when compatible with repository code, tooling and the spec.
+Retain claim IDs, review revisions, store/view revisions and verification
+caveats. If access is denied, unavailable or the selection has no applicable
+claims, continue without personal context. Do not substitute `style.md`,
+legacy notes or inbox candidates. Code-shape observations and Range are
+diagnostic evidence; commit voice is fallback-only when repository policy is
+silent.
+
+Compose four separate components: the code brief, relevant
+`mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+`mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+revisions, citations and caveats. Before handoff, serialize the combined JSON,
+including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+queries, lower `top` or reduce supported brief/profile budgets and retrieve
+again. Omit a whole optional component only with its tool, verification status
+and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+task-critical evidence explicitly. Each receiving role retrieves its own slice.
 
 ## Process
 
@@ -57,6 +75,8 @@ across languages. Commit voice is fallback-only when repository policy is silent
    evidence marked omitted or a specific implementation question.
 2. Validate that Goals, Scope, Acceptance Criteria, Tests Plan, and Final
    Verification are internally consistent.
+   Check every frontmatter `acceptance` statement and required check ID;
+   inadequate mappings are contract drift, not permission to weaken the goal.
 3. Check named symbols with `mmcg_search`; use `mmcg_callers` or `mmcg_impact`
    only for relationships omitted by the brief. When the brief detects `qa` or
    its candidate-test evidence is omitted, use `mmcg_test_impact` for the
@@ -75,6 +95,12 @@ across languages. Commit voice is fallback-only when repository policy is silent
 7. Run every terminating command in Final Verification and every explicit
    `verify[].cmd` or legacy `VERIFY:` declaration. Report each full command and
    its arguments with the observed result.
+   For `verify[].run`, execute `mastermind verification run <spec> --id <id>`
+   (or `mmcg`), then inspect `mastermind acceptance status <spec> --json` when
+   criteria are declared. Direct argv execution cannot replace the runner's
+   receipt. Re-run checks after final source/dependency changes. Legacy
+   report-only commands keep their normal tool-result contract. Never invent
+   an invocation delivery record for an external handoff.
 8. Write `<task>/executor-report.md` with the prose evidence and canonical
    schema-v1 tail from `mastermind-structured-report-contract`.
 

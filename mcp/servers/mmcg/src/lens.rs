@@ -49,6 +49,13 @@ pub struct LensOptions {
     pub production_only: bool,
 }
 
+/// Local context is deliberately separate from the portable Lens snapshot.
+#[derive(Debug, Clone)]
+pub struct PrivateContextOptions {
+    pub selection: crate::context::ContextOptions,
+    pub profile_client: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct LensRepository {
     pub name: String,
@@ -2135,6 +2142,44 @@ pub fn run_with_evidence_extensions_and_document_graph(
     document_graph: Option<PathBuf>,
     port: u16,
 ) -> Result<(), LensError> {
+    let private_context = PrivateContextOptions {
+        selection: crate::context::ContextOptions {
+            since: options.since.clone(),
+            paths: Vec::new(),
+            role: queries::BriefRole::Auditor,
+            workflow: None,
+            query: None,
+            budget_tokens: crate::context::DEFAULT_BUDGET,
+        },
+        profile_client: None,
+    };
+    run_with_private_context(
+        root,
+        index_path,
+        options,
+        evidence,
+        extensions,
+        document_graph,
+        private_context,
+        port,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_private_context(
+    root: PathBuf,
+    index_path: PathBuf,
+    options: LensOptions,
+    evidence: crate::evidence::EvidenceOptions,
+    extensions: crate::evidence::EvidenceExtensionOptions,
+    document_graph: Option<PathBuf>,
+    private_context: PrivateContextOptions,
+    port: u16,
+) -> Result<(), LensError> {
+    private_context
+        .selection
+        .normalized()
+        .map_err(|error| LensError::Serve(error.to_string()))?;
     let root = root
         .canonicalize()
         .map_err(|_| LensError::RootUnavailable)?;
@@ -2161,6 +2206,7 @@ pub fn run_with_evidence_extensions_and_document_graph(
         evidence,
         extensions,
         document_graph,
+        private_context: Some(private_context),
         authority,
     };
     serve(listener, &state, None)
@@ -2173,6 +2219,7 @@ struct ServerState {
     evidence: crate::evidence::EvidenceOptions,
     extensions: crate::evidence::EvidenceExtensionOptions,
     document_graph: Option<PathBuf>,
+    private_context: Option<PrivateContextOptions>,
     authority: String,
 }
 
@@ -2437,8 +2484,34 @@ fn route(path: &str, state: &ServerState) -> HttpResponse {
             HttpResponse::static_asset("image/svg+xml; charset=utf-8", MASTERMIND_MARK_SVG)
         }
         "/api/lens" => api_response(state),
+        "/api/context" => context_response(state),
         "/favicon.ico" => HttpResponse::empty(204, "No Content"),
         _ => HttpResponse::text(404, "Not Found", "not found"),
+    }
+}
+
+fn context_response(state: &ServerState) -> HttpResponse {
+    let Some(options) = state.private_context.as_ref() else {
+        return HttpResponse::text(404, "Not Found", "private context is not configured");
+    };
+    match crate::context::from_paths(
+        &state.root,
+        &state.index_path,
+        &options.selection,
+        options.profile_client.as_deref(),
+    ) {
+        Ok(packet) => match serde_json::to_vec(&packet) {
+            Ok(body) => HttpResponse::json(200, "OK", body),
+            Err(_) => error_response(&LensError::Serialization),
+        },
+        Err(error) => HttpResponse::json(
+            422,
+            "Context Unavailable",
+            serde_json::to_vec(&serde_json::json!({
+                "error":{"code":error.code(),"message":error.to_string()}
+            }))
+            .unwrap_or_default(),
+        ),
     }
 }
 
@@ -3843,6 +3916,7 @@ mod tests {
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
             document_graph: None,
+            private_context: None,
             authority: authority.clone(),
         };
         let server = std::thread::spawn(move || serve(listener, &state, Some(1)).unwrap());
@@ -3878,6 +3952,57 @@ mod tests {
     }
 
     #[test]
+    fn private_context_uses_a_separate_read_surface_and_never_enters_exports() {
+        let (repo, _index_dir, index_path) = fixture();
+        let private_workflow = "private-context-workflow-sentinel";
+        let state = ServerState {
+            root: repo.path().to_path_buf(),
+            index_path: index_path.clone(),
+            options: options(),
+            evidence: crate::evidence::EvidenceOptions::default(),
+            extensions: crate::evidence::EvidenceExtensionOptions::default(),
+            document_graph: None,
+            private_context: Some(PrivateContextOptions {
+                selection: crate::context::ContextOptions {
+                    since: "HEAD".into(),
+                    paths: vec!["src/lib.rs".into()],
+                    role: queries::BriefRole::Executor,
+                    workflow: Some(private_workflow.into()),
+                    query: None,
+                    budget_tokens: 8_000,
+                },
+                profile_client: None,
+            }),
+            authority: "127.0.0.1:43123".into(),
+        };
+        // URL arguments cannot opt into a profile or select another root.
+        let request = HttpRequest::parse(b"GET /api/context?profile_client=owner&root=/elsewhere HTTP/1.1\r\nHost: 127.0.0.1:43123\r\n\r\n").unwrap();
+        assert!(request.validate(&state.authority).is_ok());
+        let private = route(&request.path, &state);
+        assert_eq!(private.status, 200);
+        let packet: serde_json::Value = serde_json::from_slice(&private.body).unwrap();
+        assert_eq!(packet["layers"]["person"]["status"], "not_enabled");
+        assert!(packet["layers"]["person"]["data"].is_null());
+        assert_eq!(packet["selection"]["workflow"], private_workflow);
+        let shared = route("/api/lens", &state);
+        assert_eq!(shared.status, 200);
+        let shared_text = String::from_utf8(shared.body).unwrap();
+        assert!(!shared_text.contains(private_workflow));
+        let snapshot = build_snapshot(
+            &Store::open_read_only(&index_path).unwrap(),
+            repo.path(),
+            &options(),
+        )
+        .unwrap();
+        let html = String::from_utf8(standalone_html(&snapshot).unwrap()).unwrap();
+        assert!(!html.contains(private_workflow));
+        assert!(serde_json::to_value(snapshot)
+            .unwrap()
+            .get("layers")
+            .is_none());
+    }
+
+    #[test]
     fn deletion_only_staleness_is_rejected_before_rendering_a_map() {
         let (repo, _index_dir, index_path) = fixture();
         fs::remove_file(repo.path().join("src/lib.rs")).unwrap();
@@ -3888,6 +4013,7 @@ mod tests {
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
             document_graph: None,
+            private_context: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3932,6 +4058,7 @@ mod tests {
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
             document_graph: None,
+            private_context: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3961,6 +4088,7 @@ mod tests {
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
             document_graph: None,
+            private_context: None,
             authority: "127.0.0.1:43123".into(),
         };
 
@@ -3994,6 +4122,7 @@ mod tests {
             evidence: crate::evidence::EvidenceOptions::default(),
             extensions: crate::evidence::EvidenceExtensionOptions::default(),
             document_graph: None,
+            private_context: None,
             authority: "127.0.0.1:43123".into(),
         };
 

@@ -699,6 +699,22 @@ pub(crate) fn open_locked_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
 ) -> Result<std::fs::File, BoundedReadError> {
+    open_locked_regular_file(root, path, true)
+}
+
+/// Fail promptly if another controller owns the same stable lock file.
+pub(crate) fn try_locked_regular_file_with_capability(
+    root: &RootCapability,
+    path: &Path,
+) -> Result<std::fs::File, BoundedReadError> {
+    open_locked_regular_file(root, path, false)
+}
+
+fn open_locked_regular_file(
+    root: &RootCapability,
+    path: &Path,
+    wait: bool,
+) -> Result<std::fs::File, BoundedReadError> {
     root.verify()?;
     let relative = root.relative(path)?;
     let components = relative
@@ -779,7 +795,12 @@ pub(crate) fn open_locked_regular_file_with_capability(
     {
         return Err(BoundedReadError::NotRegular);
     }
-    file.lock().map_err(BoundedReadError::Io)?;
+    if wait {
+        file.lock().map_err(BoundedReadError::Io)?;
+    } else {
+        file.try_lock()
+            .map_err(|error| BoundedReadError::Io(std::io::Error::other(error.to_string())))?;
+    }
     let verification = (|| {
         root.verify()?;
         let current_parent = open_relative_directory_nofollow(&root.directory, parent_relative)

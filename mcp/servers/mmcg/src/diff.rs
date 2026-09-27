@@ -1600,6 +1600,20 @@ fn is_mastermind_runtime_artifact(path: &[u8]) -> bool {
             | b".mastermind/mmcg.db-wal"
             | b".mastermind/audit-narrative.json"
     )
+    // The controller holds these locks during the audit. Windows prevents
+    // reading locked files, and their bytes are not implementation evidence.
+        || path
+            .strip_prefix(b".mastermind/tasks/")
+            .is_some_and(|relative| {
+                let mut parts = relative.split(|byte| *byte == b'/');
+                parts.next().is_some_and(|task| !task.is_empty())
+                    && parts.next() == Some(b"state.controller.lock".as_slice())
+                    && parts.next().is_none()
+            })
+        || path
+            .strip_prefix(b".mastermind/run-state/")
+            .and_then(|file| file.strip_suffix(b".controller.lock"))
+            .is_some_and(|stem| !stem.is_empty() && !stem.contains(&b'/'))
 }
 
 /// Fetch a bounded set of blobs from one resolved baseline commit. Requests
@@ -2593,6 +2607,46 @@ mod tests {
         assert_eq!(total, Some(2));
         assert!(!truncated);
         assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn worktree_snapshot_can_be_read_while_the_task_controller_holds_its_lock() {
+        let dir = init_repo("controller_lock_snapshot");
+        write(&dir, "notes.txt", "before\n");
+        run(&dir, &["add", "notes.txt"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        write(&dir, "notes.txt", "after\n");
+        let database = tempfile::tempdir().unwrap();
+        let store = Store::open(database.path().join("graph.db")).unwrap();
+        for state in [
+            ".mastermind/tasks/001-review/state.json",
+            ".mastermind/run-state/001-review.json",
+        ] {
+            let _lock = crate::run_task::controller_lock(&dir, &dir.join(state)).unwrap();
+            let snapshot = symbols_changed_in_worktree(&store, &dir, "HEAD").unwrap();
+            assert_eq!(snapshot.diff.files_in_diff, vec!["notes.txt"]);
+            validate_working_tree_snapshot_controlled(
+                &dir,
+                &snapshot.baseline_oid,
+                &snapshot.head_oid,
+                &snapshot.files,
+                &snapshot.snapshot_token,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        for path in [
+            ".mastermind/tasks/001-review/state.json",
+            ".mastermind/tasks/001-review/notes.controller.lock",
+            ".mastermind/tasks/nested/001-review/state.controller.lock",
+            ".mastermind/run-state/001-review.json",
+            ".mastermind/run-state/nested/001-review.controller.lock",
+            "src/state.controller.lock",
+        ] {
+            assert!(!is_mastermind_runtime_artifact(path.as_bytes()), "{path}");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

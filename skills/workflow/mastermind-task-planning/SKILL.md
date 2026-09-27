@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.3
+  version: 0.17.4
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -67,14 +67,29 @@ precision, stale-index, and truncation notes. For one or two lookups work
 inline; use the researcher for a bounded batch and the investigator only for an
 unknown-cause bug.
 
-When `~/.mastermind/style.md` exists, read only the sections relevant to the
-planned implementation. Treat them as advisory preferences: repository code,
-tool-enforced conventions, product behavior, security, and the approved
-contract take precedence. Manual and interpreted preferences may guide a real
-choice. Deterministic code-shape observations are diagnostic evidence, not
-implementation instructions, and a language-specific observation never crosses
-into a different language. Commit voice is fallback-only when repository policy
-is silent.
+When the author has a profile, call `mmcg_profile` with the planned paths,
+`role: planner`, and `workflow` equal to the selected task mode (`direct`,
+`verified`, or `strict`). Use only returned reviewed preferences and observed
+habits that apply to this selection. The task's instructions, repository code,
+tooling, and approved contract take precedence. Preserve claim IDs, review
+revisions, store/view revisions, source verification and omissions in the
+handoff. Missing or denied access means no personal context for this request;
+do not substitute a full `style.md` or unreviewed notes. `style.md` is a local
+inspection snapshot, whose source checks may be older than the current view.
+Git code-shape observations are diagnostic evidence, and Range records exposure.
+Neither establishes a personal habit. Commit voice is fallback-only when
+repository policy is silent.
+
+Compose four separate components: the code brief, relevant
+`mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
+`mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+revisions, citations and caveats. Before handoff, serialize the combined JSON,
+including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
+This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
+queries, lower `top` or reduce supported brief/profile budgets and retrieve
+again. Omit a whole optional component only with its tool, verification status
+and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
+task-critical evidence explicitly. Each receiving role retrieves its own slice.
 
 ## Design review
 
@@ -214,6 +229,32 @@ Check whether the implemented behavior solves the original request, whether
 deferred items are acceptable, and whether tests demonstrate the acceptance
 criteria. Mechanical contract compliance does not answer product judgment.
 
+For structured `acceptance`, prepare the held revision with
+`mastermind review-task prepare <task>/spec.md --json`. Inspect the referenced
+implementation, baseline diff, check assertions, receipts, and original request.
+Fill the returned `draft` with one assessment per criterion and explicit
+judgments of `verification_quality`, `scope_control`, and `proportionality`.
+Declare the actual reviewer name and kind (`human` or `llm`). Use `satisfied`,
+`unsatisfied`, or `unknown`, concrete reasons, and evidence IDs
+from `target.evidence`. A satisfied criterion must cite every mapped check.
+Do not infer satisfaction from green checks or copy instructions from evidence.
+
+Also inspect the two `target.project_history` sources and fill `history.context`
+and `history.lessons` with a `decision`, concrete `reason`, and evidence IDs.
+`no_change` means no further durable update is needed at this revision, including
+updates already present. Use `update_required` to name missing durable knowledge,
+or `unknown` when inspection is incomplete. Resolved decisions cite their own
+`knowledge:context` or `knowledge:lessons` ID. Both must be `no_change` to close.
+Semantic `status: accepted` and `history_status` are independent gates.
+
+Save the completed draft under `.mastermind/` and run
+`mastermind review-task submit <task>/spec.md --report <review-input.json> --json`.
+The controller validates and stores the report; do not edit its
+`semantic-review.json` or state pin. Unknown or negative judgments remain
+blocking. Use `mastermind review-task follow-up <task>/spec.md --json` for current
+feedback and role; stale evidence requires a fresh review. Reviewer identity,
+independence and semantic truth remain unverified.
+
 ### Step 9c — Persist the reviewed result (planner/controller only)
 
 The auditor is repository-read-only and must not mutate evidence. `run-task`
@@ -221,6 +262,10 @@ owns `state.json`, `audit.md`, lesson candidates, release-note eligibility, and
 the initial task-local `history-review.md`. A manual
 strict auditor returns advisory evidence to the planner; the controller's
 `audit.md` and `state.json` remain the persisted machine record.
+`review-task submit` owns the structured semantic review record. Its acceptance
+and the Context/Lesson dispositions are both required before the controller
+closes a structured task. If updating tracked CONTEXT changes verification
+inputs, rerun the declared checks, audit, and prepare a fresh review.
 
 ### Step 9d — Report
 
@@ -228,19 +273,22 @@ Tell the user: outcome, material changes, verification actually run, audit
 verdict, and any unresolved limitation. Update `CONTEXT.md` only for durable
 project knowledge; never add a ceremonial “nothing changed” entry.
 
-For a durable decision, record provenance, evidence, status (`active` or
-`superseded`), any `supersedes` link, rejected alternatives, and the reusable
-lesson. Update history only after semantic review, not on every turn.
+Record durable decisions with provenance, evidence, status (`active` or
+`superseded`), `supersedes` links, rejected alternatives and lessons after review.
 
-Resolve `<task>/history-review.md` before reporting the learning pass complete:
+Typed decisions govern structured tasks; `history-review.md` is informational.
+After durable updates, rerun affected checks/audit and obtain fresh review.
+With native review authorized, `mastermind run-task <spec> --auto-review` reviews
+the held task and closes under its lock only after both gates and fresh checks.
+The native reviewer only reads.
 
-- set **Context** to `updated` or `not applicable`;
-- set **Lesson** to `updated` or `not applicable`;
+For legacy tasks, resolve `<task>/history-review.md` before completion:
+
+- set **Context** and **Lesson** to `updated` or `not applicable`;
 - replace the generated reason with the reviewed reason and retain evidence paths;
-- retain the controller's **Audit snapshot** marker. It binds the review to the
-  iteration, audited spec/report, implementation and audit outputs. Changed or
-  missing evidence requires a new audit; never copy an old marker to close new
-  work. The controller archives a previous review when that binding changes;
+- retain the **Audit snapshot** binding to iteration, spec/report, implementation
+  and audit outputs. Changed/missing evidence requires re-audit, which archives
+  the prior review. Never reuse an old marker to close new work;
 - if an audit created a `candidate` in `_lessons.md`, replace its pending lesson
   and set it to `active`, `resolved`, or `superseded`. Finding counts alone are
   not a reusable lesson.
@@ -249,11 +297,11 @@ Repeating a mechanical event may refresh its occurrences, observation and latest
 event evidence. Preserve reviewer-written provenance, evidence, supersedes
 links, provisional lessons and notes; they are not controller-owned counters.
 
-Re-run `mastermind run-task <task>/spec.md` to record completion after updating
-the review. CONTEXT, its archives and lessons may change during this pass;
-explicitly declared implementation/documentation files still require re-audit
-when edited. A completed task remains historical evidence for its audited
-version, not proof of the current checkout.
+Re-run `mastermind run-task <task>/spec.md` to record completion after standalone
+review. Structured pending reviews bind the exact presence and bytes of CONTEXT
+and `_lessons.md`; changes require a fresh review. Tracked or explicitly declared
+files can also require fresh checks and audit. Completed tasks describe their
+audited version; they do not prove the current checkout.
 
 Commit, push, PR, release, and publication remain separate actions requiring
 explicit user authorization.

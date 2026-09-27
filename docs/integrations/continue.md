@@ -1,67 +1,44 @@
 # Continue integration
 
-Connect Continue without merging into its general configuration. Mastermind
-owns one small, standalone MCP document, so setup and removal have an exact
-boundary:
+Mastermind owns a standalone MCP document for Continue.
 
-| Scope | Path |
-|---|---|
-| Project | `.continue/mcpServers/mastermind.yaml` |
-| User | `~/.continue/mcpServers/mastermind.yaml` |
-
-## Preview first, then apply
+## Register
 
 ```bash
 npm install -g @xcraftmind/mastermind
 cd your-project
 mastermind index .
 mastermind setup continue --scope project --root .
-```
-
-Apply project or user registration explicitly:
-
-```bash
 mastermind setup continue --scope project --root . --write
-mastermind setup continue --scope user --write
 ```
 
-Mastermind writes Continue's standalone MCP schema. For a global npm install, the generated document is equivalent to:
+| Scope | Configuration |
+|---|---|
+| Project | `.continue/mcpServers/mastermind.yaml` |
+| User | `~/.continue/mcpServers/mastermind.yaml` |
 
-```yaml
-name: Mastermind MCP
-version: 1.0.0
-schema: v1
-mcpServers:
-  - name: mmcg
-    command: mastermind
-    args:
-      - serve
-```
+For user scope, replace `--scope project --root .` with `--scope user`.
+Setup previews without `--write` and selects the launcher for your installation,
+including Windows npm. It does not merge into Continue's general configuration.
 
-The `command` and `args` follow the detected install mode. On Windows, global,
-npx, and project-local npm launchers use `cmd.exe /d /s /c` so Continue can
-execute npm's `.cmd` shims. Mastermind does not merge this entry into Continue's
-general JSON configuration.
-
-## Change or undo safely
-
-A canonical owned document is an idempotent no-op and can be removed safely.
-Customized content requires `--force`; `--force` never implies `--write`.
-Before a forced change, Mastermind stores the previous bytes under
-`~/.mastermind/setup-backups/`.
-
-```bash
-mastermind setup continue --scope project --root . --remove          # dry-run
-mastermind setup continue --scope project --root . --remove --write
-```
-
-## Verify the result
+Reload Continue, then inspect registration and project health:
 
 ```bash
 mastermind doctor
 ```
 
-Doctor parses the owned YAML as bounded data, rejects symlinked files or
-existing path ancestors, and compares the full document with the trusted
-current entry. It does not execute the configured command. Reload Continue
-after applying a change. The former experimental JSON shape is unsupported.
+## Change or remove
+
+```bash
+mastermind setup continue --scope project --root . --remove
+mastermind setup continue --scope project --root . --remove --write
+```
+
+| Condition | Action |
+|---|---|
+| Removal | Select the original scope |
+| Customized content | Add `--force` and `--write` |
+| Forced file change | Backup at `~/.mastermind/setup-backups/` |
+
+See [Workflow](../workflow.md) and the
+[MCP reference](../reference/mmcg.md#mcp-tools).

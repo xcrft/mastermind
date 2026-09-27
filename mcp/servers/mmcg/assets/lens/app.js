@@ -41,6 +41,9 @@
 
   const elements = {};
 
+  // Private context is never attached to the shareable Lens snapshot/model.
+  const privateContext = { packet: null, wire: null, loading: false, request: 0, fetchedAt: null };
+
   class LensRequestError extends Error {
     constructor(code, message) {
       super(message);
@@ -1199,6 +1202,15 @@
       tests: { value: byId("metric-tests"), note: byId("metric-tests-note") },
     };
     elements.modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
+    elements.profilesButton = byId("mode-profiles");
+    elements.profilesBoard = byId("profiles-board");
+    elements.profilesStatus = byId("profiles-status");
+    elements.profilesContent = byId("profiles-content");
+    elements.profilesRefresh = byId("profiles-refresh");
+    if (elements.profilesButton) {
+      elements.profilesButton.hidden = isStandalone();
+      elements.profilesButton.disabled = isStandalone();
+    }
     elements.auditBoard = byId("audit-board");
     elements.auditSummary = byId("audit-summary");
     elements.auditExplain = byId("audit-explain");
@@ -1224,8 +1236,12 @@
 
   function bindEvents() {
     elements.refresh.addEventListener("click", function () {
-      loadSnapshot(false);
+      if (state.mode === "profiles") { loadContext(); }
+      else { clearPrivateContext(); loadSnapshot(false); }
     });
+    if (elements.profilesRefresh) {
+      elements.profilesRefresh.addEventListener("click", loadContext);
+    }
     elements.modeButtons.forEach(function (button) {
       button.addEventListener("click", function () {
         setMode(button.getAttribute("data-mode"));
@@ -1368,7 +1384,7 @@
         state.component = null;
       }
       renderAll();
-      announce(snapshotAnnouncement());
+      if (state.mode !== "profiles") { announce(snapshotAnnouncement()); }
     } catch (error) {
       const requestError = error instanceof LensRequestError
         ? error
@@ -1378,15 +1394,15 @@
       state.stale = state.model !== null;
       if (state.model) {
         renderAll();
-        announce("Refresh failed. Showing the previous snapshot. " + requestError.message);
+        if (state.mode !== "profiles") { announce("Refresh failed. Showing the previous snapshot. " + requestError.message); }
       } else {
         renderInitialError(requestError);
-        announce("Lens snapshot failed. " + requestError.message);
+        if (state.mode !== "profiles") { announce("Lens snapshot failed. " + requestError.message); }
       }
     } finally {
       state.refreshing = false;
       document.body.classList.remove("is-refreshing");
-      elements.refresh.disabled = Boolean(document.getElementById("lens-snapshot"));
+      elements.refresh.disabled = isStandalone() || privateContext.loading;
       elements.refresh.setAttribute("aria-busy", "false");
       elements.graphFrame.setAttribute("aria-busy", "false");
       updateSnapshotAge();
@@ -1413,16 +1429,382 @@
   }
 
   function setMode(mode) {
-    var next = mode === "audit" ? "audit" : "review";
+    var next = mode === "profiles" && !isStandalone() ? "profiles" : mode === "audit" ? "audit" : "review";
+    if (next !== "profiles") { clearPrivateContext(); }
     state.mode = next;
     document.body.setAttribute("data-mode", next);
     if (elements.auditBoard) {
       elements.auditBoard.hidden = next !== "audit";
     }
+    if (elements.profilesBoard) { elements.profilesBoard.hidden = next !== "profiles"; }
     elements.modeButtons.forEach(function (button) {
       button.setAttribute("aria-pressed", button.getAttribute("data-mode") === next ? "true" : "false");
     });
-    announce(next === "audit" ? "Showing the selected-scope audit." : "Showing the change review.");
+    elements.refresh.setAttribute("aria-label", isStandalone() ? "Static Lens snapshot" : next === "profiles" ? "Refresh context preview" : "Refresh Lens snapshot");
+    updateSnapshotAge();
+    if (next === "profiles") { loadContext(); }
+    else { announce(next === "audit" ? "Showing the selected-scope audit." : "Showing the change review."); }
+  }
+
+  function isStandalone() {
+    return Boolean(document.getElementById("lens-snapshot"));
+  }
+
+  function clearPrivateContext() {
+    privateContext.request += 1;
+    privateContext.packet = null;
+    privateContext.wire = null;
+    privateContext.loading = false;
+    privateContext.fetchedAt = null;
+    if (elements.profilesContent) { elements.profilesContent.replaceChildren(); }
+    if (elements.profilesStatus) { elements.profilesStatus.textContent = "Open Profiles to load a local context preview."; }
+    if (elements.profilesBoard) { elements.profilesBoard.setAttribute("aria-busy", "false"); }
+    if (elements.profilesRefresh) { elements.profilesRefresh.disabled = isStandalone(); }
+    if (elements.refresh) { elements.refresh.disabled = isStandalone() || state.refreshing; }
+  }
+
+  async function loadContext() {
+    clearPrivateContext();
+    if (isStandalone() || state.mode !== "profiles") { return; }
+    const request = privateContext.request;
+    privateContext.loading = true;
+    elements.profilesBoard.setAttribute("aria-busy", "true");
+    elements.profilesStatus.textContent = "Loading current context. Previous private data has been cleared.";
+    elements.profilesRefresh.disabled = true;
+    elements.refresh.disabled = true;
+    updateSnapshotAge();
+    try {
+      const response = await fetch("/api/context", {
+        method: "GET", headers: { Accept: "application/json" }, cache: "no-store",
+      });
+      const wire = await response.text();
+      const payload = JSON.parse(wire);
+      if (request !== privateContext.request || state.mode !== "profiles" || isStandalone()) { return; }
+      if (!response.ok || isRecord(record(payload).error)) {
+        throw new LensRequestError("context_unavailable", "The current context is unavailable. Check local access and retry.");
+      }
+      if (!isRecord(payload) || payload.schema_version !== 1 || payload.kind !== "context_preview" || !isRecord(payload.layers)) {
+        throw new LensRequestError("context_schema", "This context response is incompatible. No private data is shown.");
+      }
+      privateContext.packet = payload;
+      privateContext.wire = wire;
+      privateContext.fetchedAt = new Date();
+      renderContext(payload, privateContext.wire);
+      elements.profilesStatus.textContent = "Current preview · delivery not recorded · grants no action permissions";
+      announce("Context preview loaded. Inspect each layer's sources and omissions.");
+    } catch (error) {
+      if (request !== privateContext.request || state.mode !== "profiles") { return; }
+      privateContext.packet = null;
+      privateContext.wire = null;
+      privateContext.fetchedAt = null;
+      elements.profilesContent.replaceChildren();
+      elements.profilesStatus.textContent = error instanceof LensRequestError
+        ? error.message : "Could not load the current context. Private data has been cleared; retry when the local server is available.";
+      announce("Context unavailable. Private data has been cleared.");
+    } finally {
+      if (request === privateContext.request) {
+        privateContext.loading = false;
+        elements.profilesBoard.setAttribute("aria-busy", "false");
+        elements.profilesRefresh.disabled = isStandalone();
+        elements.refresh.disabled = isStandalone() || state.refreshing;
+        updateSnapshotAge();
+      }
+    }
+  }
+
+  function contextLabel(value, fallback) {
+    return text(value, fallback === undefined ? "Unknown" : fallback).replace(/_/g, " ");
+  }
+
+  function contextCount(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? displayNumber(value) : "Unknown";
+  }
+
+  function contextFacts(parent, entries) {
+    const list = createElement("dl", "profiles-facts");
+    entries.forEach(function (entry) {
+      const row = createElement("div");
+      row.appendChild(createElement("dt", "", entry[0]));
+      row.appendChild(createElement("dd", "", entry[1]));
+      list.appendChild(row);
+    });
+    parent.appendChild(list);
+  }
+
+  function contextDetails(parent, label, entries) {
+    const details = createElement("details", "profiles-details");
+    details.appendChild(createElement("summary", "", label));
+    contextFacts(details, entries);
+    parent.appendChild(details);
+    return details;
+  }
+
+  function contextList(parent, label, values, renderItem, unavailable) {
+    parent.appendChild(createElement("h4", "profiles-subheading", label));
+    if (!Array.isArray(values)) {
+      parent.appendChild(createElement("p", "profiles-empty", unavailable || "Not included in this preview."));
+      return;
+    }
+    if (values.length === 0) {
+      parent.appendChild(createElement("p", "profiles-empty", "No items returned for this selection."));
+      return;
+    }
+    const list = createElement("ul", "profiles-list");
+    values.slice(0, 8).forEach(function (value) {
+      const item = createElement("li");
+      renderItem(item, record(value));
+      list.appendChild(item);
+    });
+    parent.appendChild(list);
+    if (values.length > 8) {
+      parent.appendChild(createElement("p", "profiles-note", "Showing 8 of " + values.length + " returned items. The received packet below contains the rest."));
+    }
+  }
+
+  function contextLayer(parent, name, title, index, packet, renderData) {
+    const layer = record(record(packet.layers)[name]);
+    const card = createElement("section", "profiles-card profiles-card--" + name);
+    card.setAttribute("aria-label", title + " context");
+    const header = createElement("header", "profiles-card__header");
+    if (index) { header.appendChild(createElement("span", "profiles-step", index)); }
+    header.appendChild(createElement(index ? "h3" : "h4", "", title));
+    const badge = layer.omitted_reason === "context_budget" && !isRecord(layer.data) ? "Budget omitted" : contextLabel(layer.status);
+    header.appendChild(createElement("span", "profiles-badge", badge));
+    card.appendChild(header);
+    const hidden = ["not_enabled", "access_denied", "unavailable", "error", "omitted"].includes(layer.status)
+      || record(layer.data).status === "access_denied";
+    if (!isRecord(layer.data) || hidden) {
+      const message = layer.status === "not_enabled"
+        ? title + " context is not enabled for this Lens session."
+        : layer.status === "access_denied" ? "Profile access is not granted to this Lens client."
+        : layer.status === "not_requested" ? "No documentation query was selected for this Lens session."
+        : "This layer is unavailable or omitted. Its contents and counts are unknown.";
+      card.appendChild(createElement("p", "profiles-empty", message));
+    } else {
+      renderData(card, layer.data);
+    }
+    if (layer.omitted_reason) { card.appendChild(createElement("p", "profiles-note", "Omission: " + contextLabel(layer.omitted_reason))); }
+    const receipt = [["Status", contextLabel(layer.status)], ["Revision", text(layer.revision, "Not supplied")]];
+    const verification = record(layer.verification);
+    [
+      ["source_verification", "Source verification"], ["source_verification_scope", "Verification scope"],
+      ["review_status", "Review status"], ["current_checkout", "Current checkout"],
+    ].forEach(function (entry) {
+      if (verification[entry[0]] !== undefined) { receipt.push([entry[1], contextLabel(verification[entry[0]])]); }
+    });
+    if (isRecord(verification.freshness)) {
+      receipt.push(["Structure freshness", contextLabel(record(verification.freshness.structural).status)]);
+      receipt.push(["History freshness", contextLabel(record(verification.freshness.history).status)]);
+    } else if (verification.freshness !== undefined) {
+      receipt.push(["Freshness", contextLabel(verification.freshness)]);
+    }
+    if (isRecord(verification.evidence_basis)) {
+      const basis = verification.evidence_basis;
+      [
+        ["scope", "Evidence scope"], ["source_binding", "Source binding"], ["review", "Review"],
+        ["habit_tasks", "Task identity"], ["authorship", "Human authorship"],
+        ["independence", "Independent observations"], ["semantic_accuracy", "Semantic accuracy"],
+      ].forEach(function (entry) { receipt.push([entry[1], contextLabel(basis[entry[0]])]); });
+    }
+    contextDetails(card, "Layer provenance", receipt);
+    parent.appendChild(card);
+    return card;
+  }
+
+  function renderPersonContext(card, data) {
+    const omitted = array(data.omitted);
+    const selectedCount = function (key) {
+      return omitted.includes(key) || !Array.isArray(data[key]) ? "Not included" : String(data[key].length) + " returned";
+    };
+    contextFacts(card, [
+      ["Habits", selectedCount("habits")], ["Preferences", selectedCount("feedback")],
+      ["Source verification", contextLabel(data.source_verification)],
+      ["Verification scope", contextLabel(data.source_verification_scope)],
+    ]);
+    card.appendChild(createElement("p", "profiles-note", "Returned claims describe this selection. Counts do not measure how well a person is understood."));
+    card.appendChild(createElement("p", "profiles-note", "This view contains selected claims. The raw evidence review queue is not included."));
+    const basis = record(data.evidence_basis);
+    contextDetails(card, "What the evidence establishes", [
+      ["Applies to", contextLabel(basis.scope)], ["Source binding", contextLabel(basis.source_binding)],
+      ["Review", contextLabel(basis.review)], ["Task identity", contextLabel(basis.habit_tasks)],
+      ["Human authorship", contextLabel(basis.authorship)], ["Independent observations", contextLabel(basis.independence)],
+      ["Semantic accuracy", contextLabel(basis.semantic_accuracy)],
+    ]);
+    contextList(card, "Working habits", omitted.includes("habits") ? null : data.habits, function (item, habit) {
+      item.appendChild(createElement("p", "profiles-item__context", text(habit.when, "Situation unknown")));
+      item.appendChild(createElement("p", "profiles-item__title", text(habit.behavior, "Behavior unavailable")));
+      contextDetails(item, "Scope and evidence", [
+        ["Scope", text(habit.scope, "Unknown")], ["Role", text(habit.role, "Unspecified")],
+        ["Workflow", text(habit.workflow, "Unspecified")], ["Task episodes", contextCount(habit.episodes)],
+        ["Outcome", text(habit.outcome, "Unknown")], ["Exceptions", text(habit.exception, "Unknown")],
+        ["Claim ID", text(habit.id)], ["Reviewed revision", text(habit.review_revision, "Unknown")],
+      ]);
+    });
+    contextList(card, "Stated preferences", omitted.includes("feedback") ? null : data.feedback, function (item, preference) {
+      item.appendChild(createElement("p", "profiles-item__title", text(preference.statement, "Preference unavailable")));
+      contextDetails(item, "Scope and evidence", [
+        ["Category", contextLabel(preference.category)], ["Scope", text(preference.scope, "Unknown")],
+        ["Sources", contextCount(preference.sources)], ["Latest source", text(preference.last, "Unknown")],
+        ["Claim ID", text(preference.key)], ["Reviewed revision", text(preference.review_revision, "Unknown")],
+      ]);
+    });
+    const evidence = record(data.evidence);
+    const history = contextDetails(card, "Sampled Git observations", [
+      ["Repositories", contextCount(evidence.repos)], ["Measured commits", contextCount(evidence.diff_sampled)],
+      ["Context conflicts", contextCount(evidence.context_conflicts)], ["Identity basis", contextLabel(evidence.git_identity_status)],
+    ]);
+    history.appendChild(createElement("p", "profiles-note", "Commit patterns describe a sample; they do not establish a personal trait or skill."));
+    contextList(history, "Conventions", omitted.includes("conventions") ? null : data.conventions, function (item, convention) {
+      item.appendChild(createElement("p", "profiles-item__title", text(convention.statement)));
+      contextFacts(item, [["Evidence", text(convention.evidence, "Unknown")], ["Counterpattern", text(convention.counterpattern, "Unknown")]]);
+    });
+    if (omitted.length) { card.appendChild(createElement("p", "profiles-note", "Not included: " + omitted.map(function (value) { return contextLabel(value); }).join(", "))); }
+  }
+
+  function renderProjectContext(card, data) {
+    contextFacts(card, [
+      ["Source", text(data.source, "Unknown")], ["Freshness", contextLabel(data.freshness)],
+      ["Returned sections", contextCount(data.count)], ["Decision candidates", contextCount(data.claim_candidates_count)],
+      ["Review", text(data.review_status, "Unknown")],
+    ]);
+    if (data.result_truncated || data.claim_candidates_truncated || data.corpus_truncated || data.sections_truncated) {
+      card.appendChild(createElement("p", "profiles-note", "Some project evidence is omitted or truncated. See the packet for its scope."));
+    }
+    contextList(card, "Context sections", data.observed, function (item, section) {
+      const details = createElement("details", "profiles-details");
+      details.appendChild(createElement("summary", "", text(section.heading, "Untitled section")));
+      details.appendChild(createElement("p", "profiles-excerpt", text(section.excerpt, "Excerpt unavailable")));
+      details.appendChild(createElement("p", "profiles-note", text(section.section_citation, "Citation unavailable") + (section.excerpt_truncated ? " · excerpt truncated" : "")));
+      item.appendChild(details);
+    });
+    contextList(card, "Decision candidates", data.claim_candidates, function (item, claim) {
+      item.appendChild(createElement("p", "profiles-item__title", text(claim.statement)));
+      contextFacts(item, [
+        ["Source status", contextLabel(claim.source_status)], ["Review status", contextLabel(claim.review_status)],
+        ["Citation", text(claim.source_citation, "Unknown")],
+      ]);
+    });
+    card.appendChild(createElement("p", "profiles-note", "Indexing preserves source statements. It does not approve a decision or verify its relationship to code."));
+  }
+
+  function renderDocumentationContext(card, data) {
+    contextFacts(card, [
+      ["Query", text(data.query, "Unknown")], ["Freshness", contextLabel(data.freshness)],
+      ["Indexed documents", contextCount(data.indexed_documents)], ["Indexed sections", contextCount(data.indexed_sections)],
+      ["Matching sections", contextCount(data.indexed_total)], ["Returned sections", contextCount(data.count)],
+    ]);
+    if (data.result_truncated || data.corpus_truncated || data.sections_truncated) {
+      card.appendChild(createElement("p", "profiles-note", "The documentation result or indexed corpus is partial."));
+    }
+    contextList(card, "Matching documentation", data.observed, function (item, section) {
+      const details = createElement("details", "profiles-details");
+      details.appendChild(createElement("summary", "", text(section.heading, "Untitled section")));
+      details.appendChild(createElement("p", "profiles-excerpt", text(section.excerpt, "Excerpt unavailable")));
+      contextFacts(details, [
+        ["Source", text(section.path, "Unknown")],
+        ["Lines", contextCount(section.start_line) + "–" + contextCount(section.end_line)],
+        ["Kind", contextLabel(section.kind)],
+      ]);
+      item.appendChild(details);
+    });
+    card.appendChild(createElement("p", "profiles-note", "Text matches are source candidates. They do not establish an approved decision or a relationship to code."));
+  }
+
+  function briefContextCount(value) {
+    const data = record(value);
+    const returned = contextCount(data.returned);
+    return returned + " returned · " + (data.total === null || data.total === undefined ? "total unknown" : contextCount(data.total) + " total");
+  }
+
+  function renderCodeContext(card, data) {
+    const freshness = record(data.freshness);
+    const changes = record(data.changes);
+    const baseline = record(data.baseline);
+    contextFacts(card, [
+      ["Structure freshness", contextLabel(record(freshness.structural).status)],
+      ["History freshness", contextLabel(record(freshness.history).status)],
+      ["Changed files", briefContextCount(changes.files)], ["Changed symbols", briefContextCount(changes.symbols)],
+      ["Test candidates", briefContextCount(data.tests)],
+    ]);
+    contextList(card, "Selected changes", record(changes.files).items, function (item, file) {
+      item.appendChild(createElement("p", "profiles-item__title profiles-path", text(file.path, "Path unavailable")));
+      item.appendChild(createElement("p", "profiles-note", contextLabel(file.status)));
+    });
+    contextDetails(card, "Revision and scope", [
+      ["Baseline", text(baseline.requested_ref, "Unknown")], ["Baseline revision", text(baseline.baseline_oid, "Unknown")],
+      ["Head revision", text(baseline.head_oid, "Unknown")],
+      ["Scope", text(record(data.scope).repository_relative_root, "Unknown")],
+    ]);
+    card.appendChild(createElement("p", "profiles-note", "Code covers the repository diff. Person path filters do not restrict this layer."));
+    card.appendChild(createElement("p", "profiles-note", "Candidates identify where to inspect. They do not prove test execution or current behavior."));
+  }
+
+  function renderWorkContext(card, data) {
+    contextFacts(card, [["Task records returned", contextCount(data.returned)], ["Current checkout", contextLabel(data.current_checkout)]]);
+    if (data.scan_error) { card.appendChild(createElement("p", "profiles-note", "Task scan: " + text(data.scan_error))); }
+    contextList(card, "Recorded work", data.tasks, function (item, task) {
+      item.appendChild(createElement("p", "profiles-item__title", text(task.folder, "Task unavailable")));
+      const historical = task.completion_basis === "historical_record";
+      item.appendChild(createElement("p", "profiles-item__context", historical ? "Completed in stored history" : "Recorded phase: " + contextLabel(task.phase)));
+      const taskState = record(task.state);
+      contextFacts(item, [
+        ["Current checkout", contextLabel(task.current_checkout)],
+        ["Completion basis", contextLabel(task.completion_basis)],
+        ["Next step", text(taskState.next_step, "Not supplied")],
+        ["Blocker", text(taskState.blocking_reason, "Not supplied")],
+        ["Last artifact", text(taskState.last_artifact, "Not supplied")],
+      ]);
+    });
+    card.appendChild(createElement("p", "profiles-note", "Stored completion describes prior work. Current checkout verification is separate."));
+  }
+
+  function renderContext(packet, wire) {
+    const target = elements.profilesContent;
+    target.replaceChildren();
+    const selection = record(packet.selection);
+    const scope = createElement("div", "profiles-selection");
+    contextFacts(scope, [
+      ["Role", contextLabel(selection.role)], ["Workflow", text(selection.workflow, "Unspecified")],
+      ["Person paths", Array.isArray(selection.paths) ? (selection.paths.length ? selection.paths.map(function (value) { return text(value); }).join(", ") : "No path filter") : "Unknown"],
+      ["Project/docs query", text(selection.query, "Not selected")],
+      ["Baseline", text(selection.since, "Unknown")], ["Size budget", contextCount(selection.budget_tokens)],
+    ]);
+    scope.appendChild(createElement("p", "profiles-note", "Selection is fixed by the local server. Layers retain independent snapshots; this is a preview, with no recorded delivery."));
+    target.appendChild(scope);
+    const grid = createElement("div", "profiles-grid");
+    contextLayer(grid, "person", "Person", "01", packet, renderPersonContext);
+    const project = contextLayer(grid, "project", "Project", "02", packet, renderProjectContext);
+    contextLayer(project, "documentation", "Documentation", null, packet, renderDocumentationContext);
+    contextLayer(grid, "code", "Code", "03", packet, renderCodeContext);
+    contextLayer(grid, "work", "Work", "04", packet, renderWorkContext);
+    target.appendChild(grid);
+    const receipt = createElement("section", "profiles-receipt");
+    receipt.appendChild(createElement("h3", "", "Context preview"));
+    const budget = record(packet.budget);
+    contextFacts(receipt, [
+      ["Delivery", contextLabel(packet.delivery)], ["Action permissions", contextLabel(packet.permission_effect)],
+      ["Snapshot consistency", contextLabel(packet.consistency)], ["Context revision", text(packet.context_revision, "Unknown")],
+      ["Estimated size units", contextCount(budget.estimated_tokens)], ["Requested size units", contextCount(budget.requested_tokens)],
+      ["Serialized bytes", contextCount(budget.serialized_bytes)], ["Estimator", text(budget.estimator, "Unknown")],
+    ]);
+    receipt.appendChild(createElement("p", "profiles-note", "4 UTF-8 JSON bytes per unit; model token use may differ."));
+    contextList(receipt, "Omissions", packet.omitted, function (item, omission) {
+      item.appendChild(createElement("p", "profiles-note", contextLabel(omission.layer) + " · " + contextLabel(omission.reason)));
+    }, "Omission reporting was not supplied.");
+    if (Array.isArray(packet.precision_notes)) {
+      const notes = createElement("ul", "profiles-notes");
+      packet.precision_notes.forEach(function (note) { notes.appendChild(createElement("li", "", text(note))); });
+      receipt.appendChild(notes);
+    }
+    const complete = createElement("details", "profiles-packet");
+    complete.appendChild(createElement("summary", "", "Inspect the complete received packet"));
+    const pre = createElement("pre");
+    pre.setAttribute("tabindex", "0");
+    pre.setAttribute("aria-label", "Complete context preview JSON");
+    pre.appendChild(createElement("code", "", wire));
+    complete.appendChild(pre);
+    receipt.appendChild(complete);
+    target.appendChild(receipt);
   }
 
   function auditRow(label, value, fraction) {
@@ -4983,6 +5365,17 @@
   }
 
   function updateSnapshotAge() {
+    if (state.mode === "profiles") {
+      if (privateContext.loading) {
+        elements.snapshotAge.textContent = "Loading context";
+      } else if (!privateContext.fetchedAt) {
+        elements.snapshotAge.textContent = "No current context";
+      } else {
+        const minutes = Math.floor(Math.max(0, Date.now() - privateContext.fetchedAt.getTime()) / 60000);
+        elements.snapshotAge.textContent = minutes === 0 ? "Context preview just now" : "Context preview " + minutes + "m ago";
+      }
+      return;
+    }
     if (!state.fetchedAt) {
       elements.snapshotAge.textContent = state.error ? "No snapshot loaded" : "Awaiting first scan";
       return;

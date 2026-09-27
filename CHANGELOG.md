@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The style miner now counts evidence per commit instead of per line. Each
+  sampled commit votes once on each convention, and a rule needs at least eight
+  commits with the opportunity plus a Wilson-bounded majority, so one large or
+  formatter-rewritten commit can no longer produce a `high` rule. Small samples
+  render as insufficient evidence, and repositories mined by the older
+  line-level store stay listed as legacy until re-mined.
+- Style mining samples diffs across the author's history instead of only the
+  newest commits: up to 400 non-bulk commits are drawn round-robin across
+  months from the 2000 newest, and commits over 2000 added source lines count
+  only for commit voice. Re-mining reuses stored commit tallies for the same
+  author and detector contract and measures only new commits.
+- Style mining no longer credits the author with conventions a repository's
+  own tooling decides. Formatter and linter configuration at the mined
+  snapshot, plus tools run from CI or task files, route those lines to a
+  Repository tooling summary instead of the personal rules.
+- The style profile gains a Workflow (process) section measured per commit:
+  delivery through squash-merged pull requests, tests and documentation
+  changed with source, tracker keys in subjects, typical change size, and
+  reverts. Commit voice now reads squash-merged pull-request titles without
+  their `(#123)` suffix instead of skipping them, and leaves their generated
+  bodies out of the body rule.
+- The style profile gains a Range section: languages (including SQL, HCL,
+  Shell and PowerShell), repository areas and libraries from added imports,
+  each counted in commits with the number of recent commits and the last
+  month active. Imports of the repository's own crates, packages and Go
+  modules, standard libraries and path aliases are left out.
+
+### Added
+- `mastermind miner feedback` records preferences the author stated to coding
+  agents in the same profile: `scan` prints the human turns of a Claude Code
+  session transcript under `~/.claude/projects`, `add` stores one preference
+  whose quote must appear verbatim in a human turn, `import-memory` imports
+  Claude Code memory files of type `feedback` or `user`, and `list`, `accept`
+  and `reject` review them. Every recorded or imported statement is a
+  candidate. Only `accept` in an interactive terminal makes it active, and
+  only active feedback outranks mined preferences in the rendered profile.
+- `mastermind-feedback-collector` subagent collects those preferences at the
+  end of a session and records them through the CLI.
+- `mmcg_profile` read-only MCP tool returns the part of the user's own profile
+  that applies to the paths being changed: session feedback whose scope
+  matches exactly (without the local quotes), personal rules for their languages, workflow habits, range, and the
+  libraries that co-occurred with the changed areas in the author's commits,
+  within a token budget. The task executor is granted it. Independent
+  reviewers are not.
+
 ## [2.1.1] - 2026-09-19
 
 ### Added
@@ -32,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context doctor now treats a bound semantic-review state without an audit
   snapshot as unresolved instead of accepting its Markdown dispositions.
 - Workflow status no longer reports a learned or history-review task as
-  complete when its audit snapshot binding is missing; it now routes that
+  complete when its audit snapshot binding is missing. It now routes that
   state back through post-flight audit.
 - Workflow-audit text and documentation now distinguish complete inventory
   collection from diagnostic-free wiring, runtime execution, and acceptance.
@@ -41,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Canonical executor-report `files_modified` now has to match the actual,
   normalized changed-file set, excluding controller artifacts. Missing or
   invented file declarations can no longer enter a held audit or sealed bundle.
-- Canonical executor-report passes now require `observed.exit_code: 0`; an
+- Canonical executor-report passes now require `observed.exit_code: 0`. An
   unobserved pass cannot satisfy a required verification command. The receipt is
   self-reported consistency evidence, not execution provenance.
 - Brief packets now retain bounded API-crossing candidates with component, seed,
@@ -56,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remain traceable to their static reason.
 - Frontend audit now treats a component with zero static callers as a wiring
   hypothesis. It requires inspection of routes, lazy registration, barrels,
-  stories, and auto-import before reporting an unrendered defect; its eval
+  stories, and auto-import before reporting an unrendered defect. Its eval
   fixture now supplies that complete registration evidence.
 - History retrieval now emits precision notes that FTS matches do not establish
   current semantic truth and an empty page does not prove a relevant decision
@@ -120,7 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one result, rejecting conflicting partial/final events and successful replies
   with incomplete tool evidence.
 - A normally exited benchmark adapter no longer becomes a false timeout when an
-  abandoned descendant keeps its output pipes open; the supervisor drains
+  abandoned descendant keeps its output pipes open. The supervisor drains
   briefly and then cleans up the owned process group.
 - Offline research review now requires every retained result to keep its empty
   one-shot attempt lock, so a detached result cannot count as a completed batch
@@ -158,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Controller artifacts now recognize only the exact
   `.mastermind/tasks/<task>/spec.md` layout as canonical. Other nested specs use
   full exact-path digests in isolated namespaces, so equal basenames cannot
-  share state, release notes, or semantic-review files; legacy flat task paths
+  share state, release notes, or semantic-review files. Legacy flat task paths
   remain compatible and noncanonical release notes remain searchable.
 - Source workflow audits now reject non-UTF-8 and Unix backslash aliases before
   creating component paths, nodes, or inventory counts.
@@ -174,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lesson candidates now deduplicate by exact repository-relative spec identity
   instead of a sanitized task label, preventing distinct task folders from
   merging their evidence and occurrence counts.
-- Lens evidence and review manifests now require exact source labels; non-UTF-8
+- Lens evidence and review manifests now require exact source labels. Non-UTF-8
   names and Unix backslash aliases cannot be bound to a different path. Review
   output paths are also validated before package publication.
 - Spec parsing, executor-report bundle binding, and fact-adapter summaries now
@@ -188,8 +234,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy now enforce the same task-state repository and spec binding as
   `run-task`. Legacy state routes to explicit pre-flight, while foreign state
   cannot appear ready, complete, or valid policy evidence.
-- Claude workflow inventory counts only exact UTF-8 agent and skill names;
-  lossy filename aliases no longer inflate the installed-adapter totals.
+- Claude workflow inventory counts only exact UTF-8 agent and skill names.
+  Lossy filename aliases no longer inflate the installed-adapter totals.
 - Direct-install MCP setup now requires an exact UTF-8 executable path before
   it renders or writes client configuration. Setup and doctor no
   longer serialize a lossy command that can launch a different binary.
@@ -210,7 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository-path identity. Unix backslash aliases can no longer select or
   suppress evidence for another path.
 - Local-worktree fact identities preserve literal Unix backslashes and reject
-  non-UTF-8 roots; SCIP provenance labels and SARIF artifact URIs also keep
+  non-UTF-8 roots. SCIP provenance labels and SARIF artifact URIs also keep
   distinct paths distinct instead of rewriting them onto slash paths.
 - SARIF, LCOV/Cobertura, JUnit, and OTLP evidence no longer rewrites ambiguous
   relative backslash paths onto another Unix source file. Unsafe paths are
@@ -221,7 +267,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or importing them under another path identity.
 - Source indexing, freshness checks, and watcher removals now share one exact
   repository-path encoding. Non-UTF-8 and ambiguous Unix backslash source paths
-  fail closed instead of colliding with another graph row; working-tree reports
+  fail closed instead of colliding with another graph row. Working-tree reports
   preserve literal backslashes as distinct paths.
 - Git history evidence now rejects non-canonical backslash paths instead of
   rewriting them to slash paths and potentially assigning churn to another
@@ -229,10 +275,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Impact text renderer tests now exercise a public-field view, so binary test
   targets compile without exposing or constructing private snapshot state.
 - Git history evidence now distinguishes binary changes and malformed `numstat`
-  records from exact zero-line churn; Lens labels known text totals and exposes
+  records from exact zero-line churn. Lens labels known text totals and exposes
   per-file line-count completeness instead of presenting missing counts as zero.
 - Automatic CODEOWNERS discovery is now bounded, exact-case, no-follow, and
-  fail-closed across Lens, temporal ownership, and review export; unreadable or
+  fail-closed across Lens, temporal ownership, and review export. Unreadable or
   invalid priority locations can no longer look like an absent ownership file.
 - Offline review export now selects automatic CODEOWNERS evidence once and
   rechecks that path before publication, preventing Lens analysis and manifest
@@ -282,30 +328,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   analysis without making a freshly purged index permanently stale.
 - Spec frontmatter now preserves YAML scalar types before deserialization, so
   numbers and booleans cannot be coerced into file, symbol, command, label, or
-  metadata strings; legacy integer task IDs remain accepted explicitly.
+  metadata strings. Legacy integer task IDs remain accepted explicitly.
 - Spec frontmatter now rejects unknown top-level and nested fields plus invalid
   `mode` and `risk` values, preventing metadata typos from silently weakening
   scope, snapshot, verification, or workflow gates.
 - Specs that declare `mode: strict` now enable strict pre-flight checks in both
-  `verify-spec` and `run-task` without depending on a second CLI flag; controller
+  `verify-spec` and `run-task` without depending on a second CLI flag. Controller
   state also retains the effective strict contract for later retries.
 - `run-task` now re-evaluates inherited `--allow-no-index` against the current
-  spec; adding indexed source or symbol evidence restores the index gate and
+  spec. Adding indexed source or symbol evidence restores the index gate and
   clears the docs-only escape from revalidation state.
 - Strict code tasks now fail post-flight when their exact architecture-policy
-  snapshot cannot be created; they can no longer reach semantic review or
+  snapshot cannot be created. They can no longer reach semantic review or
   `learned` with policy evidence that downstream checks silently ignore.
 - `run-task` now reports every failed fallback state write and escalates a
   failed Drift/Broken-state persistence instead of claiming the task state was
   kept when the write did not succeed.
-- Rust vacuous-test scanning now reads test attributes from the syntax tree;
+- Rust vacuous-test scanning now reads test attributes from the syntax tree.
   `#[test]` examples in comments and strings no longer hide a test command with
   no conventional executable tests.
 - Lens Git-history parsing now uses NUL-delimited paths and canonical mailmap
   name-and-email identities, preserving unusual filenames and preventing author
   aliases or equal display names from distorting ownership concentration.
 - Lens now carries the minimum ownership-history threshold and its coverage in
-  the bus-factor payload; components below five touches make the assessment
+  the bus-factor payload. Components below five touches make the assessment
   partial instead of allowing a complete verdict with an unjudgeable signal.
 - Lens bus-factor analysis now evaluates every returned map component, retains
   components with no commits in the bounded history window, exposes its
@@ -316,7 +362,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment and context doctor text now escapes repository paths, diagnostic
   messages, hints, and explain-mode paths before writing them to a terminal.
 - `verify-spec` text and JSON reports now say whether index-backed symbol,
-  snapshot, and blast-radius checks ran; a default no-index pass no longer hides
+  snapshot, and blast-radius checks ran. A default no-index pass no longer hides
   that those checks were skipped. Human findings also escape terminal controls.
 - Controller-written `audit.md` now retains the complete bounded symbol diff,
   every claim-check result, and the checked executor report used by post-flight,
@@ -356,13 +402,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection, including complete 201–10,000-file snapshots that previously
   bypassed the cap.
 - Note/none findings no longer turn Lens's security chip or overall audit
-  verdict into `Attention`; warnings and errors still retain their stronger
+  verdict into `Attention`. Warnings and errors still retain their stronger
   postures.
 - The bounded Lens audit card now orders errors and warnings before
   informational findings, so an early run of notes cannot hide a severe result
   beyond the six displayed rows.
 - Lens now preserves SARIF finding severity in trace ranking, cluster counts,
-  evidence marks, audit badges, and inspector markers; note/none results no
+  evidence marks, audit badges, and inspector markers. Note/none results no
   longer become serious claims.
 - Lens now exposes endpoint-only document packets as `corpus not tracked`
   across visible, precision, notice, and accessibility surfaces instead of
@@ -389,7 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncation reasons. Audit limits appear in the method ledger, and a bounded
   empty change-hotspot ranking no longer renders as a clean zero.
 - Temporal deltas now leave totals and summary counts unknown when their map,
-  CODEOWNERS, or history source is incomplete; centrality increases count the
+  CODEOWNERS, or history source is incomplete. Centrality increases count the
   complete measured delta before response bounding, and component-shape drift
   is retained as `components_changed` across JSON, text, Lens, and review output.
 - `mmcg_semantic` now marks rows withheld for stale SCIP documents in each
@@ -417,10 +463,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   freshness independently from structural and concept health, so edited context,
   task, release, lesson, and ADR Markdown cannot hide behind a green graph.
 - `mmcg_status` and `index_stale` now expose concept-corpus contract health
-  separately from structural extractor health; concept drift no longer appears
+  separately from structural extractor health. Concept drift no longer appears
   as a fabricated stale source-file count.
 - Incremental indexing and structural freshness now treat an older source mtime
-  as changed instead of silently trusting restored or checked-out content; status
+  as changed instead of silently trusting restored or checked-out content. Status
   identifies its path-and-mtime basis and documents the exact-mtime limitation.
 - Index status now distinguishes an exact stale-file count from a bounded lower
   bound or failed freshness scan, rechecks the SQLite snapshot after walking
@@ -447,22 +493,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete.
 - MCP symbol diffs now bound every returned collection while preserving their
   flat arrays, expose per-collection coverage, and keep totals unknown when the
-  upstream Git file scope is partial; CLI and audit consumers stay complete.
+  upstream Git file scope is partial. CLI and audit consumers stay complete.
 - MCP dependency-cycle results now bound both SCC count and total file
   memberships, omit rather than mislabel partial SCCs, and distinguish response
-  truncation from an import-graph work cutoff; CLI output stays complete.
+  truncation from an import-graph work cutoff. CLI output stays complete.
 - MCP recent-file queries now apply their advertised response bound in SQL and
-  report exact filtered totals; CLI output stays complete.
+  report exact filtered totals. CLI output stays complete.
 - MCP file outlines now use a bounded parent-before-child traversal, report
   exact node coverage, and disclose depth or hierarchy gaps instead of silently
-  dropping nested symbols; CLI output stays complete.
+  dropping nested symbols. CLI output stays complete.
 - MCP exact-name search now bounds returned hits and partial-type grouping work,
   reports raw candidate coverage, and leaves the grouped total unknown when the
-  work cap prevents complete partial locations; CLI output stays complete and
+  work cap prevents complete partial locations. CLI output stays complete and
   the isolated benchmark advertises the same bounded graph-tool arguments.
 - MCP callee responses now bound both ambiguous definition candidates and
   outgoing edges, report each truncation independently, and query precise
-  file/line selectors outside the broad candidate cap; CLI output stays complete.
+  file/line selectors outside the broad candidate cap. CLI output stays complete.
 - MCP per-file symbol inventories now stop at an explicit 200-row default,
   apply the cap inside SQLite, expose exact truncation and extraction limits,
   and retain complete local CLI output.
@@ -470,20 +516,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cap inside SQLite, expose exact truncation and static-analysis limits, and
   have a complete `mmcg query imports` CLI counterpart.
 - MCP caller responses now stop at an explicit 100-row default, apply the cap
-  inside SQLite, and expose exact truncation plus the effective language filter;
+  inside SQLite, and expose exact truncation plus the effective language filter.
   CLI caller output stays complete and rejects unknown edge kinds.
 - MCP reverse-import responses now stop at an explicit 200-row default, apply
   the cap inside SQLite, expose exact truncation and the effective selector,
-  and state that dynamic dependencies can be missing; CLI output stays complete.
+  and state that dynamic dependencies can be missing. CLI output stays complete.
 - MCP API-surface responses now stop at an explicit 100-row default, expose the
-  exact filtered total and truncation, and apply the cap inside SQLite; the
+  exact filtered total and truncation, and apply the cap inside SQLite. The
   local CLI retains its complete listing.
 - MCP unreferenced-symbol responses now stop at an explicit 100-row default,
   expose the exact filtered total and truncation, and avoid materializing every
-  candidate; the local CLI retains its complete listing.
+  candidate. The local CLI retains its complete listing.
 - MCP file inventory responses now stop at an explicit 200-row default and
   report truncation instead of materializing a result until the 8 MiB envelope
-  fails; the local CLI retains its complete listing.
+  fails. The local CLI retains its complete listing.
 - Recent-change results now expose their source-mtime basis and exact interval,
   exclude future timestamps, and stop describing source mtimes as index times.
 - Markdown workflow parsing now advances across backticked Unicode by byte
@@ -509,7 +555,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Change-impact analysis now fails closed when collision or changed-test lookups
   fail instead of reporting zero collisions or omitting test candidates.
 - Writable opens and private snapshots no longer disturb SQLite's process-wide
-  POSIX locks; snapshots now use SQLite's consistent online backup protocol,
+  POSIX locks. Snapshots now use SQLite's consistent online backup protocol,
   existing writable indexes and snapshots resolve aliased parent directories
   for no-follow opens, and validation distinguishes transient shared-memory
   coordination from durable database or WAL changes.
@@ -616,7 +662,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated JSON, and symlink or non-file state targets are rejected.
 - Status, next-action, and resume now read task lifecycle state through bounded,
   no-follow repository capabilities. Malformed, oversized, unknown, or
-  special-file state is held instead of becoming a fresh ready task; an
+  special-file state is held instead of becoming a fresh ready task. An
   ambiguous or changing task inventory blocks workflow actions.
 - Spec parsing now uses a single bounded, no-follow file snapshot capped at the
   audit-bundle 16 MiB limit. Verify, CI, and workflow gates reject path swaps
@@ -671,7 +717,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependency cycles, large-file pressure, author concentration, dead-code
   candidates, change hotspots, and change-scoped security evidence. Optional AI
   narratives are bound to the exact repository, revisions, worktree snapshot,
-  and project map; invalid or stale sidecars are ignored.
+  and project map. Invalid or stale sidecars are ignored.
 - `mmcg_concept` and `mastermind concept` now return a bounded schema-v1 set of
   local symbol candidates from normalized names, repository paths, and
   declaration shapes. Rust outer docs, Python owned docstrings, and
@@ -679,13 +725,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without persisting or returning raw text. Credential-shaped candidates and
   per-symbol/per-file overflow are omitted and counted. Fixed quoted-AND FTS5
   retrieval uses no embeddings, model calls, network access, source bodies,
-  literals, or defaults; managed indexes refresh once on extractor or
+  literals, or defaults. Managed indexes refresh once on extractor or
   normalization drift, while custom external indexes remain read-only and fail
   closed.
 - `mmcg_brief` and `mastermind brief` now build one deterministic,
   revision-bound planner/executor/auditor context packet. Role-specific prefix
-  admission is capped and reports source, unsafe-content, and budget omissions;
-  unknown source truncation remains an explicit lower bound, while structural
+  admission is capped and reports source, unsafe-content, and budget omissions.
+  Unknown source truncation remains an explicit lower bound, while structural
   and history freshness remain separate. The accepted token budget counts the
   final MCP result after escaping and text/structured duplication. History
   citations use the source lexemes highlighted by the selecting FTS5 query,
@@ -696,7 +742,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts, and writers. Schema-v1 output includes stable wiring diagnostics,
   installed-profile ownership checks, component context estimates, and strict
   no-follow/YAML/input/output limits, real Claude registration-scope checks,
-  and canonical writer-target validation; doctor and packaged-profile smoke
+  and canonical writer-target validation. Doctor and packaged-profile smoke
   tests consume the same analyzer.
 - The artifact validator and `mastermind doctor` now detect Claude subagents
   that scope an MCP server but block all of its tools with an explicit
@@ -710,7 +756,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A live-codegraph researcher suite exercises the shipped custom-agent boundary,
   source cross-checking, static/runtime uncertainty, and planner handoff.
 - Workflow installation profiles expose `core`, `frontend`, `security`, and
-  `full` portable-skill catalogs. Fresh installs default to `core`; updates and
+  `full` portable-skill catalogs. Fresh installs default to `core`. Updates and
   doctor preserve the installed profile, and legacy manifests migrate as
   `full` without dropping owned skills. Committed updates report recoverable
   staging backups if final cleanup fails.
@@ -727,7 +773,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses concept and exact graph queries before literal fallbacks, and forbids
   rediscovering complete graph answers through Bash. The read-only researcher
   no longer receives Bash and can resolve natural-language candidates through
-  `mmcg_concept`; managed-index auto-refresh guidance is synchronized across
+  `mmcg_concept`. Managed-index auto-refresh guidance is synchronized across
   the portable skill and Claude workflow template. Investigator instructions
   drop long examples and companion sections, and every Bash-capable structural
   role now names the exact graph route before shell fallback.
@@ -742,10 +788,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managed refresh and retry, Git, filesystem work, private snapshots, and
   serialization. Automatic refresh is capped at 20,000 candidates and 512 MiB
   declared bytes and returns `refresh_limit_exceeded` when bounded out.
-- Custom MCP indexes open read-only and are never migrated or given sidecars;
-  incompatible schemas return `schema_incompatible`. Git refs are length- and
-  option-safe and resolve to a validated commit OID before later commands;
-  commit-range symbol diffs now share one deadline, bounded NUL-delimited file
+- Custom MCP indexes open read-only and are never migrated or given sidecars.
+  Incompatible schemas return `schema_incompatible`. Git refs are length- and
+  option-safe and resolve to a validated commit OID before later commands.
+  Commit-range symbol diffs now share one deadline, bounded NUL-delimited file
   inventory, and capped batched baseline-blob reads.
 - Shipped Claude subagents grant only the exact `mmcg` tools each role needs
   and carry bounded `maxTurns` and `effort` settings. Auditor evals exercise the
@@ -777,7 +823,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract from `mmcg-extractors-v2` to `mmcg-extractors-v3`. Run
   `mastermind index .` once after upgrading. It rebuilds derived graph tables
   in place while preserving repository identity and durable history/scratchpad
-  data; no manual SQLite migration is required. Refresh the index before
+  data. No manual SQLite migration is required. Refresh the index before
   trusting Lens, MCP, map, impact, temporal, or policy results.
 - Package and command names remain `@xcraftmind/mastermind`, `mastermind`, and
   `mmcg`. The Node.js 24+ and Rust 1.96+ requirements are unchanged.
@@ -786,7 +832,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in `mastermind facts adapt` converters turn bounded SARIF,
   LCOV/Cobertura, JUnit, and OTLP JSON artifacts into strict
   `mastermind-facts/v1` manifests. Every emitted fact must map to the current
-  index; partial parsing and unmapped records fail before output publication.
+  index. Partial parsing and unmapped records fail before output publication.
 - Fact manifests can be signed and verified with a domain-separated Ed25519
   contract and explicit trusted/revoked key policy. Trusted imports preserve a
   reproducible signature proof for Lens, MCP, and PR evidence packages, while
@@ -795,7 +841,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mastermind team lock` and `mastermind team map`, plus the read-only
   `mmcg_team_map` tool, federate up to 16 pinned local indexes into a bounded
   repository-namespaced graph. Identity, Git revision, DB/WAL digest, and index
-  freshness are revalidated; cross-repository edges are explicit manifest
+  freshness are revalidated. Cross-repository edges are explicit manifest
   claims rather than guessed topology. Lock output reports the exact manifest
   digest required to authorize the read-only MCP tool.
 - Release workflows now smoke-test the exact published npm and crates.io
@@ -833,7 +879,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository.
 - `mastermind ui --since <ref>` serves Mastermind Lens: an offline, loopback-only,
   read-only diff-first review UI backed by the existing bounded project-map and
-  change-impact schemas. Checkpointed indexes open immutably; active WAL state is
+  change-impact schemas. Checkpointed indexes open immutably. Active WAL state is
   read through a bounded private snapshot without creating source sidecars.
 - Lens evidence overlays now correlate returned trace files with bounded SARIF,
   LCOV/Cobertura, JUnit, explicit OTLP code paths, CODEOWNERS, Git churn, and
@@ -852,7 +898,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   most often an empty one from a stray colon, which POSIX reads as the current
   directory — would let the resolved binary depend on where the command was run,
   and that command is written into an MCP config that gets executed later. The
-  outcome class is unchanged for anything parsing it; the error now also names
+  outcome class is unchanged for anything parsing it. The error now also names
   every offending entry by position and says whether it is empty or relative.
   `mastermind doctor` gained a `PATH entries` check so the same problem surfaces
   before setup rather than after it.
@@ -862,8 +908,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `mastermind-product-intake` converts a PRD or ticket into a task contract by
   sorting every statement into behaviour, constraint, and outcome. Only
-  behaviour becomes acceptance criteria; a constraint qualifies once its
-  measurement is named; an outcome never does, because a success metric cannot
+  behaviour becomes acceptance criteria. A constraint qualifies once its
+  measurement is named. An outcome never does, because a success metric cannot
   fail on the day the change lands and leaving it in the contract makes a
   mechanical gate mark it satisfied while nothing was measured. It resolves
   product nouns to symbols before assuming they are new, and surfaces the cases
@@ -887,7 +933,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a missing edge is not absence of access — global middleware, route tables, DI,
   and proxies invoke code it never links — and a present edge is not enforcement,
   since order, control flow, and fail-closed behaviour are invisible to a call
-  edge. The packet is a population and a gap list; it produces no verdict, does
+  edge. The packet is a population and a gap list. It produces no verdict, does
   not clear a change, and does not lower the mode.
 - The backend discipline gets its research half. `mastermind-runtime-research`
   gathers consumers, state writers, and boundary crossings before a service
@@ -966,7 +1012,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.vue` file rather than at an offset inside the block. Template usage emits
   `calls` edges, with `<my-widget />` and `<MyWidget />` normalized to the same
   PascalCase name the way Vue itself resolves them. Adds one dependency, the
-  tree-sitter organization's `tree-sitter-html`, which parses the SFC shell; the
+  tree-sitter organization's `tree-sitter-html`, which parses the SFC shell. The
   available `tree-sitter-vue` crates are a stale 0.0.3 and third-party forks.
 
 ### Fixed
@@ -979,7 +1025,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call (`memo`, `forwardRef`, `styled`) are now `function` symbols carrying the
   inner parameters as their signature, so a changed props contract reports as
   `signature_changed`. `<Component />` and `<Ns.Component />` emit `calls` edges
-  from the containing component; lowercase host elements do not. Applies to
+  from the containing component. Lowercase host elements do not. Applies to
   `.tsx`, `.jsx`, and JSX in `.js`. The extractor contract version bumped to
   `mmcg-extractors-v2`, so the next ordinary `index` run rebuilds automatically.
 - Folding a repeat audit event into an existing lesson candidate truncated
@@ -1013,7 +1059,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full core until the git deadline expired. Both now use `thread::sleep`.
 - `mmcg serve` now exits when its parent process changes. The npm wrapper
   spawns the binary with `stdio: "inherit"`, so stdin belongs to the MCP client
-  rather than to the wrapper; if the wrapper died, EOF never arrived and the
+  rather than to the wrapper. If the wrapper died, EOF never arrived and the
   server lingered indefinitely.
 
 ## [1.1.0] - 2026-07-22
@@ -1024,13 +1070,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nested budgets compose by min), so no query can run unbounded: on expiry the
   tool returns a structured `work_limit_exceeded` payload carrying `budget_ms`
   and guidance to narrow the scope. Tunable via `MMCG_QUERY_BUDGET_MS`
-  (default 10,000 ms for `mcp serve`, 60,000 ms for one-shot CLI queries;
+  (default 10,000 ms for `mcp serve`, 60,000 ms for one-shot CLI queries,
   `0` = unlimited).
 - Client cancellation. `serve_io` reads frames on a dedicated thread that
   intercepts `notifications/cancelled` (and legacy `$/cancelRequest`) out of
   band and interrupts the running statement, so a cancel lands while the main
   thread is still inside a query. A cancelled call reports `cancelled`, never
-  `work_limit_exceeded`; a single mutex over the in-flight request id keeps a
+  `work_limit_exceeded`. A single mutex over the in-flight request id keeps a
   late cancel from aborting the next request.
 - `git` subprocesses in the symbol-diff path (`run_git`, `git_show_blob`) now
   run under a deadline (`MMCG_GIT_TIMEOUT_MS`, default 30,000 ms) with
@@ -1040,9 +1086,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The dominant graph aggregations no longer scale with name-collision fan-out.
   `centrality` / `map_centrality` pre-aggregate in-degree per name over the
-  union of the `to_name` and `to_type` edge branches; `map_import_edges` and
+  union of the `to_name` and `to_type` edge branches. `map_import_edges` and
   `dependency_cycles` pre-deduplicate `(name, file_path)` before joining import
-  edges; `unreferenced` and `api_surface` replace per-row `EXISTS` name probes
+  edges. `unreferenced` and `api_surface` replace per-row `EXISTS` name probes
   with joins against pre-aggregated name sets. Results are unchanged —
   property tests compare each rewrite against a brute-force reference over
   randomized graphs including `to_type`-only edges. On a 1M-symbol index this
@@ -1109,7 +1155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destructive re-mine from `doctor` guidance.
 
 ### Security
-- Lesson writes use locked, symlink-safe, repository-bounded paths; style
+- Lesson writes use locked, symlink-safe, repository-bounded paths. Style
   profiles avoid email persistence and cross-author leakage.
 
 ## [0.38.1] - 2026-07-19
@@ -1118,7 +1164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The npm package page now uses a concise package description and a shorter, task-focused README.
 
 ### Fixed
-- The npm version badge now uses a release-bound value instead of the broken scoped-package lookup; validation keeps it aligned with `package.json`.
+- The npm version badge now uses a release-bound value instead of the broken scoped-package lookup. Validation keeps it aligned with `package.json`.
 
 ## [0.38.0] - 2026-07-19
 
@@ -1132,15 +1178,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Portable skills now match the real Direct/Verified/Strict lifecycle: read-only validation precedes approval, executor work is acceptance-driven with bounded repair, and `executor-report.md` is the only machine-consumed agent handoff.
 - Codegraph, prompt-refiner, security-review, style, comments, and investigation guidance now state their evidence limits, activation boundaries, and cross-client behavior explicitly.
 - New work now chooses among Direct (no spec), Verified (compact default contract), and Strict (risk-driven review). Planner and project workflow prompts are shorter, outcome-oriented, and no longer force a critic or independent auditor onto normal work.
-- `run-task` now keeps controller-owned lifecycle state beside each canonical task, requires the executor's canonical report before post-flight, persists `audit.md`, and keeps completed runs idempotent. The default handoff is client-neutral; `--exec` remains a Claude-only compatibility path.
+- `run-task` now keeps controller-owned lifecycle state beside each canonical task, requires the executor's canonical report before post-flight, persists `audit.md`, and keeps completed runs idempotent. The default handoff is client-neutral. `--exec` remains a Claude-only compatibility path.
 - Pull-request audit execution now selects only changed canonical task folders and requires an executor report before producing evidence, instead of re-auditing every historical spec against the current baseline.
-- The auditor is repository-read-only; planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
+- The auditor is repository-read-only. Planner/controller code now owns audit artifacts, lessons, release eligibility, and task-state transitions.
 - Release workflows pin every third-party Action to a full commit SHA. Manual publish runs are verification-only, and package publication requires a tag push in `xcrft/mastermind`.
 - The executor now applies a mandatory zero-by-default comment gate before final verification, preserving only required documentation and non-obvious rationale.
 - Eval results are presented as a dated behavioral scorecard rather than a performance benchmark, with full-suite runs separated from targeted reruns.
 
 ### Removed
-- The unused `extras/` artifact tree; installable workflow artifacts now have one canonical home under `agents/` and `skills/`.
+- The unused `extras/` artifact tree. Installable workflow artifacts now have one canonical home under `agents/` and `skills/`.
 
 ### Security
 - Executor reports are capped at 1 MiB before YAML decoding, workflow eval prompts use an exact artifact allowlist in a tool-free safe-mode subprocess outside the repository, and Action-pin validation covers both `.yml` and `.yaml` workflows.
@@ -1183,7 +1229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The `rust-cli` profile is now just `rust` — it was mislabelling Rust services and libraries as CLIs. Template renamed `rust-cli.md` → `rust.md` and generalized.
-- The style miner no longer learns commit conventions from squash/PR-merge commits (subjects ending in `(#123)`). These are tool-generated, not hand-written, so counting them taught the profile the merge format instead of the author's voice; in a squash-merged repo the commit-voice rules now correctly emit nothing rather than a wrong rule.
+- The style miner no longer learns commit conventions from squash/PR-merge commits (subjects ending in `(#123)`). These are tool-generated, not hand-written, so counting them taught the profile the merge format instead of the author's voice. In a squash-merged repo the commit-voice rules now correctly emit nothing rather than a wrong rule.
 - `mastermind miner profile` and `init` now report which identity they mined as and that repo's contribution (`enriched as \`<author>\` … (+N commits here)`), so a wrong author (e.g. a misconfigured `git user.name`) is visible instead of silent.
 
 ### Fixed
@@ -1193,18 +1239,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Author style miner — `mastermind miner profile` learns your code-shape style ("write like me") into `~/.mastermind/style.md`, which the planner reads when drafting `CHANGE TO` blocks. Deterministic (git + line heuristics, no LLM): it derives code-shape idioms (indentation, quotes, line length, comment density, brace style, declarations) and commit conventions (prefix, subject length, body usage). A rule is emitted only with a dominant pattern over enough samples and names the counter-pattern it rejects — no signal, no rule.
-- Cross-repo style store — each mine enriches a user-global SQLite store (`~/.mastermind/style.db`) and regenerates `style.md` from the aggregate, so the profile is one fingerprint summed over every repo you mine. Idempotent per repo (re-mining replaces, never doubles), with retention that drops repos gone from disk or unmined for a year. A managed/manual split preserves hand edits across re-mines, and `mastermind doctor` nudges a re-mine once you've accrued enough new commits since the last one. `--deep` optionally adds an LLM-written "design patterns" section via `claude -p` (sends sampled lines + commit messages; off by default).
+- Cross-repo style store — each mine enriches a user-global SQLite store (`~/.mastermind/style.db`) and regenerates `style.md` from the aggregate, so the profile is one fingerprint summed over every repo you mine. Idempotent per repo (re-mining replaces, never doubles), with retention that drops repos gone from disk or unmined for a year. A managed/manual split preserves hand edits across re-mines, and `mastermind doctor` nudges a re-mine once you've accrued enough new commits since the last one. `--deep` optionally adds an LLM-written "design patterns" section via `claude -p` (sends sampled lines + commit messages, off by default).
 
 ### Changed
 - `mastermind init` is now batteries-included — it auto-detects the repo's stack from its manifests for CONTEXT.md and always installs the workflow CLAUDE.md, dropping the opt-in `--profile` / `--with-claude-md` / `--with-workflow` flags. The product is the whole workflow out of the box.
 
 ### Removed
-- The standards-library layer — artifact `_template/` scaffolds, the `*-anatomy.md` docs, `docs/conventions.md`, the new-artifact contribution flow, and the unused `filesystem-readonly` MCP example. Mastermind is a product (codegraph + workflow), not a contributable artifact library; `CONTRIBUTING.md` and the PR template are rewritten product-focused.
+- The standards-library layer — artifact `_template/` scaffolds, the `*-anatomy.md` docs, `docs/conventions.md`, the new-artifact contribution flow, and the unused `filesystem-readonly` MCP example. Mastermind is a product (codegraph + workflow), not a contributable artifact library. `CONTRIBUTING.md` and the PR template are rewritten product-focused.
 
 ## [0.33.0] - 2026-06-22
 
 ### Changed
-- Docs: npm package README rewritten to npm conventions and trimmed ~40%; top-level README onboarding aligned (`install`-led) and inventory updated (added the `coding/` skill domain, the `install` / `update` / `list` commands, and all three eval suites); binary `--help` now points npm users at the `mastermind install` shortcut.
+- Docs: npm package README rewritten to npm conventions and trimmed ~40%. Top-level README onboarding aligned (`install`-led) and inventory updated (added the `coding/` skill domain, the `install` / `update` / `list` commands, and all three eval suites). Binary `--help` now points npm users at the `mastermind install` shortcut.
 - Task specs now require VERIFY commands to be scoped, cheap, and terminating: the planner skill, executor skill, and canonical spec template forbid whole-repo suites in a per-step VERIFY (use `tsc -p packages/x`, `npm test -- billing`), reserve the full typecheck/test suite for the phase boundary and final block, and ban non-terminating commands (`dev`/`start`/`watch`/`serve`) that hang the executor to its tool timeout. Cuts executor wall-clock on large repos without losing per-step failure localization.
 
 ### Tests
@@ -1212,38 +1258,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Prompt-refiner subagent is now self-contained for passthrough — the intake gate inlines the passthrough decision rule and output format (previously only in the skill, which a subagent can't load at runtime), so an already-tight prompt is returned unchanged (`action: passthrough`) instead of being needlessly rewritten.
-- Critic verdict ladder sharpened — a sound approach with fixable gaps now scores `concern`/`revise`, and `rethink` is reserved for a genuinely wrong approach; stops the critic over-escalating under-specified-but-sound designs.
+- Critic verdict ladder sharpened — a sound approach with fixable gaps now scores `concern`/`revise`, and `rethink` is reserved for a genuinely wrong approach. Stops the critic over-escalating under-specified-but-sound designs.
 
 ## [0.32.0] - 2026-06-19
 
 ### Added
-- `mastermind install` / `update` / `list` — one-command Claude Code setup. `install` copies the workflow subagents + skills into `~/.claude/` **and** registers the mmcg MCP server (reusing `setup claude --write-mcp`, so the agents can actually query the codegraph); `update` re-copies the agents; `list` shows what ships. Each prints a completion summary. The per-project codegraph index stays with `mastermind init`.
-- `no-ai-slop-comments` skill (new `coding/` domain) — states the one rule LLMs break constantly: a comment must say something the code can't (the *why*); everything else (restating the code, section banners, `// added` edit markers, ownerless TODOs) is slop and gets deleted. Ships in the default install. The `coding/` domain is registered in `docs/conventions.md` §1.3 and the `scripts/validate.py` whitelist.
+- `mastermind install` / `update` / `list` — one-command Claude Code setup. `install` copies the workflow subagents + skills into `~/.claude/` **and** registers the mmcg MCP server (reusing `setup claude --write-mcp`, so the agents can actually query the codegraph). `update` re-copies the agents. `list` shows what ships. Each prints a completion summary. The per-project codegraph index stays with `mastermind init`.
+- `no-ai-slop-comments` skill (new `coding/` domain) — states the one rule LLMs break constantly: a comment must say something the code can't (the *why*). Everything else (restating the code, section banners, `// added` edit markers, ownerless TODOs) is slop and gets deleted. Ships in the default install. The `coding/` domain is registered in `docs/conventions.md` §1.3 and the `scripts/validate.py` whitelist.
 
 ### Changed
-- The task executor (subagent + skill), the canonical spec template, and the auditor now enforce a no-AI-slop-comment rule end to end. The executor applies each `CHANGE TO:` block verbatim and adds no comments of its own; every generated spec carries a global Rule against restating-the-code / edit-marker comments; the auditor gained a post-flight check (§6.7) that flags slop comments added against that Rule while leaving genuine *why* comments alone. Baked self-contained into the subagents (no Skill tool at runtime), with a `[[no-ai-slop-comments]]` pointer for readers.
+- The task executor (subagent + skill), the canonical spec template, and the auditor now enforce a no-AI-slop-comment rule end to end. The executor applies each `CHANGE TO:` block verbatim and adds no comments of its own. Every generated spec carries a global Rule against restating-the-code / edit-marker comments. The auditor gained a post-flight check (§6.7) that flags slop comments added against that Rule while leaving genuine *why* comments alone. Baked self-contained into the subagents (no Skill tool at runtime), with a `[[no-ai-slop-comments]]` pointer for readers.
 
 ### Tests
-- New auditor eval `a-009-slop-comments-drift` + `slop-comments` fixture — the executor pads an in-scope function with restate-the-code comments and a section banner, then falsely reports it added none; the auditor must read the hunk and flag the contradiction (`drift`/`broken`).
+- New auditor eval `a-009-slop-comments-drift` + `slop-comments` fixture — the executor pads an in-scope function with restate-the-code comments and a section banner, then falsely reports it added none. The auditor must read the hunk and flag the contradiction (`drift`/`broken`).
 
 ## [0.31.0] - 2026-06-18
 
 ### Added
-- Shared workflow skills so every agent reads one source instead of duplicating contracts: `mastermind-codegraph-research` (mmcg-first structural lookup), `mastermind-structured-report-contract` (the executor↔planner↔auditor report tail), `mastermind-investigation-ledger` (the unknown-bug hypothesis loop), and `mastermind-critical-review` (a compact design/spec review rubric). The planner and executor skills reference them; subagents (which have no Skill tool at runtime) keep the operational content inline.
+- Shared workflow skills so every agent reads one source instead of duplicating contracts: `mastermind-codegraph-research` (mmcg-first structural lookup), `mastermind-structured-report-contract` (the executor↔planner↔auditor report tail), `mastermind-investigation-ledger` (the unknown-bug hypothesis loop), and `mastermind-critical-review` (a compact design/spec review rubric). The planner and executor skills reference them. Subagents (which have no Skill tool at runtime) keep the operational content inline.
 - `mastermind-security-auditor` subagent — an independent, Opus-tier security reviewer spawned only on security-sensitive scope (auth, tools, secrets, delegation, supply chain, prompt injection). Read-only Bash, evidence-first, never implements. Optional OWASP mode maps findings to the verified OWASP Top 10 for Agentic Applications (2026), shipped as the `mastermind-agent-security-review` reference pack rather than recited from memory.
 
 ### Changed
 - Tightened code comments across the mmcg crate — compressed wording, kept every rationale.
-- Simplified and actualized the top-level README; trimmed filler from `CONTRIBUTING.md` and several sub-READMEs.
+- Simplified and actualized the top-level README. Trimmed filler from `CONTRIBUTING.md` and several sub-READMEs.
 
 ### Fixed
 - `.jsx` files were indexed under language `"jsx"`, which isn't in the MCP `language` enum and never matches a `language: "javascript"` filter — so `.jsx` definitions silently vanished from every language-scoped query (the exact monorepo cross-language-collision case the filter exists for, a silent false-negative). `guess_language_for` now folds `.jsx` into `"javascript"`, matching `lang_from_ext` and the schema enum.
-- `audit-spec` vacuous-test detection no longer false-flags `cargo test`. Two compounding bugs: (1) `"cargo test"` contains the substring `"go test"`, so the Go detector (checked first) shadowed the cargo branch entirely and flagged every `cargo test` run for having no `_test.go` files in the repo root; (2) the cargo branch only scanned `src/`, so a crate whose tests live entirely in `tests/*.rs` (integration tests, no `#[test]` in `src/`) was flagged vacuous. Now the Go branch is guarded against `cargo`, the scan covers `src/` **and** `tests/`, and recognizes `#[tokio::test]` / `#[async_std::test]` / `#[rstest]` alongside `#[test]`.
+- `audit-spec` vacuous-test detection no longer false-flags `cargo test`. Two compounding bugs: (1) `"cargo test"` contains the substring `"go test"`, so the Go detector (checked first) shadowed the cargo branch entirely and flagged every `cargo test` run for having no `_test.go` files in the repo root. (2) the cargo branch only scanned `src/`, so a crate whose tests live entirely in `tests/*.rs` (integration tests, no `#[test]` in `src/`) was flagged vacuous. Now the Go branch is guarded against `cargo`, the scan covers `src/` **and** `tests/`, and recognizes `#[tokio::test]` / `#[async_std::test]` / `#[rstest]` alongside `#[test]`.
 - `audit-spec` no longer runs the static vacuous-test file-scan when the executor reported a positive `observed.tests_run` — a confirmed non-zero test count is authoritative and the heuristic must not override it.
 - npm install-mode detection now walks up from cwd to find the owning `node_modules`, so a command run from a monorepo subpackage whose dependency is hoisted to the workspace root is classified `project` (was misclassified `global`, making `setup claude` emit the wrong MCP `command` form).
 - mmcg MCP server now answers malformed JSON with a JSON-RPC `-32700` error (`id: null`) instead of silently dropping the line, so a strict stdio client doesn't block waiting for a reply. Valid notifications (no `id`) still correctly get no response.
 - `verify-spec` PATH resolution (`which_on_path`) now checks the executable bit on Unix (`mode & 0o111`), not just file existence — a non-executable file shadowing a command name no longer suppresses the "command not found" warning.
-- `mcp/servers/mmcg/README.md` frontmatter `metadata.version` bumped 0.28.1 → 0.30.0 to match the crate. The runtime `serverInfo.version` was already correct (`CARGO_PKG_VERSION`); only the doc metadata was stale.
+- `mcp/servers/mmcg/README.md` frontmatter `metadata.version` bumped 0.28.1 → 0.30.0 to match the crate. The runtime `serverInfo.version` was already correct (`CARGO_PKG_VERSION`). Only the doc metadata was stale.
 
 ### Tests
 - New: `jsx_files_indexed_as_javascript`, `malformed_json_gets_parse_error_with_null_id`, `notification_without_id_gets_no_reply`, `file_has_test_attr_recognises_common_spellings`, `cargo_test_not_vacuous_with_only_integration_tests`. 169 lib + 17 golden pass.
@@ -1264,11 +1310,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README: the workflow's determinism is now stated to live in the deterministic Rust gates (`verify-spec` / `audit-spec`), not in the subagents' MCP calls — the latter is LLM-interpreted context whose payoff scales with repo size. "Sub-millisecond queries" softened to distinguish point queries from whole-graph aggregations (centrality / impact / dependency cycles).
 
 ### Fixed
-- `mmcg_symbols_changed_since` over MCP no longer errors with `canonicalize root: No such file or directory` when called without an explicit `root`. The default root is now derived from the canonicalized index file (`<root>/.mastermind/mmcg.db` → `<root>`); previously it climbed a *relative* db path to `""`, which failed to canonicalize and broke the default invocation.
+- `mmcg_symbols_changed_since` over MCP no longer errors with `canonicalize root: No such file or directory` when called without an explicit `root`. The default root is now derived from the canonicalized index file (`<root>/.mastermind/mmcg.db` → `<root>`). Previously it climbed a *relative* db path to `""`, which failed to canonicalize and broke the default invocation.
 - Subagent definitions now declare `tools`, `model`, and (for mmcg-using roles) `mcpServers: [mmcg]` as **top-level** frontmatter keys. They were nested under `metadata:`, which the Claude Code runtime does not read — so on a stock install every subagent silently inherited all tools and the parent's model: no read-only restriction (researcher/critic/auditor could write files), no Haiku/Sonnet/Opus tiering, and MCP access worked only by accident of that inheritance. Fixed across `agents/subagents/`, `extras/subagents/mastermind-release.md`, `agents/_template/subagent.md`, and the convention docs (`docs/conventions.md` §2.4, `docs/agent-anatomy.md`).
 
 ### Tests
-- New unit tests: `changed_since_root_defaults_to_repo_root_from_db_path`, `definition_count_counts_same_named_non_module_defs`, `subagent_mcp_refs_parses_list_and_handles_absence`, `unregistered_subagent_servers_flags_missing_then_clears`; `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 164 lib + 17 golden pass.
+- New unit tests: `changed_since_root_defaults_to_repo_root_from_db_path`, `definition_count_counts_same_named_non_module_defs`, `subagent_mcp_refs_parses_list_and_handles_absence`, `unregistered_subagent_servers_flags_missing_then_clears`. `centrality_ranks_by_in_degree` asserts the new `name_collision` field. 164 lib + 17 golden pass.
 
 ## [0.29.0] - 2026-06-13
 
@@ -1278,8 +1324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mastermind tour`: six-step guided onboarding walkthrough.
 - Five deterministic demo scenarios (`hallucinated-symbol`, `scope-creep`, `stale-find-block`, `vacuous-test`, `signature-drift`) — each runs in under one second, no API key required.
 - Integration docs for Claude Code, Cursor, Continue, Codex CLI, and generic MCP clients (`docs/integrations/`).
-- Audit bundle v2: `baseline`, `head`, `spec_files`, `changed_files`, `verified_claims`, `failed_claims`, `mmcg_queries`, `commands`, `human_summary`; legacy fields `files_diff` and `git_ref` preserved for backward compatibility.
-- File-scoped executor claims: `FunctionAdded` gains `file` and `signature`; `Integration` gains `from_file` and `to_file` — narrows symbol lookups to declared files.
+- Audit bundle v2: `baseline`, `head`, `spec_files`, `changed_files`, `verified_claims`, `failed_claims`, `mmcg_queries`, `commands`, `human_summary`. Legacy fields `files_diff` and `git_ref` preserved for backward compatibility.
+- File-scoped executor claims: `FunctionAdded` gains `file` and `signature`. `Integration` gains `from_file` and `to_file` — narrows symbol lookups to declared files.
 - `ObservedOutcome` on `VerifyResult`: CI can attach `exit_code` and `tests_run` so auditor catches "claimed passed but exit code 1" without re-running.
 - Three new `Broken`-severity `Finding` variants: `ClaimedSignatureMismatch`, `ObservedExitCodeNonZero`, `ObservedZeroTests`.
 - `SymbolHit.precision` field on `mmcg_search` results: carries `confidence`, `resolution`, and `limitations` per source language.
@@ -1290,7 +1336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auditor eval runner retries once on missing structured sentinel and tracks `first_pass` vs `after_retry` with honest duration accounting.
 - README proof badge: `7/8 first, 8/8 retry` (was `8/8` without retry disclosure).
 - `Bundle::from_report_full` now accepts `root: Option<&Path>` so `head` SHA is resolved relative to the audited project root, not the caller's working directory.
-- Integration claim classification in bundle uses `(from, to)` pair matching; `FunctionAdded` classification uses `(symbol, file)` — prevents one failing claim from polluting another.
+- Integration claim classification in bundle uses `(from, to)` pair matching. `FunctionAdded` classification uses `(symbol, file)` — prevents one failing claim from polluting another.
 
 ### Fixed
 - CI bundle write errors now propagate as hard failures (`create_dir_all`, serialization, and `fs::write` all use `?`).
@@ -1306,7 +1352,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `mastermind new-spec` no longer panics on Unicode descriptions (e.g. Cyrillic). `slugify` previously used byte-index slicing `slug[..40]` which could land inside a multi-byte UTF-8 codepoint. Now filters to ASCII-only chars and truncates with `.chars().take(40)`. Descriptions with no ASCII word characters fall back to the slug `"task"`.
 - Generated YAML frontmatter now quotes the title field. Unquoted `title: {description}` caused YAML parse failures on descriptions containing `:`, `#`, or `"`, which silently dropped `frontmatter.mode` and caused `verify-spec` to apply full mandatory sections even on `--mode lite` specs.
-- `audit-spec` integration verifier no longer produces false `MissingCallEdge` findings in monorepos with multiple symbols sharing the same name. Previously only the first `search_symbols` hit was checked; now all matching symbols are checked with `iter().any()`.
+- `audit-spec` integration verifier no longer produces false `MissingCallEdge` findings in monorepos with multiple symbols sharing the same name. Previously only the first `search_symbols` hit was checked. Now all matching symbols are checked with `iter().any()`.
 - `context doctor` module docstring now matches actual thresholds (`fail < 50`, `warn 50–199`, `ok ≥ 200` non-whitespace chars) instead of the incorrect `< 100` claim.
 
 ### Changed
@@ -1340,8 +1386,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flaky test temp-dir collision. `doctor.rs::tmp()` and `verify_spec.rs::tmp()` — the only two test helpers that keyed their temp-dir name purely on `process::id()` + a nanosecond timestamp — could resolve to the SAME directory when two of cargo's parallel test threads entered them in the same nanosecond bucket, letting one test's `remove_dir_all` wipe another's working dir mid-run (observed as an intermittent `check_gitignore_warns_when_missing_or_unset` panic, ~1 in 6 runs). Both helpers now mix in a process-global `AtomicU64` counter, guaranteeing a distinct directory per call. Test-harness only — no production code touched.
 
 ### Added
-- Premature-terminal escalation tiers in the `mastermind-task-planning` SKILL — a forge-`StepEnforcer`-style self-check the planner-LLM runs before drafting a "task done" message to the user. Three tiers: (1, polite) audit chain not started → spawn auditor and wait; (2, direct) `drift`/`broken` verdict → refuse to ship, address discrepancies; (3, aggressive) user asks to skip audit → refuse, explain `_lessons.md` precedent, record an explicit override in the conversation transcript + auto-append a `kind: premature_terminal_temptation` lesson. Pairs with spec-003's typed-report convention — the auditor's structured tail IS the artifact the planner checks for at tier 1. Zero new code, zero new MCP tools, zero CLI changes — pure SKILL-prose convention engineering. New defect kind `premature_terminal_temptation` added to `defect-taxonomy.md`.
-- Iteration budget in `mmcg run-task` — every pre-flight on the same spec increments a counter (stored on `RunState.iteration`, additively via `#[serde(default)]` so legacy state files load cleanly). The 4th cycle without landing `Held` is refused with a clear escalation message + auto-appended `kind: iteration_budget_exhausted` lesson in `.mastermind/tasks/_lessons.md`. Two new flags: `--max-iterations N` (default 3, matching the `mastermind-task-planning` SKILL's prose convention and forge's `ErrorTracker.max_retries`) and `--force-iteration` (bypass for explicit one-off overrides; lesson still fires). The counter survives `--reset` so the budget can't be trivially bypassed by repeated state-drops.
+- Premature-terminal escalation tiers in the `mastermind-task-planning` SKILL — a forge-`StepEnforcer`-style self-check the planner-LLM runs before drafting a "task done" message to the user. Three tiers: (1, polite) audit chain not started → spawn auditor and wait. (2, direct) `drift`/`broken` verdict → refuse to ship, address discrepancies. (3, aggressive) user asks to skip audit → refuse, explain `_lessons.md` precedent, record an explicit override in the conversation transcript + auto-append a `kind: premature_terminal_temptation` lesson. Pairs with spec-003's typed-report convention — the auditor's structured tail IS the artifact the planner checks for at tier 1. Zero new code, zero new MCP tools, zero CLI changes — pure SKILL-prose convention engineering. New defect kind `premature_terminal_temptation` added to `defect-taxonomy.md`.
+- Iteration budget in `mmcg run-task` — every pre-flight on the same spec increments a counter (stored on `RunState.iteration`, additively via `#[serde(default)]` so legacy state files load cleanly). The 4th cycle without landing `Held` is refused with a clear escalation message + auto-appended `kind: iteration_budget_exhausted` lesson in `.mastermind/tasks/_lessons.md`. Two new flags: `--max-iterations N` (default 3, matching the `mastermind-task-planning` SKILL's prose convention and forge's `ErrorTracker.max_retries`) and `--force-iteration` (bypass for explicit one-off overrides, lesson still fires). The counter survives `--reset` so the budget can't be trivially bypassed by repeated state-drops.
 - Cross-agent scratchpad MCP tools — `mmcg_scratchpad_append { agent, kind, body }` and `mmcg_scratchpad_read { since?, agent?, kind?, limit? }`. Live in-session channel between Mastermind subagents (planner → executor → auditor), persisted in `.mastermind/mmcg.db` (additive table — no schema-version bump, no re-index needed). Body capped at 8 KiB. Cross-session counterpart remains `.mastermind/tasks/_lessons.md` (auditor-written).
 - Structural fingerprints on every indexed file plus a new `mmcg_change_class { file }` MCP tool that returns `structural` / `cosmetic` / `first-seen` for a given path. The fingerprint is a deterministic FNV-1a 64-bit hash of the file's parsed shape (sorted symbol `(kind, name, signature)` tuples + sorted edge `(kind, from, to_name, to_path)` tuples — line numbers and whitespace excluded by design). Stored in a new `files.structural_fingerprint` column added idempotently via `ALTER TABLE` — no `SCHEMA_VERSION` bump, no forced re-index. Existing files report `first-seen` until naturally re-indexed.
 - Typed subagent reports — `mastermind-task-executor` and `mastermind-auditor` now emit a fenced-YAML "structured tail" at the end of every report, wrapped in `<!-- mastermind:report-begin -->` / `<!-- mastermind:audit-begin -->` sentinels. Defect taxonomy lives in `skills/workflow/mastermind-task-planning/references/defect-taxonomy.md` (6 executor stop kinds + 5 auditor discrepancy kinds + `unclassified` escape hatch, each with named fix templates). Planner SKILL gains "Defect-aware retry" + "Iteration budget" sections describing the mechanical routing: parse the tail, match `kind:`, apply named fix template, re-spawn — capped at 3 rounds. Bakes the lessons from tasks 001 + 002 (envelope drift, doc-surface gap, zero-filter verify, stale pre-edit snapshot, seed-extractor mismatch, fmt tension) into the workflow as a closed routing table instead of free-form prose. Inspired by [`forge`'s Nudge + ErrorTracker patterns](https://github.com/antoinezambelli/forge). Zero new code in mmcg — pure convention engineering.
@@ -1349,13 +1395,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.27.1] - 2026-06-03
 
 ### Security
-- Drop `serde_yml` (and its `libyml` transitive) — both archived as unsound: [RUSTSEC-2025-0068](https://rustsec.org/advisories/RUSTSEC-2025-0068.html) (`serde_yml`) and [RUSTSEC-2025-0067](https://rustsec.org/advisories/RUSTSEC-2025-0067.html) (`libyml`, `yaml_string_extend` UB). Swapped to `serde_norway 0.9.42` — maintained fork of `serde_yaml`, backed by `unsafe-libyaml-norway` (maintained libyaml fork). API-compatible drop-in; no behavior change on spec parsing. Closes the two Dependabot alerts (1 high + 1 medium).
+- Drop `serde_yml` (and its `libyml` transitive) — both archived as unsound: [RUSTSEC-2025-0068](https://rustsec.org/advisories/RUSTSEC-2025-0068.html) (`serde_yml`) and [RUSTSEC-2025-0067](https://rustsec.org/advisories/RUSTSEC-2025-0067.html) (`libyml`, `yaml_string_extend` UB). Swapped to `serde_norway 0.9.42` — maintained fork of `serde_yaml`, backed by `unsafe-libyaml-norway` (maintained libyaml fork). API-compatible drop-in. No behavior change on spec parsing. Closes the two Dependabot alerts (1 high + 1 medium).
 
 ## [0.27.0] - 2026-06-03
 
 ### Added
 - Strict, contract-driven gates. `mastermind verify-spec --strict` and `run-task --strict` require YAML frontmatter that scopes the change (`touches` with files + symbols) plus at least one `verify[].cmd`, and require an index. `verify-spec --require-index` fails (instead of silently skipping the live symbol checks) when no index is present.
-- Deterministic `_lessons.md` writer. `mmcg audit-spec` and `mmcg run-task`'s post-phase now append a `[auto]`-prefixed one-line lesson to `.mastermind/tasks/_lessons.md` on every `Drift` / `Broken` verdict — no LLM in the loop, so the file accumulates real signal even when the planner skips spawning the `mastermind-auditor` subagent. The auditor subagent still writes a richer root-cause line alongside; the `[auto]` entry is the mechanical finding summary (counts of scope creep / caller drift / etc.).
+- Deterministic `_lessons.md` writer. `mmcg audit-spec` and `mmcg run-task`'s post-phase now append a `[auto]`-prefixed one-line lesson to `.mastermind/tasks/_lessons.md` on every `Drift` / `Broken` verdict — no LLM in the loop, so the file accumulates real signal even when the planner skips spawning the `mastermind-auditor` subagent. The auditor subagent still writes a richer root-cause line alongside. The `[auto]` entry is the mechanical finding summary (counts of scope creep / caller drift / etc.).
 
 ### Changed
 - **BREAKING — task specs now live in per-task folders.** New layout is `.mastermind/tasks/<NNN>-<name>/spec.md` (was `.mastermind/tasks/<NNN>-<name>.md`). The folder holds the spec plus any related artifacts (audit notes, screenshots, scratchpad). The only shared asset that may stay flat at the top of `tasks/` is `_lessons.md` (auditor-appended). Bare `.md` files at the top of `tasks/` are no longer indexed by `mmcg_tasks`. `mastermind init` surfaces them with a per-file migration command (`mkdir -p .mastermind/tasks/NNN-name && mv .mastermind/tasks/NNN-name.md .mastermind/tasks/NNN-name/spec.md`). All bundled templates, skills, and subagents updated to the new path shape.
@@ -1373,7 +1419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.25.0] - 2026-05-28
 
 ### Added
-- `mastermind init` now installs the workflow subagents + skills into `~/.claude/{agents,skills}/` — the full planner / critic / executor / auditor pipeline (plus workflow skills) from a single npm install, not just the codegraph. The npm package bundles them under `share/`; `init` overwrites Mastermind's own files there to keep them current. `--no-global` skips it; a cargo install ships no bundle and falls back to the plugin marketplace.
+- `mastermind init` now installs the workflow subagents + skills into `~/.claude/{agents,skills}/` — the full planner / critic / executor / auditor pipeline (plus workflow skills) from a single npm install, not just the codegraph. The npm package bundles them under `share/`. `init` overwrites Mastermind's own files there to keep them current. `--no-global` skips it. A cargo install ships no bundle and falls back to the plugin marketplace.
 
 ## [0.24.0] - 2026-05-28
 
@@ -1388,11 +1434,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.0] - 2026-05-28
 
 ### Added
-- `mastermind uninstall` — removes a Mastermind setup. `--scope project` (default) deletes `.mastermind/` (index, tasks, run-state) and the project `.mcp.json` mmcg entry; `--scope global` removes the `~/.claude/.mcp.json` entry; `--scope all` does both. Safe dry-run by default; `--force` to apply. Never touches CONTEXT.md / CLAUDE.md.
+- `mastermind uninstall` — removes a Mastermind setup. `--scope project` (default) deletes `.mastermind/` (index, tasks, run-state) and the project `.mcp.json` mmcg entry. `--scope global` removes the `~/.claude/.mcp.json` entry. `--scope all` does both. Safe dry-run by default. `--force` to apply. Never touches CONTEXT.md / CLAUDE.md.
 
 ### Changed
-- `mastermind init` now builds the index automatically (`--no-index` to skip) and populates CONTEXT.md from the codebase via `claude -p` (`--no-claude` to skip; falls back to printing the prompt if the Claude CLI is unavailable).
-- `mastermind` is now the primary command in all help text and CLI output; `--help` usage, the long description (with an onboarding walkthrough), and every printed command example say `mastermind`. `mmcg` remains a working alias (the cargo-installed binary name).
+- `mastermind init` now builds the index automatically (`--no-index` to skip) and populates CONTEXT.md from the codebase via `claude -p` (`--no-claude` to skip, falls back to printing the prompt if the Claude CLI is unavailable).
+- `mastermind` is now the primary command in all help text and CLI output. `--help` usage, the long description (with an onboarding walkthrough), and every printed command example say `mastermind`. `mmcg` remains a working alias (the cargo-installed binary name).
 - Fixed `mastermind init` "Next steps" to reference real commands (`mastermind setup claude --write-mcp`) instead of repo-internal paths that don't exist for npm installs.
 - Rewrote the npm README with a step-by-step quick start and a "what gets set up where" guide (per-project index vs. global MCP registration).
 

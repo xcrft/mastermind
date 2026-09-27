@@ -1,126 +1,96 @@
 # Contributing
 
-Ship one focused change, make its evidence easy to replay, and leave unrelated
-local state alone. Mastermind combines a Rust codegraph engine, a browser review
-surface, and installable workflow contracts, so a small edit can cross more
-than one distribution boundary.
+Keep changes focused and include enough evidence to reproduce the result.
+
+## Development setup
+
+Run commands from the repository root. Required tools:
+
+- Rust 1.96 or newer, as declared in [Cargo.toml](mcp/servers/mmcg/Cargo.toml)
+- Node.js 24 or newer
+- Python 3.11 or newer
+- [`just`](https://github.com/casey/just) and `cargo-deny`
+
+```bash
+just bootstrap
+just check
+```
+
+`bootstrap` creates the Python virtual environment and installs pinned validator
+dependencies. `check` runs formatting, Clippy, Rust tests, repository validation,
+npm tests, Lens tests, deterministic eval harnesses and dependency policy checks.
+Run the full gate before opening a pull request.
+
+## Focused checks
+
+| Change | Command |
+|---|---|
+| Rust | `just test` |
+| Rust lint and formatting | `just lint` and `just fmt-check` |
+| Documentation or repository contracts | `just validate` |
+| npm installer | `just npm-test` |
+| Native npm packaging | `just npm-smoke-native` |
+| Lens frontend | `just lens-ui-test` |
+| Eval and evidence harnesses | `just eval-harness` |
+| Control-loop characterization | `just eval-control .mastermind/research/control-loop` |
+| Index performance | `just benchmark-index` |
+
+The native npm smoke builds and installs local tarballs in a temporary project.
+It does not publish packages. Model-backed evaluations require an authenticated
+Claude CLI and run separately with `just evals`. See [evals](evals/README.md) and
+[script contracts](scripts/README.md).
 
 ## Repository layout
 
 | Path | Responsibility |
 |---|---|
-| `mcp/servers/mmcg/` | Rust CLI, indexer, SQLite store, MCP server, Lens backend |
-| `mcp/servers/mmcg/assets/lens/` | Static Lens application |
-| `skills/`, `agents/` | Installed workflow and agent contracts |
-| `schemas/` | Public, versioned JSON contracts |
+| `mcp/servers/mmcg/` | Rust CLI, indexer, SQLite store, MCP and Lens backend |
+| `mcp/servers/mmcg/assets/lens/` | Lens frontend |
+| `skills/`, `agents/` | Installable skill and agent instructions |
+| `schemas/` | Versioned JSON contracts |
 | `npm/` | npm wrapper and platform packages |
 | `action.yml`, `Dockerfile.audit-action` | GitHub Action runtime |
-| `docs/` | User and maintainer documentation |
-| `scripts/` | Validation, packaging, release, and smoke-test tooling |
-| `evals/` | Deterministic harness tests and optional model-backed evaluations |
+| `docs/` | Guides, architecture and reference |
+| `scripts/`, `evals/` | Validation, packaging and evaluation tools |
 
-## Prerequisites
+## Documentation
 
-- Rust toolchain declared in `rust-toolchain.toml`
-- Node.js 24 or newer
-- Python 3.11 or newer
-- [`just`](https://github.com/casey/just)
-- `cargo-deny`
+Human-facing documentation describes current behavior. Keep the authority clear:
 
-Install the Python validator dependencies once:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install --require-hashes -r scripts/requirements.txt
-```
-
-## The ship gate
-
-Run this before opening a pull request:
-
-```bash
-just check
-```
-
-`just check` runs the locked Rust tests, formatting and Clippy checks, npm
-tests, Lens tests, workflow-security tests, deterministic eval-harness tests,
-repository validation, and `cargo deny` policy checks. A passing subset is
-useful while developing but does not replace this gate.
-
-## Focused checks
-
-| Change | Fast local command |
+| Document | Owns |
 |---|---|
-| Rust implementation | `cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked` |
-| Rust lint | `cargo clippy --manifest-path mcp/servers/mmcg/Cargo.toml --locked --all-targets --all-features -- -D warnings` |
-| Rust formatting | `cargo fmt --manifest-path mcp/servers/mmcg/Cargo.toml --all -- --check` |
-| Public docs or repository contracts | `.venv/bin/python scripts/validate.py` |
-| npm wrapper or packaging | `just npm-smoke-native` |
-| Lens frontend | `node --test mcp/servers/mmcg/assets/lens/app.test.cjs` |
-| Eval harness | `.venv/bin/python -m unittest evals/test_runner.py` |
+| [Architecture](docs/architecture.md) | Components, data ownership and trust boundaries |
+| [Workflow](docs/workflow.md) | The delivery process and completion gates |
+| [Reference](docs/reference/mmcg.md) | CLI/MCP contracts, schemas, limits and precision |
+| Root README and guides | Orientation and task-oriented examples |
 
-`just npm-smoke-native` builds and installs local tarballs in a temporary
-project. It never reads from or publishes to npm.
+- Check examples against the current parser. State the working directory when
+  it differs from the repository root.
+- Distinguish structural, compiler-resolved, declared and observed evidence.
+- Use tables for inputs, outputs, limits and failure behavior. Use a diagram for
+  a multi-step flow. Keep rationale only where it explains an operational choice.
+- Avoid filler, repeated disclaimers and semicolons in prose. Preserve syntax in
+  code samples and the actual boundaries of each claim.
+- Measurements need a source, revision, corpus, command, environment and limits.
+  See [benchmark methodology](docs/benchmarks.md). A synthetic result is not a
+  general accuracy claim.
+- Agent/subagent instructions and mirrored templates change together when the
+  instruction contract changes. Documentation editing alone must not rewrite them.
+- Fixture Markdown is test input, not editorial prose.
+- Run `just validate` to check links, artifact mirrors and public contracts.
 
-Model-backed evals require an authenticated `claude` CLI and are intentionally
-not part of ordinary CI:
+## Pull requests and releases
 
-```bash
-bash evals/run-verified.sh
-```
-
-See [evals/README.md](evals/README.md) for suites and limitations.
-
-## Documentation changes
-
-- Lead with the outcome, then give the shortest copyable path to it.
-- Put task-oriented guides in `docs/`; keep the root README as the product and
-  onboarding page.
-- Put exhaustive CLI and MCP details in
-  [docs/reference/mmcg.md](docs/reference/mmcg.md).
-- Use commands that run from the repository root unless a section says
-  otherwise.
-- Label syntactic, compiler-resolved, declared, and observed evidence
-  separately.
-- Delete filler and narration. Keep rationale, trust boundaries, failure modes,
-  and the facts a reader cannot recover from the command itself.
-- Do not publish speed or accuracy comparisons without a reproducible corpus,
-  command, environment, and correctness boundary.
-- Run `.venv/bin/python scripts/validate.py`; it checks internal links, mirrors,
-  versioned artifacts, tool documentation, and release contracts.
-
-Benchmark methodology and current reference measurements live in
-[docs/benchmarks.md](docs/benchmarks.md). Benchmark changes must record the
-fixture size, command, number of runs, machine class, toolchain, and range—not
-only the fastest sample.
-
-## Pull requests
-
-Include:
-
-1. the behavior or contract changed;
-2. the affected files and deliberate exclusions;
-3. the commands run and their results;
-4. any unavailable live, registry, browser, model, or authorization proof;
-5. screenshots only when rendered behavior changed.
+Describe the changed behavior, compatibility impact, tests and remaining
+verification gaps. Add screenshots when rendered behavior changes. Discuss
+breaking CLI, schema or workflow changes before implementation.
 
 Use an imperative commit subject with a conventional prefix, for example
-`fix(index): reject stale snapshots`. Discuss compatibility-breaking CLI,
-schema, or workflow changes in an issue before implementation.
+`fix(index): reject stale snapshots`.
 
-## Releases
+Publish through the repository release workflows. They retain artifact digests
+and approval evidence, then test installation from the public registries.
 
-Do not publish from a local checkout. The repository workflows build and carry
-forward exact artifacts, checksums, and approval evidence. Release smoke tests
-install the public registry package rather than reusing workspace artifacts.
-
-## Security
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-For other bugs, use the
-[bug report template](.github/ISSUE_TEMPLATE/bug.md) and include
-`mastermind --version`, the operating system, expected behavior, and the exact
-failure.
-
-All participation is governed by the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+Report vulnerabilities through [SECURITY.md](SECURITY.md). Other issues can use
+the [bug template](.github/ISSUE_TEMPLATE/bug.md). Participation is governed by
+the [Code of Conduct](CODE_OF_CONDUCT.md).

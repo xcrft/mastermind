@@ -396,6 +396,13 @@ fn run_internal(
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
 
+    if let Err(reason) = crate::verification_receipts::validate_declarations(spec) {
+        errors.push(Finding::InvalidFrontmatter { reason });
+    }
+    if let Err(reason) = crate::acceptance::validate(spec) {
+        errors.push(Finding::InvalidFrontmatter { reason });
+    }
+
     if let Some(reason) = &spec.frontmatter_error {
         errors.push(Finding::InvalidFrontmatter {
             reason: reason.clone(),

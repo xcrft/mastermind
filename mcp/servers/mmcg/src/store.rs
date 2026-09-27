@@ -706,6 +706,74 @@ pub struct ProjectHistoryHit {
     pub(crate) matched_terms: Vec<String>,
 }
 
+/// One direct FTS match in a Markdown section, with source line boundaries.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentSectionHit {
+    pub path: String,
+    pub kind: String,
+    pub section_id: String,
+    pub heading: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub excerpt: String,
+    pub score: f64,
+}
+
+/// A bounded source excerpt from the indexed root CONTEXT.md. This is a
+/// project-profile input, not an accepted project claim.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectContextSection {
+    pub section_id: String,
+    pub heading: String,
+    pub heading_truncated: bool,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub excerpt: String,
+    pub excerpt_truncated: bool,
+    pub section_citation: String,
+}
+
+fn project_context_section_row(
+    row: &rusqlite::Row<'_>,
+) -> SqlResult<(ProjectContextSection, bool)> {
+    let excerpt: String = row.get(4)?;
+    let body: String = row.get(6)?;
+    let heading: String = row.get(1)?;
+    let start_line = row.get::<_, i64>(2)? as u32;
+    let end_line = row.get::<_, i64>(3)? as u32;
+    let excerpt_truncated = excerpt != body;
+    let section = ProjectContextSection {
+        section_id: row.get(0)?,
+        heading: heading.chars().take(240).collect(),
+        heading_truncated: heading.chars().count() > 240,
+        start_line,
+        end_line,
+        excerpt: excerpt.chars().take(400).collect(),
+        excerpt_truncated: excerpt_truncated || row.get::<_, i64>(5)? != 0,
+        section_citation: format!("CONTEXT.md:{start_line}-{end_line}"),
+    };
+    let secret_like = crate::indexer::secret_like_documentation(&body)
+        || crate::indexer::secret_like_documentation(&heading);
+    Ok((section, secret_like))
+}
+
+fn safe_project_context_sections(
+    rows: impl IntoIterator<Item = SqlResult<(ProjectContextSection, bool)>>,
+    top: u32,
+) -> SqlResult<(u32, Vec<ProjectContextSection>)> {
+    let mut unsafe_omitted = 0u32;
+    let mut observed = Vec::new();
+    for row in rows {
+        let (section, unsafe_section) = row?;
+        if unsafe_section {
+            unsafe_omitted += 1;
+        } else if observed.len() < top as usize {
+            observed.push(section);
+        }
+    }
+    Ok((unsafe_omitted, observed))
+}
+
 pub(crate) type CountedProjectHistoryHits = (u32, Vec<ProjectHistoryHit>);
 
 #[derive(Debug, Clone)]
@@ -3570,6 +3638,38 @@ impl Store {
                 title,
                 body,
                 tokenize = 'porter unicode61 remove_diacritics 2'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_section_fts USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
+                section_id UNINDEXED,
+                heading,
+                start_line UNINDEXED,
+                end_line UNINDEXED,
+                body,
+                tokenize = 'porter unicode61 remove_diacritics 2'
+            );
+            -- Rebuildable candidate decisions from explicit CONTEXT.md fields.
+            -- Source-declared status never grants review authority.
+            CREATE TABLE IF NOT EXISTS project_evidence (
+                id                  TEXT PRIMARY KEY,
+                section_id          TEXT NOT NULL,
+                source_path         TEXT NOT NULL CHECK (source_path = 'CONTEXT.md'),
+                source_line         INTEGER NOT NULL CHECK (source_line > 0),
+                record_digest       TEXT NOT NULL,
+                source_file_digest  TEXT NOT NULL,
+                extractor_version   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS project_evidence_line
+                ON project_evidence(source_path, source_line);
+            CREATE TABLE IF NOT EXISTS project_claim (
+                id             TEXT PRIMARY KEY,
+                kind           TEXT NOT NULL CHECK (kind = 'decision'),
+                statement      TEXT NOT NULL,
+                status         TEXT NOT NULL CHECK (status = 'candidate'),
+                source_status  TEXT NOT NULL,
+                review_status  TEXT NOT NULL CHECK (review_status = 'unknown'),
+                evidence_id    TEXT NOT NULL UNIQUE REFERENCES project_evidence(id)
             );
 
             -- Cross-agent scratchpad. Live in-session channel between Mastermind
@@ -6833,8 +6933,31 @@ impl Store {
         truncated: bool,
         inventory_token: &str,
     ) -> SqlResult<()> {
+        let mut sections = Vec::new();
+        let mut sections_truncated = false;
+        let mut documents_indexed = 0usize;
+        for entry in entries {
+            let (document_sections, document_truncated) = crate::document_sections::split(entry);
+            sections_truncated |= document_truncated;
+            if sections.len() + document_sections.len()
+                > crate::document_sections::MAX_SECTIONS_TOTAL
+            {
+                sections_truncated = true;
+                break;
+            }
+            sections.extend(document_sections);
+            documents_indexed += 1;
+        }
+        let extracted_claims = entries
+            .iter()
+            .find(|entry| entry.path == "CONTEXT.md")
+            .map(|entry| crate::project_claims::extract(&sections, &entry.body))
+            .unwrap_or_default();
         let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM project_claim", [])?;
+        tx.execute("DELETE FROM project_evidence", [])?;
         tx.execute("DELETE FROM project_history_fts", [])?;
+        tx.execute("DELETE FROM document_section_fts", [])?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO project_history_fts(path, kind, title, body)
@@ -6842,6 +6965,57 @@ impl Store {
             )?;
             for entry in entries {
                 stmt.execute(params![entry.path, entry.kind, entry.title, entry.body])?;
+            }
+        }
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO document_section_fts \
+                 (path, kind, section_id, heading, start_line, end_line, body) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for section in &sections {
+                stmt.execute(params![
+                    section.path,
+                    section.kind,
+                    section.id,
+                    section.heading,
+                    section.start_line as i64,
+                    section.end_line as i64,
+                    section.body,
+                ])?;
+            }
+        }
+        {
+            let mut evidence = tx.prepare(
+                "INSERT INTO project_evidence \
+                 (id, section_id, source_path, source_line, record_digest, \
+                  source_file_digest, extractor_version) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            let mut claims = tx.prepare(
+                "INSERT INTO project_claim \
+                 (id, kind, statement, status, source_status, review_status, evidence_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for claim in &extracted_claims.candidates {
+                evidence.execute(params![
+                    claim.evidence_id,
+                    claim.section_id,
+                    claim.source_path,
+                    claim.source_line,
+                    claim.record_digest,
+                    claim.source_file_digest,
+                    claim.extractor_version,
+                ])?;
+                claims.execute(params![
+                    claim.id,
+                    claim.kind,
+                    claim.statement,
+                    claim.status,
+                    claim.source_status,
+                    claim.review_status,
+                    claim.evidence_id,
+                ])?;
             }
         }
         for (key, value) in [
@@ -6854,6 +7028,28 @@ impl Store {
                 "project_history_inventory_token",
                 inventory_token.to_string(),
             ),
+            (
+                "document_sections_truncated",
+                if sections_truncated { "true" } else { "false" }.to_string(),
+            ),
+            ("document_sections_indexed", sections.len().to_string()),
+            ("document_files_indexed", documents_indexed.to_string()),
+            (
+                "document_section_extractor_version",
+                crate::document_sections::EXTRACTOR_VERSION.to_string(),
+            ),
+            (
+                "project_claim_extractor_version",
+                crate::project_claims::EXTRACTOR_VERSION.to_string(),
+            ),
+            (
+                "project_claim_candidates_indexed",
+                extracted_claims.candidates.len().to_string(),
+            ),
+            (
+                "project_claim_candidates_omitted",
+                extracted_claims.omitted.to_string(),
+            ),
         ] {
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES (?1, ?2)
@@ -6862,6 +7058,169 @@ impl Store {
             )?;
         }
         tx.commit()
+    }
+
+    pub fn search_document_sections(
+        &self,
+        query: &str,
+        top: u32,
+    ) -> SqlResult<Vec<DocumentSectionHit>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT path, kind, section_id, heading,
+                    CAST(start_line AS INTEGER), CAST(end_line AS INTEGER),
+                    snippet(document_section_fts, 6, '«', '»', '…', 20),
+                    bm25(document_section_fts) AS score
+             FROM document_section_fts
+             WHERE document_section_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query.trim(), top], |row| {
+            Ok(DocumentSectionHit {
+                path: row.get(0)?,
+                kind: row.get(1)?,
+                section_id: row.get(2)?,
+                heading: row.get(3)?,
+                start_line: row.get::<_, i64>(4)? as u32,
+                end_line: row.get::<_, i64>(5)? as u32,
+                excerpt: row.get(6)?,
+                score: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub(crate) fn search_document_sections_bounded(
+        &self,
+        query: &str,
+        top: u32,
+    ) -> SqlResult<(u32, Vec<DocumentSectionHit>)> {
+        if query.trim().is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM document_section_fts WHERE document_section_fts MATCH ?1",
+            params![query.trim()],
+            |row| row.get(0),
+        )?;
+        Ok((total, self.search_document_sections(query, top)?))
+    }
+
+    /// A source-backed project profile projection from root CONTEXT.md only.
+    /// Other documentation stays in mmcg_docs. All text remains unreviewed.
+    /// Scan the bounded CONTEXT.md section corpus before applying the safe-row
+    /// page size, so unsafe rows cannot hide later safe sections.
+    pub fn project_context_sections(
+        &self,
+        query: Option<&str>,
+        top: u32,
+    ) -> SqlResult<(u32, u32, u32, Vec<ProjectContextSection>)> {
+        let indexed_sections: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM document_section_fts WHERE path = 'CONTEXT.md'",
+            [],
+            |row| row.get(0),
+        )?;
+        let Some(query) = query.filter(|query| !query.trim().is_empty()) else {
+            let mut stmt = self.conn.prepare(
+                "SELECT section_id, heading, CAST(start_line AS INTEGER), CAST(end_line AS INTEGER), \
+                 substr(body, 1, 401), CASE WHEN length(body) > 400 THEN 1 ELSE 0 END, body \
+                 FROM document_section_fts WHERE path = 'CONTEXT.md' \
+                 ORDER BY CAST(start_line AS INTEGER) LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(
+                params![crate::document_sections::MAX_SECTIONS_PER_DOCUMENT as u32],
+                project_context_section_row,
+            )?;
+            let (unsafe_omitted, observed) = safe_project_context_sections(rows, top)?;
+            return Ok((indexed_sections, indexed_sections, unsafe_omitted, observed));
+        };
+        let total: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM document_section_fts \
+             WHERE document_section_fts MATCH ?1 AND path = 'CONTEXT.md'",
+            params![query],
+            |row| row.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT section_id, heading, CAST(start_line AS INTEGER), CAST(end_line AS INTEGER), \
+             substr(snippet(document_section_fts, 6, '', '', '…', 20), 1, 401), \
+             CASE WHEN length(body) > 400 THEN 1 ELSE 0 END, body \
+             FROM document_section_fts \
+             WHERE document_section_fts MATCH ?1 AND path = 'CONTEXT.md' \
+             ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                query,
+                crate::document_sections::MAX_SECTIONS_PER_DOCUMENT as u32
+            ],
+            project_context_section_row,
+        )?;
+        let (unsafe_omitted, observed) = safe_project_context_sections(rows, top)?;
+        Ok((indexed_sections, total, unsafe_omitted, observed))
+    }
+
+    /// Explicit decision-log records are derived candidates, not reviewed
+    /// guidance. A missing extractor-version meta value means an older index.
+    pub fn project_claim_candidates(
+        &self,
+        query: Option<&str>,
+        top: u32,
+    ) -> SqlResult<(u32, Vec<crate::project_claims::ProjectClaimCandidate>)> {
+        fn row(row: &rusqlite::Row<'_>) -> SqlResult<crate::project_claims::ProjectClaimCandidate> {
+            let source_path: String = row.get(8)?;
+            let source_line = row.get::<_, i64>(9)? as u32;
+            Ok(crate::project_claims::ProjectClaimCandidate {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                statement: row.get(2)?,
+                status: row.get(3)?,
+                source_status: row.get(4)?,
+                review_status: row.get(5)?,
+                evidence_id: row.get(6)?,
+                section_id: row.get(7)?,
+                source_citation: format!("{source_path}:{source_line}"),
+                source_path,
+                source_line,
+                record_digest: row.get(10)?,
+                source_file_digest: row.get(11)?,
+                extractor_version: row.get(12)?,
+            })
+        }
+        let Some(query) = query.filter(|query| !query.trim().is_empty()) else {
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM project_claim", [], |row| row.get(0))?;
+            let mut stmt = self.conn.prepare(
+                "SELECT c.id, c.kind, c.statement, c.status, c.source_status, c.review_status, \
+                 e.id, e.section_id, e.source_path, e.source_line, e.record_digest, \
+                 e.source_file_digest, e.extractor_version \
+                 FROM project_claim c JOIN project_evidence e ON e.id = c.evidence_id \
+                 ORDER BY e.source_line LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![top], row)?;
+            return Ok((total, rows.collect::<SqlResult<_>>()?));
+        };
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM project_claim c \
+             JOIN project_evidence e ON e.id = c.evidence_id \
+             JOIN document_section_fts d ON d.section_id = e.section_id \
+             WHERE d.path = 'CONTEXT.md' AND document_section_fts MATCH ?1",
+            params![query],
+            |row| row.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.kind, c.statement, c.status, c.source_status, c.review_status, \
+             e.id, e.section_id, e.source_path, e.source_line, e.record_digest, \
+             e.source_file_digest, e.extractor_version \
+             FROM project_claim c JOIN project_evidence e ON e.id = c.evidence_id \
+             JOIN document_section_fts d ON d.section_id = e.section_id \
+             WHERE d.path = 'CONTEXT.md' AND document_section_fts MATCH ?1 \
+             ORDER BY e.source_line LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, top], row)?;
+        Ok((total, rows.collect::<SqlResult<_>>()?))
     }
 
     /// Strongly-connected components of size ≥ `min_size` in the file-level
@@ -6977,6 +7336,7 @@ impl Store {
                          THEN 1 ELSE 0 END AS evidence_marker_collision
              FROM project_history_fts
              WHERE project_history_fts MATCH ?1
+               AND kind != 'documentation'
                AND (?2 IS NULL OR kind = ?2)
              ORDER BY rank
              LIMIT ?3",
@@ -7019,6 +7379,7 @@ impl Store {
             "SELECT COUNT(*)
              FROM project_history_fts
              WHERE project_history_fts MATCH ?1
+               AND kind != 'documentation'
                AND (?2 IS NULL OR kind = ?2)",
             params![trimmed, kind],
             |row| row.get(0),
@@ -9124,6 +9485,59 @@ mod tests {
             .search_project_history("clock skew", None, 10)
             .unwrap()
             .is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn project_claim_replacement_rolls_back_history_and_token_on_failure() {
+        let path = tmp_db("project_claim_atomic");
+        let mut store = Store::open(&path).unwrap();
+        let entry = |statement: &str| ProjectHistoryEntry {
+            path: "CONTEXT.md".into(),
+            kind: "context".into(),
+            title: "Context".into(),
+            body: format!(
+                "## Decision log\n### Storage\n- **Decision:** {statement}\n- **Status:** active\n"
+            ),
+        };
+        store
+            .replace_project_history_snapshot(&[entry("Keep Markdown.")], 0, false, "first")
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_project_claim BEFORE INSERT ON project_claim \
+                 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .replace_project_history_snapshot(&[entry("Use SQLite.")], 0, false, "second")
+            .is_err());
+        assert_eq!(
+            store
+                .meta_value("project_history_inventory_token")
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            store
+                .search_project_history("Markdown", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let (_, claims) = store.project_claim_candidates(None, 10).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].statement, "Keep Markdown.");
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_project_claim")
+            .unwrap();
+        store
+            .replace_project_history_snapshot(&[], 0, false, "third")
+            .unwrap();
+        assert_eq!(store.project_claim_candidates(None, 10).unwrap().0, 0);
         std::fs::remove_file(&path).ok();
     }
 

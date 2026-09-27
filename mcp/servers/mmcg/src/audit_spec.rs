@@ -136,6 +136,8 @@ pub enum Finding {
     ExecutorReportUnexpectedFile { file: String },
     /// A declared command has missing, unsuccessful or conflicting report rows.
     VerificationRequirementUnmet { cmd: String, reason: String },
+    /// At least one current observed check required by a criterion is missing.
+    AcceptanceCriterionUnmet { id: String, reason: String },
     /// The integration claim has no matching target definition in its scope.
     HallucinatedSymbol {
         from_symbol: String,
@@ -183,6 +185,9 @@ pub struct Report {
     /// The complete report whose completion, task identity and claims were checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_report: Option<ExecutorReport>,
+    /// Absent for legacy tasks without a structured acceptance contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<crate::acceptance::Report>,
 }
 
 #[derive(Serialize)]
@@ -191,6 +196,8 @@ struct TextEvidence<'a> {
     symbol_diff: &'a Option<SymbolDiff>,
     claim_checks: &'a Option<Vec<ClaimCheck>>,
     executor_report: &'a Option<ExecutorReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acceptance: Option<&'a crate::acceptance::Report>,
 }
 
 fn append_indented_json<T: Serialize>(out: &mut String, value: &T) {
@@ -243,6 +250,7 @@ impl Report {
                 | Finding::ExecutorReportMissingChangedFile { .. }
                 | Finding::ExecutorReportUnexpectedFile { .. }
                 | Finding::VerificationRequirementUnmet { .. }
+                | Finding::AcceptanceCriterionUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -270,6 +278,7 @@ impl Report {
                 symbol_diff: &self.symbol_diff,
                 claim_checks: &self.claim_checks,
                 executor_report: &self.executor_report,
+                acceptance: self.acceptance.as_ref(),
             },
         );
         out
@@ -390,6 +399,9 @@ fn render_finding(f: &Finding) -> String {
         Finding::VerificationRequirementUnmet { cmd, reason } => {
             format!("verification_requirement_unmet: `{cmd}`: {reason}")
         }
+        Finding::AcceptanceCriterionUnmet { id, reason } => {
+            format!("acceptance_criterion_unmet: `{id}`: {reason}")
+        }
         Finding::HallucinatedSymbol {
             from_symbol,
             to_symbol,
@@ -491,6 +503,22 @@ fn run_internal(
     let mut findings: Vec<Finding> = Vec::new();
     if let Some(reason) = &spec.frontmatter_error {
         findings.push(Finding::InvalidFrontmatter {
+            reason: reason.clone(),
+        });
+    }
+    let mut observed_checks = crate::verification_receipts::inspect_checks(
+        spec,
+        repo_root,
+        &worktree.baseline_oid,
+        deadline,
+    );
+    let receipt_evidence = match &observed_checks {
+        Ok(checks) => crate::verification_receipts::current_digests(checks),
+        Err(reason) => Err(reason.clone()),
+    };
+    if let Err(reason) = &receipt_evidence {
+        findings.push(Finding::VerificationRequirementUnmet {
+            cmd: "observed verification receipts".into(),
             reason: reason.clone(),
         });
     }
@@ -734,6 +762,45 @@ fn run_internal(
             reason: issue.reason.into(),
         });
     }
+    if let Ok(expected) = &receipt_evidence {
+        if !expected.is_empty() {
+            match crate::verification_receipts::audit_checks(
+                spec,
+                repo_root,
+                &worktree.baseline_oid,
+                deadline,
+            ) {
+                Ok(current) if &current == expected => {}
+                current => {
+                    observed_checks = Err("receipt_changed_during_audit".into());
+                    findings.push(Finding::VerificationRequirementUnmet {
+                        cmd: "observed verification receipts".into(),
+                        reason: current
+                            .err()
+                            .unwrap_or_else(|| "receipt_changed_during_audit".into()),
+                    });
+                }
+            }
+        }
+    }
+    let acceptance = match crate::acceptance::evaluate(spec, &observed_checks) {
+        Ok(report) if report.status != crate::acceptance::Status::NotDeclared => {
+            for criterion in &report.criteria {
+                if criterion.status != crate::acceptance::Status::RequirementsSatisfied {
+                    findings.push(Finding::AcceptanceCriterionUnmet {
+                        id: criterion.id.clone(),
+                        reason: "current_required_checks_unavailable".into(),
+                    });
+                }
+            }
+            Some(report)
+        }
+        Ok(_) => None,
+        Err(reason) => {
+            findings.push(Finding::InvalidFrontmatter { reason });
+            None
+        }
+    };
     let verdict = compute_verdict(&findings);
     Ok((
         Report {
@@ -744,6 +811,7 @@ fn run_internal(
             symbol_diff: Some(worktree.diff),
             claim_checks,
             executor_report: executor_report.cloned(),
+            acceptance,
         },
         verification,
     ))
@@ -1542,6 +1610,7 @@ fn build_human_summary(
                     | Finding::ExecutorReportMissingChangedFile { .. }
                     | Finding::ExecutorReportUnexpectedFile { .. }
                     | Finding::VerificationRequirementUnmet { .. }
+                    | Finding::AcceptanceCriterionUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1565,6 +1634,7 @@ fn build_human_summary(
                     | Finding::ExecutorReportMissingChangedFile { .. }
                     | Finding::ExecutorReportUnexpectedFile { .. }
                     | Finding::VerificationRequirementUnmet { .. }
+                    | Finding::AcceptanceCriterionUnmet { .. }
                     | Finding::HallucinatedSymbol { .. }
                     | Finding::MissingCallEdge { .. }
                     | Finding::ClaimedSignatureMismatch { .. }
@@ -1680,6 +1750,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
                 | Finding::ExecutorReportMissingChangedFile { .. }
                 | Finding::ExecutorReportUnexpectedFile { .. }
                 | Finding::VerificationRequirementUnmet { .. }
+                | Finding::AcceptanceCriterionUnmet { .. }
                 | Finding::HallucinatedSymbol { .. }
                 | Finding::MissingCallEdge { .. }
                 | Finding::ClaimedSignatureMismatch { .. }
@@ -1853,6 +1924,7 @@ mod tests {
     #[test]
     fn bundle_preserves_legacy_aliases_and_constructor() {
         let report = Report {
+            acceptance: None,
             spec: "spec.md".into(),
             git_ref: "main".into(),
             verdict: Verdict::Held,
@@ -1897,6 +1969,7 @@ mod tests {
             signature: Some("fn checkout()".into()),
         };
         let report = Report {
+            acceptance: None,
             spec: "spec\u{1b}.md".into(),
             git_ref: "main\u{202e}".into(),
             verdict: Verdict::Drift,

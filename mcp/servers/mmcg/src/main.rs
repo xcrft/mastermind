@@ -318,6 +318,22 @@ enum Cmd {
         /// Bound read-only Git churn and contributor evidence. Zero disables it.
         #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
         git_commits: u16,
+        /// Enable personal context for an existing root/client read grant.
+        #[arg(long)]
+        profile_client: Option<String>,
+        /// Agent duty for the private context preview.
+        #[arg(long, value_enum, default_value_t = BriefRoleArg::Auditor)]
+        role: BriefRoleArg,
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Repository-relative paths used to select personal context. Repeatable.
+        #[arg(long = "context-path")]
+        context_paths: Vec<String>,
+        /// Search terms for project/documentation context.
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value_t = 8_000, value_parser = clap::value_parser!(u32).range(1_024..=16_000))]
+        budget_tokens: u32,
         /// Loopback port. Zero asks the OS for an available ephemeral port.
         #[arg(long, default_value_t = 0)]
         port: u16,
@@ -401,10 +417,12 @@ enum Cmd {
         /// recorded in Mastermind's ownership manifest are retired on later updates.
         #[arg(long)]
         no_global: bool,
-        /// Skip enriching `~/.mastermind/style.md` with this repository's authored history.
-        /// Enabled by default and idempotent per repository; manual and interpreted sections
-        /// are preserved.
-        #[arg(long)]
+        /// Explicitly enrich the user-global style profile from this repository's Git history.
+        /// Project initialization does not mine a person by default.
+        #[arg(long, conflicts_with = "no_seed_style")]
+        seed_style: bool,
+        /// Compatibility alias from versions where style mining was enabled by default.
+        #[arg(long, hide = true, conflicts_with = "seed_style")]
         no_seed_style: bool,
     },
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
@@ -428,6 +446,15 @@ enum Cmd {
     /// Dry-run-first MCP configuration for supported clients.
     #[command(subcommand)]
     Setup(SetupCmd),
+    /// Run explicitly declared verification commands and record bound results.
+    #[command(subcommand)]
+    Verification(VerificationCmd),
+    /// Inspect current evidence for structured acceptance criteria.
+    #[command(subcommand)]
+    Acceptance(AcceptanceCmd),
+    /// Prepare and record explicit semantic review of a held task revision.
+    #[command(subcommand)]
+    ReviewTask(TaskReviewCmd),
     /// Pre-execution gate: mechanical checks on a spec file before handing
     /// off to the executor. Verifies mandatory sections non-empty, claimed
     /// symbols exist in the index, claimed files exist on disk, pre-edit
@@ -504,7 +531,7 @@ enum Cmd {
     ///                 emits release notes to stdout + `.mastermind/releases/`.
     ///
     /// Defaults to hand-off semantics — print "now invoke the executor and
-    /// re-run". Pass `--exec` to shell out to `claude -p` between phases.
+    /// re-run". Pass `--exec` for a recorded native Claude invocation between phases.
     RunTask {
         /// Path to the spec file (typically under `.mastermind/tasks/`).
         spec: PathBuf,
@@ -520,9 +547,30 @@ enum Cmd {
         /// Run only post-flight (errors if no state file).
         #[arg(long)]
         post_only: bool,
-        /// Shell out to `claude -p` synchronously between phases. Default: hand-off only.
-        #[arg(long)]
+        /// Run Claude with bound context and permission policy in a new preflight iteration.
+        #[arg(long, conflicts_with = "post_only")]
         exec: bool,
+        /// Retry fresh failed checks inside the approved scope and finite iteration budget.
+        #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
+        auto_repair: bool,
+        /// Review a held task once and complete if resolved. Without --exec, resume its existing audit.
+        #[arg(long, conflicts_with_all = ["pre_only", "post_only"])]
+        auto_review: bool,
+        /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        review_timeout: u64,
+        /// Reviewer native turn budget, independent of the executor (1–100).
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        review_max_turns: u32,
+        /// Wall-clock limit for the native invocation, in seconds (1–7200).
+        #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        exec_timeout: u64,
+        /// Native agent turn budget (1–100).
+        #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..=100))]
+        exec_max_turns: u32,
+        /// Existing profile client grant to use for this invocation's context packet.
+        #[arg(long, requires = "exec")]
+        profile_client: Option<String>,
         /// Skip the "index must exist and be non-empty" pre-check. Use for
         /// docs-only / spec-only specs that don't touch indexed source.
         /// Default = hard-fail when no index, because mmcg gates are only as
@@ -779,7 +827,107 @@ enum ReviewCmd {
 }
 
 #[derive(Subcommand)]
+enum VerificationCmd {
+    /// Execute one observed check from a spec with a completed preflight.
+    Run {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AcceptanceCmd {
+    /// Check every criterion's declared observed checks without executing them.
+    Status {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskReviewCmd {
+    /// Read current review feedback and the next role/action; never writes or invokes a model.
+    FollowUp {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The portable follow-up packet is always JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one bounded native reviewer against a mechanically held task revision.
+    Run {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        timeout: u64,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        max_turns: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Produce an evidence manifest and an unknown draft; never calls a model.
+    Prepare {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The portable request is always JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store a completed draft against exactly the prepared evidence revision.
+    Submit {
+        spec: PathBuf,
+        /// Repository-contained JSON with the completed draft (use .mastermind/).
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the active review without executing a model or verification.
+    Status {
+        spec: PathBuf,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContextCmd {
+    /// Preview code, project, documents, person and work in one read-only packet.
+    Preview {
+        #[arg(long, value_enum)]
+        role: BriefRoleArg,
+        #[arg(long)]
+        since: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value_t = 8_000, value_parser = clap::value_parser!(u32).range(1_024..=16_000))]
+        budget_tokens: u32,
+        /// Opt in to the personal profile through this existing audience grant.
+        #[arg(long)]
+        profile_client: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+
     /// Audit project memory: CONTEXT placeholders and decision schema,
     /// completed-task history reviews, and lesson lifecycle quality.
     Doctor {
@@ -839,6 +987,39 @@ enum AuditCmd {
 
 #[derive(Subcommand)]
 enum MinerCmd {
+    /// Capture native client interactions and review semantic habit hypotheses.
+    #[command(subcommand)]
+    Hooks(HookCmd),
+    /// Collect possible persona signals into a private review inbox.
+    Collect {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        /// Explicit local Claude Code or Codex histories; repeat for up to 16 files.
+        #[arg(long, required = true)]
+        transcript: Vec<PathBuf>,
+        /// Preview observations without writing the store or profile.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Reread one page of previously collected sources for this project.
+    Sync {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        /// Page position from sync; omit to start each new complete pass.
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u16).range(1..=16))]
+        limit: u16,
+        /// Preview changes without writing the store or profile.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect metadata from successful collections, without reading transcripts.
+    #[command(subcommand)]
+    Sources(SourceCmd),
+    /// Inspect or dismiss collected observations, separate from the profile.
+    #[command(subcommand)]
+    Candidates(CandidateCmd),
     /// Mine an author's style ("write like me") from their git history into
     /// `~/.mastermind/style.md`: advisory corpus observations plus commit
     /// conventions. Deterministic by default. Each run enriches a user-global
@@ -861,6 +1042,400 @@ enum MinerCmd {
         /// Prefer the `mastermind-style-deep` skill when qualitative accuracy matters.
         #[arg(long)]
         deep: bool,
+    },
+    /// Record preferences the author stated to coding agents, quoted verbatim
+    /// from Claude Code or supported Codex transcripts, into the same profile.
+    #[command(subcommand)]
+    Feedback(FeedbackCmd),
+    /// Build and review evidence-backed descriptions of working habits.
+    #[command(subcommand)]
+    Habit(HabitCmd),
+    /// Grant or revoke a configured MCP client's access to the global profile.
+    #[command(subcommand)]
+    Access(ProfileAccessCmd),
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// Preview or install project-local hooks. Collection is local and opt-in.
+    Setup {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        remove: bool,
+        /// Optionally offer reviewed context using an existing profile read grant.
+        #[arg(long)]
+        profile_client: Option<String>,
+    },
+    /// Native JSON hook on stdin; stdout is only the native hook response.
+    Receive {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    Status {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    /// Start a fresh generation after a capture failure; old receipts become stale.
+    Recover {
+        #[arg(long, value_parser=["claude","codex"])]
+        client: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    Episodes {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, default_value_t=20, value_parser=clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    Show {
+        episode: String,
+    },
+    /// Explicitly send this reviewed episode to a selected semantic processor.
+    Analyze {
+        episode: String,
+        #[arg(long)]
+        revision: String,
+        /// Absolute executable; stdin JSON request, stdout strict JSON response.
+        #[arg(
+            long,
+            required_unless_present = "provider",
+            conflicts_with = "provider"
+        )]
+        processor: Option<PathBuf>,
+        /// Explicit Claude API/provider request in isolated bare mode, without tools.
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
+        timeout: u64,
+    },
+    Draft {
+        id: String,
+    },
+    /// Drain eligible capture episodes once per revision and selected processor.
+    Mine {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "provider",
+            conflicts_with = "provider"
+        )]
+        processor: Option<PathBuf>,
+        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        provider: Option<String>,
+        #[arg(long = "processor-arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
+        timeout: u64,
+        #[arg(long, default_value_t=4, value_parser=clap::value_parser!(u16).range(1..=16))]
+        limit: u16,
+        #[arg(long)]
+        after: Option<String>,
+        /// Keep processing new revisions in the foreground until Ctrl-C.
+        #[arg(long, conflicts_with = "after")]
+        follow: bool,
+    },
+    /// Propose an inspected draft as a candidate habit; review is still required.
+    Propose {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        /// Stable task/PR identity; reuse across sessions of the same task.
+        #[arg(long)]
+        episode: String,
+        /// Confirm cited words belong to the person and are not quoted/automated.
+        #[arg(long)]
+        attest_human: bool,
+        #[arg(long="habit", value_parser=clap::value_parser!(i64).range(1..))]
+        habit: Option<i64>,
+    },
+    /// Remove raw episode text and linked drafts; prior profile audit records remain.
+    Forget {
+        episode: String,
+        #[arg(long)]
+        revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceCmd {
+    /// Exclude a registered source from future sync; keep its evidence and history.
+    Exclude {
+        source: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    /// Explicitly include a previously excluded source in future sync.
+    Include {
+        source: String,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+    },
+    /// List stored source snapshots for this exact project root.
+    List {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum CandidateCmd {
+    /// Search retained inbox quotes locally; does not search claim definitions.
+    Search {
+        query: String,
+        #[arg(long)]
+        project_root: Option<PathBuf>,
+        /// Exact full source ID from sources list.
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, value_parser = ["pending", "dismissed", "all"], default_value = "pending")]
+        status: String,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Propose a preference from an exact inbox revision. Default scope is its project.
+    ProposePreference {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        statement: String,
+        #[arg(long, value_parser = ["code", "process", "communication", "tooling", "review"])]
+        category: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Propose a habit from the exact inbox revision, without observing it.
+    ProposeHabit {
+        id: String,
+        /// Explicit existing habit generation; its entire definition must match.
+        #[arg(long = "habit", value_parser = clap::value_parser!(i64).range(1..))]
+        habit_id: Option<i64>,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        episode: String,
+        #[arg(long)]
+        when: String,
+        #[arg(long)]
+        behavior: String,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long, default_value = "")]
+        exception: String,
+        #[arg(long)]
+        global: bool,
+        #[arg(long, value_parser = ["planner", "executor", "auditor"])]
+        role: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+    },
+    List {
+        #[arg(long, value_parser = ["pending", "dismissed", "all"], default_value = "pending")]
+        status: String,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    Show {
+        id: String,
+    },
+    /// Dismiss the exact version shown during local review.
+    Dismiss {
+        id: String,
+        #[arg(long)]
+        revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileAccessCmd {
+    /// Expose the entire current profile to one client in one project root.
+    Grant {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        client: String,
+    },
+    /// Stop exposing the profile to that client and project root.
+    Revoke {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        client: String,
+    },
+    /// List configured project/client grants.
+    List,
+}
+
+#[derive(Subcommand)]
+enum FeedbackCmd {
+    /// Print the human-written turns of a session transcript as JSON.
+    Scan {
+        /// Claude Code or Codex transcript (`.jsonl`). Without it, use the
+        /// newest Claude session of `--project`.
+        #[arg(long)]
+        transcript: Option<PathBuf>,
+        /// Project whose newest Claude Code session to read.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Record one preference; `--quote` must appear verbatim in a human turn.
+    Add {
+        #[arg(long)]
+        transcript: PathBuf,
+        #[arg(long)]
+        quote: String,
+        /// The preference as one imperative sentence.
+        #[arg(long)]
+        statement: String,
+        /// code, process, communication, tooling or review.
+        #[arg(long, default_value = "code")]
+        category: String,
+        /// `global`, or `language:`, `repo:`, `path:` or `project:` with a value.
+        #[arg(long, default_value = "global")]
+        scope: String,
+    },
+    /// Import Claude Code memory files of type `feedback` or `user`.
+    ImportMemory {
+        /// Directory of Claude Code projects. Defaults to `~/.claude/projects`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// List recorded preferences with their keys and status.
+    List,
+    /// Inspect retained quotes and their origin before accepting a preference.
+    Show { key: String },
+    /// Accept the exact definition and evidence revision printed by feedback show.
+    Accept {
+        key: String,
+        #[arg(long)]
+        revision: String,
+    },
+    /// Mark a preference rejected; later repeats stay rejected.
+    Reject { key: String },
+    /// Replace one reviewed preference with another in the same category/scope.
+    Supersede {
+        key: String,
+        #[arg(long = "with")]
+        successor: String,
+        #[arg(long)]
+        old_revision: String,
+        #[arg(long)]
+        new_revision: String,
+    },
+    /// Withdraw one inbox source while retaining its quotes and receipt history.
+    DismissSource {
+        key: String,
+        candidate: String,
+        #[arg(long)]
+        revision: String,
+    },
+    /// Revalidate preference and habit sources and refresh the published profile.
+    Refresh,
+}
+
+#[derive(Subcommand)]
+enum HabitCmd {
+    /// Start a new unreviewed generation of a rejected or superseded description.
+    Renew {
+        id: i64,
+        #[arg(long)]
+        revision: String,
+    },
+    /// Propose a conditional behavior with one exact quote from a human turn.
+    Propose {
+        /// Project root matching the transcript's verified cwd.
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        transcript: PathBuf,
+        #[arg(long)]
+        quote: String,
+        /// Stable task or PR ID; all sessions of that task must use the same ID.
+        #[arg(long)]
+        episode: String,
+        #[arg(long)]
+        when: String,
+        #[arg(long)]
+        behavior: String,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long, default_value = "")]
+        exception: String,
+        /// Request a cross-project scope; observation then needs two projects.
+        #[arg(long)]
+        global: bool,
+        #[arg(long, value_parser = ["planner", "executor", "auditor"])]
+        role: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+    },
+    /// Cite support, a limitation, or a counterexample from a human turn.
+    Cite {
+        id: i64,
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        transcript: PathBuf,
+        #[arg(long)]
+        quote: String,
+        #[arg(long)]
+        episode: String,
+        #[arg(long, default_value = "supports", value_parser = ["supports", "contradicts", "limits"])]
+        relation: String,
+    },
+    List,
+    /// Recheck cited sources and regenerate the static style.md snapshot.
+    Refresh,
+    Show {
+        id: i64,
+    },
+    /// Publish a reviewed habit as an advisory observation.
+    Observe {
+        id: i64,
+        /// Exact definition/evidence revision printed by habit show.
+        #[arg(long)]
+        revision: String,
+    },
+    /// Dismiss an incorrectly attributed citation while keeping its audit trail.
+    Dismiss {
+        id: i64,
+        evidence_id: i64,
+    },
+    /// Replace a habit within the same scope, role and workflow after review.
+    Supersede {
+        id: i64,
+        #[arg(long = "with")]
+        successor: i64,
+        #[arg(long)]
+        old_revision: String,
+        #[arg(long)]
+        new_revision: String,
+    },
+    Reject {
+        id: i64,
     },
 }
 
@@ -1440,6 +2015,33 @@ fn run_cli_inner(
             };
             print!("{}", commands::query::render_brief(&response, format)?);
         }
+        Cmd::Context(ContextCmd::Preview {
+            role,
+            since,
+            paths,
+            workflow,
+            query,
+            budget_tokens,
+            profile_client,
+            root,
+        }) => {
+            let root = root.canonicalize()?;
+            let index_path = index_path_for_root(index_override.as_deref(), &root);
+            let packet = mmcg::context::from_paths(
+                &root,
+                &index_path,
+                &mmcg::context::ContextOptions {
+                    since,
+                    paths,
+                    role: role.into(),
+                    workflow,
+                    query,
+                    budget_tokens,
+                },
+                profile_client.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string(&packet)?);
+        }
         Cmd::Concept { query, top, format } => {
             mmcg::queries::validate_concept_request(&query, top)?;
             let managed_root = if index_override.is_none() {
@@ -1618,13 +2220,30 @@ fn run_cli_inner(
             no_project_knowledge,
             document_graph,
             git_commits,
+            profile_client,
+            role,
+            workflow,
+            context_paths,
+            query,
+            budget_tokens,
             port,
         } => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            mmcg::lens::run_with_evidence_extensions_and_document_graph(
+            let private_context = mmcg::lens::PrivateContextOptions {
+                selection: mmcg::context::ContextOptions {
+                    since: since.clone(),
+                    paths: context_paths,
+                    role: role.into(),
+                    workflow,
+                    query,
+                    budget_tokens,
+                },
+                profile_client,
+            };
+            mmcg::lens::run_with_private_context(
                 root,
                 index_path,
                 mmcg::lens::LensOptions {
@@ -1647,6 +2266,7 @@ fn run_cli_inner(
                     project_knowledge: !no_project_knowledge,
                 },
                 document_graph,
+                private_context,
                 port,
             )?;
         }
@@ -1711,6 +2331,7 @@ fn run_cli_inner(
             no_index,
             no_claude,
             no_global,
+            seed_style,
             no_seed_style,
         } => {
             let root = root
@@ -1725,7 +2346,7 @@ fn run_cli_inner(
                     index: !no_index,
                     claude: !no_claude,
                     global: !no_global,
-                    seed_style: !no_seed_style,
+                    seed_style: seed_style && !no_seed_style,
                 },
             )?;
         }
@@ -1771,6 +2392,59 @@ fn run_cli_inner(
                 outcome,
                 mmcg::setup::Outcome::Error | mmcg::setup::Outcome::RefusedOverwrite
             ) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Verification(VerificationCmd::Run {
+            spec,
+            root,
+            id,
+            json,
+        }) => {
+            if !commands::verification_run(&spec, root, &id, json)? {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Acceptance(AcceptanceCmd::Status { spec, root, json }) => {
+            if !commands::acceptance::status(&spec, root, json)? {
+                std::process::exit(1);
+            }
+        }
+        Cmd::ReviewTask(command) => {
+            use commands::task_review::{dispatch, Action};
+            let approved = match command {
+                TaskReviewCmd::Run {
+                    spec,
+                    root,
+                    timeout,
+                    max_turns,
+                    json,
+                } => dispatch(
+                    &spec,
+                    root,
+                    Action::Run(&mmcg::review_invocation::Options {
+                        timeout_secs: timeout,
+                        max_turns,
+                    }),
+                    json,
+                )?,
+                TaskReviewCmd::Prepare { spec, root, json } => {
+                    dispatch(&spec, root, Action::Prepare, json)?
+                }
+                TaskReviewCmd::FollowUp { spec, root, json } => {
+                    dispatch(&spec, root, Action::FollowUp, json)?
+                }
+                TaskReviewCmd::Submit {
+                    spec,
+                    root,
+                    report,
+                    json,
+                } => dispatch(&spec, root, Action::Submit(&report), json)?,
+                TaskReviewCmd::Status { spec, root, json } => {
+                    dispatch(&spec, root, Action::Status, json)?
+                }
+            };
+            if !approved {
                 std::process::exit(1);
             }
         }
@@ -1932,6 +2606,13 @@ fn run_cli_inner(
             pre_only,
             post_only,
             exec,
+            auto_repair,
+            auto_review,
+            review_timeout,
+            review_max_turns,
+            exec_timeout,
+            exec_max_turns,
+            profile_client,
             allow_no_index,
             strict,
             max_iterations,
@@ -1948,6 +2629,17 @@ fn run_cli_inner(
                     pre_only,
                     post_only,
                     exec,
+                    auto_repair,
+                    auto_review,
+                    review_invocation: mmcg::review_invocation::Options {
+                        timeout_secs: review_timeout,
+                        max_turns: review_max_turns,
+                    },
+                    invocation: mmcg::invocation::InvocationOptions {
+                        wall_timeout_secs: exec_timeout,
+                        max_turns: exec_max_turns,
+                        profile_client,
+                    },
                     allow_no_index,
                     strict,
                     max_iterations,
@@ -1978,6 +2670,215 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
+        Cmd::Miner(MinerCmd::Hooks(command)) => {
+            use mmcg::miner::hooks;
+            match command {
+                HookCmd::Setup {
+                    client,
+                    project_root,
+                    write,
+                    remove,
+                    profile_client,
+                } => hooks::setup(
+                    &client,
+                    &project_root,
+                    write,
+                    remove,
+                    profile_client.as_deref(),
+                )?,
+                HookCmd::Receive {
+                    client,
+                    project_root,
+                } => hooks::receive(&client, &project_root)?,
+                HookCmd::Status {
+                    client,
+                    project_root,
+                } => hooks::status(&client, &project_root)?,
+                HookCmd::Recover {
+                    client,
+                    project_root,
+                } => hooks::recover(&client, &project_root)?,
+                HookCmd::Episodes {
+                    project_root,
+                    limit,
+                    after,
+                } => hooks::episodes(&project_root, usize::from(limit), after.as_deref())?,
+                HookCmd::Show { episode } => hooks::show(&episode)?,
+                HookCmd::Analyze {
+                    episode,
+                    revision,
+                    processor,
+                    provider,
+                    args,
+                    timeout,
+                } => hooks::analyze(
+                    &episode,
+                    &revision,
+                    processor.as_deref(),
+                    provider.as_deref(),
+                    &args,
+                    timeout,
+                )?,
+                HookCmd::Draft { id } => hooks::draft(&id)?,
+                HookCmd::Mine {
+                    project_root,
+                    processor,
+                    provider,
+                    args,
+                    timeout,
+                    limit,
+                    after,
+                    follow,
+                } => {
+                    if follow {
+                        hooks::follow(
+                            &project_root,
+                            processor.as_deref(),
+                            provider.as_deref(),
+                            &args,
+                            timeout,
+                            usize::from(limit),
+                        )?;
+                    } else {
+                        hooks::mine(
+                            &project_root,
+                            processor.as_deref(),
+                            provider.as_deref(),
+                            &args,
+                            timeout,
+                            usize::from(limit),
+                            after.as_deref(),
+                        )?;
+                    }
+                }
+                HookCmd::Propose {
+                    id,
+                    revision,
+                    episode,
+                    attest_human,
+                    habit,
+                } => hooks::propose(&id, &revision, &episode, attest_human, habit)?,
+                HookCmd::Forget { episode, revision } => hooks::forget(&episode, &revision)?,
+            }
+        }
+        Cmd::Miner(MinerCmd::Collect {
+            project_root,
+            transcript,
+            dry_run,
+        }) => {
+            mmcg::miner::collection::collect(&project_root, &transcript, dry_run)?;
+        }
+        Cmd::Miner(MinerCmd::Sync {
+            project_root,
+            after,
+            limit,
+            dry_run,
+        }) => {
+            mmcg::miner::collection::sources::sync(
+                &project_root,
+                after.as_deref(),
+                usize::from(limit),
+                dry_run,
+            )?;
+        }
+        Cmd::Miner(MinerCmd::Sources(SourceCmd::List {
+            project_root,
+            after,
+            limit,
+        })) => {
+            mmcg::miner::collection::sources::list(
+                &project_root,
+                after.as_deref(),
+                usize::from(limit),
+            )?;
+        }
+        Cmd::Miner(MinerCmd::Sources(SourceCmd::Exclude {
+            source,
+            project_root,
+        })) => {
+            mmcg::miner::collection::sources::set_sync_enabled(&project_root, &source, false)?;
+        }
+        Cmd::Miner(MinerCmd::Sources(SourceCmd::Include {
+            source,
+            project_root,
+        })) => {
+            mmcg::miner::collection::sources::set_sync_enabled(&project_root, &source, true)?;
+        }
+        Cmd::Miner(MinerCmd::Candidates(command)) => {
+            use mmcg::miner::collection;
+            match command {
+                CandidateCmd::ProposePreference {
+                    id,
+                    revision,
+                    statement,
+                    category,
+                    scope,
+                } => {
+                    mmcg::miner::curation::propose_preference(
+                        &id,
+                        &revision,
+                        mmcg::miner::curation::PreferenceDraft {
+                            statement,
+                            category,
+                            scope,
+                        },
+                    )?;
+                }
+                CandidateCmd::ProposeHabit {
+                    id,
+                    habit_id,
+                    revision,
+                    episode,
+                    when,
+                    behavior,
+                    outcome,
+                    exception,
+                    global,
+                    role,
+                    workflow,
+                } => {
+                    mmcg::miner::curation::propose_habit(
+                        &id,
+                        &revision,
+                        mmcg::miner::curation::HabitDraft {
+                            episode,
+                            when,
+                            behavior,
+                            outcome,
+                            exception,
+                            global,
+                            role: role.unwrap_or_default(),
+                            workflow: workflow.unwrap_or_default(),
+                        },
+                        habit_id,
+                    )?;
+                }
+                CandidateCmd::List {
+                    after,
+                    status,
+                    limit,
+                } => collection::list(after.as_deref(), &status, usize::from(limit))?,
+                CandidateCmd::Search {
+                    query,
+                    project_root,
+                    source,
+                    status,
+                    limit,
+                    after,
+                } => {
+                    collection::search::run(collection::search::SearchOptions {
+                        query: &query,
+                        project_root: project_root.as_deref(),
+                        source: source.as_deref(),
+                        status: &status,
+                        after: after.as_deref(),
+                        limit: usize::from(limit),
+                    })?;
+                }
+                CandidateCmd::Show { id } => collection::show(&id)?,
+                CandidateCmd::Dismiss { id, revision } => collection::dismiss(&id, &revision)?,
+            }
+        }
         Cmd::Miner(MinerCmd::Profile {
             root,
             author,
@@ -1988,6 +2889,102 @@ fn run_cli_inner(
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
             mmcg::miner::profile::run(&root, author, force, deep)?;
+        }
+        Cmd::Miner(MinerCmd::Feedback(command)) => {
+            use mmcg::miner::feedback;
+            match command {
+                FeedbackCmd::Scan {
+                    transcript,
+                    project,
+                } => feedback::scan(transcript, &project)?,
+                FeedbackCmd::Add {
+                    transcript,
+                    quote,
+                    statement,
+                    category,
+                    scope,
+                } => feedback::add(&transcript, &quote, &statement, &category, &scope)?,
+                FeedbackCmd::ImportMemory { dir } => feedback::import_memory(dir)?,
+                FeedbackCmd::List => feedback::list()?,
+                FeedbackCmd::Show { key } => feedback::show(&key)?,
+                FeedbackCmd::Accept { key, revision } => {
+                    feedback::set_status(&key, "active", Some(&revision))?
+                }
+                FeedbackCmd::Reject { key } => feedback::set_status(&key, "rejected", None)?,
+                FeedbackCmd::Supersede {
+                    key,
+                    successor,
+                    old_revision,
+                    new_revision,
+                } => feedback::supersede(&key, &successor, &old_revision, &new_revision)?,
+                FeedbackCmd::DismissSource {
+                    key,
+                    candidate,
+                    revision,
+                } => feedback::dismiss_source(&key, &candidate, &revision)?,
+                FeedbackCmd::Refresh => mmcg::miner::habit::refresh()?,
+            }
+        }
+        Cmd::Miner(MinerCmd::Habit(command)) => {
+            use mmcg::miner::habit;
+            match command {
+                HabitCmd::Propose {
+                    project_root,
+                    transcript,
+                    quote,
+                    episode,
+                    when,
+                    behavior,
+                    outcome,
+                    exception,
+                    global,
+                    role,
+                    workflow,
+                } => habit::propose(
+                    &project_root,
+                    &transcript,
+                    &quote,
+                    &episode,
+                    &when,
+                    &behavior,
+                    &outcome,
+                    &exception,
+                    global,
+                    role.as_deref(),
+                    workflow.as_deref(),
+                )?,
+                HabitCmd::Cite {
+                    id,
+                    project_root,
+                    transcript,
+                    quote,
+                    episode,
+                    relation,
+                } => habit::cite(id, &project_root, &transcript, &quote, &episode, &relation)?,
+                HabitCmd::List => habit::list()?,
+                HabitCmd::Refresh => habit::refresh()?,
+                HabitCmd::Show { id } => habit::show(id)?,
+                HabitCmd::Observe { id, revision } => {
+                    habit::review(id, "observed", Some(&revision))?
+                }
+                HabitCmd::Dismiss { id, evidence_id } => habit::dismiss(id, evidence_id)?,
+                HabitCmd::Renew { id, revision } => habit::renew(id, &revision)?,
+                HabitCmd::Supersede {
+                    id,
+                    successor,
+                    old_revision,
+                    new_revision,
+                } => habit::supersede(id, successor, &old_revision, &new_revision)?,
+                HabitCmd::Reject { id } => habit::review(id, "rejected", None)?,
+            }
+        }
+        Cmd::Miner(MinerCmd::Access(command)) => {
+            use mmcg::miner::access;
+            match command {
+                ProfileAccessCmd::Grant { root, client } => access::set(&root, &client, true)?,
+                ProfileAccessCmd::Revoke { root, client } => access::set(&root, &client, false)?,
+                ProfileAccessCmd::List => access::list()?,
+            }
         }
     }
     Ok(())
@@ -2739,6 +3736,7 @@ mod tests {
                 document_graph: None,
                 git_commits: 200,
                 port: 0,
+                ..
             } if since == "origin/main"
                 && root.as_path() == std::path::Path::new(".")
                 && path == "."

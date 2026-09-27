@@ -715,12 +715,12 @@ fn valid_tools(tools: &[String]) -> bool {
 }
 
 #[cfg(not(unix))]
-fn acquire_lock(_task: &Task, _create: bool) -> Result<std::fs::File, String> {
+fn acquire_lock(_task: &Task, _create: bool) -> Result<bounded_fs::StableFileLock, String> {
     Err("invocation_runtime_unsupported_platform".into())
 }
 
 #[cfg(unix)]
-fn acquire_lock(task: &Task, create: bool) -> Result<std::fs::File, String> {
+fn acquire_lock(task: &Task, create: bool) -> Result<bounded_fs::StableFileLock, String> {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt};
     let parent = task
@@ -768,6 +768,7 @@ fn acquire_lock(task: &Task, create: bool) -> Result<std::fs::File, String> {
         return Err("invocation_lock_unavailable".into());
     }
     lock.try_lock().map_err(|_| "invocation_busy")?;
+    let lock = bounded_fs::StableFileLock::from_locked_file(lock);
     task.root.verify().map_err(|_| "invocation_root_changed")?;
     Ok(lock)
 }

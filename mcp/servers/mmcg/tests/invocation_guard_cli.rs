@@ -223,13 +223,16 @@ impl Fixture {
         command
     }
     fn execute(&self) -> Output {
+        // Each hook pins the test executable. Debug musl builds are much slower
+        // on shared CI runners, especially with several fixtures in parallel.
+        // Timeout behavior has its own invocation regression.
         self.cli(&[
             "run-task",
             SPEC,
             "--exec",
             "--guarded-exec",
             "--exec-timeout",
-            "30",
+            "180",
         ])
         .output()
         .unwrap()

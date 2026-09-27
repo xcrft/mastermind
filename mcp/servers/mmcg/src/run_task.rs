@@ -2237,7 +2237,7 @@ fn complete_reviewed_task(
 pub(crate) fn controller_lock(
     repo_root: &Path,
     state_path: &Path,
-) -> Result<std::fs::File, String> {
+) -> Result<crate::bounded_fs::StableFileLock, String> {
     let root = RootCapability::open(repo_root).map_err(|_| "controller_root_unavailable")?;
     let path = state_path.with_extension("controller.lock");
     let parent = path.parent().ok_or("controller_lock_unavailable")?;

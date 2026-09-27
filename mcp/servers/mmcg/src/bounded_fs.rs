@@ -698,7 +698,7 @@ pub(crate) fn create_regular_file_with_capability(
 pub(crate) fn open_locked_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     open_locked_regular_file(root, path, true)
 }
 
@@ -706,7 +706,7 @@ pub(crate) fn open_locked_regular_file_with_capability(
 pub(crate) fn try_locked_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     open_locked_regular_file(root, path, false)
 }
 
@@ -716,7 +716,7 @@ pub(crate) fn try_locked_regular_file_with_capability(
 pub(crate) fn try_locked_existing_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
-) -> Result<Option<std::fs::File>, BoundedReadError> {
+) -> Result<Option<StableFileLock>, BoundedReadError> {
     root.verify()?;
     let relative = root.relative(path)?;
     let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
@@ -768,14 +768,54 @@ pub(crate) fn try_locked_existing_regular_file_with_capability(
         }
         return Err(error);
     }
-    Ok(acquired.then_some(file))
+    Ok(if acquired {
+        Some(StableFileLock::from_locked_file(file))
+    } else {
+        None
+    })
+}
+
+/// Own an acquired lock, not just its descriptor. On Unix, another thread's
+/// fork can briefly retain the same open file description before exec, even
+/// with close-on-exec enabled. Explicit unlock ends our critical section at
+/// guard drop instead of waiting for all inherited descriptors to close.
+#[derive(Debug)]
+pub(crate) struct StableFileLock {
+    file: std::fs::File,
+    released: bool,
+}
+
+impl StableFileLock {
+    /// The caller must already own the lock on this open file description.
+    pub(crate) fn from_locked_file(file: std::fs::File) -> Self {
+        Self {
+            file,
+            released: false,
+        }
+    }
+
+    /// Release explicitly when the caller needs to propagate an unlock error.
+    /// A failure still leaves Drop a best-effort release before closing.
+    pub(crate) fn unlock(mut self) -> std::io::Result<()> {
+        let result = self.file.unlock();
+        self.released = result.is_ok();
+        result
+    }
+}
+
+impl Drop for StableFileLock {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.file.unlock();
+        }
+    }
 }
 
 fn open_locked_regular_file(
     root: &RootCapability,
     path: &Path,
     wait: bool,
-) -> Result<std::fs::File, BoundedReadError> {
+) -> Result<StableFileLock, BoundedReadError> {
     root.verify()?;
     let relative = root.relative(path)?;
     let components = relative
@@ -887,7 +927,7 @@ fn open_locked_regular_file(
         let _ = file.unlock();
         return Err(error);
     }
-    Ok(file)
+    Ok(StableFileLock::from_locked_file(file))
 }
 
 /// Atomically replace one repository-owned regular file through a retained
@@ -1920,6 +1960,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read.bytes, b"fn main() {}\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_guard_drop_releases_before_inherited_descriptor_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RootCapability::open(temp.path()).unwrap();
+        for mode in ["blocking", "nonblocking", "existing"] {
+            let path = temp.path().join(format!("{mode}.lock"));
+            let owner = match mode {
+                "blocking" => open_locked_regular_file_with_capability(&root, &path).unwrap(),
+                "nonblocking" => try_locked_regular_file_with_capability(&root, &path).unwrap(),
+                "existing" => {
+                    std::fs::write(&path, b"").unwrap();
+                    try_locked_existing_regular_file_with_capability(&root, &path)
+                        .unwrap()
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            };
+            // A fork before exec holds the same open file description, even
+            // when the descriptor is close-on-exec. Dup models that lifetime
+            // deterministically without forking the threaded test harness.
+            let inherited = owner.file.try_clone().unwrap();
+            drop(owner);
+            let acquired = try_locked_existing_regular_file_with_capability(&root, &path)
+                .unwrap()
+                .expect("guard drop must release while inherited descriptor remains open");
+            drop(acquired);
+            drop(inherited);
+        }
     }
 
     #[cfg(unix)]

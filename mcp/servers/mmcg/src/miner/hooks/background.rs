@@ -8,7 +8,6 @@ use crate::bounded_fs::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -199,7 +198,7 @@ impl Store {
         .identity)
     }
 
-    fn lifecycle(&self) -> Result<File, Error> {
+    fn lifecycle(&self) -> Result<bounded_fs::StableFileLock, Error> {
         bounded_fs::try_locked_regular_file_with_capability(
             &self.root,
             &self.path("lifecycle.lock"),
@@ -207,7 +206,7 @@ impl Store {
         .map_err(|_| "worker_lifecycle_busy_or_unavailable".into())
     }
 
-    fn owner(&self) -> Result<Option<File>, Error> {
+    fn owner(&self) -> Result<Option<bounded_fs::StableFileLock>, Error> {
         Ok(
             bounded_fs::try_locked_existing_regular_file_with_capability(
                 &self.root,

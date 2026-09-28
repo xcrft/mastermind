@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -75,6 +76,53 @@ fn dry_run_and_missing_removal_do_not_create_configuration() {
     }
     assert!(!fixture.home.join(".claude").exists());
     assert!(!fixture.home.join("custom-codex").exists());
+}
+
+#[test]
+fn generated_hooks_have_distinct_user_visible_labels() {
+    let fixture = Fixture::new();
+    for client in ["claude", "codex"] {
+        let preview = fixture.success(client, &[]);
+        let hooks = preview["hook_config"]["hooks"].as_object().unwrap();
+        let labels = hooks
+            .values()
+            .map(|groups| groups[0]["hooks"][0]["statusMessage"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels.len(), preview["events"].as_array().unwrap().len());
+        assert!(labels.iter().all(|label| label.starts_with("Mastermind: ")));
+        assert_eq!(
+            labels.len(),
+            labels.iter().copied().collect::<HashSet<_>>().len()
+        );
+        assert_eq!(
+            hooks.get("UserPromptSubmit").unwrap()[0]["hooks"][0]["statusMessage"],
+            "Mastermind: Capture user prompt"
+        );
+    }
+
+    let refining = fixture.success("codex", &["--refiner-provider", "claude"]);
+    assert_eq!(
+        refining["hook_config"]["hooks"]["UserPromptSubmit"][0]["hooks"][0]["statusMessage"],
+        "Mastermind: Refine and capture user prompt"
+    );
+}
+
+#[test]
+fn setup_replaces_previous_owned_labels_without_duplicating_hooks() {
+    let fixture = Fixture::new();
+    let path = fixture.config("codex");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let preview = fixture.success("codex", &[]);
+    let mut previous = preview["hook_config"].clone();
+    for groups in previous["hooks"].as_object_mut().unwrap().values_mut() {
+        groups[0]["hooks"][0]["statusMessage"] = json!("Saving Mastermind interaction evidence");
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&previous).unwrap()).unwrap();
+
+    assert_eq!(fixture.success("codex", &["--write"])["written"], true);
+    let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(updated, preview["hook_config"]);
+    assert_eq!(fixture.success("codex", &["--write"])["written"], false);
 }
 
 #[test]

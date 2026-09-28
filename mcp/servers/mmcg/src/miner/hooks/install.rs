@@ -86,17 +86,32 @@ pub(super) fn configure(
         "type": "command",
         "command": command,
         "timeout": 3,
-        "statusMessage": "Saving Mastermind interaction evidence",
     });
     let mut events = COMMON_EVENTS.to_vec();
     events.push(extra_event);
     let mut generated = serde_json::Map::new();
     for event in &events {
         let mut event_handler = handler.clone();
+        event_handler["statusMessage"] = json!(match *event {
+            "SessionStart" => "Mastermind: Record session start",
+            "UserPromptSubmit" if refiner_timeout.is_some() => {
+                "Mastermind: Refine and capture user prompt"
+            }
+            "UserPromptSubmit" => "Mastermind: Capture user prompt",
+            "PreToolUse" => "Mastermind: Record tool request",
+            "PostToolUse" => "Mastermind: Record tool result",
+            "PostToolUseFailure" => "Mastermind: Record tool failure",
+            "Stop" => "Mastermind: Record agent response",
+            "SessionEnd" => "Mastermind: Record session end",
+            "PreCompact" => "Mastermind: Record compaction boundary",
+            "SubagentStart" => "Mastermind: Record subagent start",
+            "SubagentStop" => "Mastermind: Record subagent completion",
+            "Interrupt" => "Mastermind: Record interruption",
+            _ => unreachable!("unsupported generated hook event"),
+        });
         if *event == "UserPromptSubmit" {
             if let Some(timeout) = refiner_timeout {
                 event_handler["timeout"] = json!(timeout + 3);
-                event_handler["statusMessage"] = json!("Refining the request with Mastermind");
             }
         }
         generated.insert((*event).to_string(), json!([{ "hooks": [event_handler] }]));

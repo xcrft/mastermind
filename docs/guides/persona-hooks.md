@@ -42,6 +42,10 @@ execution currently require macOS or Linux.
 | Claude Code | `.claude/settings.local.json` | Reload and inspect `/hooks`. Managed settings may disable hooks |
 | Codex | `.codex/hooks.json` | Trust the project and review the definitions in `/hooks` |
 
+Each generated hook has an event-specific `statusMessage` so the review screen
+shows what Mastermind captures. After upgrading, repeat setup with `--write`
+and review the updated definitions in the client.
+
 | Setup effect | Boundary |
 |---|---|
 | Capture grant | This client and canonical project root only |

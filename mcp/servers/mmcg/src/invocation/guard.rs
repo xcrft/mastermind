@@ -329,7 +329,8 @@ impl Prepared {
     pub(super) fn args(&self) -> Result<Vec<String>, String> {
         let settings = json!({"disableAllHooks":false,"disableClaudeAiConnectors":true,
             "hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":self.manifest.runner.invocation_path,
-                "args":["invocation","guard","--manifest",self.path],"timeout":5}]}]}});
+                "args":["invocation","guard","--manifest",self.path],"timeout":5,
+                "statusMessage":"Mastermind: Check task tool boundary"}]}]}});
         Ok(vec![
             "--restricted".into(),
             "--setting-sources".into(),

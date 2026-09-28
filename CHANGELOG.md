@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-09-28
+
+### Changed
+
+- Give each Mastermind native hook an event-specific label in the client review
+  screen. Re-running hook setup updates previous labels without duplicate hooks.
+
 ## [3.0.0] - 2026-09-28
 
 ### Upgrade from 2.x
@@ -1477,7 +1484,8 @@ and MCP with mining off.
 - Seven prebuilt platform packages (`@xcraftmind/mmcg-*`) covering macOS (arm64, x64), Linux glibc and musl (x64, arm64), and Windows (x64). npm installs only the package matching the host's `os` / `cpu` / `libc`.
 - Install-mode-aware `setup claude` that writes the correct MCP `command` form for npx, global, project-local, and cargo installs.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.0.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.0.1...HEAD
+[3.0.1]: https://github.com/xcrft/mastermind/compare/npm-v3.0.0...npm-v3.0.1
 [3.0.0]: https://github.com/xcrft/mastermind/compare/npm-v2.1.1...npm-v3.0.0
 [2.1.1]: https://github.com/xcrft/mastermind/compare/npm-v2.1.0...npm-v2.1.1
 [2.1.0]: https://github.com/xcrft/mastermind/compare/npm-v2.0.1...npm-v2.1.0

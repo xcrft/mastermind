@@ -685,7 +685,10 @@ mod tests {
             counts: keys.iter().map(|key| (key.to_string(), 1)).collect(),
         };
         let commits = [
-            commit("2026-09-01", &["range.lang.Rust", "range.area.sample-app/mcp"]),
+            commit(
+                "2026-09-01",
+                &["range.lang.Rust", "range.area.sample-app/mcp"],
+            ),
             commit("2026-08-01", &["range.lang.Rust", "range.lib.Rust:tokio"]),
             commit(
                 "2025-01-01",

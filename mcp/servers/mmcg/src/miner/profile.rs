@@ -5286,10 +5286,7 @@ diff --git a/src/a.rs b/src/a.rs
             ("Check component contracts before review", "role:auditor"),
             ("Run the release checklist", "workflow:release"),
             ("Deploys are run by the author", "project:remote:sample-app"),
-            (
-                "Never deploy from the agent",
-                "project:-Users-a-other-app",
-            ),
+            ("Never deploy from the agent", "project:-Users-a-other-app"),
         ] {
             store::fixture_preference(&mut db, statement, scope);
             let entry = db

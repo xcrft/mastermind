@@ -1,7 +1,7 @@
 {
   "id": "callees-definition-boundaries-01",
   "kind": "research",
-  "revision": "cbc8179320d815c07609f859810b3e64ebc74d48",
+  "revision": "f220777fd1fbd0ad03ec9a4f8ed2f52b2464e890",
   "source_allowlist": [
     "mcp/servers/mmcg/src/mcp.rs",
     "mcp/servers/mmcg/src/queries.rs",

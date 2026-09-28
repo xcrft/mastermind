@@ -96,7 +96,7 @@ pub(crate) const PROJECT_DECISION_DIRS: [&str; 6] = [
     "adrs",
     ".mastermind/decisions",
 ];
-pub const AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT: usize = 20_000;
+pub const AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT: usize = 100_000;
 pub const AUTO_REFRESH_SOURCE_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Parsed files waiting for the single SQLite writer at once. This bounds peak
@@ -244,10 +244,12 @@ fn assigned_secret_like(line: &str) -> bool {
         let left = if separator == '=' {
             let trimmed = left.trim_end();
             let start = trimmed
-                .rfind(|character: char| {
+                .char_indices()
+                .rev()
+                .find(|(_, character)| {
                     character.is_whitespace() || matches!(character, ',' | ';' | '(' | '{')
                 })
-                .map_or(0, |position| position + 1);
+                .map_or(0, |(position, character)| position + character.len_utf8());
             &trimmed[start..]
         } else {
             left
@@ -1613,6 +1615,19 @@ fn git_relative_path(raw: &[u8]) -> Result<PathBuf, IndexError> {
         .map_err(index_error_from_read)
 }
 
+fn unportable_non_source_git_path(raw: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return false;
+    };
+    let path = Path::new(text);
+    text.contains('\\')
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && extractor_for_path(path).is_none()
+}
+
 /// Tracked files remain source-of-truth even when a later or overly broad
 /// ignore rule matches them. Git itself applies ignore rules to untracked
 /// discovery, not to entries already present in the index. Failure to query Git
@@ -1650,6 +1665,12 @@ fn tracked_relative_paths_controlled(
     let mut paths = Vec::new();
     for raw in output.stdout.split(|byte| *byte == 0) {
         if raw.is_empty() {
+            continue;
+        }
+        // Unix repositories can track literal backslashes in filenames. Such
+        // paths cannot enter the portable index, but an unsupported file type
+        // should not prevent unrelated source files from being indexed.
+        if unportable_non_source_git_path(raw) {
             continue;
         }
         let path =
@@ -1719,6 +1740,9 @@ pub(crate) fn source_candidates_bounded(
     for raw in output.stdout.split(|byte| *byte == 0) {
         control.check().map_err(index_error_from_read)?;
         if raw.is_empty() {
+            continue;
+        }
+        if unportable_non_source_git_path(raw) {
             continue;
         }
         let relative = git_relative_path(raw)?;
@@ -1995,6 +2019,24 @@ pub(crate) fn source_admission_with_capability(
         return Err(IndexError::Skipped(IndexSkipReason::Binary));
     }
     Ok(prefix)
+}
+
+pub(crate) fn source_is_binary_after_admission(
+    root: &RootCapability,
+    path: &Path,
+    expected_identity: StableFileIdentity,
+    control: ReadControl<'_>,
+) -> Result<bool, IndexError> {
+    let source = read_regular_file_expected(
+        root,
+        path,
+        MAX_INDEXABLE_FILE_SIZE,
+        MAX_INDEXABLE_FILE_SIZE,
+        control,
+        Some(expected_identity),
+    )
+    .map_err(index_error_from_read)?;
+    Ok(is_binary_content(&source.bytes))
 }
 
 fn read_source_bounded(
@@ -2475,6 +2517,9 @@ def password_material():
 def api_key_material():
     """apiassignmentcanary stripe_api_key = liveexamplecredential"""
 
+def unicode_space_material():
+    """nbspcanary description{NBSP}stripe_api_key = liveunicodecredential"""
+
 def prose():
     """rotationquartz explains token buckets and password rotation"""
 
@@ -2483,7 +2528,8 @@ def bearer_prose():
 
 def placeholder():
     """placeholderquartz token = placeholder"""
-"#,
+"#
+            .replace("{NBSP}", "\u{00a0}"),
         )
         .unwrap();
         let mut store = Store::open(&db).unwrap();
@@ -2496,9 +2542,11 @@ def placeholder():
             "jsonbearercanary",
             "passwordcanary",
             "apiassignmentcanary",
+            "nbspcanary",
             "livecredential123",
             "livecredential456",
             "liveexamplecredential",
+            "liveunicodecredential",
             "jsoncredential789",
         ] {
             assert!(
@@ -2517,13 +2565,13 @@ def placeholder():
         );
         let stats = store.concept_documentation_stats().unwrap();
         assert_eq!(stats.indexed_documents, 3);
-        assert_eq!(stats.secret_omitted, 6);
+        assert_eq!(stats.secret_omitted, 7);
         assert_eq!(
             store
                 .meta_value(crate::store::CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY)
                 .unwrap()
                 .as_deref(),
-            Some("6")
+            Some("7")
         );
         fs::remove_dir_all(&dir).ok();
     }
@@ -3600,6 +3648,32 @@ def candidate(value: ImportantType) -> ResultType"#
             Err(IndexError::SnapshotChanged)
         ));
         assert!(store.indexed_paths().unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_inventory_skips_unportable_non_source_files() {
+        let (dir, db) = setup("tracked_backslash_non_source");
+        fs::write(dir.join("good.rs"), "pub fn good() {}\n").unwrap();
+        fs::write(dir.join("allure-results\\executor.json"), "{}\n").unwrap();
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        git(&dir, &["add", "-A"]);
+
+        assert_eq!(
+            tracked_relative_paths(&dir).unwrap(),
+            [PathBuf::from("good.rs")]
+        );
+        let root = RootCapability::open(&dir).unwrap();
+        assert_eq!(
+            source_candidates_bounded(&root, 10, ReadControl::default()).unwrap(),
+            vec![root.canonical_root().join("good.rs")]
+        );
+        let mut store = Store::open(&db).unwrap();
+        let stats = Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_failed, 0);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["good.rs"]);
         fs::remove_dir_all(&dir).ok();
     }
 

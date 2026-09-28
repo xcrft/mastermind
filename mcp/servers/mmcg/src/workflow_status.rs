@@ -28,7 +28,7 @@ const MAX_WORKFLOW_DIAGNOSTICS: usize = 4_096;
 const MAX_WORKFLOW_CONTEXT_ESTIMATES: usize = 16_384;
 const MAX_STATUS_TASKS: usize = 4_096;
 const MAX_TASK_STATE_BYTES: u64 = 1024 * 1024;
-const STATUS_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const STATUS_FRESHNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const STATUS_STALE_FILE_LIMIT: usize = 10;
 const STATUS_STALE_FILE_PROBE_LIMIT: usize = STATUS_STALE_FILE_LIMIT + 1;
 
@@ -4815,6 +4815,19 @@ pub(crate) fn stale_paths_controlled(
                 cap: source_bytes_cap,
             });
         }
+        // Parsing rejects NUL bytes anywhere in a source file. Admission only
+        // sniffs the prefix, so verify the whole file for paths the index omitted.
+        if !indexed.contains_key(&relative)
+            && crate::indexer::source_is_binary_after_admission(
+                &root_capability,
+                &path,
+                admitted.identity,
+                control,
+            )?
+        {
+            seen.insert(relative);
+            continue;
+        }
         seen.insert(relative.clone());
         if indexed
             .get(&relative)
@@ -7460,6 +7473,44 @@ mod tests {
         assert!(snapshot.source_snapshot_unchanged().unwrap());
         drop(snapshot);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_ignore_binary_source_with_nul_after_admission_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        init_git_repository(root.path());
+        let source = root.path().join("late_nul.rs");
+        let mut bytes = vec![b'a'; 9_000];
+        bytes.push(0);
+        fs::write(&source, bytes).unwrap();
+        let output = Command::new("git")
+            .args(["add", "late_nul.rs"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let db = root.path().join("mmcg.db");
+        let mut store = crate::store::Store::open(&db).unwrap();
+        let stats = crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        assert_eq!(stats.files_skipped_binary, 1);
+        assert!(stale_paths_controlled(
+            &store,
+            root.path(),
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap()
+        .is_empty());
+        assert!(crate::lens::validate_index_snapshot(
+            &store,
+            &root.path().canonicalize().unwrap(),
+            None,
+        )
+        .is_ok());
     }
 
     #[test]

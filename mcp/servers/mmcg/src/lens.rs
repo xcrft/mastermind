@@ -1063,7 +1063,24 @@ fn validated_index_paths(
                 interrupted: None,
             },
         ) {
-            Ok(_) => return Err(LensError::IndexStale),
+            Ok(admitted) => {
+                let binary = crate::indexer::source_is_binary_after_admission(
+                    &root_capability,
+                    &root.join(&relative),
+                    admitted.identity,
+                    crate::bounded_fs::ReadControl {
+                        deadline,
+                        interrupted: None,
+                    },
+                )
+                .map_err(|error| match error {
+                    crate::indexer::IndexError::DeadlineExceeded => LensError::AnalysisTimeout,
+                    _ => LensError::IndexStale,
+                })?;
+                if !binary {
+                    return Err(LensError::IndexStale);
+                }
+            }
             Err(crate::indexer::IndexError::Skipped(_)) => {}
             Err(crate::indexer::IndexError::Missing) => {
                 let path = root.join(&relative);

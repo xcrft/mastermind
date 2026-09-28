@@ -5090,7 +5090,7 @@ fn stale_count(store: &Store, index_root: &std::path::Path) -> (usize, bool, Opt
     let Ok(root) = index_root.canonicalize() else {
         return (1, false, Some("index_root_unavailable"));
     };
-    let hard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let hard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let deadline = store
         .request_deadline()
         .map_or(hard_deadline, |deadline| deadline.min(hard_deadline));

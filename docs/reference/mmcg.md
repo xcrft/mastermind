@@ -1419,9 +1419,10 @@ Run `mmcg watch` in a separate terminal so the index stays current while you wor
 Structural MCP queries also refresh the managed `.mastermind/mmcg.db` on demand
 when source files or the extractor contract drift. The repository root is
 derived from the canonical database path and checked against the stored index
-identity before any refresh. Automatic refresh admits at most 20,000 source
+identity before any refresh. Automatic refresh admits at most 100,000 source
 candidates and 512 MiB of declared source bytes. Exceeding either cap returns
-`refresh_limit_exceeded` without a partial refresh. A custom external `--index`
+`refresh_limit_exceeded` without a partial refresh. Status freshness scans have
+a 30-second deadline. A custom external `--index`
 is opened read-only by `serve`: it remains query-compatible when fresh, requires
 an explicit `mmcg index` when stale, and is never created, migrated, truncated,
 or given a WAL by the server. Reading an existing active WAL may create or

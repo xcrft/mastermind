@@ -1,14 +1,15 @@
 # Mine working habits from interactions
 
-Mastermind can collect selected client interactions locally, extract candidate
-habits with an explicit processor, and publish reviewed habits through MCP.
+Mastermind collects selected client interactions locally, retains explicit
+statements as candidates without a model, and publishes reviewed habits through MCP.
+An explicitly selected processor can also propose semantic candidates.
 The profile describes observable working approaches and preferences. It is
 advisory context for an agent, not a personality score or permission policy.
 
 The process is:
 
 ```text
-capture → inspect → analyze → attest authorship → review habit → select for context
+capture → local candidates → inspect → attest authorship → review habit → select for context
 ```
 
 ## 1. Enable local capture
@@ -52,7 +53,7 @@ and review the updated definitions in the client.
 | Existing hooks | Preserved |
 | Native hook trust and profile reads | Require separate authorization |
 | Activation | Restart the client to capture `SessionStart` |
-| Installed receiver | Local capture. Prompt refinement requires a selected processor. Habit analysis uses a separate worker |
+| Installed receiver | Local capture and bounded explicit-statement candidates when profile delivery is enabled. Prompt refinement and semantic analysis require a selected processor |
 | Background mining | Started by `init --mining on` or explicit `miner start` / `hooks worker start`. Direct hook setup and status do not start it |
 
 ### Check each boundary
@@ -66,8 +67,9 @@ mastermind miner hooks setup --client codex --project-root . --disable-refiner -
 ```
 
 Repeat direct hook commands for each configured client and project. Capture and
-deterministic Git mining continue locally. Semantic habit analysis and prompt
-refinement stay disabled; captured episodes remain available for later review.
+deterministic Git mining continue locally. With profile delivery enabled, closed
+complete episodes also produce local explicit-statement candidates. Semantic
+habit analysis and prompt refinement stay disabled.
 
 `hooks setup`, `hooks status` and `mastermind doctor` expose the same read-only
 readiness observations:
@@ -91,6 +93,8 @@ native registration and SessionStart recovery without fabricating past events.
 | Native registration | Expected definitions are current, missing/stale, unavailable or unsupported. Local disable flags are separate |
 | Capture | This client and project have a grant, a revocation or an incomplete delivery |
 | Session | `SessionStart` was observed in the current capture generation. Client trust/loading remains unverified |
+| Local candidates | Completed episode revisions for the local detector. An empty result also counts as processed |
+| Profile delivery | Recorded offers in the current capture generation. Receipt does not prove client receipt or use |
 | Refiner | A processor is configured. Provider execution and interpretation quality are not tested |
 | Managed miner | Worker ownership, state and budget. Foreground workers are not observed by this check |
 
@@ -115,8 +119,12 @@ refiner continuation can use its current spec's declared paths and workflow;
 an ordinary request does not inherit the previous task's scope.
 
 `run-task --exec` automatically selects the configured Claude audience and
-retrieves an executor slice from the approved spec. `--profile-client` overrides
-that selection. Independent semantic review still receives no personal profile.
+refreshes committed Git observations before retrieving an executor slice from
+the approved spec. It preserves the stored author selector and reuses eligible
+diff measurements. After reviewed completion, it refreshes those observations
+again and records the pinned Git revision in `state.json` under `profile_refresh`.
+Uncommitted edits are not mined. `--profile-client` overrides the audience.
+Independent semantic review still receives no personal profile.
 
 To stop automatic delivery while keeping local capture and MCP read access:
 
@@ -132,6 +140,39 @@ not model use. Fresh prompts retain their original prior-exposure classification
 Session exposure summaries retain the most recent 32 entries and disclose an
 omission count. Earlier episode receipts and prior-exposure flags remain intact;
 repeated profile delivery does not itself create a capture gap.
+
+### Collect explicit statements without a model
+
+With an existing profile read grant and delivery enabled, `Stop` processes the
+closed episode locally. Appended later context triggers reprocessing of the
+previous closed episode; changed bindings require authorship review again.
+`Stop` is a response boundary, not verified task completion.
+
+| Local candidate | Boundary |
+|---|---|
+| Detector | `persona-explicit-v2`, shared with transcript collection |
+| Text | Exact eligible user-prose quotation, no inferred role, motive or result |
+| Bounds | First 128 lines per user prompt, at most 8 drafts per episode, complete statement of at most 200 characters |
+| Exclusions | Incomplete capture, generated input, code, quotations, pasted wrappers and credential-like text |
+| Repeat | Checkpoint by episode revision and processor fingerprint, including empty results |
+| Prior profile/refiner exposure | Candidate remains inspectable; dependent support cannot be promoted as independent evidence |
+| Publication | No automatic acceptance; authorship attestation and habit review remain required |
+| Opt-out | `--disable-profile` stops automatic local extraction as well as delivery; capture continues |
+| Quality | Synthetic regression checks, no measured real-history accuracy or task benefit |
+
+Inspect candidates with `hooks show` and `hooks draft`. For an explicit local
+replay of retained complete episodes:
+
+```bash
+mastermind miner hooks mine-local --project-root . --limit 16
+mastermind miner hooks mine-local --project-root . --limit 16 --after '<next_after>'
+```
+
+This command invokes no provider and cannot repair missing evidence. Its limit
+is 1–16 episodes per page. Start a fresh pass to reconsider revised episodes.
+Status exposes this path under `pipeline.local_analysis` and reports task
+benefit as `unmeasured`. Git refresh success and hook delivery are separate
+observations; neither establishes correctness of a personal claim.
 
 ### Refine every admitted prompt
 

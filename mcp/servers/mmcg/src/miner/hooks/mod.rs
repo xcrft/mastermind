@@ -7,6 +7,7 @@ mod fence;
 mod influence;
 mod install;
 mod journal;
+mod local;
 mod profile_context;
 pub mod readiness;
 mod refiner;
@@ -150,7 +151,7 @@ pub fn setup_report(
     receipt["profile_delivery"] = json!({"client_id":effective_profile,"requires_existing_read_grant":true,
         "trigger":"UserPromptSubmit","selection":"task_paths_role_and_workflow","requires_refiner":false,
         "note":"Each event retains prior context exposure. Dependent observations can be inspected but cannot count as unexposed habit support."});
-    receipt["next"]=json!("Restart a client session after setup. Collection remains local; analyze explicitly selects a processor. User-channel citations require authorship attestation and habit review.");
+    receipt["next"]=json!("Restart a client session after setup. With profile delivery enabled, Stop collects local explicit-statement candidates. Semantic analysis selects a processor explicitly. User-channel citations require authorship attestation and habit review.");
     Ok(receipt)
 }
 
@@ -176,6 +177,17 @@ pub fn configured_profile_client(root: &Path, client_id: &str) -> Result<Option<
         }
     }
     Ok(crate::onboarding::profile_access(&root, client_id)?.then(|| client_id.to_owned()))
+}
+
+/// Completion records this optional local refresh independently from its
+/// correctness verdict. A failed persona refresh cannot approve or fail a task.
+pub fn refresh_task_profile(root: &Path) -> Option<Value> {
+    let reader = ["claude", "codex"]
+        .into_iter()
+        .find_map(|client| configured_profile_client(root, client).ok().flatten())?;
+    Some(profile::refresh_for_task(root, &reader).unwrap_or_else(
+        |_| json!({"status":"failed","reason":"local_profile_refresh_unavailable","model":false}),
+    ))
 }
 
 pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {
@@ -364,6 +376,14 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     }
     let receipt = db.receive(&grant, incoming, &project, &repository)?;
     delivery.clear()?;
+    if kind == "Stop" && matches!(receipt["status"].as_str(), Some("recorded" | "duplicate")) {
+        if let Some(episode) = receipt["episode"].as_str() {
+            local::automatic(&mut db, &grant, episode);
+        }
+    }
+    if let Some(episode) = receipt["revised_episode"].as_str() {
+        local::automatic(&mut db, &grant, episode);
+    }
     let mut contexts = Vec::new();
     if kind == "UserPromptSubmit" && receipt["status"] == "recorded" {
         if let (Some(episode), Some(event_id), Some(original)) = (
@@ -591,6 +611,10 @@ pub fn show(episode: &str) -> Result<(), Error> {
         &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,
         "note":"User-channel text is unverified authorship. Stop is an observed boundary, not task completion. Tool output is not proof of a human preference."}),
     )
+}
+
+pub fn mine_local(root: &Path, limit: usize, after: &str) -> Result<(), Error> {
+    print(&local::mine(root, limit, after)?)
 }
 
 pub fn analyze(

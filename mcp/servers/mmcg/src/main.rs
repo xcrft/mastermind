@@ -1073,6 +1073,15 @@ enum MinerCmd {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    /// Extract explicit-statement candidates locally. No model or publication.
+    MineLocal {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, default_value_t=4, value_parser=clap::value_parser!(u16).range(1..=16))]
+        limit: u16,
+        #[arg(long)]
+        after: Option<String>,
+    },
     /// Manage one explicitly configured, bounded background mining worker.
     Worker {
         #[command(subcommand)]
@@ -2801,6 +2810,17 @@ fn run_cli_inner(
         Cmd::Miner(MinerCmd::Hooks(command)) => {
             use mmcg::miner::hooks;
             match command {
+                HookCmd::MineLocal {
+                    project_root,
+                    limit,
+                    after,
+                } => {
+                    hooks::mine_local(
+                        &project_root,
+                        limit as usize,
+                        after.as_deref().unwrap_or(""),
+                    )?;
+                }
                 HookCmd::Worker { cmd } => {
                     let result = match cmd {
                         HookWorkerCmd::Start {

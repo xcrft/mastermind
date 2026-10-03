@@ -1145,6 +1145,7 @@ mod tests {
             invocation_required: false,
             semantic_review_required: false,
             semantic_review_sha256: None,
+            profile_refresh: None,
         };
         std::fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
     }

@@ -674,6 +674,43 @@ fn native_fixture_helper() {
 }
 
 #[test]
+fn reviewed_completion_refreshes_only_committed_profile_evidence_without_a_model() {
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.home.join(".mastermind/style.md")).unwrap();
+    fixture.write(".git/info/exclude", ".claude/settings.local.json\n");
+    assert_success(&fixture.run(&["miner", "access", "grant", "--client", "claude"]));
+    assert_success(&fixture.run(&["miner", "hooks", "setup", "--client", "claude", "--write"]));
+    let fixture = fixture.hold_external();
+    fixture.manual_positive();
+    let head = String::from_utf8(fixture.git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    let state = fixture.state();
+    assert_eq!(state["status"], "learned");
+    let refresh = &state["profile_refresh"];
+    assert_eq!(refresh["status"], "refreshed");
+    assert_eq!(refresh["source"], "committed_git");
+    assert_eq!(refresh["source_snapshot"], head.trim());
+    assert_eq!(refresh["repo_commits"], 1);
+    assert_eq!(refresh["model"], false);
+    assert_eq!(refresh["personal_claims_accepted"], 0);
+    assert_eq!(fixture.calls("reviewer"), 0);
+    let conn = rusqlite::Connection::open(fixture.home.join(".mastermind/style.db")).unwrap();
+    for table in [
+        "feedback_acceptance",
+        "persona_habit_observation",
+        "persona_review_event",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    let before = fs::read(fixture.root.join(STATE)).unwrap();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fs::read(fixture.root.join(STATE)).unwrap(), before);
+}
+
+#[test]
 fn standalone_native_review_binds_exact_input_and_result_and_preserves_executor_evidence() {
     let fixture = Fixture::held();
     let executor = fs::read(fixture.root.join(EXECUTOR_RECEIPT)).unwrap();

@@ -16,6 +16,9 @@
 |---|---|
 | Initial selection | Explicit `miner collect` |
 | Later refresh | `miner sync` rereads registered selection |
+| Native local hooks | Enabled profile delivery processes complete closed episodes at `Stop` and on later context append, without a model |
+| Hook candidate bounds | Exact eligible user prose, first 128 lines per prompt, at most 8 drafts, complete statement up to 200 characters |
+| Hook replay | Explicit `miner hooks mine-local`, no repair of missing events |
 | Extractor fingerprint change | Recollect and inspect retained observations |
 | Changed evidence binding | Rebind and review |
 | Extractor upgrade | Cannot accept a claim |
@@ -76,6 +79,12 @@ cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --lib --locked \
 
 Synthetic improvements do not establish real-history accuracy. This release
 makes no such accuracy claim.
+
+The local hook adapter reuses this lexical detector and applies the episode's
+whole-text prose, source-revision and coverage guards. Its `explicit_statement`
+drafts are unreviewed quotations, not automatically accepted habits. Adapter
+tests check bounds, excluded material, replay, opt-out and prior-exposure
+restrictions. They do not add independent labels or establish task benefit.
 
 See [persona commands](persona.md) for curation and publication, and the
 [mining contract](persona-mining-contract.md) for Git measurements.

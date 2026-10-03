@@ -272,6 +272,10 @@ fn unavailable_capture_journal_preserves_other_readiness_observations() {
     assert_eq!(status["status"], "unavailable");
     assert_eq!(status["readiness"]["capture"]["status"], "unavailable");
     assert_eq!(
+        status["readiness"]["pipeline"]["local_analysis"]["status"],
+        "unavailable"
+    );
+    assert_eq!(
         status["readiness"]["native_registration"]["status"],
         "current"
     );

@@ -18,7 +18,7 @@ pub mod sources;
 
 // Includes detector, attribution adapters and segmentation. Bump whenever an
 // input can produce a different set of candidates or provenance bindings.
-const EXTRACTOR: &str = "persona-explicit-v2";
+pub(crate) const EXTRACTOR: &str = "persona-explicit-v2";
 const MAX_FILES: usize = 16;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LINES: usize = 1_000_000;
@@ -38,7 +38,17 @@ fn detect_version(
     turn: &HumanTurn,
     expanded: bool,
 ) -> Option<(String, &'static str, &'static str)> {
-    let quote = feedback::single_line(&turn.text, "candidate quote", 8, 300).ok()?;
+    detect_text(&turn.text, expanded)
+}
+
+/// The hook collector shares the transcript detector, without asserting
+/// authorship or admitting its result as an accepted personal claim.
+pub(crate) fn explicit_statement(text: &str) -> Option<(String, &'static str, &'static str)> {
+    detect_text(text, true)
+}
+
+fn detect_text(text: &str, expanded: bool) -> Option<(String, &'static str, &'static str)> {
+    let quote = feedback::single_line(text, "candidate quote", 8, 300).ok()?;
     if quote.contains('?')
         || quote.chars().any(char::is_control)
         || feedback::looks_secret(&quote)
@@ -47,11 +57,11 @@ fn detect_version(
         return None;
     }
     // Never combine visible fragments across quoted/code/HTML material.
-    let visible: HashSet<usize> = crate::context_doctor::prose_lines(&turn.text)
+    let visible: HashSet<usize> = crate::context_doctor::prose_lines(text)
         .into_iter()
         .map(|line| line.index)
         .collect();
-    if crate::context_doctor::source_lines(&turn.text)
+    if crate::context_doctor::source_lines(text)
         .iter()
         .any(|line| !line.text.trim().is_empty() && !visible.contains(&line.index))
     {

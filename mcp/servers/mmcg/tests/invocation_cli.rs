@@ -616,6 +616,35 @@ fn native_executor_automatically_uses_the_configured_hook_audience_and_its_own_s
     let fixture = Fixture::new("repair");
     fixture.write(".git/info/exclude", ".claude/settings.local.json\n");
     fixture.seed_private_preference();
+    fs::remove_file(fixture.home.join(".mastermind/style.md")).unwrap();
+    assert_success(&fixture.run(&["miner", "profile", "--author", "invocation@example.invalid"]));
+    let db_path = fixture.home.join(".mastermind/style.db");
+    let repo_key = fixture.root.join(".git").canonicalize().unwrap();
+    let prior = ProfileStore::open_read_only(&db_path)
+        .unwrap()
+        .repo_meta(repo_key.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    fixture.write(
+        "service.py",
+        "# Second committed observation\ndef keep():\n    return 1\n",
+    );
+    for args in [
+        vec!["add", "service.py"],
+        vec!["commit", "-qm", "Add a committed observation"],
+        vec!["config", "user.name", "Unrelated current Git name"],
+    ] {
+        assert_success(&fixture.command("/usr/bin/git").args(args).output().unwrap());
+    }
+    let head = fixture
+        .command("/usr/bin/git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_success(&head);
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+    assert_ne!(prior.1.as_deref(), Some(head.as_str()));
+    fixture.index();
     assert_success(&fixture.run(&[
         "miner",
         "hooks",
@@ -641,6 +670,15 @@ fn native_executor_automatically_uses_the_configured_hook_audience_and_its_own_s
         json!(["service.py"])
     );
     assert!(packet.to_string().contains(PREFERENCE));
+    let store = ProfileStore::open_read_only(&db_path).unwrap();
+    let current = store
+        .repo_meta(repo_key.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.0, "invocation@example.invalid");
+    assert_eq!(current.1.as_deref(), Some(head.as_str()));
+    assert_eq!(store.feedback().unwrap().len(), 1);
+    assert!(store.habits().unwrap().is_empty());
 }
 
 #[test]

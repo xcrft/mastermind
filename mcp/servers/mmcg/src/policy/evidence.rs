@@ -1462,6 +1462,7 @@ mod tests {
                 invocation_required: false,
                 semantic_review_required: false,
                 semantic_review_sha256: None,
+                profile_refresh: None,
             })
             .unwrap(),
         )

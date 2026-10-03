@@ -91,9 +91,12 @@ pub enum SeedOutcome {
         pruned: usize,
         synthesized: bool,
         empty: bool,
+        source_snapshot: String,
+        profile_revision: String,
     },
     NoCommits {
         author: String,
+        source_snapshot: String,
     },
 }
 
@@ -109,6 +112,41 @@ pub fn mine(
 ) -> Result<SeedOutcome, Box<dyn std::error::Error>> {
     let db_path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
     mine_to_paths(repo_root, author, force, deep, &db_path, &profile_path()?)
+}
+
+/// Refresh committed Git observations for an already granted task audience.
+/// Existing author selection is preserved. No model, owner replacement or
+/// personal preference acceptance is part of this operation.
+pub fn refresh_for_task(
+    repo_root: &Path,
+    reader: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if !crate::onboarding::profile_access(repo_root, reader)? {
+        return Ok(serde_json::json!({"status":"access_denied","model":false}));
+    }
+    let path = store::ProfileStore::db_path().ok_or("could not resolve style store")?;
+    let key = repository_key(repo_root)?;
+    let author = {
+        let db = store::ProfileStore::open_read_only(&path)?;
+        db.repo_meta(&key)?.map(|(author, _, _)| author)
+    };
+    Ok(match mine(repo_root, author, false, false)? {
+        SeedOutcome::Enriched {
+            source_snapshot,
+            profile_revision,
+            repo_commits,
+            ..
+        } => {
+            serde_json::json!({"status":"refreshed","source":"committed_git",
+                "source_snapshot":source_snapshot,"profile_revision":profile_revision,
+                "repo_commits":repo_commits,"model":false,"personal_claims_accepted":0})
+        }
+        SeedOutcome::NoCommits {
+            source_snapshot, ..
+        } => {
+            serde_json::json!({"status":"no_authored_commits","source_snapshot":source_snapshot,"model":false})
+        }
+    })
 }
 
 fn mine_to_paths(
@@ -132,7 +170,10 @@ fn mine_to_paths(
     let history_ref = history_snapshot(repo_root)?;
     let mut prov = collect_provenance(repo_root, &author, &history_ref)?;
     if prov.commits_total == 0 {
-        return Ok(SeedOutcome::NoCommits { author });
+        return Ok(SeedOutcome::NoCommits {
+            author,
+            source_snapshot: history_ref,
+        });
     }
 
     let commit_msgs = collect_commits(repo_root, &author, LISTED_COMMIT_CAP, &history_ref)?;
@@ -275,6 +316,8 @@ fn mine_to_paths(
         pruned: pruned.len(),
         synthesized: candidate_saved,
         empty: published.rules == 0,
+        source_snapshot: history_ref,
+        profile_revision: published.revision,
     })
 }
 
@@ -594,7 +637,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = profile_path()?;
     match mine(repo_root, author, force, deep)? {
-        SeedOutcome::NoCommits { author } => {
+        SeedOutcome::NoCommits { author, .. } => {
             println!(
                 "No commits authored by `{author}` in {}. Nothing to profile.",
                 repo_root.display()
@@ -612,6 +655,7 @@ pub fn run(
             pruned,
             synthesized,
             empty,
+            ..
         } => {
             println!(
                 "Enriched {} as `{author}` — {rules} rule(s) across {repos} repo(s), \

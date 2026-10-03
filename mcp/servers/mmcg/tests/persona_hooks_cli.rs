@@ -15,6 +15,172 @@ const QUOTE: &str = "Before changing an API, check its callers and preserve the 
 const BEHAVIOR: &str = "Checks callers before changing an API contract";
 
 #[test]
+fn local_hook_candidates_are_automatic_idempotent_and_never_accept_a_claim() {
+    let f = Fixture::new();
+    for args in [
+        vec!["config", "user.name", "Hook Fixture"],
+        vec!["config", "user.email", "hooks@example.invalid"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["config", "core.hooksPath", ""],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&f.project)
+            .env("HOME", &f.home)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    for value in 0..8 {
+        fs::write(
+            f.project.join("service.py"),
+            format!("def keep():\n    if True:\n        return {value}\n"),
+        )
+        .unwrap();
+        for args in [
+            vec!["add", "service.py"],
+            vec!["commit", "-qm", "Local observation"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&f.project)
+                .env("HOME", &f.home)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+    }
+    let mined = f.run(&["miner", "profile"]);
+    assert!(mined.status.success(), "{mined:?}");
+    assert!(f
+        .run(&["miner", "access", "grant", "--client", "codex"])
+        .status
+        .success());
+    let configured = f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    assert_eq!(
+        configured["hook_config"]["hooks"]["Stop"][0]["hooks"][0]["statusMessage"],
+        "Mastermind: Capture response and collect local candidates"
+    );
+    f.event("local", "", "SessionStart", json!({"source":"startup"}));
+    let quote = "I prefer short code review replies.";
+    let output = f.native(json!({"session_id":"local","turn_id":"first","hook_event_name":"UserPromptSubmit","prompt":quote}));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("additionalContext"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let offered = parse(output);
+    assert!(offered["hookSpecificOutput"]["additionalContext"].is_string());
+    let stop = json!({"last_assistant_message":"The code review is complete."});
+    f.event("local", "first", "Stop", stop.clone());
+    let episode = f.episode("first");
+    let shown = f.success(&["miner", "hooks", "show", episode["id"].as_str().unwrap()]);
+    assert_eq!(shown["drafts"].as_array().unwrap().len(), 1);
+    let id = shown["drafts"][0]["id"].as_str().unwrap();
+    let draft = f.success(&["miner", "hooks", "draft", id]);
+    assert_eq!(draft["draft"]["content"]["behavior"], quote);
+    assert_eq!(draft["draft"]["processor"]["engine"], "local_explicit");
+    assert_eq!(draft["draft"]["processor"]["model"], false);
+    assert_eq!(draft["evidence_class"], "no_recorded_prior_exposure");
+    assert_eq!(draft["promotion_eligible"], true);
+    assert_eq!(draft["draft"]["attested"], false);
+    f.event("local", "first", "Stop", stop);
+    let replay = f.success(&["miner", "hooks", "mine-local", "--limit", "16"]);
+    assert_eq!(replay["model"], false);
+    assert_eq!(
+        replay["results"][0]["status"],
+        "already_analyzed_or_changed"
+    );
+    let replayed = f.success(&["miner", "hooks", "draft", id]);
+    assert_eq!(replayed["draft"]["revision"], draft["draft"]["revision"]);
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(
+        status["readiness"]["pipeline"]["local_analysis"]["completed_revisions"],
+        1
+    );
+
+    f.event(
+        "local",
+        "second",
+        "UserPromptSubmit",
+        json!({"prompt":"I prefer explicit code review results."}),
+    );
+    f.event(
+        "local",
+        "second",
+        "Stop",
+        json!({"last_assistant_message":"Reviewed."}),
+    );
+    let second = f.episode("second");
+    let shown = f.success(&["miner", "hooks", "show", second["id"].as_str().unwrap()]);
+    let dependent = f.success(&[
+        "miner",
+        "hooks",
+        "draft",
+        shown["drafts"][0]["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(dependent["evidence_class"], "dependent_observation");
+    assert_eq!(dependent["promotion_eligible"], false);
+    let revised = f.success(&["miner", "hooks", "draft", id]);
+    assert_eq!(revised["current"], true);
+    assert_ne!(revised["draft"]["revision"], draft["draft"]["revision"]);
+    let store = ProfileStore::open_read_only(&f.home.join(".mastermind/style.db")).unwrap();
+    assert!(store.habits().unwrap().is_empty());
+    assert!(store.feedback().unwrap().is_empty());
+}
+
+#[test]
+fn local_hook_candidates_require_complete_capture_and_respect_delivery_opt_out() {
+    let f = Fixture::new();
+    assert!(f
+        .run(&["miner", "access", "grant", "--client", "codex"])
+        .status
+        .success());
+    f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    let prompt = json!({"prompt":"I prefer short code review replies."});
+    f.event(
+        "missing-start",
+        "incomplete",
+        "UserPromptSubmit",
+        prompt.clone(),
+    );
+    f.event(
+        "missing-start",
+        "incomplete",
+        "Stop",
+        json!({"last_assistant_message":"Done."}),
+    );
+    let incomplete = f.episode("incomplete");
+    let shown = f.success(&["miner", "hooks", "show", incomplete["id"].as_str().unwrap()]);
+    assert!(shown["drafts"].as_array().unwrap().is_empty());
+    let replay = f.success(&["miner", "hooks", "mine-local"]);
+    assert_eq!(replay["results"][0]["status"], "incomplete");
+    f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--disable-profile",
+        "--write",
+    ]);
+    f.event("disabled", "", "SessionStart", json!({"source":"startup"}));
+    f.event("disabled", "opt-out", "UserPromptSubmit", prompt);
+    f.event(
+        "disabled",
+        "opt-out",
+        "Stop",
+        json!({"last_assistant_message":"Done."}),
+    );
+    let capture = f.episode("opt-out");
+    assert!(capture["coverage_gaps"].as_array().unwrap().is_empty());
+    let shown = f.success(&["miner", "hooks", "show", capture["id"].as_str().unwrap()]);
+    assert!(shown["drafts"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn large_tool_output_records_an_episode_gap_without_poisoning_future_capture() {
     let f = Fixture::new();
     f.capture("large-output", "before");

@@ -106,7 +106,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
             json!({"status":"unavailable","execution":"not_tested","reason":"refiner_configuration_unavailable"})
         }
     };
-    let profile_report = match &grant {
+    let mut profile_report = match &grant {
         Ok(Some(grant)) if grant.enabled && grant.profile_client.is_some() => {
             let reader = grant.profile_client.as_deref().unwrap();
             let allowed = crate::onboarding::profile_access(&root, reader);
@@ -119,6 +119,30 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         Ok(_) => json!({"status":"not_configured","requires_refiner":false}),
         Err(_) => json!({"status":"unavailable","reason":"capture_journal_unavailable"}),
     };
+    let (local_count, profile_offers) = match (&database, &grant) {
+        (Ok(Some(db)), Ok(Some(grant))) => (
+            db.local_analysis_count(client, &root, grant.generation)
+                .ok(),
+            db.profile_offer_count(client, &root, grant.generation).ok(),
+        ),
+        (Ok(None), _) | (_, Ok(None)) => (Some(0), Some(0)),
+        _ => (None, None),
+    };
+    profile_report["delivery"] = json!({
+        "status":match profile_offers { Some(0) => "not_observed", Some(_) => "offer_recorded", None => "unavailable" },
+        "current_generation_offers":profile_offers,
+        "meaning":"A committed offer receipt does not establish that the client received or followed the profile."
+    });
+    let local_report = json!({
+        "status":match profile_report["status"].as_str() {
+            Some("configured") => "configured", Some("unavailable") => "unavailable", _ => "disabled"
+        },
+        "engine":"local_explicit","model":false,
+        "trigger":["Stop","source_context_append"],"completed_revisions":local_count,
+        "output":"unreviewed_explicit_statement_candidates",
+        "publication":"authorship_attestation_and_review_required",
+        "quality":"synthetic_regression_only"
+    });
     let native = if cfg!(unix) {
         match install::configure(
             client,
@@ -239,8 +263,12 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "requested_mode":requested_mode,"analysis_requested":analysis_requested,
         "managed_analysis":mining["status"],"foreground_workers":"not_observed",
         "publication":"authorship_attestation_and_review_required",
+        "local_analysis":local_report,
+        "git_refresh":{"trigger":["native_executor_context","reviewed_task_completion"],
+            "source":"committed_git","model":false,"uncommitted_changes":"not_mined"},
+        "task_benefit":"unmeasured",
         "next_actions":next_actions,
-        "meaning":"Capture records events. Semantic analysis creates drafts only when requested; reviewed claims are published separately."
+        "meaning":"Profile-enabled hooks extract explicit local candidates after complete capture. Model analysis is separate. Only reviewed claims are published."
     });
     Ok(json!({
         "schema":1,"client":client,"project_root":root,"inspection":"read_only",

@@ -60,12 +60,19 @@ continuation can select the spec's paths and workflow. The planning workflow
 retrieves `mmcg_profile` again when its known scope differs from that selection.
 The native task controller automatically uses the project's configured Claude
 profile audience for `run-task --exec`, with `--profile-client` as an override.
-It supplies the executor's selected context packet and
+After task and native-client admission, it refreshes committed Git observations
+locally using the stored author selector, then supplies the executor's context packet and
 pins its receipt/revision before delivery. The manual auditor workflow can
 request an auditor slice for communication and focus. The native independent
 semantic reviewer runs without MCP or a personal profile. Personal context
 does not decide correctness or authorize tools. `style.md` remains a local
 inspection snapshot; it is never a replacement for denied MCP access.
+
+Reviewed task completion also refreshes Git observations and retains an optional
+`state.profile_refresh` receipt with the exact Git snapshot and published profile
+revision. No model or personal-claim acceptance is involved. Uncommitted edits
+are excluded. Refresh failures are recorded separately from the task verdict;
+read-only context previews do not trigger refresh.
 
 ## Revisions and budget
 

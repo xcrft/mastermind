@@ -27,6 +27,7 @@ const EVIDENCE_KINDS: &[&str] = &[
     "communication_preference",
     "tool_preference",
     "review_preference",
+    "explicit_statement",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

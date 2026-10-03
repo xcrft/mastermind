@@ -76,7 +76,8 @@ See [MCP arguments and result fields](mmcg.md#mcp-tools).
 
 | Entry point | Execution contract |
 |---|---|
-| [Native capture](../guides/persona-hooks.md) | Collects only |
+| [Native capture](../guides/persona-hooks.md) | Collects events and, with profile delivery enabled, bounded explicit-statement candidates. No provider or automatic acceptance |
+| `hooks mine-local` | Explicit bounded replay of complete episodes using the same local detector |
 | `hooks analyze` or foreground `hooks mine` | Explicitly selects a processor |
 | Custom processor | Direct argv, no inserted shell, caller permissions |
 

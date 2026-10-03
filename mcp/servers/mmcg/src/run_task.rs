@@ -110,6 +110,9 @@ pub struct RunState {
     /// Exact active local review bytes, never an independently signed verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_review_sha256: Option<String>,
+    /// Optional committed Git refresh, separate from the task's verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_refresh: Option<serde_json::Value>,
 }
 
 fn default_run_status() -> String {
@@ -2238,6 +2241,12 @@ fn complete_reviewed_task(
         );
         return Outcome::PostBroken;
     }
+    if let Some(refresh) = crate::miner::hooks::refresh_task_profile(repo_root) {
+        completed.profile_refresh = Some(refresh);
+        if save_state_in_repository(repo_root, state_path, &completed).is_err() {
+            eprintln!("Mastermind: optional profile refresh receipt could not be retained");
+        }
+    }
     println!("Task complete — semantic history review is resolved.");
     Outcome::PostHeld
 }
@@ -2915,6 +2924,7 @@ fn run_pre(
         invocation_required: opts.exec && !opts.pre_only,
         semantic_review_required: crate::acceptance::declared(&parsed).is_some(),
         semantic_review_sha256: None,
+        profile_refresh: None,
     };
     if let Err(e) = save_state_in_repository(repo_root, state_path, &state) {
         eprintln!("error: writing state `{}`: {e}", state_path.display());
@@ -3561,6 +3571,7 @@ verifications: []\n\
             invocation_required: false,
             semantic_review_required: false,
             semantic_review_sha256: None,
+            profile_refresh: None,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");

@@ -108,6 +108,8 @@ pub(super) fn configure(
             "PreToolUse" => "Mastermind: Record tool request",
             "PostToolUse" => "Mastermind: Record tool result",
             "PostToolUseFailure" => "Mastermind: Record tool failure",
+            "Stop" if profile_delivery =>
+                "Mastermind: Capture response and collect local candidates",
             "Stop" => "Mastermind: Record agent response",
             "SessionEnd" => "Mastermind: Record session end",
             "PreCompact" => "Mastermind: Record compaction boundary",

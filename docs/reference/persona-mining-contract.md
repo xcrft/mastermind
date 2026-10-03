@@ -7,6 +7,25 @@ formatters and model assistance remain attribution limits.
 
 For collection and review commands, see [Persona](persona.md).
 
+## Task loop verification
+
+| Local path | Established behavior |
+|---|---|
+| Prompt hook | Capture precedes profile offer; retained event influence cannot be cleared by incoming flags |
+| Response boundary | Complete closed episodes can produce bounded exact-statement drafts, without a provider or automatic acceptance |
+| Repeated boundary | Same episode revision and detector fingerprint do not create another analysis |
+| Later context | Reprocessing keeps the source binding current and resets changed authorship attestation |
+| Native executor | Refresh committed observations, preserve the stored author selector, select the executor's own scope, pin the delivered packet |
+| Reviewed task completion | Refresh committed observations after the completion verdict, record the Git snapshot separately |
+| Missing evidence or delivery opt-out | No automatic local candidate publication |
+| Independent review | Does not receive the personal profile |
+
+Isolated CLI tests exercise these links with synthetic hooks, Git history and
+native clients. They establish those tested control-flow properties. They do
+not establish client activation in a real session, honest human authorship,
+durable habits or a causal improvement in task results. None of these links
+turns the Wilson score below into a probability that a personal claim is true.
+
 ## Algorithmic contract
 
 | Symbol | Input |

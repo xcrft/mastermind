@@ -604,6 +604,7 @@ impl Journal {
             session.started = true;
         }
         let mut target = session.active.clone();
+        let mut revised_episode = None;
         if incoming.kind == "UserPromptSubmit" {
             if let Some(turn) = &incoming.native_turn {
                 if !episodes_for_turn(&tx, &sid, turn)?.is_empty() {
@@ -629,6 +630,7 @@ impl Journal {
                 }
                 push_event(&mut ep, correction);
                 save_episode(&tx, &ep)?;
+                revised_episode = Some(ep.id.clone());
             }
             let count: i64 = tx.query_row("SELECT count(*) FROM hook_episode", [], |r| r.get(0))?;
             if count >= MAX_EPISODES {
@@ -752,7 +754,10 @@ impl Journal {
         save_session(&tx, &session)?;
         finish(&tx, grant)?;
         tx.commit()?;
-        Ok(json!({"status":"recorded","event_id":event_id,"episode":target}))
+        Ok(
+            json!({"status":"recorded","event_id":event_id,"episode":target,
+            "revised_episode":revised_episode}),
+        )
     }
 
     pub fn expose(&mut self, grant: &Grant, episode: &str, packet: &Value) -> Result<(), Error> {
@@ -838,6 +843,45 @@ impl Journal {
         Ok(self
             .conn
             .query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
+    pub fn local_analysis_count(
+        &self,
+        client: &str,
+        root: &Path,
+        generation: i64,
+    ) -> Result<i64, Error> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM hook_analysis a JOIN hook_episode e ON e.id=a.episode
+             WHERE a.completed=1 AND a.processor=?1
+             AND json_extract(e.data,'$.client')=?2
+             AND json_extract(e.data,'$.project_root')=?3
+             AND json_extract(e.data,'$.generation')=?4",
+            params![
+                hash(&super::local::processor()),
+                client,
+                root.to_string_lossy(),
+                generation
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn profile_offer_count(
+        &self,
+        client: &str,
+        root: &Path,
+        generation: i64,
+    ) -> Result<i64, Error> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM hook_episode e, json_each(e.data,'$.exposures') x
+             WHERE json_extract(e.data,'$.client')=?1
+             AND json_extract(e.data,'$.project_root')=?2
+             AND json_extract(e.data,'$.generation')=?3
+             AND json_extract(x.value,'$.status')='offered'",
+            params![client, root.to_string_lossy(), generation],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn store_drafts(

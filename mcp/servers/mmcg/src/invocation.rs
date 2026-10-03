@@ -1097,6 +1097,14 @@ pub(crate) fn execute_with_feedback(
                     .map_err(|_| (Status::Failed, "invocation_guard_preparation_failed"))?,
             );
         }
+        if let Some(reader) = options.profile_client.as_deref() {
+            if crate::miner::profile::refresh_for_task(task.root.canonical_root(), reader).is_err()
+            {
+                eprintln!(
+                    "Mastermind: local Git profile refresh unavailable; task execution continues"
+                );
+            }
+        }
         let fm = task.spec.frontmatter.as_ref();
         let paths = fm
             .into_iter()

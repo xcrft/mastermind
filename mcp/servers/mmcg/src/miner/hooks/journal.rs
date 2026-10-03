@@ -45,6 +45,9 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_refiner (
                     client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
                     data TEXT, PRIMARY KEY(client,project_root));
+                CREATE TABLE IF NOT EXISTS hook_profile_delivery (
+                    client TEXT NOT NULL, project_root TEXT NOT NULL, disabled INTEGER NOT NULL,
+                    PRIMARY KEY(client,project_root));
                 CREATE TABLE IF NOT EXISTS hook_intake (
                     id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS hook_task_binding (
@@ -130,6 +133,8 @@ struct Session {
     previous_assistant: Option<EventInput>,
     exposures: Vec<Value>,
     #[serde(default)]
+    exposure_summaries_omitted: u64,
+    #[serde(default)]
     influence: Influence,
     episode_count: usize,
     #[serde(default)]
@@ -154,6 +159,8 @@ pub(super) struct Episode {
     pub closed: bool,
     pub open_tools: Vec<String>,
     pub exposures: Vec<Value>,
+    #[serde(default)]
+    pub prior_exposure_summaries_omitted: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,6 +370,24 @@ impl Journal {
         Ok(serde_json::from_str(&data)?)
     }
 
+    pub fn profile_delivery_disabled(&self, client: &str, root: &Path) -> Result<bool, Error> {
+        profile_delivery_disabled(&self.conn, client, root)
+    }
+
+    pub fn configure_profile_delivery(
+        &mut self,
+        client: &str,
+        root: &Path,
+        disabled: bool,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO hook_profile_delivery(client,project_root,disabled) VALUES(?1,?2,?3)
+             ON CONFLICT(client,project_root) DO UPDATE SET disabled=excluded.disabled",
+            params![client, root.to_string_lossy(), disabled],
+        )?;
+        Ok(())
+    }
+
     /// Aggregate this exact client's journal without returning source text or
     /// identities. Completeness concerns recorded capture metadata, not truth,
     /// authorship, independence or review eligibility of a semantic claim.
@@ -484,6 +509,7 @@ impl Journal {
             active: None,
             previous_assistant: None,
             exposures: vec![],
+            exposure_summaries_omitted: 0,
             influence: if incoming.fresh_start {
                 Influence::fresh()
             } else {
@@ -560,13 +586,7 @@ impl Journal {
         }
         if let Some(exposure) = &incoming.profile_exposure {
             session.influence.offer_profile();
-            if !session.exposures.contains(exposure) {
-                if session.exposures.len() >= 32 {
-                    add_gap(&mut session.gaps, "profile_exposure_limit");
-                } else {
-                    session.exposures.push(exposure.clone());
-                }
-            }
+            push_exposure(&mut session, exposure.clone());
         }
         let event = EventInput {
             influence: session.influence,
@@ -635,6 +655,7 @@ impl Journal {
                 closed: false,
                 open_tools: vec![],
                 exposures: session.exposures.clone(),
+                prior_exposure_summaries_omitted: session.exposure_summaries_omitted,
             };
             if !session.started {
                 add_gap(&mut ep.gaps, "missing_session_start");
@@ -771,15 +792,13 @@ impl Journal {
             packet[field].as_array().map(|items| items.iter().take(32)
             .map(|item|json!({"id":item[key],"review_revision":item["review_revision"]})).collect::<Vec<_>>()).unwrap_or_default()
         };
-        let receipt = json!({"status":"offered","packet_digest":hash(packet),"profile_revision":packet.get("profile_revision"),
-            "feedback":claims("feedback","key"),"habits":claims("habits","id")});
-        if !session.exposures.contains(&receipt) {
-            if session.exposures.len() >= 32 {
-                add_gap(&mut session.gaps, "profile_exposure_limit");
-            } else {
-                session.exposures.push(receipt.clone());
-            }
+        if self::profile_delivery_disabled(&tx, &grant.client, Path::new(&grant.project_root))? {
+            return Err("hook profile delivery is disabled".into());
         }
+        let receipt = json!({"status":"offered","packet_digest":hash(packet),"profile_revision":packet.get("profile_revision"),
+            "selection":packet.get("selection"),
+            "feedback":claims("feedback","key"),"habits":claims("habits","id")});
+        push_exposure(&mut session, receipt.clone());
         ep.exposures.push(receipt);
         session.influence.offer_profile();
         save_session(&tx, &session)?;
@@ -1118,6 +1137,39 @@ fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
         r.get(0)
     })?;
     Ok(serde_json::from_str(&data)?)
+}
+
+fn push_exposure(session: &mut Session, receipt: Value) {
+    if session.exposures.contains(&receipt) {
+        return;
+    }
+    // Event-level influence and each episode's delivery receipt remain durable.
+    // A bounded session summary must not turn normal repeated delivery into a
+    // capture gap or erase the fact that later input has prior exposure.
+    if session.exposures.len() >= 32 {
+        session.exposures.remove(0);
+        session.exposure_summaries_omitted = session.exposure_summaries_omitted.saturating_add(1);
+    }
+    session.exposures.push(receipt);
+}
+
+fn profile_delivery_disabled(conn: &Connection, client: &str, root: &Path) -> Result<bool, Error> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_profile_delivery')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT disabled FROM hook_profile_delivery WHERE client=?1 AND project_root=?2",
+            params![client, root.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 fn episodes_for_turn(conn: &Connection, session: &str, turn: &str) -> Result<Vec<String>, Error> {

@@ -1836,7 +1836,7 @@ pub fn render_release_notes(r: &ReleaseNotes) -> String {
 /// Top-level dispatcher — picks pre or post from flags + state presence, then
 /// calls that phase function. Pure I/O orchestration; the computational pieces
 /// above are independently testable.
-pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts) -> Outcome {
+pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, mut opts: RunOpts) -> Outcome {
     let state_path = state_file_path(repo_root, spec_path);
     if opts.auto_review
         && (opts.pre_only
@@ -1879,6 +1879,14 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, opts: RunOpts)
             return Outcome::PreFailed;
         }
     };
+    if opts.exec && opts.invocation.profile_client.is_none() {
+        match crate::miner::hooks::configured_profile_client(repo_root, "claude") {
+            Ok(reader) => opts.invocation.profile_client = reader,
+            Err(_) => eprintln!(
+                "Mastermind task profile omitted: project profile configuration is unavailable"
+            ),
+        }
+    }
     // Keep preflight and the complete native run in one controller critical
     // section. An older executor must never overwrite a newer iteration.
     // Verification commands only read controller state and use their own lock.

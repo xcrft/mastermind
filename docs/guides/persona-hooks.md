@@ -97,6 +97,42 @@ native registration and SessionStart recovery without fabricating past events.
 An absent refiner or miner is optional. Unknown or missing evidence is never a
 successful provider test. Status starts no process and changes no configuration.
 
+### Load the profile for each task
+
+With profile access enabled, every admitted `UserPromptSubmit` selects a local
+planner profile and offers it through `additionalContext`. This also works in
+capture mode with the refiner disabled. It makes no provider calls.
+
+```bash
+mastermind init --client all --mining capture --refiner off --profile-access on
+```
+
+Direct hook setup reuses the configured reader, or this native client's existing
+project read grant. Ordinary setup preserves the selection. It grants no new
+profile access. The hook selects literal repository paths from the original
+prompt. With no paths, language-scoped advice is withheld. An explicitly bound
+refiner continuation can use its current spec's declared paths and workflow;
+an ordinary request does not inherit the previous task's scope.
+
+`run-task --exec` automatically selects the configured Claude audience and
+retrieves an executor slice from the approved spec. `--profile-client` overrides
+that selection. Independent semantic review still receives no personal profile.
+
+To stop automatic delivery while keeping local capture and MCP read access:
+
+```bash
+mastermind miner hooks setup --client codex --disable-profile --write
+```
+
+This opt-out survives setup. An explicit `--profile-client codex` re-enables it;
+`init --profile-access on` also reconciles delivery for its selected clients.
+`hooks status` reports this component under `readiness.profile`. Exposure
+receipts retain the selected paths, role and workflow. They establish an offer,
+not model use. Fresh prompts retain their original prior-exposure classification.
+Session exposure summaries retain the most recent 32 entries and disclose an
+omission count. Earlier episode receipts and prior-exposure flags remain intact;
+repeated profile delivery does not itself create a capture gap.
+
 ### Refine every admitted prompt
 
 Select a processor once for this client and project:

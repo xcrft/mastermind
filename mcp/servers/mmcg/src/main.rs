@@ -549,7 +549,7 @@ enum Cmd {
         /// Native agent turn budget (1–100).
         #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..=100))]
         exec_max_turns: u32,
-        /// Existing profile client grant to use for this invocation's context packet.
+        /// Override the automatically selected project profile audience for this invocation.
         #[arg(long, requires = "exec")]
         profile_client: Option<String>,
         /// Skip the "index must exist and be non-empty" pre-check. Use for
@@ -1088,9 +1088,12 @@ enum HookCmd {
         write: bool,
         #[arg(long)]
         remove: bool,
-        /// Optionally offer reviewed context using an existing profile read grant.
-        #[arg(long)]
+        /// Select an existing profile reader. Otherwise reuse the project's granted client.
+        #[arg(long, conflicts_with = "disable_profile")]
         profile_client: Option<String>,
+        /// Disable automatic profile delivery while retaining capture and profile read access.
+        #[arg(long, conflicts_with = "remove")]
+        disable_profile: bool,
         /// Refine each admitted prompt with an explicitly selected provider.
         #[arg(long, value_parser=["claude"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
         refiner_provider: Option<String>,
@@ -2841,6 +2844,7 @@ fn run_cli_inner(
                     write,
                     remove,
                     profile_client,
+                    disable_profile,
                     refiner_provider,
                     refiner_processor,
                     refiner_args,
@@ -2860,6 +2864,7 @@ fn run_cli_inner(
                         write,
                         remove,
                         profile_client.as_deref(),
+                        disable_profile,
                         refiner.as_ref(),
                         disable_refiner,
                     )?;

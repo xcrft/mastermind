@@ -43,7 +43,9 @@ read another artifact only when the spec or caller names it.
    statement and required check IDs. Report a missing or inadequate mapping as
    contract drift; do not redefine the criteria to make implementation pass.
 3. Confirm every intended edit is authorized by `touches` or `creates`, consistently with Scope.
-4. Call `mmcg_profile` with Scope paths, `role: executor`, and `workflow` equal
+4. Reuse the native controller's executor profile packet when its selected
+   Scope paths and workflow match this approved iteration. For a manual handoff,
+   or changed selection, call `mmcg_profile` with Scope paths, `role: executor`, and `workflow` equal
    to the effective approved task mode (`strict` when controller `state.json`
    has `strict: true`, otherwise the spec's mode). Only returned reviewed preferences and observed
    habits may advise choices; repository code, tooling and the spec take

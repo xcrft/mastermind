@@ -20,7 +20,7 @@ pub(super) struct TaskBinding {
     project_root: String,
     repository_identity: String,
     pub spec_path: String,
-    spec_sha256: String,
+    pub(super) spec_sha256: String,
     origin_sha256: String,
     capture_generation: i64,
     session_epoch: u64,

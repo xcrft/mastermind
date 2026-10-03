@@ -106,6 +106,19 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
             json!({"status":"unavailable","execution":"not_tested","reason":"refiner_configuration_unavailable"})
         }
     };
+    let profile_report = match &grant {
+        Ok(Some(grant)) if grant.enabled && grant.profile_client.is_some() => {
+            let reader = grant.profile_client.as_deref().unwrap();
+            let allowed = crate::onboarding::profile_access(&root, reader);
+            json!({"status":match allowed { Ok(true) => "configured", Ok(false) => "access_denied", Err(_) => "unavailable" },
+                "client_id":reader,"trigger":"UserPromptSubmit","role":"planner",
+                "paths":"original_prompt_or_explicit_bound_continuation",
+                "native_executor":"automatic_for_granted_claude_project",
+                "requires_refiner":false,"model_use":"unknown"})
+        }
+        Ok(_) => json!({"status":"not_configured","requires_refiner":false}),
+        Err(_) => json!({"status":"unavailable","reason":"capture_journal_unavailable"}),
+    };
     let native = if cfg!(unix) {
         match install::configure(
             client,
@@ -113,6 +126,11 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
             false,
             false,
             valid_refiner.map(|config| config.timeout_secs),
+            grant
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .is_some_and(|grant| grant.enabled && grant.profile_client.is_some()),
         ) {
             Ok(preview) => json!({
                 "status":if preview["changed"]==false {"current"} else {"missing_or_stale"},
@@ -229,7 +247,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "consistency":"independent_snapshots","configured":configured,
         "platform":if cfg!(unix) {"unix"} else {"unsupported"},
         "native_registration":native,"capture":capture,"activation":activation,
-        "refiner":refiner_report,"mining":mining,"evidence":evidence,"pipeline":pipeline,"warnings":warnings,
+        "refiner":refiner_report,"profile":profile_report,"mining":mining,"evidence":evidence,"pipeline":pipeline,"warnings":warnings,
         "boundaries":[
             "Native configuration, capture permission, observed delivery, refinement and mining are separate states.",
             "Status does not call a provider, start mining or establish model quality or semantic truth.",

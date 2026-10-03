@@ -63,9 +63,9 @@ The graph is syntactic evidence. Preserve collision, precision, stale-index and
 truncation notes. Work inline for one or two lookups. Use the researcher for
 bounded batches and the investigator for unknown-cause bugs.
 
-When the author has a profile, call `mmcg_profile` with the planned paths,
-`role: planner`, and `workflow` equal to the selected task mode (`direct`,
-`verified`, or `strict`). Use only returned reviewed preferences and observed
+Reuse a hook profile only for matching planner paths and mode. Otherwise call
+`mmcg_profile` with those paths, `role: planner`, and the selected `workflow`
+(`direct`, `verified`, or `strict`). Use only returned reviewed preferences and observed
 habits that apply to this selection. The task's instructions, repository code,
 tooling, and approved contract take precedence. Preserve claim IDs, review
 revisions, store/view revisions, source verification and omissions in the

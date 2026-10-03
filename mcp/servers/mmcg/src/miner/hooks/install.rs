@@ -36,6 +36,7 @@ pub(super) fn configure(
     write: bool,
     remove: bool,
     refiner_timeout: Option<u64>,
+    profile_delivery: bool,
 ) -> Result<Value, Box<dyn Error>> {
     if !cfg!(unix) {
         return Err("native hook command installation currently requires a Unix platform".into());
@@ -94,6 +95,12 @@ pub(super) fn configure(
         let mut event_handler = handler.clone();
         event_handler["statusMessage"] = json!(match *event {
             "SessionStart" => "Mastermind: Record session start",
+            "UserPromptSubmit" if refiner_timeout.is_some() && profile_delivery => {
+                "Mastermind: Capture and refine prompt with task profile"
+            }
+            "UserPromptSubmit" if profile_delivery => {
+                "Mastermind: Capture prompt and load task profile"
+            }
             "UserPromptSubmit" if refiner_timeout.is_some() => {
                 "Mastermind: Refine and capture user prompt"
             }
@@ -162,7 +169,7 @@ pub(super) fn configure(
         "local_hooks_disabled": original.get("disableAllHooks").and_then(Value::as_bool) == Some(true),
         "platform": "unix",
         "coverage": "native_events_only",
-        "purpose": "local mining capture and optional prompt refinement; these hooks do not enforce action permissions",
+        "purpose": "local capture, task profile context and optional prompt refinement; these hooks do not enforce action permissions",
         "limits": limits,
         "documentation": documentation,
     }))

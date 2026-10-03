@@ -238,7 +238,7 @@ impl Fixture {
         self.episode(turn)
     }
     fn episode(&self, turn: &str) -> Value {
-        let list = self.success(&["miner", "hooks", "episodes"]);
+        let list = self.success(&["miner", "hooks", "episodes", "--limit", "100"]);
         list["episodes"]
             .as_array()
             .unwrap()
@@ -667,6 +667,155 @@ fn offered_profile_preserves_original_observation_and_restricts_later_echo_promo
     ]);
     assert!(!result.status.success());
     assert_eq!(f.habit().episodes, count);
+}
+
+#[test]
+fn every_prompt_selects_its_own_profile_without_a_refiner_and_setup_preserves_the_reader() {
+    let f = Fixture::new();
+    for (session, turn) in [("one", "first"), ("two", "second")] {
+        let captured = f.capture(session, turn);
+        f.propose(&f.analyze(&captured));
+    }
+    assert!(f.observe().status.success());
+    f.profile();
+    f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--profile-client",
+        "fixture",
+        "--write",
+    ]);
+    let refreshed = f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    assert_eq!(refreshed["capture_grant"]["profile_client"], "fixture");
+    assert_eq!(refreshed["refiner"]["status"], "not_configured");
+    f.event("automatic", "", "SessionStart", json!({"source":"startup"}));
+    let prompts = [
+        (
+            "rust".to_owned(),
+            "Fix `src/api.rs`".to_owned(),
+            json!(["src/api.rs"]),
+        ),
+        (
+            "python".to_owned(),
+            "Check src/api.py".to_owned(),
+            json!(["src/api.py"]),
+        ),
+        (
+            "unknown".to_owned(),
+            "Исправь следующую задачу".to_owned(),
+            json!([]),
+        ),
+    ]
+    .into_iter()
+    .chain((0..37).map(|index| {
+        let path = format!("src/task-{index}.rs");
+        (
+            format!("task-{index}"),
+            format!("Inspect {path}"),
+            json!([path]),
+        )
+    }));
+    for (turn, prompt, paths) in prompts {
+        let output = f.event(
+            "automatic",
+            &turn,
+            "UserPromptSubmit",
+            json!({"prompt":prompt}),
+        );
+        let context = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let packet: Value = serde_json::from_str(context.split_once('\n').unwrap().1).unwrap();
+        assert_eq!(packet["selection"]["paths"], paths);
+        assert_eq!(packet["selection"]["role"], "planner");
+        assert!(packet["selection"]["workflow"].is_null());
+        assert_eq!(
+            packet["task_context"]["source"],
+            "original_prompt_path_literals"
+        );
+        assert_eq!(packet["habits"][0]["behavior"], BEHAVIOR);
+        f.event(
+            "automatic",
+            &turn,
+            "Stop",
+            json!({"last_assistant_message":"Done"}),
+        );
+        let episode = f.episode(&turn);
+        let retained = f.success(&["miner", "hooks", "show", episode["id"].as_str().unwrap()]);
+        assert_eq!(
+            retained["capture"]["exposures"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["selection"]["paths"],
+            paths
+        );
+        assert!(retained["intake"].is_null());
+        assert!(episode["coverage_gaps"].as_array().unwrap().is_empty());
+        let original = episode["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "UserPromptSubmit")
+            .unwrap();
+        assert_eq!(
+            original["influence"]["prior_profile_context"],
+            turn != "rust"
+        );
+        if turn == "task-36" {
+            assert!(
+                retained["capture"]["prior_exposure_summaries_omitted"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+        }
+    }
+}
+
+#[test]
+fn existing_client_grant_enables_delivery_and_explicit_opt_out_survives_setup() {
+    let f = Fixture::new();
+    assert!(f
+        .run(&["miner", "access", "grant", "--client", "codex"])
+        .status
+        .success());
+    let automatic = f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    assert_eq!(automatic["capture_grant"]["profile_client"], "codex");
+    assert_eq!(automatic["readiness"]["profile"]["status"], "configured");
+    let disabled = f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--disable-profile",
+        "--write",
+    ]);
+    assert!(disabled["capture_grant"]["profile_client"].is_null());
+    let repeated = f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    assert!(repeated["capture_grant"]["profile_client"].is_null());
+    f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--profile-client",
+        "codex",
+        "--write",
+    ]);
+    let enabled = f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    assert_eq!(enabled["capture_grant"]["profile_client"], "codex");
+    assert!(f
+        .run(&["miner", "access", "revoke", "--client", "codex"])
+        .status
+        .success());
+    let readiness = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(readiness["readiness"]["profile"]["status"], "access_denied");
 }
 
 #[test]

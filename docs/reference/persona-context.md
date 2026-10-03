@@ -53,8 +53,14 @@ The MCP equivalent is:
 | Personal advice | Subordinate to explicit tasks, code/tooling contracts and product requirements |
 | Explicit paths with no applicable language detector | Excludes other languages' conventions and language-scoped preferences. Unknown extensions do not disable the path filter |
 
-The planning workflow retrieves a planner slice through `mmcg_profile`. The
-native task controller supplies the executor's selected context packet and
+The native prompt hook offers a planner slice on every admitted prompt when
+profile delivery is enabled. It selects literal task paths without a provider;
+missing paths withhold language-scoped advice. A current explicitly bound
+continuation can select the spec's paths and workflow. The planning workflow
+retrieves `mmcg_profile` again when its known scope differs from that selection.
+The native task controller automatically uses the project's configured Claude
+profile audience for `run-task --exec`, with `--profile-client` as an override.
+It supplies the executor's selected context packet and
 pins its receipt/revision before delivery. The manual auditor workflow can
 request an auditor slice for communication and focus. The native independent
 semantic reviewer runs without MCP or a personal profile. Personal context

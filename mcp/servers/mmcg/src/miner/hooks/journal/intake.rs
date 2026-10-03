@@ -86,6 +86,29 @@ impl Journal {
         }).transpose()
     }
 
+    pub fn profile_task(&self, episode: &str) -> Result<Option<(String, String, String)>, Error> {
+        let Some(summary) = self.intake_for_episode(episode)? else {
+            return Ok(None);
+        };
+        let receipt = self.intake(summary["id"].as_str().ok_or("intake id unavailable")?)?;
+        if receipt.status != "offered"
+            || !receipt.response.as_ref().is_some_and(|response| {
+                response.workflow_intent == refiner::Intent::ContinueActive
+                    && response.action != refiner::Action::Ask
+            })
+        {
+            return Ok(None);
+        }
+        let (epoch, binding) = super::task::active(&self.conn, &receipt.input.session_id)?;
+        Ok(binding
+            .filter(|binding| {
+                epoch == receipt.session_epoch
+                    && Some(&binding.revision) == receipt.task_binding_revision.as_ref()
+                    && Some(&binding.spec_path) == receipt.input.active_task.as_ref()
+            })
+            .map(|binding| (binding.spec_path, binding.revision, binding.spec_sha256)))
+    }
+
     pub fn begin_intake(
         &mut self,
         grant: &Grant,
@@ -309,13 +332,7 @@ fn mark_refiner_exposure(conn: &Connection, receipt: &IntakeReceipt) -> Result<(
     // has prior advisory exposure even if native use remains unverified.
     session.influence.offer_refiner();
     let exposure = json!({"status":"refiner_context_offered"});
-    if !session.exposures.contains(&exposure) {
-        if session.exposures.len() >= 32 {
-            add_gap(&mut session.gaps, "profile_exposure_limit");
-        } else {
-            session.exposures.push(exposure);
-        }
-    }
+    push_exposure(&mut session, exposure);
     ep.exposures
         .push(json!({"status":"refiner_context_offered","intake_id":receipt.input.id}));
     save_session(conn, &session)?;

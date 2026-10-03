@@ -74,6 +74,127 @@ print(json.dumps(response, ensure_ascii=False))
 "#;
 
 #[test]
+fn profile_uses_only_the_explicit_continuation_scope_and_stays_separate_from_refinement() {
+    for client in ["claude", "codex"] {
+        let f = Fixture::new("activation");
+        f.setup(client, "8");
+        assert!(f
+            .run(&["miner", "access", "grant", "--client", client])
+            .status
+            .success());
+        let mut store =
+            mmcg::miner::store::ProfileStore::open(&f.home.join(".mastermind/style.db")).unwrap();
+        let commits = (0..8)
+            .map(|index| mmcg::miner::store::CommitEvidence {
+                sha: format!("{index:040}"),
+                authored_at: "2026-09-01".into(),
+                counts: [("decl.const".to_owned(), 3)].into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        store
+            .upsert_repo(
+                "/synthetic",
+                &mmcg::miner::store::RepoProvenance {
+                    author: "Fixture".into(),
+                    commits_total: 8,
+                    commits_sampled: 8,
+                    added_lines_sampled: 24,
+                    latest_sha: None,
+                    latest_date: None,
+                    mined_at_epoch: 1,
+                    extractor: String::new(),
+                },
+                &[],
+                &commits,
+                &[],
+            )
+            .unwrap();
+        drop(store);
+        f.success(&["miner", "hooks", "setup", "--client", client, "--write"]);
+        f.start(client, "task-profile");
+        f.native(
+            client,
+            &f.prompt("task-profile", "one", "Use Mastermind for this task."),
+        );
+        let first = f.receipts().remove(0);
+        let spec = ".mastermind/tasks/001-profile/spec.md";
+        fs::create_dir_all(f.project.join(spec).parent().unwrap()).unwrap();
+        fs::write(
+            f.project.join(spec),
+            "---\nmode: verified\ntouches: [{file: src/api.py}]\ncreates: [web/new.ts]\n---\n# Inspect\n",
+        )
+        .unwrap();
+        let binding = f.success(&[
+            "miner",
+            "hooks",
+            "bind-task",
+            first["input"]["id"].as_str().unwrap(),
+            "--spec",
+            spec,
+        ]);
+        f.native(client, &f.event("task-profile", "one", "Stop"));
+        f.mode("continuation");
+        let continued = f.native(
+            client,
+            &f.prompt("task-profile", "two", "Continue the bound task."),
+        );
+        let context = continued["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("bound_active_task"));
+        assert!(context.len() <= 8 * 1024);
+        let selected: Value = serde_json::from_str(
+            context
+                .rsplit("\n\n")
+                .next()
+                .unwrap()
+                .split_once('\n')
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(
+            selected["selection"]["paths"],
+            json!(["src/api.py", "web/new.ts"])
+        );
+        assert_eq!(selected["selection"]["role"], "planner");
+        assert_eq!(selected["selection"]["workflow"], "verified");
+        assert_eq!(selected["task_context"]["source"], "bound_task");
+        assert_eq!(
+            selected["task_context"]["task_binding_revision"],
+            binding["binding"]["revision"]
+        );
+        f.native(client, &f.event("task-profile", "two", "Stop"));
+        f.mode("ordinary");
+        let unrelated = f.native(
+            client,
+            &f.prompt("task-profile", "three", "Inspect src/other.rs."),
+        );
+        let context = unrelated["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        let selected: Value = serde_json::from_str(
+            context
+                .rsplit("\n\n")
+                .next()
+                .unwrap()
+                .split_once('\n')
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(selected["selection"]["paths"], json!(["src/other.rs"]));
+        assert!(selected["selection"]["workflow"].is_null());
+        assert_eq!(
+            selected["task_context"]["source"],
+            "original_prompt_path_literals"
+        );
+        assert!(selected["task_context"]["task_binding_revision"].is_null());
+        assert_eq!(f.calls().len(), 3);
+    }
+}
+
+#[test]
 fn bound_intake_survives_tool_events_and_routes_only_its_session() {
     let f = Fixture::new("activation");
     f.setup("claude", "8");

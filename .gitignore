@@ -35,3 +35,6 @@ scratch/
 
 # Claude Code per-machine permissions allowlist with absolute paths.
 .claude/settings.local.json
+
+# Codex per-machine hooks with absolute executable paths.
+.codex/hooks.json

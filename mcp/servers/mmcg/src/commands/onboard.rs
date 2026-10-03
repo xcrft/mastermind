@@ -415,6 +415,7 @@ fn configure_hooks(
         true,
         mining == Mining::Off,
         access.then_some(client),
+        !access,
         refiner,
         refiner.is_none(),
     )

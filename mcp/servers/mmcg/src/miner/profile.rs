@@ -2996,7 +2996,8 @@ fn view_at_with_verifier(
         .iter()
         .filter(|rule| match rule.scope {
             RuleScope::Language(tags) => {
-                paths.is_empty() || tags.split('/').any(|tag| codes.contains(tag))
+                (paths.is_empty() && role.is_none() && workflow.is_none())
+                    || tags.split('/').any(|tag| codes.contains(tag))
             }
             _ => true,
         })
@@ -3083,7 +3084,7 @@ fn view_at_with_verifier(
     let mut packet = json!({
         "schema_version": 2,
         "status": status,
-        "selection": { "role": role, "workflow": workflow },
+        "selection": { "paths": paths, "role": role, "workflow": workflow },
         "store_revision": stored_profile_revision,
         "profile_revision": selection_revision,
         "revision_scope": "selected_claims_and_git_aggregate",
@@ -3211,7 +3212,7 @@ fn feedback_applies(
     match scope.split_once(':') {
         None => scope == "global",
         Some(("language", value)) => {
-            paths.is_empty()
+            (paths.is_empty() && role.is_none() && workflow.is_none())
                 || languages
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(value))
@@ -3727,12 +3728,18 @@ mod tests {
                     &mut Current,
                 )
                 .unwrap();
-                assert!(packet["conventions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|rule| rule["statement"].as_str().unwrap().contains("TS/JS")));
-                assert_eq!(packet["feedback"].as_array().unwrap().len(), 2);
+                assert!(
+                    packet["conventions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|rule| rule["statement"].as_str().unwrap().contains("TS/JS"))
+                        == !paths.is_empty()
+                );
+                assert_eq!(
+                    packet["feedback"].as_array().unwrap().len(),
+                    if paths.is_empty() { 0 } else { 2 }
+                );
             }
         }
     }

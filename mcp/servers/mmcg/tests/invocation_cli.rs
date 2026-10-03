@@ -612,6 +612,65 @@ fn intake_binding_reaches_native_checks_review_and_historical_completion() {
 }
 
 #[test]
+fn native_executor_automatically_uses_the_configured_hook_audience_and_its_own_scope() {
+    let fixture = Fixture::new("repair");
+    fixture.write(".git/info/exclude", ".claude/settings.local.json\n");
+    fixture.seed_private_preference();
+    assert_success(&fixture.run(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "claude",
+        "--profile-client",
+        "invocation-test",
+        "--write",
+    ]));
+    assert_success(&fixture.execute(&[]));
+    assert_eq!(
+        fixture.receipt()["options"]["profile_client"],
+        "invocation-test"
+    );
+    let (_, packet) = fixture.packet();
+    assert_eq!(
+        packet["layers"]["person"]["data"]["selection"]["role"],
+        "executor"
+    );
+    assert_eq!(
+        packet["layers"]["person"]["data"]["selection"]["paths"],
+        json!(["service.py"])
+    );
+    assert!(packet.to_string().contains(PREFERENCE));
+}
+
+#[test]
+fn native_executor_preserves_profile_delivery_opt_out_without_revoking_mcp_access() {
+    let fixture = Fixture::new("repair");
+    fixture.write(".git/info/exclude", ".claude/settings.local.json\n");
+    fixture.seed_private_preference();
+    assert_success(&fixture.run(&["miner", "access", "grant", "--client", "claude"]));
+    assert_success(&fixture.run(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "claude",
+        "--disable-profile",
+        "--write",
+    ]));
+    assert_success(&fixture.run(&["miner", "hooks", "setup", "--client", "claude", "--write"]));
+    assert_success(&fixture.execute(&[]));
+    assert!(fixture.receipt()["options"]["profile_client"].is_null());
+    let (_, packet) = fixture.packet();
+    assert_eq!(packet["layers"]["person"]["status"], "not_enabled");
+    assert!(!packet.to_string().contains(PREFERENCE));
+    let store = ProfileStore::open_read_only(&fixture.home.join(".mastermind/style.db")).unwrap();
+    assert!(store
+        .reader_allowed(fixture.root.to_str().unwrap(), "claude")
+        .unwrap());
+}
+
+#[test]
 fn successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_out_of_receipt() {
     let fixture = Fixture::new("repair");
     fixture.seed_private_preference();

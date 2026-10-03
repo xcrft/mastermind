@@ -106,10 +106,10 @@ class WorkflowContractTests(unittest.TestCase):
         uses.extend(step.get("uses", "") for step in sarif_job["steps"])
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", uses)
         self.assertIn("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020", uses)
-        self.assertIn("dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4", uses)
+        self.assertIn("dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d", uses)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", uses)
         self.assertIn("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", uses)
-        self.assertIn("github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4", uses)
+        self.assertIn("github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2", uses)
         self.assertEqual(
             sarif_job["if"],
             "github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'",

@@ -1533,10 +1533,10 @@ def validate_review_package_contract() -> list[Issue]:
         for token in (
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
-            "dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4",
+            "dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d",
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            "github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4",
+            "github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
             "github.event.pull_request.head.sha",
             "github.event.pull_request.base.sha",
             "refs/pull/${{ github.event.pull_request.number }}/head",
@@ -2061,10 +2061,10 @@ def validate_portable_skill_semantics() -> list[Issue]:
 # ----- verifiable audit Action security contract -----------------------
 
 AUDIT_ACTION_PINS = {
-    "actions/checkout": "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-    "actions/attest": "f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
+    "actions/attest": "1e69f48acb82d1966a394da916b4c1698aa569d6",
 }
 AUDIT_EXAMPLES = (
     "docs/examples/mastermind-audit-pr.yml",
@@ -2287,14 +2287,14 @@ def validate_audit_action_security() -> list[Issue]:
         issues.append(Issue(docker_path, "error", f"cannot read Dockerfile: {error}"))
     else:
         expected_from = [
-            "rust:1.98-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7",
-            "buildpack-deps:bookworm-scm@sha256:de4e518f98c6533eceeee6f8b14a77a918856fa8282a1b711c0292d089157c0c",
+            "rust:1.99-bookworm@sha256:59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0",
+            "buildpack-deps:bookworm-scm@sha256:b42f74a50a22540b839042134919504ff7c51e7cf8d751b79d0f94c56566cb92",
         ]
         actual_from = dockerfile_from_images(docker_text)
         if actual_from != expected_from:
             issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
-        if "cargo +1.96.0 build" not in docker_text or "--locked" not in docker_text:
-            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.96 and the Cargo lockfile"))
+        if "cargo +1.99.0 build" not in docker_text or "--locked" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.99 and the Cargo lockfile"))
         if "COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches" not in docker_text:
             issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared benchmark target"))
         if "COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs" not in docker_text:

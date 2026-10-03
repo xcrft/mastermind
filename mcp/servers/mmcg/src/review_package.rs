@@ -1898,7 +1898,7 @@ mod tests {
                 .unwrap();
         assert_eq!(package_sarif["runs"].as_array().unwrap().len(), 2);
         let workflow = std::fs::read_to_string(output.join("mastermind-review.yml")).unwrap();
-        assert!(workflow.contains("github/codeql-action/upload-sarif@c54b30b7"));
+        assert!(workflow.contains("github/codeql-action/upload-sarif@2892aa5e"));
         assert!(workflow.contains("actions/upload-artifact@043fb46d"));
         assert!(matches!(
             export(&options),

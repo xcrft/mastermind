@@ -26,7 +26,7 @@ jobs:
 
       - name: Set up Rust for a Mastermind source checkout
         if: github.repository == 'xcrft/mastermind'
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Resolve pinned Mastermind
         env:
@@ -90,7 +90,7 @@ jobs:
           path: mastermind-review
 
       - name: Upload architecture risks to GitHub code scanning
-        uses: github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4 # v4.37.3
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: mastermind-review/mastermind.sarif
           category: mastermind-review

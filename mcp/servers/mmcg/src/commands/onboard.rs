@@ -556,6 +556,33 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
                     .as_str()
                     .unwrap_or("unknown")
             );
+            let evidence = &client["hooks"]["evidence"];
+            let analysis = match client["hooks"]["pipeline"]["analysis_requested"].as_bool() {
+                Some(true) => "requested",
+                Some(false) => "not requested",
+                None => "unspecified",
+            };
+            if evidence["status"] == "available" {
+                println!(
+                    "    Capture: {} current events, {} historical events; {} complete episodes, {} incomplete; semantic analysis {analysis}",
+                    evidence["current"]["events"], evidence["historical"]["events"],
+                    evidence["current"]["complete_episodes"], evidence["current"]["incomplete_episodes"]
+                );
+            } else {
+                println!(
+                    "    Capture evidence {}; semantic analysis {analysis}",
+                    evidence["status"].as_str().unwrap_or("unavailable")
+                );
+            }
+            for action in client["hooks"]["pipeline"]["next_actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(action) = action.as_str() {
+                    println!("    Next: {action}");
+                }
+            }
         }
         for task in observed["project"]["tasks"]
             .as_array()

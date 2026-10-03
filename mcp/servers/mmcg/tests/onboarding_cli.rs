@@ -252,6 +252,24 @@ fn repeated_init_preserves_a_stopped_worker_budget_and_explicit_start_renews_it(
         initial["run_id"]
     );
     f.success(&["miner", "stop", "--json"]);
+    let capture = f.success(&["init", "--mining", "capture", "--json"]);
+    let hooks = &capture["observed"]["clients"][0]["hooks"];
+    assert_eq!(hooks["pipeline"]["requested_mode"], "capture");
+    assert_eq!(hooks["pipeline"]["analysis_requested"], false);
+    assert_eq!(
+        hooks["mining"]["run"]["run_id"],
+        restart["steps"][0]["detail"]["run"]["run_id"]
+    );
+    assert!(!hooks["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "managed_miner_not_running"));
+    let status = f.run(&["status"]);
+    assert!(status.status.success(), "{status:?}");
+    let text = String::from_utf8(status.stdout).unwrap();
+    assert!(text.contains("semantic analysis not requested"), "{text}");
+    assert!(text.contains("events"), "{text}");
     f.no_provider_calls();
 }
 

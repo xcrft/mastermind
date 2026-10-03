@@ -23,6 +23,28 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         return Err("hook_readiness_project_root_invalid".into());
     }
     let database = open_journal();
+    let settings = crate::onboarding::load(&root);
+    let requested_mode = settings.as_ref().ok().and_then(|settings| {
+        settings.as_ref().map(|settings| {
+            if settings
+                .clients
+                .iter()
+                .any(|configured| configured == client)
+            {
+                settings.mining
+            } else {
+                crate::onboarding::Mining::Off
+            }
+        })
+    });
+    let analysis_requested = requested_mode.map(|mode| mode == crate::onboarding::Mining::On);
+    let evidence = match &database {
+        Ok(Some(db)) => db.capture_evidence_summary(client, &root).unwrap_or_else(
+            |_| json!({"status":"unavailable","reason":"capture_evidence_summary_unavailable"}),
+        ),
+        Ok(None) => json!({"status":"not_configured","eligibility":"capture_metadata_only"}),
+        Err(_) => json!({"status":"unavailable","reason":"capture_journal_unavailable"}),
+    };
     let grant = match &database {
         Ok(Some(db)) => db.grant(client, &root),
         Ok(None) => Ok(None),
@@ -134,6 +156,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         Some(false)
     };
     let mut warnings = Vec::new();
+    if settings.is_err() {
+        warnings.push("setup_settings_unavailable");
+    }
     if configured != Some(false) {
         match capture["status"].as_str() {
             Some("enabled") => {}
@@ -159,19 +184,52 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         ) {
             warnings.push("refiner_configuration_unavailable");
         }
-        if !matches!(
-            mining["status"].as_str(),
-            Some("running" | "not_configured" | "unsupported")
-        ) {
+        if mining["status"] == "unavailable" {
+            warnings.push("managed_miner_state_unavailable");
+        } else if (analysis_requested == Some(true) && mining["status"] != "running")
+            || (analysis_requested.is_none()
+                && !matches!(
+                    mining["status"].as_str(),
+                    Some("running" | "not_configured" | "unsupported")
+                ))
+        {
             warnings.push("managed_miner_not_running");
         }
+        if analysis_requested == Some(false)
+            && matches!(
+                mining["status"].as_str(),
+                Some("starting" | "running" | "stopping" | "unresponsive")
+            )
+        {
+            warnings.push("managed_miner_active_despite_saved_choice");
+        }
+        if evidence["status"] == "unavailable" {
+            warnings.push("capture_evidence_summary_unavailable");
+        }
     }
+    let mut next_actions = Vec::new();
+    if native["status"] == "missing_or_stale" {
+        next_actions.push("Refresh the generated definitions with miner hooks setup --write.");
+    }
+    if capture["enabled"] == true && activation["status"] != "session_start_observed" {
+        next_actions.push("Review /hooks in the trusted project, then start a new client session to observe SessionStart. Existing gaps remain recorded.");
+    }
+    if capture["status"] == "incomplete" {
+        next_actions.push("Inspect capture delivery gaps before using miner hooks recover; recovery does not restore missing events.");
+    }
+    let pipeline = json!({
+        "requested_mode":requested_mode,"analysis_requested":analysis_requested,
+        "managed_analysis":mining["status"],"foreground_workers":"not_observed",
+        "publication":"authorship_attestation_and_review_required",
+        "next_actions":next_actions,
+        "meaning":"Capture records events. Semantic analysis creates drafts only when requested; reviewed claims are published separately."
+    });
     Ok(json!({
         "schema":1,"client":client,"project_root":root,"inspection":"read_only",
         "consistency":"independent_snapshots","configured":configured,
         "platform":if cfg!(unix) {"unix"} else {"unsupported"},
         "native_registration":native,"capture":capture,"activation":activation,
-        "refiner":refiner_report,"mining":mining,"warnings":warnings,
+        "refiner":refiner_report,"mining":mining,"evidence":evidence,"pipeline":pipeline,"warnings":warnings,
         "boundaries":[
             "Native configuration, capture permission, observed delivery, refinement and mining are separate states.",
             "Status does not call a provider, start mining or establish model quality or semantic truth.",

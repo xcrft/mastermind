@@ -14,6 +14,131 @@ use std::process::{Command, Output, Stdio};
 const QUOTE: &str = "Before changing an API, check its callers and preserve the contract.";
 const BEHAVIOR: &str = "Checks callers before changing an API contract";
 
+#[test]
+fn large_tool_output_records_an_episode_gap_without_poisoning_future_capture() {
+    let f = Fixture::new();
+    f.capture("large-output", "before");
+    f.event(
+        "large-output",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":QUOTE}),
+    );
+    let previous = f.episode("before");
+    f.event(
+        "large-output",
+        "one",
+        "PreToolUse",
+        json!({"tool_use_id":"tool-one","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
+    );
+    let output = f.native(json!({"session_id":"large-output","turn_id":"one","hook_event_name":"PostToolUse","tool_use_id":"tool-one","tool_name":"exec_command","tool_response":"x".repeat(350*1024)}));
+    assert!(output.status.success(), "{output:?}");
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(status["capture_pending"], false);
+    assert_eq!(status["grant"]["gap"], "");
+    let episode = f.episode("one");
+    assert!(episode["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap == "oversized_event_content"));
+    f.event(
+        "large-output",
+        "one",
+        "Stop",
+        json!({"last_assistant_message":"Done"}),
+    );
+    f.event(
+        "large-output",
+        "two",
+        "UserPromptSubmit",
+        json!({"prompt":QUOTE}),
+    );
+    f.event(
+        "large-output",
+        "two",
+        "Stop",
+        json!({"last_assistant_message":"Done"}),
+    );
+    let fresh = f.episode("two");
+    assert!(fresh["coverage_gaps"].as_array().unwrap().is_empty());
+    assert_eq!(f.episode("before")["revision"], previous["revision"]);
+    assert!(f.episode("one")["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap == "oversized_event_content"));
+    assert!(f.capture("fresh-session", "three")["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn missing_next_prompt_text_marks_its_two_uses_without_poisoning_later_turns() {
+    let f = Fixture::new();
+    f.capture("s", "one");
+    f.event(
+        "s",
+        "two",
+        "UserPromptSubmit",
+        json!({"prompt":"API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789"}),
+    );
+    f.event("s", "two", "Stop", json!({"last_assistant_message":"Done"}));
+    for turn in ["one", "two"] {
+        let episode = f.episode(turn);
+        assert!(episode["coverage_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap == "redacted_event_content"));
+        assert!(!episode.to_string().contains("abcdefghijklmnopqrstuvwxyz"));
+    }
+    f.event("s", "three", "UserPromptSubmit", json!({"prompt":QUOTE}));
+    f.event(
+        "s",
+        "three",
+        "Stop",
+        json!({"last_assistant_message":"Done"}),
+    );
+    assert!(f.episode("three")["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn redacted_late_tool_result_does_not_invalidate_the_next_episode() {
+    let f = Fixture::new();
+    f.event("s", "", "SessionStart", json!({"source":"startup"}));
+    f.event("s", "one", "UserPromptSubmit", json!({"prompt":QUOTE}));
+    f.event(
+        "s",
+        "one",
+        "PreToolUse",
+        json!({"tool_use_id":"tool-one","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
+    );
+    f.event("s", "one", "Stop", json!({"last_assistant_message":"Done"}));
+    f.event("s", "two", "UserPromptSubmit", json!({"prompt":QUOTE}));
+    f.event("s", "two", "Stop", json!({"last_assistant_message":"Done"}));
+    let clean = f.episode("two");
+    f.event("s", "one", "PostToolUse", json!({"tool_use_id":"tool-one","tool_name":"exec_command","tool_response":"API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789"}));
+    let incomplete = f.episode("one");
+    assert!(incomplete["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap == "redacted_event_content"));
+    assert!(!incomplete
+        .to_string()
+        .contains("abcdefghijklmnopqrstuvwxyz"));
+    assert_eq!(f.episode("two")["revision"], clean["revision"]);
+    assert!(f.episode("two")["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
@@ -409,6 +534,83 @@ fn fabricated_semantic_citation_is_rejected_without_profile_side_effects() {
         .status
         .success());
     assert!(!f.home.join(".mastermind/style.db").exists());
+}
+
+#[test]
+fn missing_session_start_omits_profile_without_failing_local_capture() {
+    let f = Fixture::new();
+    let one = f.capture("s1", "t1");
+    f.propose(&f.analyze(&one));
+    let two = f.capture("s2", "t2");
+    f.propose(&f.analyze(&two));
+    assert!(f.observe().status.success());
+    f.profile();
+    f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--write",
+        "--profile-client",
+        "fixture",
+    ]);
+    let output = f.native(json!({"session_id":"already-open","turn_id":"missing-start","hook_event_name":"UserPromptSubmit","prompt":QUOTE}));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(parse(output), json!({}));
+    f.event(
+        "already-open",
+        "missing-start",
+        "Stop",
+        json!({"last_assistant_message":"Done"}),
+    );
+    let episode = f.episode("missing-start");
+    assert!(episode["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap == "missing_session_start"));
+    assert_eq!(episode["profile_influenced"], false);
+    assert!(f.capture("new-session", "clean")["profile_influenced"]
+        .as_bool()
+        .unwrap());
+}
+
+#[test]
+fn unavailable_optional_profile_does_not_fail_local_capture() {
+    let f = Fixture::new();
+    f.success(&[
+        "miner",
+        "hooks",
+        "setup",
+        "--client",
+        "codex",
+        "--write",
+        "--profile-client",
+        "fixture",
+    ]);
+    fs::write(
+        f.home.join(".mastermind/style.db"),
+        b"invalid synthetic profile database",
+    )
+    .unwrap();
+    f.event("s", "", "SessionStart", json!({"source":"startup"}));
+    let output = f.native(json!({"session_id":"s","turn_id":"local","hook_event_name":"UserPromptSubmit","prompt":QUOTE}));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(parse(output), json!({}));
+    f.event(
+        "s",
+        "local",
+        "Stop",
+        json!({"last_assistant_message":"Done"}),
+    );
+    let episode = f.episode("local");
+    assert!(episode["coverage_gaps"].as_array().unwrap().is_empty());
+    assert_eq!(episode["profile_influenced"], false);
+    assert_eq!(
+        fs::read(f.home.join(".mastermind/style.db")).unwrap(),
+        b"invalid synthetic profile database"
+    );
 }
 
 #[test]

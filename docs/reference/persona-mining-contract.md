@@ -12,7 +12,7 @@ For collection and review commands, see [Persona](persona.md).
 | Symbol | Input |
 |---|---|
 | `H` | Bounded ordered commits for one pinned Git revision and author selector |
-| `D` | Detector version, tooling scopes and first-party module classifier derived from that revision |
+| `D` | Detector and grammar contract, tooling scopes and first-party module classifier derived from that revision |
 | `K` | Valid cache produced for the same inputs |
 | `S` | Selected commit set |
 | `M` | Measurement data, excluding publication timestamps and filesystem provenance |
@@ -30,7 +30,10 @@ M(H, D, K) = M(H, D, empty)
 | Deep model-assisted candidates | Outside this deterministic contract |
 | Selection | Deterministic monthly rounds, at most 400 eligible source commits from 2,000 listed non-merge commits |
 | Cache | Skips diff reads only for currently selected SHAs, cannot exclude newly selected commits |
-| Reuse | Requires matching detector/tooling/first-party fingerprint |
+| Reuse | Requires matching detector/grammar/tooling/first-party fingerprint; v7 replaces legacy line-based imports and incorrect hunk-row counters |
+| Import measurement | Parse complete committed blobs, count import syntax intersecting added rows, once per library per commit. Comments and string contents cannot supply imports |
+| Import limits | Standard and first-party modules excluded; missing, oversized or unparseable blobs make the sampled commit's import coverage incomplete |
+| Import coverage | The MCP and Markdown range section disclose complete / incomplete import reads for supported import languages separately from diff coverage. An omitted range also omits its coverage |
 | New local module | Can change historical import classification, invalidating cached measurements |
 | Duplicate SHA | Measured copy wins over metadata-only copy |
 | Equal-strength copies disagree on counters or author date | Mark `evidence.context_conflict` and withhold counters |

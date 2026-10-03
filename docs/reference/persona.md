@@ -40,10 +40,11 @@ mmcg miner profile . --deep
 | History | Up to 2,000 recent authored non-merge commits |
 | Diff sample | Up to 400 eligible source commits selected in monthly rounds |
 | Bulk commit over 2,000 added source lines | Commit-message evidence only |
-| Cache reuse | Matching author, detector and tooling contract required |
+| Cache reuse | Matching author, detector, grammar, tooling and first-party contract required |
 | Tooling conventions | Separate from personal observations |
 | Workflow measures | Commit-level delivery patterns |
 | Range | Language, area and library exposure |
+| Libraries | Parsed imports in complete committed source intersecting added rows. Import coverage disclosed separately; comments, strings, standard modules and recognized first-party modules excluded |
 | Interpretation | Neither exposure nor delivery patterns establish proficiency, motives or stable human habits |
 | Subdirectories and linked worktrees | Share one repository contribution |
 | Independent clones | Retain provenance. Support counts each SHA once and withholds conflicting measurements, historical occurrences may repeat |
@@ -119,7 +120,7 @@ Empty drafts are valid. A draft follows the supplied response example:
 | Capture or analysis resource | Bound |
 |---|---|
 | Native hook command | 3 seconds |
-| Native JSON / retained text per event | 256 KiB / 16 KiB |
+| Native JSON / retained text per event | 4 MiB / 16 KiB. Unavailable retained content marks each episode that uses the event incomplete; an unattributed loss or envelope over 4 MiB fences the session/capture until recovery |
 | Journal / retained episodes | 64 MiB / 2,000 |
 | Events / stored bytes per episode | 128 / 512 KiB |
 | Processor request / stdout / stderr | 512 KiB / 64 KiB / 16 KiB |

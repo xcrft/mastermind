@@ -57,8 +57,34 @@ and review the updated definitions in the client.
 
 ### Check each boundary
 
+To keep an existing installation in local capture mode without provider calls:
+
+```bash
+mastermind init --mining capture --refiner off
+mastermind miner hooks worker stop --client codex --project-root .
+mastermind miner hooks setup --client codex --project-root . --disable-refiner --write
+```
+
+Repeat direct hook commands for each configured client and project. Capture and
+deterministic Git mining continue locally. Semantic habit analysis and prompt
+refinement stay disabled; captured episodes remain available for later review.
+
 `hooks setup`, `hooks status` and `mastermind doctor` expose the same read-only
 readiness observations:
+
+`mastermind status` also shows current and historical event counts, complete
+and incomplete episodes in the current capture generation, and whether the
+saved setup requests semantic analysis. JSON reports expose these as `evidence`
+and `pipeline`. Counts are scoped to the exact client and canonical project
+root. Coverage gap counts describe affected episodes and can overlap. They
+measure capture completeness, not semantic accuracy or accepted preferences.
+These reads do not create drafts, call a processor or approve a claim.
+
+In capture mode, terminal records from earlier workers remain visible as
+history; they do not require restarting semantic mining. A worker still active
+despite that saved choice, unavailable worker state, or a missing worker when
+analysis is requested produces a warning. `pipeline.next_actions` explains
+native registration and SessionStart recovery without fabricating past events.
 
 | Component | What the state establishes |
 |---|---|
@@ -190,6 +216,20 @@ mastermind miner hooks show '<capture-episode-id>'
 | User-channel text | Requires authorship review. Pasted documents, quotations, delegated work and automated prompts are not personal evidence |
 | Assistant and tool output | Context only, not independent habit support |
 | Mastermind controller prompts | Excluded from capture |
+
+Capture version 3 keeps unavailable retained text on its attributed episode,
+including late tool results. The following prompt also supplies context to the
+preceding episode, so redacting that prompt marks both uses incomplete. Other
+complete episodes in the same session remain usable. Ambiguous event identities,
+unattributed events, forks and delivery failures still fence the session or
+capture grant. Earlier capture versions and their stored gaps remain historical
+evidence; upgrading never clears those gaps or declares their sources complete.
+
+Profile delivery is optional after local capture commits. A missing
+SessionStart, an incomplete prompt, a changed grant or an unavailable personal
+store withholds the profile and emits diagnostic metadata. The native hook
+still returns its normal protocol, preserving the recorded event. Profile text
+is offered only after its exposure receipt is durable.
 
 | Event ordering | Capture behavior |
 |---|---|

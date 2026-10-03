@@ -9,8 +9,8 @@
 //!   verbatim from Claude Code or supported Codex transcripts, or imported
 //!   from memory.
 //! - [`profile`] — mines an author's code-shape idioms ("write like me") from
-//!   their git-authored diffs into `~/.mastermind/style.md`, which the planner
-//!   reads when drafting `CHANGE TO` blocks.
+//!   their git-authored diffs into SQL and the local `~/.mastermind/style.md`
+//!   snapshot. Agents retrieve applicable advice through MCP, not Markdown.
 //! - [`store`] — the user-global SQLite store (`~/.mastermind/style.db`) that
 //!   accumulates each repo's counts so the profile enriches across repos.
 //! - [`tooling`] — formatter and linter scopes, so conventions a repository's

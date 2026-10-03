@@ -91,6 +91,11 @@ impl Fixture {
     fn session_start(&self, client: &str, session: &str) {
         let event = json!({"hook_event_name":"SessionStart","event_id":format!("{session}:start"),
             "session_id":session,"source":"startup","cwd":self.project});
+        self.event(client, event);
+    }
+
+    fn event(&self, client: &str, mut event: Value) {
+        event["cwd"] = json!(self.project);
         let mut input = tempfile::tempfile().unwrap();
         input.write_all(event.to_string().as_bytes()).unwrap();
         input.rewind().unwrap();
@@ -110,6 +115,129 @@ impl Fixture {
             ".claude/settings.local.json"
         })
     }
+}
+
+#[test]
+fn evidence_summary_separates_clients_generations_and_incomplete_episodes() {
+    let f = Fixture::new();
+    f.setup("codex");
+    f.setup("claude");
+    f.session_start("codex", "current");
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"current","turn_id":"one","prompt":"Inspect the callers before changing the API."}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"Stop","session_id":"current","turn_id":"one"}),
+    );
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"current","turn_id":"two","prompt":"Check the test results."}));
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"missing-start","turn_id":"three","prompt":"Inspect the API."}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"Stop","session_id":"missing-start","turn_id":"three"}),
+    );
+    f.session_start("claude", "other-client");
+    f.event("claude", json!({"hook_event_name":"UserPromptSubmit","session_id":"other-client","turn_id":"four","prompt":"Inspect the API."}));
+    let database = f.home.join(".mastermind/persona-events.db");
+    let before = fs::read(&database).unwrap();
+    let evidence = f.report("codex")["evidence"].clone();
+    assert_eq!(evidence["status"], "available");
+    assert_eq!(evidence["eligibility"], "capture_metadata_only");
+    assert_eq!(evidence["current"]["events"], 6);
+    assert_eq!(evidence["current"]["episodes"], 3);
+    assert_eq!(evidence["current"]["complete_episodes"], 1);
+    assert_eq!(evidence["current"]["incomplete_episodes"], 2);
+    assert_eq!(
+        evidence["current"]["coverage_gaps"]["missing_session_start"],
+        1
+    );
+    assert_eq!(evidence["current"]["coverage_gaps"]["no_stop_observed"], 1);
+    assert_eq!(evidence["historical"]["episodes"], 0);
+    assert_eq!(fs::read(&database).unwrap(), before);
+    assert!(!evidence.to_string().contains("Inspect the"));
+    f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    let recovered = f.report("codex")["evidence"].clone();
+    assert_eq!(recovered["current"]["episodes"], 0);
+    assert_eq!(recovered["current"]["events"], 0);
+    assert_eq!(recovered["historical"]["episodes"], 3);
+    assert_eq!(recovered["historical"]["events"], 6);
+    assert!(!f.home.join(".mastermind/style.db").exists());
+}
+
+#[test]
+fn legacy_capture_gaps_are_retained_without_reinterpreting_old_sources() {
+    let f = Fixture::new();
+    f.setup("codex");
+    f.session_start("codex", "legacy");
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"legacy","turn_id":"one","prompt":"Inspect the API."}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"Stop","session_id":"legacy","turn_id":"one"}),
+    );
+    let path = f.home.join(".mastermind/persona-events.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE hook_session SET data=json_set(data,'$.capture_version',2,'$.gaps',json('[\"oversized_event_content\"]'))", []).unwrap();
+    drop(conn);
+    let before = fs::read(&path).unwrap();
+    let report = f.report("codex");
+    assert_eq!(report["evidence"]["current"]["complete_episodes"], 0);
+    assert_eq!(
+        report["evidence"]["current"]["coverage_gaps"]["legacy_capture_semantics"],
+        1
+    );
+    assert_eq!(
+        report["evidence"]["current"]["coverage_gaps"]["oversized_event_content"],
+        1
+    );
+    assert_eq!(report["activation"]["status"], "not_observed");
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn capture_mode_reports_disabled_analysis_and_actionable_activation() {
+    let f = Fixture::new();
+    let mut settings = mmcg::onboarding::Settings::local(&f.project);
+    settings.clients = vec!["codex".into()];
+    settings.mining = mmcg::onboarding::Mining::Capture;
+    mmcg::onboarding::Session::begin(&f.project)
+        .unwrap()
+        .save(&settings)
+        .unwrap();
+    f.setup("codex");
+    let report = f.report("codex");
+    assert_eq!(report["pipeline"]["requested_mode"], "capture");
+    assert_eq!(report["pipeline"]["analysis_requested"], false);
+    assert!(report["pipeline"]["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action.as_str().unwrap().contains("/hooks")));
+    assert_eq!(report["evidence"]["current"]["events"], 0);
+    assert!(!f.home.join(".mastermind/persona-workers").exists());
+    assert!(!f.home.join(".mastermind/style.db").exists());
+    settings.mining = mmcg::onboarding::Mining::On;
+    settings.provider = Some("claude".into());
+    mmcg::onboarding::Session::begin(&f.project)
+        .unwrap()
+        .save(&settings)
+        .unwrap();
+    let requested = f.report("codex");
+    assert_eq!(requested["pipeline"]["analysis_requested"], true);
+    assert!(requested["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "managed_miner_not_running"));
+    assert!(!f.home.join(".mastermind/persona-workers").exists());
+    let path = f.project.join(".mastermind/setup.json");
+    fs::write(&path, b"{invalid setup settings").unwrap();
+    let unavailable = f.report("codex");
+    assert!(unavailable["pipeline"]["requested_mode"].is_null());
+    assert!(unavailable["pipeline"]["analysis_requested"].is_null());
+    assert!(unavailable["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "setup_settings_unavailable"));
+    assert_eq!(fs::read(&path).unwrap(), b"{invalid setup settings");
 }
 
 fn parse(output: Output) -> Value {

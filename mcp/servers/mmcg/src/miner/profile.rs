@@ -1,6 +1,6 @@
 //! `mastermind miner profile` — mine an author's code-shape style ("write like
-//! me") from their git-authored diffs into `~/.mastermind/style.md`, which the
-//! planner reads when drafting `CHANGE TO` blocks.
+//! me") from their git-authored diffs. SQL is authoritative; `style.md` is a
+//! local inspection snapshot and agents retrieve a scoped MCP profile.
 //!
 //! Constraints that aren't obvious from the code:
 //!
@@ -51,7 +51,7 @@ const BULK_COMMIT_LINES: usize = 2000;
 const DIFF_BATCH: usize = 50;
 /// Detector contract of stored commit tallies. Bump it when a detector changes
 /// so incremental mines measure old commits again instead of reusing them.
-const EXTRACTOR: &str = "style-commit-v5";
+const EXTRACTOR: &str = "style-commit-v7";
 const GIT_METADATA_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GIT_SAMPLE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
@@ -143,9 +143,10 @@ fn mine_to_paths(
         range::FirstParty::from_snapshot(repo_root, &history_ref, listing.as_deref())?;
     // Reuse requires the same detectors, tooling and local-module classifier.
     let extractor = format!(
-        "{EXTRACTOR}+{}+{}",
+        "{EXTRACTOR}+{}+{}+{}",
         tooling::fingerprint(&scopes),
-        first_party.fingerprint()
+        first_party.fingerprint(),
+        crate::indexer::EXTRACTOR_CONTRACT_VERSION
     );
     // `--force` rebuilds and `--deep` needs fresh diff text, so both measure again.
     let mut previous = if force || deep {
@@ -235,7 +236,7 @@ fn mine_to_paths(
         let lines: Vec<AddedLine> = commit_msgs
             .iter()
             .filter_map(|commit| diffs.get(&commit.sha)?.as_ref())
-            .flatten()
+            .flat_map(|diff| &diff.lines)
             .cloned()
             .collect();
         match synthesize(repo_root, &rules, &commit_msgs, &lines) {
@@ -1207,7 +1208,39 @@ fn select_sample(commits: &[Commit], shapes: &HashMap<String, CommitShape>) -> V
 }
 
 /// Added lines of each selected commit; `None` when its diff was too large to read.
-type CommitDiffs = HashMap<String, Option<Vec<AddedLine>>>;
+type CommitDiffs = HashMap<String, Option<CommitDiff>>;
+
+#[derive(Default)]
+struct CommitDiff {
+    lines: Vec<AddedLine>,
+    added_rows: BTreeMap<String, BTreeSet<usize>>,
+    libraries: BTreeSet<String>,
+    imports_complete: bool,
+}
+
+fn measure_imports(
+    root: &Path,
+    sha: &str,
+    diff: &mut CommitDiff,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let paths: Vec<_> = diff.added_rows.keys().map(String::as_str).collect();
+    if paths.iter().any(|path| path.contains(['\n', '\r', '\0'])) {
+        diff.imports_complete = false;
+        return Ok(());
+    }
+    let sources = tooling::read_snapshot_files(root, sha, &paths)?;
+    diff.imports_complete = sources.len() == paths.len();
+    for (path, source) in sources {
+        let Some(added_rows) = diff.added_rows.get(&path) else {
+            continue;
+        };
+        match range::added_libraries(&path, &source, added_rows) {
+            Some(libraries) => diff.libraries.extend(libraries),
+            None => diff.imports_complete = false,
+        }
+    }
+    Ok(())
+}
 
 /// Diffs of the selected commits, read in batches through stdin. A batch over
 /// the output limit splits in half; a single oversized commit maps to `None`,
@@ -1249,7 +1282,10 @@ fn fetch_diff_batch(
     match out {
         Ok(out) if out.success => {
             let parsed = parse_commit_diffs(&String::from_utf8_lossy(&out.stdout), scopes);
-            diffs.extend(parsed.into_iter().map(|(sha, lines)| (sha, Some(lines))));
+            for (sha, mut diff) in parsed {
+                measure_imports(root, &sha, &mut diff)?;
+                diffs.insert(sha, Some(diff));
+            }
             Ok(())
         }
         Ok(_) => Err("git log -p exited unsuccessfully".into()),
@@ -1347,7 +1383,8 @@ fn commit_evidence(
             let counts = previous.get(&commit.sha).cloned().unwrap_or_else(|| {
                 let lines = diffs.get(&commit.sha);
                 let mut counts = Counts::new();
-                let measured = lines.and_then(Option::as_ref);
+                let diff = lines.and_then(Option::as_ref);
+                let measured = diff.map(|diff| &diff.lines);
                 accumulate(
                     measured.map(Vec::as_slice).unwrap_or(&[]),
                     std::slice::from_ref(commit),
@@ -1365,11 +1402,22 @@ fn commit_evidence(
                 let inline_tests = measured
                     .map(|lines| lines.iter().any(|line| workflow::declares_test(&line.text)));
                 workflow::tally(&commit.subject, shape, inline_tests, &mut counts);
-                let libraries: BTreeSet<String> = measured
+                if let Some(diff) = diff.filter(|diff| !diff.added_rows.is_empty()) {
+                    bump(
+                        &mut counts,
+                        if diff.imports_complete {
+                            "range.imports_checked"
+                        } else {
+                            "range.imports_unchecked"
+                        },
+                        1,
+                    );
+                }
+                let libraries: BTreeSet<String> = diff
                     .into_iter()
-                    .flatten()
-                    .filter_map(|line| range::imported_library(line.lang.name()?, &line.text))
+                    .flat_map(|diff| &diff.libraries)
                     .filter(|library| !first_party.contains(library))
+                    .cloned()
                     .collect();
                 let (languages, areas) = match shape {
                     Some(shape) => (
@@ -1432,39 +1480,81 @@ fn is_generated_path(path: &str) -> bool {
         || p.ends_with(".min.js")
 }
 
+#[cfg(test)]
 fn parse_added_lines(raw: &str, scopes: &[ToolScope]) -> Vec<AddedLine> {
-    let mut out = Vec::new();
+    parse_added_diff(raw, scopes).lines
+}
+
+fn parse_added_diff(raw: &str, scopes: &[ToolScope]) -> CommitDiff {
+    let mut out = CommitDiff::default();
     let mut lang = Lang::Other;
     let mut mine = false;
     let mut governed = Governed::default();
+    let mut path = String::new();
+    let mut row = None;
+    let mut remaining = (0usize, 0usize);
     for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            let path = rest.strip_prefix("b/").unwrap_or(rest);
-            mine = should_mine_path(path);
-            lang = lang_for_path(path);
-            governed = tooling::governed(scopes, path);
+        if line.starts_with("diff --git ") {
+            remaining = (0, 0);
+            mine = false;
+            row = None;
             continue;
         }
-        if line.starts_with("+++") {
+        // In a hunk, `+++ counter` is added `++ counter` source, not a header.
+        if let Some(rest) = line.strip_prefix("+++ ").filter(|_| remaining == (0, 0)) {
+            path = rest.strip_prefix("b/").unwrap_or(rest).to_string();
+            mine = should_mine_path(&path);
+            lang = lang_for_path(&path);
+            governed = tooling::governed(scopes, &path);
+            row = None;
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            let mut fields = line.split_whitespace().skip(1);
+            let old = fields.next().and_then(|part| hunk_range(part, '-'));
+            let new = fields.next().and_then(|part| hunk_range(part, '+'));
+            row = new.and_then(|(start, _)| start.checked_sub(1));
+            remaining = (
+                old.map_or(0, |(_, count)| count),
+                new.map_or(0, |(_, count)| count),
+            );
             continue;
         }
         if mine {
             if let Some(content) = line.strip_prefix('+') {
-                out.push(AddedLine {
+                if lang.name().is_some() {
+                    if let Some(row) = row {
+                        out.added_rows.entry(path.clone()).or_default().insert(row);
+                    }
+                }
+                out.lines.push(AddedLine {
                     lang,
                     text: content.to_string(),
                     governed,
                 });
             }
         }
+        if line.starts_with(['+', ' ']) {
+            row = row.and_then(|row| row.checked_add(1));
+            remaining.1 = remaining.1.saturating_sub(1);
+        }
+        if line.starts_with(['-', ' ']) {
+            remaining.0 = remaining.0.saturating_sub(1);
+        }
     }
     out
+}
+
+fn hunk_range(part: &str, prefix: char) -> Option<(usize, usize)> {
+    let range = part.strip_prefix(prefix)?;
+    let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+    Some((start.parse().ok()?, count.parse().ok()?))
 }
 
 /// Split a `git log -p` dump with RS-prefixed SHA lines into each commit's added
 /// source lines. Diff content lines start with a diff marker, so only a header
 /// line can begin with RS.
-fn parse_commit_diffs(raw: &str, scopes: &[ToolScope]) -> HashMap<String, Vec<AddedLine>> {
+fn parse_commit_diffs(raw: &str, scopes: &[ToolScope]) -> HashMap<String, CommitDiff> {
     let starts: Vec<usize> = raw
         .match_indices('\u{1e}')
         .map(|(index, _)| index)
@@ -1477,7 +1567,7 @@ fn parse_commit_diffs(raw: &str, scopes: &[ToolScope]) -> HashMap<String, Vec<Ad
             let end = starts.get(n + 1).copied().unwrap_or(raw.len());
             let record = &raw[start + 1..end];
             let (sha, diff) = record.split_once('\n').unwrap_or((record, ""));
-            (sha.trim().to_string(), parse_added_lines(diff, scopes))
+            (sha.trim().to_string(), parse_added_diff(diff, scopes))
         })
         .collect()
 }
@@ -2890,7 +2980,7 @@ fn view_at_with_verifier(
     let source_verification_complete = mark_unavailable_claims(&db, &mut agg, verify);
     let selection_revision = crate::hex::encode(&Sha256::digest(
         json!([
-            "mastermind-profile-selection-v1",
+            "mastermind-profile-selection-v2",
             agg.profile_revision(),
             paths,
             repo.map(|repo| &repo.persona_project_id),
@@ -2906,7 +2996,7 @@ fn view_at_with_verifier(
         .iter()
         .filter(|rule| match rule.scope {
             RuleScope::Language(tags) => {
-                codes.is_empty() || tags.split('/').any(|tag| codes.contains(tag))
+                paths.is_empty() || tags.split('/').any(|tag| codes.contains(tag))
             }
             _ => true,
         })
@@ -3121,7 +3211,7 @@ fn feedback_applies(
     match scope.split_once(':') {
         None => scope == "global",
         Some(("language", value)) => {
-            languages.is_empty()
+            paths.is_empty()
                 || languages
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(value))
@@ -3427,12 +3517,224 @@ mod tests {
         fixture_git(root, &["rev-parse", "HEAD"])
     }
 
+    #[test]
+    fn mined_imports_use_commit_syntax_and_replace_legacy_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fixture_repository(&root, "Alice");
+        std::fs::write(
+            root.join("sample.py"),
+            "\"\"\"A description.\nfrom the window end, keep the prose intact.\nimport imaginary_python\n\"\"\"\nimport pytest, numpy\nimport tomllib\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sample.ts"),
+            "/**\n * distinguish \"unknown\" from \"confirmed zero\".\n * import fake from 'imaginary_typescript';\n */\nimport {\n  z\n} from 'zod';\nconst extra = require('fs-extra');\n",
+        )
+        .unwrap();
+        fixture_git(&root, &["add", "."]);
+        fixture_git(
+            &root,
+            &["commit", "-qm", "Add real imports and quoted examples"],
+        );
+        std::fs::write(
+            root.join("sample.js"),
+            "let counter = 0;\n++counter;\n++ counter;\nconst library = require('lodash');\n",
+        )
+        .unwrap();
+        fixture_git(&root, &["add", "."]);
+        fixture_git(
+            &root,
+            &["commit", "-qm", "Add increments before a real import"],
+        );
+        // The opening delimiters are unchanged and absent from this zero-context diff.
+        let path = root.join("sample.py");
+        let source = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, source.replace("window end", "window start")).unwrap();
+        fixture_git(&root, &["add", "."]);
+        fixture_git(
+            &root,
+            &["commit", "-qm", "Edit prose inside an existing docstring"],
+        );
+        let db_path = dir.path().join("style.db");
+        let profile = dir.path().join("style.md");
+        mine_to_paths(
+            &root,
+            Some("Alice".into()),
+            false,
+            false,
+            &db_path,
+            &profile,
+        )
+        .unwrap();
+        let check = || {
+            let db = store::ProfileStore::open_read_only(&db_path).unwrap();
+            let counts = db.aggregate().unwrap().counts;
+            for library in [
+                "Python:the",
+                "Python:imaginary_python",
+                "Python:tomllib",
+                "TypeScript:confirmed zero",
+                "TypeScript:imaginary_typescript",
+            ] {
+                assert_eq!(
+                    cget(&counts, &format!("range.lib.{library}")),
+                    0,
+                    "{library}"
+                );
+            }
+            for library in [
+                "Python:pytest",
+                "Python:numpy",
+                "TypeScript:zod",
+                "TypeScript:fs-extra",
+                "JavaScript:lodash",
+            ] {
+                assert_eq!(
+                    cget(&counts, &format!("range.lib.{library}")),
+                    1,
+                    "{library}"
+                );
+            }
+        };
+        check();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE repo SET extractor='style-commit-v5'", [])
+            .unwrap();
+        conn.execute("INSERT INTO commit_counter(repo_key,sha,key,value) SELECT repo_key,sha,'range.lib.Python:legacy_bogus',1 FROM sampled_commit LIMIT 1", []).unwrap();
+        drop(conn);
+        mine_to_paths(
+            &root,
+            Some("Alice".into()),
+            false,
+            false,
+            &db_path,
+            &profile,
+        )
+        .unwrap();
+        check();
+        let db = store::ProfileStore::open_read_only(&db_path).unwrap();
+        assert_eq!(
+            cget(
+                &db.aggregate().unwrap().counts,
+                "range.lib.Python:legacy_bogus"
+            ),
+            0
+        );
+    }
+
     fn one_commit(counts: Counts) -> Vec<store::CommitEvidence> {
         vec![store::CommitEvidence {
             sha: "c".repeat(40),
             authored_at: "2026-01-01".into(),
             counts,
         }]
+    }
+
+    #[test]
+    fn scoped_profile_excludes_other_language_patterns_for_every_agent_role() {
+        struct Current;
+        impl QuoteVerifier for Current {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                false
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        let evidence: Vec<_> = (0..8)
+            .map(|i| store::CommitEvidence {
+                sha: format!("{i:040}"),
+                authored_at: "2026-09-01".into(),
+                counts: [("decl.const".to_string(), 3)].into_iter().collect(),
+            })
+            .collect();
+        db.upsert_repo(
+            "/fixture",
+            &store::RepoProvenance {
+                author: "Alice".into(),
+                commits_total: 8,
+                commits_sampled: 8,
+                added_lines_sampled: 24,
+                latest_sha: None,
+                latest_date: None,
+                mined_at_epoch: 1,
+                extractor: String::new(),
+            },
+            &[],
+            &evidence,
+            &[],
+        )
+        .unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for (statement, scope) in [
+            ("Rust-specific preference", "language:rust"),
+            ("TS-specific preference", "language:ts"),
+        ] {
+            store::fixture_preference(&mut db, statement, scope);
+            let entry = db
+                .feedback()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.statement == statement)
+                .unwrap();
+            db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+                .unwrap();
+        }
+        drop(db);
+        for role in ["planner", "executor", "auditor"] {
+            for source in [
+                "src/lib.rs",
+                "src/main.go",
+                "src/App.java",
+                "src/code.unknown-extension",
+            ] {
+                let packet = view_at_with_verifier(
+                    &path,
+                    &[source.into()],
+                    None,
+                    4000,
+                    Some((&root, "test")),
+                    Some(role),
+                    None,
+                    &mut Current,
+                )
+                .unwrap();
+                assert!(
+                    packet["conventions"].as_array().unwrap().is_empty(),
+                    "{role}: {source}"
+                );
+                let feedback = packet["feedback"].as_array().unwrap();
+                assert_eq!(feedback.len(), usize::from(source.ends_with(".rs")));
+                if source.ends_with(".rs") {
+                    assert_eq!(feedback[0]["statement"], "Rust-specific preference");
+                }
+            }
+            for paths in [vec![], vec!["src/lib.rs".into(), "src/app.ts".into()]] {
+                let packet = view_at_with_verifier(
+                    &path,
+                    &paths,
+                    None,
+                    4000,
+                    Some((&root, "test")),
+                    Some(role),
+                    None,
+                    &mut Current,
+                )
+                .unwrap();
+                assert!(packet["conventions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|rule| rule["statement"].as_str().unwrap().contains("TS/JS")));
+                assert_eq!(packet["feedback"].as_array().unwrap().len(), 2);
+            }
+        }
     }
 
     fn message(subject: &str, body: &str) -> Commit {
@@ -3455,7 +3757,7 @@ mod tests {
             .unwrap()
             .into_values()
             .flatten()
-            .flatten()
+            .flat_map(|diff| diff.lines)
             .map(|line| line.text)
             .collect::<Vec<_>>()
             .join("\n")
@@ -4779,9 +5081,9 @@ diff --git a/src/a.rs b/src/a.rs
 ";
         let diffs = parse_commit_diffs(raw, &[]);
         assert_eq!(diffs.len(), 2);
-        assert_eq!(diffs["aaa"].len(), 1);
+        assert_eq!(diffs["aaa"].lines.len(), 1);
         assert_eq!(
-            diffs["bbb"].len(),
+            diffs["bbb"].lines.len(),
             2,
             "an RS inside content is not a header"
         );

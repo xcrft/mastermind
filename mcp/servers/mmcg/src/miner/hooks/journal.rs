@@ -9,6 +9,7 @@ use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability, Sta
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,7 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_EPISODES: i64 = 2000;
-const CAPTURE_VERSION: u32 = 2;
+const CAPTURE_VERSION: u32 = 3;
 const INSPECTION_ATTEMPTS: usize = 3;
 
 const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
@@ -362,6 +363,76 @@ impl Journal {
         Ok(serde_json::from_str(&data)?)
     }
 
+    /// Aggregate this exact client's journal without returning source text or
+    /// identities. Completeness concerns recorded capture metadata, not truth,
+    /// authorship, independence or review eligibility of a semantic claim.
+    pub fn capture_evidence_summary(&self, client: &str, root: &Path) -> Result<Value, Error> {
+        let project = super::profile::persona_project_id(root);
+        let pending = super::fence::pending(client, root).unwrap_or(true);
+        let tx = self.conn.unchecked_transaction()?;
+        let Some(grant) = read_grant(&tx, client, root)? else {
+            return Ok(json!({"status":"not_configured","eligibility":"capture_metadata_only"}));
+        };
+        let episodes = {
+            let mut statement = tx.prepare("SELECT id,json_extract(data,'$.generation') FROM hook_episode WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 LIMIT ?3")?;
+            let rows = statement.query_map(
+                params![client, root.to_string_lossy(), MAX_EPISODES + 1],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if episodes.len() as i64 > MAX_EPISODES {
+            return Err("capture evidence summary exceeds the episode bound".into());
+        }
+        let mut current = 0;
+        let mut complete = 0;
+        let mut historical = 0;
+        let mut gaps = BTreeMap::<String, u64>::new();
+        for (id, generation) in episodes {
+            if generation != grant.generation {
+                historical += 1;
+                continue;
+            }
+            current += 1;
+            let snapshot = snapshot_at(&tx, &id)?;
+            let mut reasons = snapshot.coverage_gaps;
+            if project.as_deref() != Some(snapshot.project.as_str()) {
+                reasons.push("project_identity_changed".into());
+            }
+            if pending {
+                reasons.push("capture_delivery_pending_or_unavailable".into());
+            }
+            reasons.sort();
+            reasons.dedup();
+            complete += usize::from(reasons.is_empty());
+            for reason in reasons {
+                *gaps.entry(reason).or_default() += 1;
+            }
+        }
+        let mut summary = json!({
+            "status":"available","eligibility":"capture_metadata_only",
+            "current":{"generation":grant.generation,"episodes":current,
+                "complete_episodes":complete,"incomplete_episodes":current-complete,"coverage_gaps":gaps},
+            "historical":{"episodes":historical},
+            "meaning":"Complete capture metadata is not proof of human authorship, semantic truth or an accepted personal habit."
+        });
+        for (field, sql) in [
+            ("events", "SELECT count(*),coalesce(sum(json_extract(s.data,'$.generation')=?3),0) FROM hook_event e JOIN hook_session s ON s.id=e.session WHERE json_extract(s.data,'$.client')=?1 AND json_extract(s.data,'$.project_root')=?2"),
+            ("drafts", "SELECT count(*),coalesce(sum(json_extract(e.data,'$.generation')=?3),0) FROM hook_draft d JOIN hook_episode e ON e.id=d.episode WHERE json_extract(e.data,'$.client')=?1 AND json_extract(e.data,'$.project_root')=?2"),
+            ("completed_analyses", "SELECT count(*),coalesce(sum(json_extract(e.data,'$.generation')=?3),0) FROM hook_analysis a JOIN hook_episode e ON e.id=a.episode WHERE a.completed=1 AND json_extract(e.data,'$.client')=?1 AND json_extract(e.data,'$.project_root')=?2"),
+        ] {
+            let (total, count) = tx.query_row(
+                sql,
+                params![client, root.to_string_lossy(), grant.generation],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            summary["current"][field] = json!(count);
+            summary["historical"][field] = json!(total - count);
+        }
+        tx.commit()?;
+        Ok(summary)
+    }
+
     pub fn snapshot(&self, id: &str) -> Result<EpisodeInput, Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut snapshot = snapshot_at(&tx, id)?;
@@ -487,9 +558,6 @@ impl Journal {
         if session.project != project || session.repository != repository {
             add_gap(&mut session.gaps, "project_identity_changed");
         }
-        if let Some(gap) = &incoming.gap {
-            add_gap(&mut session.gaps, gap);
-        }
         if let Some(exposure) = &incoming.profile_exposure {
             session.influence.offer_profile();
             if !session.exposures.contains(exposure) {
@@ -534,6 +602,11 @@ impl Journal {
                 }
                 let mut correction = event.clone();
                 correction.origin = "next_turn_context".into();
+                if let Some(gap) = &incoming.gap {
+                    // The next prompt also supplies contradiction context to
+                    // the preceding episode. Missing text affects both uses.
+                    add_gap(&mut ep.gaps, gap);
+                }
                 push_event(&mut ep, correction);
                 save_episode(&tx, &ep)?;
             }
@@ -600,6 +673,12 @@ impl Journal {
         }
         if let Some(id) = &target {
             let mut ep = load_episode(&tx, id)?;
+            if let Some(gap) = &incoming.gap {
+                // A known event belongs to this episode, including a late
+                // tool result. It cannot invalidate unrelated past/future
+                // episodes merely because its retained text is unavailable.
+                add_gap(&mut ep.gaps, gap);
+            }
             if let Some(exposure) = incoming.profile_exposure {
                 ep.exposures.push(exposure);
             }
@@ -634,8 +713,13 @@ impl Journal {
             }
             push_event(&mut ep, event);
             save_episode(&tx, &ep)?;
-        } else if !matches!(incoming.kind.as_str(), "SessionStart" | "SessionEnd") {
-            add_gap(&mut session.gaps, "event_without_user_turn");
+        } else {
+            if let Some(gap) = &incoming.gap {
+                add_gap(&mut session.gaps, gap);
+            }
+            if !matches!(incoming.kind.as_str(), "SessionStart" | "SessionEnd") {
+                add_gap(&mut session.gaps, "event_without_user_turn");
+            }
         }
         if incoming.kind == "SessionEnd" {
             session.started = false;
@@ -672,7 +756,15 @@ impl Journal {
             [&ep.session],
             |r| r.get::<_, String>(0),
         )?)?;
-        if !session.started || session.active.as_deref() != Some(episode) || ep.closed {
+        if !session.started
+            || session.active.as_deref() != Some(episode)
+            || ep.closed
+            || session.capture_version != CAPTURE_VERSION
+            || !session.gaps.is_empty()
+            || !ep.gaps.is_empty()
+            || current.pending != 0
+            || !current.gap.is_empty()
+        {
             return Err("hook profile delivery requires the active open prompt".into());
         }
         let claims = |field: &str, key: &str| {

@@ -1073,6 +1073,18 @@ enum MinerCmd {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    /// Evaluate labeled source spans and paired task outcomes offline. No model or publication.
+    EvaluateLocal {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Archive inactive source payloads, preserving citations and review bindings.
+    Archive {
+        #[arg(long, default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, default_value_t=32, value_parser=clap::value_parser!(u16).range(1..=64))]
+        limit: u16,
+    },
     /// Extract explicit-statement candidates locally. No model or publication.
     MineLocal {
         #[arg(long, default_value = ".")]
@@ -2810,6 +2822,13 @@ fn run_cli_inner(
         Cmd::Miner(MinerCmd::Hooks(command)) => {
             use mmcg::miner::hooks;
             match command {
+                HookCmd::Archive {
+                    project_root,
+                    limit,
+                } => {
+                    hooks::archive(&project_root, limit as usize)?;
+                }
+                HookCmd::EvaluateLocal { input } => hooks::evaluate_local(&input)?,
                 HookCmd::MineLocal {
                     project_root,
                     limit,

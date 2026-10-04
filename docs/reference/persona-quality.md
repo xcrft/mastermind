@@ -17,7 +17,8 @@
 | Initial selection | Explicit `miner collect` |
 | Later refresh | `miner sync` rereads registered selection |
 | Native local hooks | Enabled profile delivery processes complete closed episodes at `Stop` and on later context append, without a model |
-| Hook candidate bounds | Exact eligible user prose, first 128 lines per prompt, at most 8 drafts, complete statement up to 200 characters |
+| Hook candidate bounds | Exact eligible user prose, prompts up to 128 lines, at most 8 drafts, complete normalized statement up to 200 characters |
+| Multiline source | Retain the whole condition/exception and original source span; never truncate to a prefix |
 | Hook replay | Explicit `miner hooks mine-local`, no repair of missing events |
 | Extractor fingerprint change | Recollect and inspect retained observations |
 | Changed evidence binding | Rebind and review |
@@ -77,8 +78,50 @@ cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --lib --locked \
 | Extraction | Omissions, source coverage, precision/recall by language and signal kind |
 | Final claim quality | Support, contradictions, role/workflow applicability and author corrections |
 
-Synthetic improvements do not establish real-history accuracy. This release
-makes no such accuracy claim.
+Run the source-span evaluation without a model:
+
+```bash
+mastermind miner hooks evaluate-local --input evals/persona-local.json
+```
+
+The supplied regression corpus has the 58 detector cases plus two multiline
+hook cases. Its labels come from the implementation author. The adapter's
+200-character behavior limit can omit detector signals allowed by the
+300-character transcript contract. Those omissions stay in the recall denominator.
+
+A selected-history corpus uses this schema:
+
+```json
+{
+  "schema": 1,
+  "provenance": "selected_history",
+  "labeler": "reviewer-name",
+  "cases": [{
+    "id": "request-1", "session": "session-1", "partition": "held_out",
+    "text": "I prefer short code reviews\nonly for trivial changes.",
+    "expected_quotes": ["I prefer short code reviews\nonly for trivial changes."]
+  }],
+  "task_pairs": []
+}
+```
+
+`expected_quotes: []` labels a negative control. The other partition is
+`development`; one session cannot appear in both. The output reports exact-span
+TP/FP/FN, precision, recall, excluded inputs, failing case IDs and the corpus
+SHA-256. It accepts at most 128 cases and 128 task pairs in a 2 MiB file.
+Input text and expected quotes are not echoed in the report.
+
+Optional `task_pairs` entries have a SHA-256 `task_revision`, `baseline` and
+`with_profile`. Each trial supplies a distinct `session`, `correct` boolean,
+`iterations` (1–20), `user_corrections` (0–128), `wall_ms` (1–7200000), and
+`profile_digest` (null for baseline, SHA-256 for with-profile). Repeated sessions
+and task revisions are rejected. Deltas are profile minus baseline; no pairs
+produce null metrics and `unmeasured`, never zero benefit.
+
+The labels and outcomes are reviewer-supplied observations. Provenance and
+reviewer independence are not authenticated by the schema. Independent
+real-history labels and controlled paired trials are still required before
+claiming semantic accuracy or task benefit. No such result is currently qualified.
 
 The local hook adapter reuses this lexical detector and applies the episode's
 whole-text prose, source-revision and coverage guards. Its `explicit_statement`

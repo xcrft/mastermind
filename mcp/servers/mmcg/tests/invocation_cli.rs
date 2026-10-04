@@ -682,6 +682,22 @@ fn native_executor_automatically_uses_the_configured_hook_audience_and_its_own_s
 }
 
 #[test]
+fn completion_retains_an_explicit_profile_audience_across_resume() {
+    let fixture = Fixture::new("success");
+    assert_success(&fixture.run(&["miner", "access", "grant", "--client", "custom"]));
+    assert_success(&fixture.execute(&["--profile-client", "custom"]));
+    assert_eq!(fixture.state()["profile_client"], "custom");
+    fixture.resolve_history_review();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+    assert_eq!(fixture.state()["profile_refresh"]["status"], "refreshed");
+    // A stored audience never overrides a later revocation.
+    assert_success(&fixture.run(&["miner", "access", "revoke", "--client", "custom"]));
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+}
+
+#[test]
 fn native_executor_preserves_profile_delivery_opt_out_without_revoking_mcp_access() {
     let fixture = Fixture::new("repair");
     fixture.write(".git/info/exclude", ".claude/settings.local.json\n");

@@ -15,6 +15,154 @@ const QUOTE: &str = "Before changing an API, check its callers and preserve the 
 const BEHAVIOR: &str = "Checks callers before changing an API contract";
 
 #[test]
+fn archived_sources_keep_reviewed_claims_current_and_detect_tampering_and_forgetting() {
+    let f = Fixture::new();
+    f.capture("archive-one", "one");
+    f.event("archive-one", "", "SessionEnd", json!({}));
+    let first = f.episode("one");
+    f.propose(&f.analyze(&first));
+    f.capture("archive-two", "two");
+    f.event("archive-two", "", "SessionEnd", json!({}));
+    let second = f.episode("two");
+    f.propose(&f.analyze(&second));
+    assert!(f.observe().status.success());
+    assert_eq!(f.profile()["habits"][0]["behavior"], BEHAVIOR);
+    let archived = f.success(&["miner", "hooks", "archive"]);
+    assert_eq!(archived["archived"], 2);
+    assert_eq!(
+        f.success(&["miner", "hooks", "show", first["id"].as_str().unwrap()])["episode"],
+        first
+    );
+    assert_eq!(f.profile()["habits"][0]["behavior"], BEHAVIOR);
+    let files: Vec<_> = fs::read_dir(f.home.join(".mastermind/persona-archive"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 2);
+    for file in &files {
+        assert_eq!(
+            fs::metadata(file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let bytes = fs::read(&files[0]).unwrap();
+    fs::write(&files[0], b"{}").unwrap();
+    assert!(f.profile()["habits"].as_array().unwrap().is_empty());
+    fs::write(&files[0], bytes).unwrap();
+    assert_eq!(f.profile()["habits"][0]["behavior"], BEHAVIOR);
+    f.success(&[
+        "miner",
+        "hooks",
+        "forget",
+        first["id"].as_str().unwrap(),
+        "--revision",
+        first["revision"].as_str().unwrap(),
+    ]);
+    assert_eq!(
+        fs::read_dir(f.home.join(".mastermind/persona-archive"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(f.profile()["habits"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn episode_capacity_automatically_archives_closed_sources_before_new_capture() {
+    let f = Fixture::new();
+    let first = f.capture("old", "old-turn");
+    f.event("old", "", "SessionEnd", json!({}));
+    {
+        let conn =
+            rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+        let text: String = conn
+            .query_row(
+                "SELECT data FROM hook_episode WHERE id=?1",
+                [first["id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut episode: Value = serde_json::from_str(&text).unwrap();
+        for i in 0..1999 {
+            let id = format!("{i:064x}");
+            episode["id"] = json!(id);
+            conn.execute(
+                "INSERT INTO hook_episode(id,session,data) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    id,
+                    episode["session"].as_str().unwrap(),
+                    episode.to_string()
+                ],
+            )
+            .unwrap();
+        }
+    }
+    f.event("fresh", "", "SessionStart", json!({"source":"startup"}));
+    f.event(
+        "fresh",
+        "new-turn",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the service contract."}),
+    );
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(
+        status["readiness"]["pipeline"]["retention"]["archived_episodes"],
+        32
+    );
+    assert_eq!(
+        status["readiness"]["pipeline"]["retention"]["active_episodes"],
+        1969
+    );
+}
+
+#[test]
+fn local_analysis_retries_on_the_next_native_event_after_profile_store_outage() {
+    let f = Fixture::new();
+    assert!(f
+        .run(&["miner", "access", "grant", "--client", "codex"])
+        .status
+        .success());
+    f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    f.event("retry", "", "SessionStart", json!({"source":"startup"}));
+    f.event(
+        "retry",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"I prefer short code review replies."}),
+    );
+    let store = f.home.join(".mastermind/style.db");
+    let backup = f.home.join(".mastermind/style.unavailable");
+    fs::rename(&store, &backup).unwrap();
+    f.event(
+        "retry",
+        "one",
+        "Stop",
+        json!({"last_assistant_message":"The review is complete."}),
+    );
+    fs::rename(&backup, &store).unwrap();
+    let episode = f.episode("one");
+    assert!(
+        f.success(&["miner", "hooks", "show", episode["id"].as_str().unwrap()])["drafts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.event(
+        "next-session",
+        "",
+        "SessionStart",
+        json!({"source":"startup"}),
+    );
+    let shown = f.success(&["miner", "hooks", "show", episode["id"].as_str().unwrap()]);
+    assert_eq!(shown["drafts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        f.success(&["miner", "hooks", "status", "--client", "codex"])["readiness"]["pipeline"]
+            ["local_analysis"]["retry_queue"]["pending"],
+        0
+    );
+}
+
+#[test]
 fn local_hook_candidates_are_automatic_idempotent_and_never_accept_a_claim() {
     let f = Fixture::new();
     for args in [

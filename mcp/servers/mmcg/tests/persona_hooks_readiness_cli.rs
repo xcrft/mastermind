@@ -118,6 +118,27 @@ impl Fixture {
 }
 
 #[test]
+fn session_end_does_not_erase_observed_native_activation() {
+    let f = Fixture::new();
+    f.setup("codex");
+    f.session_start("codex", "ended");
+    f.event(
+        "codex",
+        json!({"hook_event_name":"SessionEnd","session_id":"ended"}),
+    );
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(
+        status["readiness"]["activation"]["status"],
+        "session_start_observed"
+    );
+    assert_eq!(status["readiness"]["activation"]["current_sessions"], 0);
+    assert_eq!(
+        status["readiness"]["activation"]["session_start_observations"],
+        1
+    );
+}
+
+#[test]
 fn evidence_summary_separates_clients_generations_and_incomplete_episodes() {
     let f = Fixture::new();
     f.setup("codex");

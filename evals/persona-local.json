@@ -1,0 +1,496 @@
+{
+  "schema": 1,
+  "provenance": "synthetic",
+  "labeler": "implementation-author",
+  "cases": [
+    {
+      "id": "synthetic-001",
+      "session": "synthetic-0",
+      "partition": "development",
+      "text": "I prefer short replies with test results.",
+      "expected_quotes": [
+        "I prefer short replies with test results."
+      ]
+    },
+    {
+      "id": "synthetic-002",
+      "session": "synthetic-1",
+      "partition": "development",
+      "text": "Я предпочитаю короткие ответы с результатами проверок.",
+      "expected_quotes": [
+        "Я предпочитаю короткие ответы с результатами проверок."
+      ]
+    },
+    {
+      "id": "synthetic-003",
+      "session": "synthetic-2",
+      "partition": "development",
+      "text": "Мне удобнее сначала увидеть plan, потом code diff.",
+      "expected_quotes": [
+        "Мне удобнее сначала увидеть plan, потом code diff."
+      ]
+    },
+    {
+      "id": "synthetic-004",
+      "session": "synthetic-3",
+      "partition": "development",
+      "text": "I usually review the contract before changing code.",
+      "expected_quotes": [
+        "I usually review the contract before changing code."
+      ]
+    },
+    {
+      "id": "synthetic-005",
+      "session": "synthetic-4",
+      "partition": "development",
+      "text": "Я обычно читаю документацию перед изменением кода.",
+      "expected_quotes": [
+        "Я обычно читаю документацию перед изменением кода."
+      ]
+    },
+    {
+      "id": "synthetic-006",
+      "session": "synthetic-5",
+      "partition": "development",
+      "text": "Я привыкла проверять tests перед review.",
+      "expected_quotes": [
+        "Я привыкла проверять tests перед review."
+      ]
+    },
+    {
+      "id": "synthetic-007",
+      "session": "synthetic-6",
+      "partition": "development",
+      "text": "From now on, include test results in the final reply.",
+      "expected_quotes": [
+        "From now on, include test results in the final reply."
+      ]
+    },
+    {
+      "id": "synthetic-008",
+      "session": "synthetic-7",
+      "partition": "development",
+      "text": "Больше не добавляй общие фразы в ответы.",
+      "expected_quotes": [
+        "Больше не добавляй общие фразы в ответы."
+      ]
+    },
+    {
+      "id": "synthetic-009",
+      "session": "synthetic-8",
+      "partition": "development",
+      "text": "I prefer not to add tests only for this PR.",
+      "expected_quotes": [
+        "I prefer not to add tests only for this PR."
+      ]
+    },
+    {
+      "id": "synthetic-010",
+      "session": "synthetic-9",
+      "partition": "development",
+      "text": "Я предпочитаю краткий ответ только для этой задачи.",
+      "expected_quotes": [
+        "Я предпочитаю краткий ответ только для этой задачи."
+      ]
+    },
+    {
+      "id": "synthetic-011",
+      "session": "synthetic-10",
+      "partition": "development",
+      "text": "My default is to report the failure before the proposed fix.",
+      "expected_quotes": [
+        "My default is to report the failure before the proposed fix."
+      ]
+    },
+    {
+      "id": "synthetic-012",
+      "session": "synthetic-11",
+      "partition": "development",
+      "text": "Мне важно видеть причины изменений в коде.",
+      "expected_quotes": [
+        "Мне важно видеть причины изменений в коде."
+      ]
+    },
+    {
+      "id": "synthetic-013",
+      "session": "synthetic-12",
+      "partition": "development",
+      "text": "Предпочитаю review с точными file references и проверками.",
+      "expected_quotes": [
+        "Предпочитаю review с точными file references и проверками."
+      ]
+    },
+    {
+      "id": "synthetic-014",
+      "session": "synthetic-13",
+      "partition": "development",
+      "text": "I would rather keep policy in data than duplicate code branches.",
+      "expected_quotes": [
+        "I would rather keep policy in data than duplicate code branches."
+      ]
+    },
+    {
+      "id": "synthetic-015",
+      "session": "synthetic-14",
+      "partition": "development",
+      "text": "В ответах ценю конкретные выводы и команды проверок.",
+      "expected_quotes": [
+        "В ответах ценю конкретные выводы и команды проверок."
+      ]
+    },
+    {
+      "id": "synthetic-016",
+      "session": "synthetic-15",
+      "partition": "development",
+      "text": "I generally put durable state beside its lifecycle owner.",
+      "expected_quotes": [
+        "I generally put durable state beside its lifecycle owner."
+      ]
+    },
+    {
+      "id": "synthetic-017",
+      "session": "synthetic-16",
+      "partition": "development",
+      "text": "Обычно я отделяю чистую логику от внешних эффектов.",
+      "expected_quotes": [
+        "Обычно я отделяю чистую логику от внешних эффектов."
+      ]
+    },
+    {
+      "id": "synthetic-018",
+      "session": "synthetic-17",
+      "partition": "development",
+      "text": "Я стараюсь проверить rollback перед migration review.",
+      "expected_quotes": [
+        "Я стараюсь проверить rollback перед migration review."
+      ]
+    },
+    {
+      "id": "synthetic-019",
+      "session": "synthetic-18",
+      "partition": "development",
+      "text": "I avoid hiding partial failure behind a successful reply.",
+      "expected_quotes": [
+        "I avoid hiding partial failure behind a successful reply."
+      ]
+    },
+    {
+      "id": "synthetic-020",
+      "session": "synthetic-19",
+      "partition": "development",
+      "text": "Как правило, я проверяю границы контракта перед правкой.",
+      "expected_quotes": [
+        "Как правило, я проверяю границы контракта перед правкой."
+      ]
+    },
+    {
+      "id": "synthetic-021",
+      "session": "synthetic-20",
+      "partition": "development",
+      "text": "When reviewing code, I check which layer owns the state.",
+      "expected_quotes": [
+        "When reviewing code, I check which layer owns the state."
+      ]
+    },
+    {
+      "id": "synthetic-022",
+      "session": "synthetic-21",
+      "partition": "development",
+      "text": "При ревью я сначала ищу слой, который владеет состоянием.",
+      "expected_quotes": [
+        "При ревью я сначала ищу слой, который владеет состоянием."
+      ]
+    },
+    {
+      "id": "synthetic-023",
+      "session": "synthetic-22",
+      "partition": "development",
+      "text": "Когда проверяю rollout, я смотрю на actual runtime outcome.",
+      "expected_quotes": [
+        "Когда проверяю rollout, я смотрю на actual runtime outcome."
+      ]
+    },
+    {
+      "id": "synthetic-024",
+      "session": "synthetic-23",
+      "partition": "development",
+      "text": "Before changing a contract, I check its callers and tests.",
+      "expected_quotes": [
+        "Before changing a contract, I check its callers and tests."
+      ]
+    },
+    {
+      "id": "synthetic-025",
+      "session": "synthetic-24",
+      "partition": "development",
+      "text": "В следующих ответах указывай выполненные проверки.",
+      "expected_quotes": [
+        "В следующих ответах указывай выполненные проверки."
+      ]
+    },
+    {
+      "id": "synthetic-026",
+      "session": "synthetic-25",
+      "partition": "development",
+      "text": "In future replies, keep the diagnosis separate from the test result.",
+      "expected_quotes": [
+        "In future replies, keep the diagnosis separate from the test result."
+      ]
+    },
+    {
+      "id": "synthetic-027",
+      "session": "synthetic-26",
+      "partition": "development",
+      "text": "На будущее, показывай diff и test results без общих обещаний.",
+      "expected_quotes": [
+        "На будущее, показывай diff и test results без общих обещаний."
+      ]
+    },
+    {
+      "id": "synthetic-028",
+      "session": "synthetic-27",
+      "partition": "development",
+      "text": "Я больше не полагаюсь на зелёный CI без проверки runtime.",
+      "expected_quotes": [
+        "Я больше не полагаюсь на зелёный CI без проверки runtime."
+      ]
+    },
+    {
+      "id": "synthetic-029",
+      "session": "synthetic-28",
+      "partition": "development",
+      "text": "I normally avoid asserting a rollout succeeded without runtime evidence.",
+      "expected_quotes": [
+        "I normally avoid asserting a rollout succeeded without runtime evidence."
+      ]
+    },
+    {
+      "id": "synthetic-030",
+      "session": "synthetic-29",
+      "partition": "development",
+      "text": "A pure decision core with effects at the boundary is easier for me to review.",
+      "expected_quotes": [
+        "A pure decision core with effects at the boundary is easier for me to review."
+      ]
+    },
+    {
+      "id": "synthetic-031",
+      "session": "synthetic-30",
+      "partition": "development",
+      "text": "Сначала читаю контракт, потом разбираю код, так у меня складывается проверка.",
+      "expected_quotes": [
+        "Сначала читаю контракт, потом разбираю код, так у меня складывается проверка."
+      ]
+    },
+    {
+      "id": "synthetic-032",
+      "session": "synthetic-31",
+      "partition": "development",
+      "text": "I usually review the full contract before changing code. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. ",
+      "expected_quotes": [
+        "I usually review the full contract before changing code. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception. The explanation must retain the context and the exception."
+      ]
+    },
+    {
+      "id": "synthetic-033",
+      "session": "synthetic-32",
+      "partition": "development",
+      "text": "Review this code before lunch.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-034",
+      "session": "synthetic-33",
+      "partition": "development",
+      "text": "Не коммить эту задачу.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-035",
+      "session": "synthetic-34",
+      "partition": "development",
+      "text": "Проверь tests в этом PR.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-036",
+      "session": "synthetic-35",
+      "partition": "development",
+      "text": "This repository requires tests for every migration.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-037",
+      "session": "synthetic-36",
+      "partition": "development",
+      "text": "В этом проекте схема базы меняется только через миграции.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-038",
+      "session": "synthetic-37",
+      "partition": "development",
+      "text": "Anton said: I prefer short replies.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-039",
+      "session": "synthetic-38",
+      "partition": "development",
+      "text": "Он обычно проверяет контракт перед изменением кода.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-040",
+      "session": "synthetic-39",
+      "partition": "development",
+      "text": "Коллега написал: I usually review code first.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-041",
+      "session": "synthetic-40",
+      "partition": "development",
+      "text": "> I prefer short replies.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-042",
+      "session": "synthetic-41",
+      "partition": "development",
+      "text": "```text\nЯ предпочитаю короткие ответы.\n```",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-043",
+      "session": "synthetic-42",
+      "partition": "development",
+      "text": "    I prefer краткие replies.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-044",
+      "session": "synthetic-43",
+      "partition": "development",
+      "text": "\"I usually review code first.\"",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-045",
+      "session": "synthetic-44",
+      "partition": "development",
+      "text": "Мне удобнее читать код до документации?",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-046",
+      "session": "synthetic-45",
+      "partition": "development",
+      "text": "Do I usually check tests before review?",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-047",
+      "session": "synthetic-46",
+      "partition": "development",
+      "text": "I prefer coffee without sugar.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-048",
+      "session": "synthetic-47",
+      "partition": "development",
+      "text": "Я обычно гуляю утром.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-049",
+      "session": "synthetic-48",
+      "partition": "development",
+      "text": "We prefer small code changes.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-050",
+      "session": "synthetic-49",
+      "partition": "development",
+      "text": "Мы обычно проводим ревью утром.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-051",
+      "session": "synthetic-50",
+      "partition": "development",
+      "text": "I prefer short replies.\n> But this quotation is not my own wording.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-052",
+      "session": "synthetic-51",
+      "partition": "development",
+      "text": "Я обычно читаю код.\n```\nчужой текст\n```",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-053",
+      "session": "synthetic-52",
+      "partition": "development",
+      "text": "I prefer commits signed using ghp_syntheticcredential",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-054",
+      "session": "synthetic-53",
+      "partition": "development",
+      "text": "Я предпочитаю short replies <!-- third party -->",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-055",
+      "session": "synthetic-54",
+      "partition": "development",
+      "text": "When reviewing code, Anton says: I check the tests first.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-056",
+      "session": "synthetic-55",
+      "partition": "development",
+      "text": "При ревью Антон сказал: я проверяю контракт.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-057",
+      "session": "synthetic-56",
+      "partition": "development",
+      "text": "When reviewing code, Anton wrote “before merging, I check the tests”.",
+      "expected_quotes": []
+    },
+    {
+      "id": "synthetic-058",
+      "session": "synthetic-57",
+      "partition": "development",
+      "text": "При ревью Антон написал «обычно я проверяю код».",
+      "expected_quotes": []
+    },
+    {
+      "id": "hook-multiline-0",
+      "session": "synthetic-multiline-0",
+      "partition": "development",
+      "text": "I prefer short code reviews\nonly for trivial changes.",
+      "expected_quotes": [
+        "I prefer short code reviews\nonly for trivial changes."
+      ]
+    },
+    {
+      "id": "hook-multiline-1",
+      "session": "synthetic-multiline-1",
+      "partition": "development",
+      "text": "Я предпочитаю короткие ревью\nтолько для простых изменений.",
+      "expected_quotes": [
+        "Я предпочитаю короткие ревью\nтолько для простых изменений."
+      ]
+    }
+  ],
+  "task_pairs": []
+}

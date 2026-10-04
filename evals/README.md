@@ -11,6 +11,7 @@ answer quality. Every published result identifies its source, inputs and runtime
 | Do hook intake and profile boundaries hold? | [Control loop](control-loop.md#connection-to-the-implementation) | Fixture checks for binding, influence, worker lifecycle, readiness and private UI metadata |
 | Does the prompt refiner preserve intent? | [Hook intake runner](control-loop.md#refiner-protocol-and-model-evaluation) | Production parser plus retained processor outputs, semantic quality needs independent review |
 | Are persona measurements reproducible? | [Persona replay](../docs/reference/persona-mining-contract.md) | Frozen Git attribution, measured diff accounting and cache consistency |
+| Does local extraction preserve complete statements? | `mmcg miner hooks evaluate-local --input evals/persona-local.json` | Exact-span precision/recall on supplied labels, source digest and paired outcome seam |
 | Does a shipped role follow its instructions? | `runner.py` | Focused model-backed behavioral cases |
 | Does retrieval improve a research answer? | [Research benchmark](benchmark/README.md) | Matched conditions, retained answers and offline assessments |
 | What does indexing cost? | [Index benchmark](../docs/benchmarks.md) | Cold, unchanged and incremental time and memory |

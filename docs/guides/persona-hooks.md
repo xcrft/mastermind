@@ -123,7 +123,10 @@ refreshes committed Git observations before retrieving an executor slice from
 the approved spec. It preserves the stored author selector and reuses eligible
 diff measurements. After reviewed completion, it refreshes those observations
 again and records the pinned Git revision in `state.json` under `profile_refresh`.
-Uncommitted edits are not mined. `--profile-client` overrides the audience.
+Uncommitted edits are not mined. `--profile-client` overrides the audience and
+is retained as `state.profile_client` across review and completion resumes.
+An older native task recovers the audience from its validated invocation receipt.
+Completion rechecks read access; a saved audience cannot undo a revocation.
 Independent semantic review still receives no personal profile.
 
 To stop automatic delivery while keeping local capture and MCP read access:
@@ -152,9 +155,10 @@ previous closed episode; changed bindings require authorship review again.
 |---|---|
 | Detector | `persona-explicit-v2`, shared with transcript collection |
 | Text | Exact eligible user-prose quotation, no inferred role, motive or result |
-| Bounds | First 128 lines per user prompt, at most 8 drafts per episode, complete statement of at most 200 characters |
+| Bounds | Prompts up to 128 lines, at most 8 drafts per episode, complete normalized statement of at most 200 characters |
+| Continuation | Conditions and exceptions on later lines stay in the same source span. Oversized spans are omitted whole |
 | Exclusions | Incomplete capture, generated input, code, quotations, pasted wrappers and credential-like text |
-| Repeat | Checkpoint by episode revision and processor fingerprint, including empty results |
+| Repeat | Checkpoint by episode revision and processor fingerprint, including empty results. Durable queue retries at native events and task boundaries |
 | Prior profile/refiner exposure | Candidate remains inspectable; dependent support cannot be promoted as independent evidence |
 | Publication | No automatic acceptance; authorship attestation and habit review remain required |
 | Opt-out | `--disable-profile` stops automatic local extraction as well as delivery; capture continues |
@@ -173,6 +177,46 @@ is 1–16 episodes per page. Start a fresh pass to reconsider revised episodes.
 Status exposes this path under `pipeline.local_analysis` and reports task
 benefit as `unmeasured`. Git refresh success and hook delivery are separate
 observations; neither establishes correctness of a personal claim.
+
+Unavailable profile storage leaves local work queued. The next admitted native
+event, executor context or reviewed completion retries up to four entries under
+the current grants. Analysis failures use bounded backoff. While idle, work stays
+durable until the next trigger; no provider worker or always-running process is
+started. `pipeline.local_analysis.retry_queue` exposes pending and retried work.
+Disabling delivery or revoking profile access pauses automatic processing.
+
+### Retain sources without filling the working journal
+
+At the active episode limit or database pressure, capture archives inactive
+payloads in private `~/.mastermind/persona-archive/*.json` files. Each session's
+current episode stays in the working set. Retired incomplete episodes keep their
+original gaps and missing-Stop state; archiving does not repair them. Identity,
+deduplication and review bindings remain in the journal. Source reads verify the
+archive digest and retain the same evidence revision; changed or missing files
+withhold dependent claims. Archive storage grows until an explicit `hooks forget`.
+Forgetting removes archived copies as well as the journal source.
+
+```bash
+mastermind miner hooks archive --project-root . --limit 32
+```
+
+`pipeline.retention` separates active and archived counts. The 2000-episode
+limit applies to active payloads. The database still has a 64 MiB bound for
+metadata and other records; archives are not proof of complete capture.
+
+### Measure extraction and task outcomes
+
+```bash
+mastermind miner hooks evaluate-local --input evals/persona-local.json
+```
+
+The offline evaluator uses the production local extractor, binds the corpus
+digest and compares exact source spans with supplied labels. Sessions cannot
+cross development and held-out partitions. Optional `task_pairs` compare one
+task revision with and without a profile, reporting correctness, iterations,
+user corrections and elapsed time. The evaluator runs no model or task, reads
+no journal, and publishes no rule. See [quality](../reference/persona-quality.md)
+for the schema and the remaining measurement boundaries.
 
 ### Refine every admitted prompt
 

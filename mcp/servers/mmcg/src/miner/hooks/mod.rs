@@ -9,6 +9,7 @@ mod install;
 mod journal;
 mod local;
 mod profile_context;
+mod quality;
 pub mod readiness;
 mod refiner;
 mod semantic;
@@ -181,13 +182,35 @@ pub fn configured_profile_client(root: &Path, client_id: &str) -> Result<Option<
 
 /// Completion records this optional local refresh independently from its
 /// correctness verdict. A failed persona refresh cannot approve or fail a task.
-pub fn refresh_task_profile(root: &Path) -> Option<Value> {
-    let reader = ["claude", "codex"]
-        .into_iter()
-        .find_map(|client| configured_profile_client(root, client).ok().flatten())?;
+pub fn refresh_task_profile(root: &Path, selected: Option<&str>) -> Option<Value> {
+    drain_local_for_task(root);
+    let reader = selected.map(str::to_owned).or_else(|| {
+        ["claude", "codex"]
+            .into_iter()
+            .find_map(|client| configured_profile_client(root, client).ok().flatten())
+    })?;
     Some(profile::refresh_for_task(root, &reader).unwrap_or_else(
         |_| json!({"status":"failed","reason":"local_profile_refresh_unavailable","model":false}),
     ))
+}
+
+/// Each task boundary retries bounded durable local work. No worker or model is started.
+pub fn drain_local_for_task(root: &Path) {
+    let result = (|| -> Result<(), Error> {
+        if !journal::path()?.exists() {
+            return Ok(());
+        }
+        let mut db = Journal::open(true)?;
+        for client in ["claude", "codex"] {
+            if let Some(grant) = db.grant(client, root)? {
+                local::drain(&mut db, &grant)?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        eprintln!("Mastermind: local candidate retry remains pending");
+    }
 }
 
 pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {
@@ -383,6 +406,9 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     }
     if let Some(episode) = receipt["revised_episode"].as_str() {
         local::automatic(&mut db, &grant, episode);
+    }
+    if local::drain(&mut db, &grant).is_err() {
+        eprintln!("Mastermind: local candidate retry remains pending");
     }
     let mut contexts = Vec::new();
     if kind == "UserPromptSubmit" && receipt["status"] == "recorded" {
@@ -615,6 +641,17 @@ pub fn show(episode: &str) -> Result<(), Error> {
 
 pub fn mine_local(root: &Path, limit: usize, after: &str) -> Result<(), Error> {
     print(&local::mine(root, limit, after)?)
+}
+
+pub fn archive(root: &Path, limit: usize) -> Result<(), Error> {
+    let root = root.canonicalize()?;
+    let mut db = Journal::open(true)?;
+    let archived = db.compact(Some(&root), limit)?;
+    print(&json!({"archived":archived,"retention":db.retention()?,"source_preserved":true}))
+}
+
+pub fn evaluate_local(path: &Path) -> Result<(), Error> {
+    print(&quality::run(path)?)
 }
 
 pub fn analyze(
@@ -865,7 +902,7 @@ pub fn draft(id: &str) -> Result<(), Error> {
     print(
         &json!({"draft":draft,"current":snapshot.revision==draft.episode_revision && snapshot.coverage_gaps.is_empty(),
         "evidence_class":semantic::evidence_class(&snapshot,&draft.content).ok(),
-        "promotion_eligible":snapshot.revision==draft.episode_revision && semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok(),
+        "promotion_eligible":snapshot.revision==draft.episode_revision && promotion_eligible(&snapshot,&draft).is_ok(),
         "episode":snapshot}),
     )
 }
@@ -891,7 +928,7 @@ fn candidate(db: &Journal, draft: &Draft) -> Result<store::CollectedCandidate, E
     if !draft.attested || input.revision != draft.episode_revision {
         return Err("draft needs current human authorship attestation".into());
     }
-    semantic::validate_for_promotion(&input, std::slice::from_ref(&draft.content))?;
+    promotion_eligible(&input, draft)?;
     let citation = draft
         .content
         .supports
@@ -927,6 +964,11 @@ fn candidate(db: &Journal, draft: &Draft) -> Result<store::CollectedCandidate, E
         status: "pending".into(),
         present: true,
     })
+}
+
+fn promotion_eligible(input: &semantic::EpisodeInput, draft: &Draft) -> Result<(), Error> {
+    semantic::validate_for_promotion(input, std::slice::from_ref(&draft.content))?;
+    local::validate_current(input, draft)
 }
 
 /// All public profile projections revalidate the complete episode receipt,

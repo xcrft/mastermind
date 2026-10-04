@@ -655,6 +655,10 @@ pub fn validate_completed(
         || receipt.agent != contract()
         || receipt.policy_sha256 != json_sha(&executor_policy(&receipt.options))?
         || !receipt.options.valid()
+        || approved
+            .profile_client
+            .as_ref()
+            .is_some_and(|client| receipt.options.profile_client.as_ref() != Some(client))
     {
         return Err("invocation_receipt_binding_mismatch".into());
     }
@@ -1097,6 +1101,7 @@ pub(crate) fn execute_with_feedback(
                     .map_err(|_| (Status::Failed, "invocation_guard_preparation_failed"))?,
             );
         }
+        crate::miner::hooks::drain_local_for_task(task.root.canonical_root());
         if let Some(reader) = options.profile_client.as_deref() {
             if crate::miner::profile::refresh_for_task(task.root.canonical_root(), reader).is_err()
             {

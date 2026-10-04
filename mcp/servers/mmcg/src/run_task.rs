@@ -110,6 +110,9 @@ pub struct RunState {
     /// Exact active local review bytes, never an independently signed verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_review_sha256: Option<String>,
+    /// Profile audience selected for this approved iteration, retained on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_client: Option<String>,
     /// Optional committed Git refresh, separate from the task's verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_refresh: Option<serde_json::Value>,
@@ -2179,10 +2182,12 @@ fn complete_reviewed_task(
     // from Git's diff or the external executable has changed.
     // Recheck observed obligations only at this new completion;
     // already completed tasks retain their historical meaning.
+    let mut completion_profile = state.profile_client.clone();
     let receipts_current = read_preflight_spec(repo_root, spec_path).and_then(|body| {
         validate_intake_binding(repo_root, spec_path, state)?;
         if state.invocation_required {
-            crate::invocation::validate_completed(spec_path, repo_root, state)?;
+            let receipt = crate::invocation::validate_completed(spec_path, repo_root, state)?;
+            completion_profile = receipt.options.profile_client;
         }
         crate::task_review::validate_current(repo_root, spec_path, state)?;
         let parsed = spec::parse_str(&state.spec_path, &body);
@@ -2241,7 +2246,9 @@ fn complete_reviewed_task(
         );
         return Outcome::PostBroken;
     }
-    if let Some(refresh) = crate::miner::hooks::refresh_task_profile(repo_root) {
+    if let Some(refresh) =
+        crate::miner::hooks::refresh_task_profile(repo_root, completion_profile.as_deref())
+    {
         completed.profile_refresh = Some(refresh);
         if save_state_in_repository(repo_root, state_path, &completed).is_err() {
             eprintln!("Mastermind: optional profile refresh receipt could not be retained");
@@ -2924,6 +2931,7 @@ fn run_pre(
         invocation_required: opts.exec && !opts.pre_only,
         semantic_review_required: crate::acceptance::declared(&parsed).is_some(),
         semantic_review_sha256: None,
+        profile_client: opts.invocation.profile_client.clone(),
         profile_refresh: None,
     };
     if let Err(e) = save_state_in_repository(repo_root, state_path, &state) {
@@ -3571,6 +3579,7 @@ verifications: []\n\
             invocation_required: false,
             semantic_review_required: false,
             semantic_review_sha256: None,
+            profile_client: Some("task-reader".into()),
             profile_refresh: None,
         };
         save_state(&path, &state).unwrap();

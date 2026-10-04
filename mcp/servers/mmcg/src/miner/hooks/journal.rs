@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod archive;
 mod intake;
+mod local;
 pub(in crate::miner) mod task;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -32,6 +34,7 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_session (id TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS hook_episode (id TEXT PRIMARY KEY, session TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS hook_episode_session ON hook_episode(session,id);
+                CREATE INDEX IF NOT EXISTS hook_episode_active ON hook_episode(id) WHERE json_type(data,'$.archive') IS NULL;
                 CREATE TABLE IF NOT EXISTS hook_event (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, native_key TEXT NOT NULL,
                     digest TEXT NOT NULL, episode TEXT, tool_id TEXT, kind TEXT NOT NULL);
@@ -53,7 +56,13 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_task_binding (
                     revision TEXT PRIMARY KEY, intake TEXT NOT NULL UNIQUE,
                     project_root TEXT NOT NULL, spec_path TEXT NOT NULL, data TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS hook_task_binding_target ON hook_task_binding(project_root,spec_path);";
+                CREATE INDEX IF NOT EXISTS hook_task_binding_target ON hook_task_binding(project_root,spec_path);
+                CREATE TABLE IF NOT EXISTS hook_local_queue (
+                    episode TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS hook_archive_file (digest TEXT PRIMARY KEY, episode TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS hook_archive_episode ON hook_archive_file(episode);
+                CREATE TABLE IF NOT EXISTS hook_archive_delete (digest TEXT PRIMARY KEY);";
 
 pub(super) fn path() -> Result<PathBuf, Error> {
     Ok(std::env::home_dir()
@@ -260,6 +269,7 @@ impl Journal {
             conn.execute_batch(SCHEMA)?;
             let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
             conn.pragma_update(None, "max_page_count", MAX_BYTES as i64 / page_size)?;
+            archive::drain_deletes(&conn)?;
         }
         Ok(Self { conn })
     }
@@ -337,6 +347,7 @@ impl Journal {
             })?;
         let mut scanned = 0;
         let mut active = 0;
+        let mut observed = 0;
         let mut complete = project.is_some();
         for row in rows {
             scanned += 1;
@@ -346,28 +357,24 @@ impl Journal {
             }
             let session: Session = serde_json::from_str(&row?)?;
             if session.capture_version == CAPTURE_VERSION
-                && session.started
                 && session.gaps.is_empty()
                 && Some(&session.project) == project.as_ref()
                 && session.repository == repository
             {
-                active += 1;
+                let started: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM hook_event WHERE session=?1 AND kind='SessionStart')", [&session.id], |row| row.get(0))?;
+                observed += usize::from(started);
+                active += usize::from(started && session.started);
             }
         }
         Ok(
-            json!({"status":if !complete {"incomplete"} else if active > 0 {"session_start_observed"} else {"not_observed"},
+            json!({"status":if !complete {"incomplete"} else if observed > 0 {"session_start_observed"} else {"not_observed"},
             "capture_generation":generation,"source":"local_unverified_native_event",
-            "current_sessions":if complete {Some(active)} else {None},"complete":complete}),
+            "current_sessions":if complete {Some(active)} else {None},"session_start_observations":if complete {Some(observed)} else {None},"complete":complete}),
         )
     }
 
     pub fn episode(&self, id: &str) -> Result<Episode, Error> {
-        let data: String =
-            self.conn
-                .query_row("SELECT data FROM hook_episode WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })?;
-        Ok(serde_json::from_str(&data)?)
+        load_episode(&self.conn, id)
     }
 
     pub fn profile_delivery_disabled(&self, client: &str, root: &Path) -> Result<bool, Error> {
@@ -399,7 +406,7 @@ impl Journal {
             return Ok(json!({"status":"not_configured","eligibility":"capture_metadata_only"}));
         };
         let episodes = {
-            let mut statement = tx.prepare("SELECT id,json_extract(data,'$.generation') FROM hook_episode WHERE json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 LIMIT ?3")?;
+            let mut statement = tx.prepare("SELECT id,json_extract(data,'$.generation') FROM hook_episode WHERE json_type(data,'$.archive') IS NULL AND json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 LIMIT ?3")?;
             let rows = statement.query_map(
                 params![client, root.to_string_lossy(), MAX_EPISODES + 1],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
@@ -441,6 +448,8 @@ impl Journal {
             "historical":{"episodes":historical},
             "meaning":"Complete capture metadata is not proof of human authorship, semantic truth or an accepted personal habit."
         });
+        let archived: i64 = tx.query_row("SELECT count(*) FROM hook_episode WHERE json_type(data,'$.archive') IS NOT NULL AND json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2", params![client,root.to_string_lossy()], |row| row.get(0))?;
+        summary["archived"] = json!({"episodes":archived,"source_verification":"on_demand"});
         for (field, sql) in [
             ("events", "SELECT count(*),coalesce(sum(json_extract(s.data,'$.generation')=?3),0) FROM hook_event e JOIN hook_session s ON s.id=e.session WHERE json_extract(s.data,'$.client')=?1 AND json_extract(s.data,'$.project_root')=?2"),
             ("drafts", "SELECT count(*),coalesce(sum(json_extract(e.data,'$.generation')=?3),0) FROM hook_draft d JOIN hook_episode e ON e.id=d.episode WHERE json_extract(e.data,'$.client')=?1 AND json_extract(e.data,'$.project_root')=?2"),
@@ -632,10 +641,25 @@ impl Journal {
                 save_episode(&tx, &ep)?;
                 revised_episode = Some(ep.id.clone());
             }
-            let count: i64 = tx.query_row("SELECT count(*) FROM hook_episode", [], |r| r.get(0))?;
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM hook_episode WHERE json_type(data,'$.archive') IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            let pages: i64 = tx.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+            let free: i64 = tx.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+            let size: i64 = tx.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+            if count >= MAX_EPISODES || (pages - free) * size > (MAX_BYTES * 3 / 4) as i64 {
+                archive::compact(&tx, None, 32)?;
+            }
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM hook_episode WHERE json_type(data,'$.archive') IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
             if count >= MAX_EPISODES {
                 return Err(
-                    "hook journal episode limit reached; export or forget reviewed sessions".into(),
+                    "hook journal active episode limit reached; remaining episodes are still in use".into(),
                 );
             }
             let id = hash(&json!(["hook-episode-v1", sid, event_id]));
@@ -831,10 +855,10 @@ impl Journal {
         };
         let mut result = vec![];
         for (id, data) in rows {
-            let ep: Episode = serde_json::from_str(&data)?;
+            let ep = load_episode(&self.conn, &id)?;
             let snapshot = self.snapshot(&id)?;
             result.push(json!({"id":id,"revision":snapshot.revision,"client":ep.client,"closed":ep.closed,
-                "events":ep.events.len(),"coverage_gaps":snapshot.coverage_gaps,"profile_influenced":snapshot.profile_influenced}));
+                "events":ep.events.len(),"archived":serde_json::from_str::<Value>(&data)?["archive"].is_string(),"coverage_gaps":snapshot.coverage_gaps,"profile_influenced":snapshot.profile_influenced}));
         }
         Ok(result)
     }
@@ -1000,7 +1024,7 @@ impl Journal {
         rows.map(|row| { let draft:Draft=serde_json::from_str(&row?)?;
             Ok(json!({"id":draft.id,"revision":draft.revision,"episode_revision":draft.episode_revision,"attested":draft.attested,
                 "evidence_class":super::semantic::evidence_class(&snapshot,&draft.content).ok(),
-                "promotion_eligible":snapshot.revision==draft.episode_revision && super::semantic::validate_for_promotion(&snapshot,std::slice::from_ref(&draft.content)).is_ok()})) }).collect()
+                "promotion_eligible":snapshot.revision==draft.episode_revision && super::promotion_eligible(&snapshot,&draft).is_ok()})) }).collect()
     }
 
     pub fn review_queue(&self, root: &Path) -> Result<Value, Error> {
@@ -1024,13 +1048,8 @@ impl Journal {
             });
             let class = current
                 .and_then(|source| super::semantic::evidence_class(source, &draft.content).ok());
-            let eligible = current.is_some_and(|source| {
-                super::semantic::validate_for_promotion(
-                    source,
-                    std::slice::from_ref(&draft.content),
-                )
-                .is_ok()
-            });
+            let eligible =
+                current.is_some_and(|source| super::promotion_eligible(source, &draft).is_ok());
             items.push(json!({"id":draft.id,"kind":"hook_habit_candidate","status":"authorship_review_required",
                 "source_status":if current.is_some() {"current"} else {"stale_or_unavailable"},
                 "evidence_class":class,"promotion_eligible":eligible,"source_id":draft.episode,
@@ -1063,10 +1082,7 @@ impl Journal {
     pub fn attest(&mut self, id: &str, revision: &str, episode: &str) -> Result<Draft, Error> {
         let prepared = self.draft(id)?;
         let verified = self.snapshot(&prepared.episode)?;
-        super::semantic::validate_for_promotion(
-            &verified,
-            std::slice::from_ref(&prepared.content),
-        )?;
+        super::promotion_eligible(&verified, &prepared)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1137,16 +1153,18 @@ impl Journal {
         }
         add_gap(&mut session.gaps, "episode_forgotten");
         save_session(&tx, &session)?;
-        let mut stmt = tx.prepare("SELECT data FROM hook_episode WHERE session=?1 AND id!=?2")?;
+        let mut stmt = tx.prepare("SELECT id FROM hook_episode WHERE session=?1 AND id!=?2")?;
         let retained = stmt
             .query_map(params![forgotten.session, id], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
-        for data in retained {
-            let mut ep: Episode = serde_json::from_str(&data)?;
+        for retained_id in retained {
+            let mut ep = load_episode(&tx, &retained_id)?;
             ep.events.retain(|e| !event_ids.contains(e.id.as_str()));
+            archive::queued_delete(&tx, &retained_id)?;
             save_episode(&tx, &ep)?;
         }
+        archive::queued_delete(&tx, id)?;
         // Drafts can quote cross-turn context. Drop this session's derived
         // hypotheses along with every copy of the removed raw event text.
         tx.execute("DELETE FROM hook_draft WHERE episode IN (SELECT id FROM hook_episode WHERE session=?1)",[&forgotten.session])?;
@@ -1154,7 +1172,9 @@ impl Journal {
         tx.execute("DELETE FROM hook_event WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
+        tx.execute("DELETE FROM hook_local_queue WHERE episode=?1", [id])?;
         tx.commit()?;
+        archive::drain_deletes(&self.conn)?;
         Ok(())
     }
 }
@@ -1180,7 +1200,20 @@ fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
     let data: String = conn.query_row("SELECT data FROM hook_episode WHERE id=?1", [id], |r| {
         r.get(0)
     })?;
-    Ok(serde_json::from_str(&data)?)
+    let value: Value = serde_json::from_str(&data)?;
+    if let Some(key) = value["archive"].as_str() {
+        let archived = archive::read(conn, key)?;
+        if archived.id != id
+            || value["client"] != archived.client
+            || value["project_root"] != archived.project_root
+            || value["generation"] != archived.generation
+        {
+            return Err("episode archive identity differs from its journal reference".into());
+        }
+        Ok(archived)
+    } else {
+        Ok(serde_json::from_value(value)?)
+    }
 }
 
 fn push_exposure(session: &mut Session, receipt: Value) {

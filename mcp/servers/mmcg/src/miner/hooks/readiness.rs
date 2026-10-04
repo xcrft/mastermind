@@ -142,6 +142,10 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "output":"unreviewed_explicit_statement_candidates",
         "publication":"authorship_attestation_and_review_required",
         "quality":"synthetic_regression_only"
+        ,"retry_queue":match (&database, &grant) {
+            (Ok(Some(db)), Ok(Some(grant))) => db.local_queue_summary(grant).ok(),
+            _ => None
+        }
     });
     let native = if cfg!(unix) {
         match install::configure(
@@ -267,6 +271,10 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "git_refresh":{"trigger":["native_executor_context","reviewed_task_completion"],
             "source":"committed_git","model":false,"uncommitted_changes":"not_mined"},
         "task_benefit":"unmeasured",
+        "evaluation":{"command":"miner hooks evaluate-local --input <labeled-corpus.json>",
+            "metrics":["exact_source_precision","exact_source_recall","paired_task_outcomes"],
+            "labels":"externally_supplied","independent_labels":"not_verified","real_history_accuracy":"unmeasured"},
+        "retention":match &database { Ok(Some(db)) => db.retention().ok(), _ => None },
         "next_actions":next_actions,
         "meaning":"Profile-enabled hooks extract explicit local candidates after complete capture. Model analysis is separate. Only reviewed claims are published."
     });

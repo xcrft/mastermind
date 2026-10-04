@@ -149,48 +149,9 @@ struct Cli {
 enum Cmd {
     /// Build or refresh the index. Incremental by default — skips files whose
     /// mtime matches the stored index. Use --force to re-parse everything.
-    Index {
-        /// Project root to index. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// Re-parse every file regardless of mtime. Use after schema changes or to recover from a stale index.
-        #[arg(long)]
-        force: bool,
-    },
+    Index(IndexArgs),
     /// Add a validated evidence overlay without replacing the Tree-sitter graph.
-    Enrich {
-        /// SCIP protobuf index produced by a language-specific SCIP indexer.
-        #[arg(
-            long,
-            value_name = "PATH",
-            required_unless_present = "facts",
-            conflicts_with = "facts"
-        )]
-        scip: Option<PathBuf>,
-        /// Strict mastermind-facts/v1 manifest produced by a declarative extension.
-        #[arg(
-            long,
-            value_name = "PATH",
-            required_unless_present = "scip",
-            conflicts_with = "scip"
-        )]
-        facts: Option<PathBuf>,
-        /// Detached mastermind fact-manifest signature.
-        #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
-        signature: Option<PathBuf>,
-        /// Ed25519 public key used to authenticate the fact manifest.
-        #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
-        public_key: Option<PathBuf>,
-        /// Reject unsigned fact manifests.
-        #[arg(long, requires = "facts", conflicts_with = "scip")]
-        require_signature: bool,
-        /// Trusted Ed25519 key ID. Repeatable for rotation windows.
-        #[arg(long = "trusted-key-id", requires = "facts", conflicts_with = "scip")]
-        trusted_key_ids: Vec<String>,
-        /// Revoked Ed25519 key ID. Revocation wins over trust.
-        #[arg(long = "revoked-key-id", requires = "facts", conflicts_with = "scip")]
-        revoked_key_ids: Vec<String>,
-    },
+    Enrich(EnrichArgs),
     /// Adapt, sign, and verify revision-bound declarative fact manifests.
     #[command(subcommand)]
     Facts(FactCmd),
@@ -201,74 +162,15 @@ enum Cmd {
     #[command(subcommand)]
     Workflow(WorkflowCmd),
     /// Build a compact deterministic architecture briefing from the codegraph.
-    Map {
-        /// Repository-relative file or directory scope. Defaults to the index root.
-        #[arg(default_value = ".")]
-        path: String,
-        #[arg(long, value_enum, default_value = "text")]
-        format: MapFormat,
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=6))]
-        depth: u8,
-        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
-        top: u32,
-        /// Exclude non-production path segments and conventional test filenames.
-        #[arg(long)]
-        production_only: bool,
-    },
+    Map(MapArgs),
     /// Analyze changes through calls and syntactic references, component crossings, and candidate tests.
-    Impact {
-        #[arg(long)]
-        since: String,
-        #[arg(long, value_enum, default_value_t = ImpactFormat::Text)]
-        format: ImpactFormat,
-        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=5))]
-        depth: u32,
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
-        top: u32,
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-    },
+    Impact(ImpactArgs),
     /// Build one bounded revision-bound context packet for an agent role.
-    Brief {
-        #[arg(long, value_enum)]
-        role: BriefRoleArg,
-        #[arg(long)]
-        since: String,
-        #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u32).range(256..=8_000))]
-        budget_tokens: u32,
-        #[arg(long, value_enum, default_value_t = BriefFormat::Text)]
-        format: BriefFormat,
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-    },
+    Brief(BriefArgs),
     /// Retrieve bounded local symbol candidates by plain concept terms.
-    Concept {
-        query: String,
-        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
-        top: u32,
-        #[arg(long, value_enum, default_value_t = ConceptFormat::Text)]
-        format: ConceptFormat,
-    },
+    Concept(ConceptArgs),
     /// Compare bounded architecture snapshots between a Git baseline and the indexed worktree.
-    Temporal {
-        #[arg(long)]
-        since: String,
-        #[arg(long, value_enum, default_value_t = TemporalFormat::Text)]
-        format: TemporalFormat,
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long, default_value = ".")]
-        path: String,
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=5))]
-        depth: u8,
-        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
-        top: u32,
-        #[arg(long)]
-        production_only: bool,
-        /// Override the repository CODEOWNERS file used for ownership drift.
-        #[arg(long, value_name = "PATH")]
-        codeowners: Option<PathBuf>,
-    },
+    Temporal(TemporalArgs),
     /// Evaluate repository-owned architecture rules over bounded change evidence.
     #[command(subcommand)]
     Policy(PolicyCmd),
@@ -276,125 +178,27 @@ enum Cmd {
     #[command(subcommand)]
     Review(ReviewCmd),
     /// Serve Mastermind Lens: a local, read-only, diff-first change review UI.
-    Ui {
-        /// Git ref used as the change-impact baseline.
-        #[arg(long)]
-        since: String,
-        /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// Repository-relative map scope. Defaults to the repository root.
-        #[arg(long, default_value = ".")]
-        path: String,
-        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
-        depth: u8,
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
-        top: u32,
-        /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
-        #[arg(long)]
-        production_only: bool,
-        /// Import a SARIF 2.1 report as read-only Lens evidence. Repeatable.
-        #[arg(long = "sarif", value_name = "PATH")]
-        sarif: Vec<PathBuf>,
-        /// Import an LCOV tracefile or Cobertura XML report. Repeatable.
-        #[arg(long = "coverage", value_name = "PATH")]
-        coverage: Vec<PathBuf>,
-        /// Import a JUnit XML test report. Only explicit testcase file paths are correlated. Repeatable.
-        #[arg(long = "junit", value_name = "PATH")]
-        junit: Vec<PathBuf>,
-        /// Import an OpenTelemetry OTLP JSON trace export. Repeatable.
-        #[arg(long = "otel", value_name = "PATH")]
-        otel: Vec<PathBuf>,
-        /// Override the repository CODEOWNERS file used by Lens.
-        #[arg(long, value_name = "PATH")]
-        codeowners: Option<PathBuf>,
-        /// Do not correlate exact changed-file mentions from indexed specs, ADRs, audits, and lessons.
-        #[arg(long)]
-        no_project_knowledge: bool,
-        /// Live-check one root-bound portable document graph and show its unverified relation queue.
-        #[arg(long, value_name = "PATH")]
-        document_graph: Option<PathBuf>,
-        /// Bound read-only Git churn and contributor evidence. Zero disables it.
-        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
-        git_commits: u16,
-        /// Enable personal context for an existing root/client read grant.
-        #[arg(long)]
-        profile_client: Option<String>,
-        /// Agent duty for the private context preview.
-        #[arg(long, value_enum, default_value_t = BriefRoleArg::Auditor)]
-        role: BriefRoleArg,
-        #[arg(long)]
-        workflow: Option<String>,
-        /// Repository-relative paths used to select personal context. Repeatable.
-        #[arg(long = "context-path")]
-        context_paths: Vec<String>,
-        /// Search terms for project/documentation context.
-        #[arg(long)]
-        query: Option<String>,
-        #[arg(long, default_value_t = 8_000, value_parser = clap::value_parser!(u32).range(1_024..=16_000))]
-        budget_tokens: u32,
-        /// Loopback port. Zero asks the OS for an available ephemeral port.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
-    },
+    Ui(UiArgs),
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
     Serve,
     /// Watch a directory and re-index files as they change. Long-running.
-    Watch {
-        /// Project root to watch. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-    },
+    Watch(WatchArgs),
     /// Show workflow status: index freshness, installed subagents/skills,
     /// active tasks and their phase, and the recommended next step.
-    Status {
-        /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// Print observed component state as JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    Status(StatusArgs),
     /// Search durable project decisions/ADRs, reports, audits, lessons, and context.
     /// Results are observed retrieval evidence; Markdown remains authoritative.
-    History {
-        /// FTS5 MATCH query.
-        query: String,
-        /// Limit results to one artifact kind.
-        #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"])]
-        kind: Option<String>,
-        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
-        top: u32,
-        /// Live-check one root-bound portable document graph and return it beside FTS history.
-        #[arg(long, value_name = "PATH")]
-        document_graph: Option<PathBuf>,
-    },
+    History(HistoryArgs),
     /// Build a grounded evidence packet for "why" questions without inventing
     /// rationale that is absent from durable project history.
-    Why {
-        query: String,
-        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
-        top: u32,
-    },
+    Why(WhyArgs),
     /// Print only the next recommended action and the ready-to-paste Claude
     /// prompt for the highest-priority pending task.
-    Next {
-        /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-    },
+    Next(NextArgs),
     /// Print a full resume packet for the highest-priority pending task (or a
     /// named task): current phase, state, goal excerpt, file list, and a
     /// ready-to-paste Claude prompt. Use this when re-opening a session.
-    Resume {
-        /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// Task folder name to resume (e.g. `042-payment-routing`). If omitted,
-        /// picks the highest-priority pending task automatically.
-        #[arg(long)]
-        task: Option<String>,
-    },
+    Resume(ResumeArgs),
     /// Configure a project, its client integrations, indexes and bounded mining.
     Init(commands::onboard::Options),
     /// Remove a Mastermind setup. By default (`--scope project`) deletes
@@ -403,18 +207,7 @@ enum Cmd {
     /// from Claude Code user scope via `claude mcp remove`; `--scope all` does
     /// both. Never touches CONTEXT.md / CLAUDE.md. Safe by default: prints the
     /// plan and exits unless `--force` is passed.
-    Uninstall {
-        /// Project root. Defaults to cwd. (Ignored for `--scope global`.)
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// What to remove: `project` (.mastermind/ + project .mcp.json),
-        /// `global` (de-register from Claude Code user scope via `claude mcp remove`), or `all`.
-        #[arg(long, value_enum, default_value = "project")]
-        scope: UninstallScope,
-        /// Actually delete. Without this, prints what would be removed and exits.
-        #[arg(long)]
-        force: bool,
-    },
+    Uninstall(UninstallArgs),
     /// Dry-run-first MCP configuration for supported clients.
     #[command(subcommand)]
     Setup(SetupCmd),
@@ -435,69 +228,21 @@ enum Cmd {
     /// symbols exist in the index, claimed files exist on disk, pre-edit
     /// snapshot caller counts match live index, blast radius isn't surprising.
     /// Exit code 0 if no errors (warnings OK).
-    VerifySpec {
-        /// Path to a `.mastermind/tasks/<NNN>-<name>/spec.md` file.
-        spec: PathBuf,
-        /// Project root the spec's file paths are relative to. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        json: bool,
-        /// Fail if no index is present, instead of skipping the live symbol checks.
-        #[arg(long)]
-        require_index: bool,
-        /// Contract-driven mode: also require YAML frontmatter scoping the change
-        /// (`touches`, `creates`, or `expected_docs`) and a `verify[].cmd`. Implies --require-index.
-        #[arg(long)]
-        strict: bool,
-    },
+    VerifySpec(VerifySpecArgs),
     /// Post-execution gate: mechanical audit comparing spec contract against
     /// the actual repo state. Diffs `<git-ref>` (typically `main` or
     /// merge-base) against the working tree — uncommitted and untracked work
     /// counts, since the audit runs before the commit step: claimed files vs
     /// what actually differs, pre-edit snapshot vs live `mmcg_callers` counts,
     /// snapshot symbols still exist. Exit code 0 unless verdict is `broken`.
-    AuditSpec {
-        /// Path to the spec.
-        spec: PathBuf,
-        /// Git ref to compare against (e.g. `main`, `HEAD~3`).
-        #[arg(long)]
-        since: String,
-        /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        json: bool,
-        /// Path to a structured executor report (bare YAML or markdown with
-        /// `<!-- mastermind:report-begin -->` sentinel; legacy executor
-        /// sentinels remain accepted). When provided,
-        /// integration-claim verification and vacuous-test detection run on
-        /// top of the standard Phase A checks.
-        #[arg(long)]
-        executor_report: Option<PathBuf>,
-        /// Write a portable audit bundle JSON to this path. Contains verdict,
-        /// changed_files, discrepancies, snapshot_drift, executor_report_path.
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    AuditSpec(AuditSpecArgs),
     /// Verify or sign sealed schema-v3 audit envelopes.
     #[command(subcommand)]
     Audit(AuditCmd),
     /// Health-check the environment for adoption — index existence,
     /// freshness, gitignore, CLAUDE.md workflow markers, MCP config,
     /// `mastermind serve` handshake. Exit code 0 if no checks fail.
-    Doctor {
-        /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
-        root: PathBuf,
-        /// Output JSON instead of human-readable text.
-        #[arg(long)]
-        json: bool,
-        /// Show full context: binary path, index path, MCP config candidates,
-        /// Claude config path, and hints for every check (not just failing ones).
-        #[arg(long)]
-        explain: bool,
-    },
+    Doctor(DoctorArgs),
     /// Two-phase orchestrator that wraps the mastermind workflow in mechanical
     /// gates. Canonical tasks resume from their task-local `state.json`.
     ///
@@ -507,139 +252,28 @@ enum Cmd {
     ///
     /// Defaults to hand-off semantics — print "now invoke the executor and
     /// re-run". Pass `--exec` for a recorded native Claude invocation between phases.
-    RunTask {
-        /// Path to the spec file (typically under `.mastermind/tasks/`).
-        spec: PathBuf,
-        /// Project root the spec's file paths resolve against. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// Restart pre-flight, preserving the task's original baseline and iteration count.
-        #[arg(long)]
-        reset: bool,
-        /// Run only pre-flight; retries preserve the original baseline and iteration count.
-        #[arg(long)]
-        pre_only: bool,
-        /// Run only post-flight (errors if no state file).
-        #[arg(long)]
-        post_only: bool,
-        /// Run Claude with bound context and permission policy in a new preflight iteration.
-        #[arg(long, conflicts_with = "post_only")]
-        exec: bool,
-        /// Mediate supported native tool requests against the approved file and check scope.
-        #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only"])]
-        guarded_exec: bool,
-        /// Retry fresh failed checks inside the approved scope and finite iteration budget.
-        #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
-        auto_repair: bool,
-        /// Review a held task once and complete if resolved. Without --exec, resume its existing audit.
-        #[arg(long, conflicts_with_all = ["pre_only", "post_only"])]
-        auto_review: bool,
-        /// Allow one concrete negative-criterion repair followed by a fresh review.
-        #[arg(long, requires_all = ["exec", "auto_review"], conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
-        auto_follow_up: bool,
-        /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
-        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
-        review_timeout: u64,
-        /// Reviewer native turn budget, independent of the executor (1–100).
-        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
-        review_max_turns: u32,
-        /// Wall-clock limit for the native invocation, in seconds (1–7200).
-        #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
-        exec_timeout: u64,
-        /// Native agent turn budget (1–100).
-        #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..=100))]
-        exec_max_turns: u32,
-        /// Override the automatically selected project profile audience for this invocation.
-        #[arg(long, requires = "exec")]
-        profile_client: Option<String>,
-        /// Skip the "index must exist and be non-empty" pre-check. Use for
-        /// docs-only / spec-only specs that don't touch indexed source.
-        /// Default = hard-fail when no index, because mmcg gates are only as
-        /// strong as the codegraph they reason from.
-        #[arg(long)]
-        allow_no_index: bool,
-        /// Contract-driven mode: fold strict spec checks into pre-flight
-        /// (scoped touches/creates, a runnable verify command).
-        #[arg(long)]
-        strict: bool,
-        /// Maximum number of pre-flight iterations on the same spec before
-        /// the dispatcher refuses to continue. Default 3. Set to 0 to disable
-        /// (not recommended). The counter survives `--reset` so the budget
-        /// can't be trivially bypassed.
-        #[arg(long, default_value_t = 3)]
-        max_iterations: u32,
-        /// Bypass the iteration-budget check for this one invocation. Still
-        /// appends a `kind: iteration_budget_exhausted` lesson so the override
-        /// is visible to future planners.
-        #[arg(long)]
-        force_iteration: bool,
-    },
+    RunTask(RunTaskArgs),
     /// One-shot query — handy for CLI debugging without going through MCP.
     #[command(subcommand)]
     Query(QueryCmd),
     /// Self-contained demo: builds a temp repo, indexes it, runs mmcg queries,
     /// and prints the mechanical auditor verdict. Zero setup — no Claude API key needed.
-    Demo {
-        /// Which demo scenario to run.
-        /// Available: hallucinated-symbol, scope-creep, stale-find-block, vacuous-test, signature-drift
-        #[arg(default_value = "hallucinated-symbol")]
-        scenario: String,
-    },
+    Demo(DemoArgs),
     /// Print a guided walkthrough of the Mastermind workflow: index → demo → setup → spec → run → track.
     Tour,
     /// Generate a PR comment in GitHub Flavored Markdown from a bundle JSON
     /// produced by `audit-spec --bundle`. Writes to stdout — pipe or redirect
     /// to a file and post via `gh pr comment --body-file <file>`.
-    PrComment {
-        /// Path to the sealed schema-v3 bundle JSON.
-        bundle: PathBuf,
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        #[arg(long)]
-        expected_repository: String,
-        #[arg(long)]
-        expected_baseline: String,
-        #[arg(long)]
-        expected_head: String,
-    },
+    PrComment(PrCommentArgs),
     /// Render an integrity-valid envelope without repository or signer trust.
     /// The output is explicitly marked untrusted and is forbidden in publication.
     PrCommentUntrusted { bundle: PathBuf },
     /// CI gate: index, verify selected specs, audit executor evidence, and
     /// optionally write bundles. Exit 0 if all pass.
-    Ci {
-        /// Git ref to diff against (required for audit phase).
-        #[arg(long, default_value = "origin/main")]
-        since: String,
-        /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-        /// Write audit bundle JSONs to this directory (one per spec).
-        #[arg(long)]
-        bundle_dir: Option<PathBuf>,
-        /// Audit only task folders with changed task artifacts between `since`
-        /// and HEAD. Intended for pull-request CI.
-        #[arg(long)]
-        changed_only: bool,
-        /// Fail when a selected task has no canonical executor-report.md.
-        /// Bundle publication implies this requirement even when omitted.
-        #[arg(long)]
-        require_executor_report: bool,
-    },
+    Ci(CiArgs),
     /// Scaffold a new task spec under `.mastermind/tasks/`. Picks the next
     /// available NNN sequence number automatically.
-    NewSpec {
-        /// Short description of the task. Used as the spec title and folder slug.
-        description: String,
-        /// Workflow contract: `verified` (compact goal/scope/acceptance/tests)
-        /// or `strict` (adds risk, evidence, rollback, and critic review).
-        /// Legacy `lite` and `standard` templates remain accepted.
-        #[arg(long, default_value = "verified")]
-        mode: String,
-        /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
-        root: std::path::PathBuf,
-    },
+    NewSpec(NewSpecArgs),
     /// Subcommands for inspecting project context quality.
     #[command(subcommand)]
     Context(ContextCmd),
@@ -647,6 +281,443 @@ enum Cmd {
     /// code-shape style). Output lives under `~/.mastermind/`, not the project.
     #[command(subcommand)]
     Miner(MinerCmd),
+}
+
+// Build each argument group in a separate frame so the full command tree
+// also fits the default Windows stack in unoptimized builds.
+#[derive(clap::Args)]
+struct IndexArgs {
+    /// Project root to index. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+    /// Re-parse every file regardless of mtime. Use after schema changes or to recover from a stale index.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct EnrichArgs {
+    /// SCIP protobuf index produced by a language-specific SCIP indexer.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "facts",
+        conflicts_with = "facts"
+    )]
+    scip: Option<PathBuf>,
+    /// Strict mastermind-facts/v1 manifest produced by a declarative extension.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "scip",
+        conflicts_with = "scip"
+    )]
+    facts: Option<PathBuf>,
+    /// Detached mastermind fact-manifest signature.
+    #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
+    signature: Option<PathBuf>,
+    /// Ed25519 public key used to authenticate the fact manifest.
+    #[arg(long, value_name = "PATH", requires = "facts", conflicts_with = "scip")]
+    public_key: Option<PathBuf>,
+    /// Reject unsigned fact manifests.
+    #[arg(long, requires = "facts", conflicts_with = "scip")]
+    require_signature: bool,
+    /// Trusted Ed25519 key ID. Repeatable for rotation windows.
+    #[arg(long = "trusted-key-id", requires = "facts", conflicts_with = "scip")]
+    trusted_key_ids: Vec<String>,
+    /// Revoked Ed25519 key ID. Revocation wins over trust.
+    #[arg(long = "revoked-key-id", requires = "facts", conflicts_with = "scip")]
+    revoked_key_ids: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct MapArgs {
+    /// Repository-relative file or directory scope. Defaults to the index root.
+    #[arg(default_value = ".")]
+    path: String,
+    #[arg(long, value_enum, default_value = "text")]
+    format: MapFormat,
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=6))]
+    depth: u8,
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+    top: u32,
+    /// Exclude non-production path segments and conventional test filenames.
+    #[arg(long)]
+    production_only: bool,
+}
+
+#[derive(clap::Args)]
+struct ImpactArgs {
+    #[arg(long)]
+    since: String,
+    #[arg(long, value_enum, default_value_t = ImpactFormat::Text)]
+    format: ImpactFormat,
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=5))]
+    depth: u32,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
+    top: u32,
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct BriefArgs {
+    #[arg(long, value_enum)]
+    role: BriefRoleArg,
+    #[arg(long)]
+    since: String,
+    #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u32).range(256..=8_000))]
+    budget_tokens: u32,
+    #[arg(long, value_enum, default_value_t = BriefFormat::Text)]
+    format: BriefFormat,
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct ConceptArgs {
+    query: String,
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+    top: u32,
+    #[arg(long, value_enum, default_value_t = ConceptFormat::Text)]
+    format: ConceptFormat,
+}
+
+#[derive(clap::Args)]
+struct TemporalArgs {
+    #[arg(long)]
+    since: String,
+    #[arg(long, value_enum, default_value_t = TemporalFormat::Text)]
+    format: TemporalFormat,
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long, default_value = ".")]
+    path: String,
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=5))]
+    depth: u8,
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+    top: u32,
+    #[arg(long)]
+    production_only: bool,
+    /// Override the repository CODEOWNERS file used for ownership drift.
+    #[arg(long, value_name = "PATH")]
+    codeowners: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct WatchArgs {
+    /// Project root to watch. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct StatusArgs {
+    /// Project root. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+    /// Print observed component state as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct HistoryArgs {
+    /// FTS5 MATCH query.
+    query: String,
+    /// Limit results to one artifact kind.
+    #[arg(long, value_parser = ["context", "lesson", "task_spec", "executor_report", "audit", "release_notes", "architecture_decision"])]
+    kind: Option<String>,
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+    top: u32,
+    /// Live-check one root-bound portable document graph and return it beside FTS history.
+    #[arg(long, value_name = "PATH")]
+    document_graph: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct WhyArgs {
+    query: String,
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=50))]
+    top: u32,
+}
+
+#[derive(clap::Args)]
+struct NextArgs {
+    /// Project root. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct ResumeArgs {
+    /// Project root. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+    /// Task folder name to resume (e.g. `042-payment-routing`). If omitted,
+    /// picks the highest-priority pending task automatically.
+    #[arg(long)]
+    task: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct UninstallArgs {
+    /// Project root. Defaults to cwd. (Ignored for `--scope global`.)
+    #[arg(default_value = ".")]
+    root: PathBuf,
+    /// What to remove: `project` (.mastermind/ + project .mcp.json),
+    /// `global` (de-register from Claude Code user scope via `claude mcp remove`), or `all`.
+    #[arg(long, value_enum, default_value = "project")]
+    scope: UninstallScope,
+    /// Actually delete. Without this, prints what would be removed and exits.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args)]
+struct VerifySpecArgs {
+    /// Path to a `.mastermind/tasks/<NNN>-<name>/spec.md` file.
+    spec: PathBuf,
+    /// Project root the spec's file paths are relative to. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long)]
+    json: bool,
+    /// Fail if no index is present, instead of skipping the live symbol checks.
+    #[arg(long)]
+    require_index: bool,
+    /// Contract-driven mode: also require YAML frontmatter scoping the change
+    /// (`touches`, `creates`, or `expected_docs`) and a `verify[].cmd`. Implies --require-index.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(clap::Args)]
+struct AuditSpecArgs {
+    /// Path to the spec.
+    spec: PathBuf,
+    /// Git ref to compare against (e.g. `main`, `HEAD~3`).
+    #[arg(long)]
+    since: String,
+    /// Project root. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long)]
+    json: bool,
+    /// Path to a structured executor report (bare YAML or markdown with
+    /// `<!-- mastermind:report-begin -->` sentinel; legacy executor
+    /// sentinels remain accepted). When provided,
+    /// integration-claim verification and vacuous-test detection run on
+    /// top of the standard Phase A checks.
+    #[arg(long)]
+    executor_report: Option<PathBuf>,
+    /// Write a portable audit bundle JSON to this path. Contains verdict,
+    /// changed_files, discrepancies, snapshot_drift, executor_report_path.
+    #[arg(long)]
+    bundle: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct DoctorArgs {
+    /// Project root. Defaults to cwd.
+    #[arg(default_value = ".")]
+    root: PathBuf,
+    /// Output JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+    /// Show full context: binary path, index path, MCP config candidates,
+    /// Claude config path, and hints for every check (not just failing ones).
+    #[arg(long)]
+    explain: bool,
+}
+
+#[derive(clap::Args)]
+struct DemoArgs {
+    /// Which demo scenario to run.
+    /// Available: hallucinated-symbol, scope-creep, stale-find-block, vacuous-test, signature-drift
+    #[arg(default_value = "hallucinated-symbol")]
+    scenario: String,
+}
+
+#[derive(clap::Args)]
+struct PrCommentArgs {
+    /// Path to the sealed schema-v3 bundle JSON.
+    bundle: PathBuf,
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long)]
+    expected_repository: String,
+    #[arg(long)]
+    expected_baseline: String,
+    #[arg(long)]
+    expected_head: String,
+}
+
+#[derive(clap::Args)]
+struct CiArgs {
+    /// Git ref to diff against (required for audit phase).
+    #[arg(long, default_value = "origin/main")]
+    since: String,
+    /// Project root. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Write audit bundle JSONs to this directory (one per spec).
+    #[arg(long)]
+    bundle_dir: Option<PathBuf>,
+    /// Audit only task folders with changed task artifacts between `since`
+    /// and HEAD. Intended for pull-request CI.
+    #[arg(long)]
+    changed_only: bool,
+    /// Fail when a selected task has no canonical executor-report.md.
+    /// Bundle publication implies this requirement even when omitted.
+    #[arg(long)]
+    require_executor_report: bool,
+}
+
+#[derive(clap::Args)]
+struct NewSpecArgs {
+    /// Short description of the task. Used as the spec title and folder slug.
+    description: String,
+    /// Workflow contract: `verified` (compact goal/scope/acceptance/tests)
+    /// or `strict` (adds risk, evidence, rollback, and critic review).
+    /// Legacy `lite` and `standard` templates remain accepted.
+    #[arg(long, default_value = "verified")]
+    mode: String,
+    /// Project root. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: std::path::PathBuf,
+}
+
+#[derive(clap::Args)]
+struct UiArgs {
+    /// Git ref used as the change-impact baseline.
+    #[arg(long)]
+    since: String,
+    /// Project root. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Repository-relative map scope. Defaults to the repository root.
+    #[arg(long, default_value = ".")]
+    path: String,
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
+    depth: u8,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+    top: u32,
+    /// Exclude conventional tests, fixtures, examples, generated, and vendor paths from the architecture map.
+    #[arg(long)]
+    production_only: bool,
+    /// Import a SARIF 2.1 report as read-only Lens evidence. Repeatable.
+    #[arg(long = "sarif", value_name = "PATH")]
+    sarif: Vec<PathBuf>,
+    /// Import an LCOV tracefile or Cobertura XML report. Repeatable.
+    #[arg(long = "coverage", value_name = "PATH")]
+    coverage: Vec<PathBuf>,
+    /// Import a JUnit XML test report. Only explicit testcase file paths are correlated. Repeatable.
+    #[arg(long = "junit", value_name = "PATH")]
+    junit: Vec<PathBuf>,
+    /// Import an OpenTelemetry OTLP JSON trace export. Repeatable.
+    #[arg(long = "otel", value_name = "PATH")]
+    otel: Vec<PathBuf>,
+    /// Override the repository CODEOWNERS file used by Lens.
+    #[arg(long, value_name = "PATH")]
+    codeowners: Option<PathBuf>,
+    /// Do not correlate exact changed-file mentions from indexed specs, ADRs, audits, and lessons.
+    #[arg(long)]
+    no_project_knowledge: bool,
+    /// Live-check one root-bound portable document graph and show its unverified relation queue.
+    #[arg(long, value_name = "PATH")]
+    document_graph: Option<PathBuf>,
+    /// Bound read-only Git churn and contributor evidence. Zero disables it.
+    #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(0..=1000))]
+    git_commits: u16,
+    /// Enable personal context for an existing root/client read grant.
+    #[arg(long)]
+    profile_client: Option<String>,
+    /// Agent duty for the private context preview.
+    #[arg(long, value_enum, default_value_t = BriefRoleArg::Auditor)]
+    role: BriefRoleArg,
+    #[arg(long)]
+    workflow: Option<String>,
+    /// Repository-relative paths used to select personal context. Repeatable.
+    #[arg(long = "context-path")]
+    context_paths: Vec<String>,
+    /// Search terms for project/documentation context.
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long, default_value_t = 8_000, value_parser = clap::value_parser!(u32).range(1_024..=16_000))]
+    budget_tokens: u32,
+    /// Loopback port. Zero asks the OS for an available ephemeral port.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+}
+
+#[derive(clap::Args)]
+struct RunTaskArgs {
+    /// Path to the spec file (typically under `.mastermind/tasks/`).
+    spec: PathBuf,
+    /// Project root the spec's file paths resolve against. Defaults to cwd.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Restart pre-flight, preserving the task's original baseline and iteration count.
+    #[arg(long)]
+    reset: bool,
+    /// Run only pre-flight; retries preserve the original baseline and iteration count.
+    #[arg(long)]
+    pre_only: bool,
+    /// Run only post-flight (errors if no state file).
+    #[arg(long)]
+    post_only: bool,
+    /// Run Claude with bound context and permission policy in a new preflight iteration.
+    #[arg(long, conflicts_with = "post_only")]
+    exec: bool,
+    /// Mediate supported native tool requests against the approved file and check scope.
+    #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only"])]
+    guarded_exec: bool,
+    /// Retry fresh failed checks inside the approved scope and finite iteration budget.
+    #[arg(long, requires = "exec", conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
+    auto_repair: bool,
+    /// Review a held task once and complete if resolved. Without --exec, resume its existing audit.
+    #[arg(long, conflicts_with_all = ["pre_only", "post_only"])]
+    auto_review: bool,
+    /// Allow one concrete negative-criterion repair followed by a fresh review.
+    #[arg(long, requires_all = ["exec", "auto_review"], conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
+    auto_follow_up: bool,
+    /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    review_timeout: u64,
+    /// Reviewer native turn budget, independent of the executor (1–100).
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+    review_max_turns: u32,
+    /// Wall-clock limit for the native invocation, in seconds (1–7200).
+    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    exec_timeout: u64,
+    /// Native agent turn budget (1–100).
+    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..=100))]
+    exec_max_turns: u32,
+    /// Override the automatically selected project profile audience for this invocation.
+    #[arg(long, requires = "exec")]
+    profile_client: Option<String>,
+    /// Skip the "index must exist and be non-empty" pre-check. Use for
+    /// docs-only / spec-only specs that don't touch indexed source.
+    /// Default = hard-fail when no index, because mmcg gates are only as
+    /// strong as the codegraph they reason from.
+    #[arg(long)]
+    allow_no_index: bool,
+    /// Contract-driven mode: fold strict spec checks into pre-flight
+    /// (scoped touches/creates, a runnable verify command).
+    #[arg(long)]
+    strict: bool,
+    /// Maximum number of pre-flight iterations on the same spec before
+    /// the dispatcher refuses to continue. Default 3. Set to 0 to disable
+    /// (not recommended). The counter survives `--reset` so the budget
+    /// can't be trivially bypassed.
+    #[arg(long, default_value_t = 3)]
+    max_iterations: u32,
+    /// Bypass the iteration-budget check for this one invocation. Still
+    /// appends a `kind: iteration_budget_exhausted` lesson so the override
+    /// is visible to future planners.
+    #[arg(long)]
+    force_iteration: bool,
 }
 
 #[derive(Subcommand)]
@@ -1100,39 +1171,7 @@ enum HookCmd {
         cmd: HookWorkerCmd,
     },
     /// Preview or install project-local hooks. Collection is local and opt-in.
-    Setup {
-        #[arg(long, value_parser=["claude","codex"])]
-        client: String,
-        #[arg(long, default_value = ".")]
-        project_root: PathBuf,
-        #[arg(long)]
-        write: bool,
-        #[arg(long)]
-        remove: bool,
-        /// Select an existing profile reader. Otherwise reuse the project's granted client.
-        #[arg(long, conflicts_with = "disable_profile")]
-        profile_client: Option<String>,
-        /// Disable automatic profile delivery while retaining capture and profile read access.
-        #[arg(long, conflicts_with = "remove")]
-        disable_profile: bool,
-        /// Refine each admitted prompt with an explicitly selected provider.
-        #[arg(long, value_parser=["native","claude","codex"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
-        refiner_provider: Option<String>,
-        /// Custom refiner executable. Receives JSON on stdin and returns strict JSON.
-        #[arg(long, conflicts_with_all=["refiner_provider", "disable_refiner", "remove"])]
-        refiner_processor: Option<PathBuf>,
-        #[arg(
-            long = "refiner-arg",
-            requires = "refiner_processor",
-            allow_hyphen_values = true
-        )]
-        refiner_args: Vec<String>,
-        #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u64).range(1..=20))]
-        refiner_timeout: u64,
-        /// Disable automatic refinement while retaining local mining capture.
-        #[arg(long)]
-        disable_refiner: bool,
-    },
+    Setup(HookSetupArgs),
     /// Native JSON hook on stdin; stdout is only the native hook response.
     Receive {
         #[arg(long, value_parser=["claude","codex"])]
@@ -1195,52 +1234,12 @@ enum HookCmd {
         episode: String,
     },
     /// Explicitly send this reviewed episode to a selected semantic processor.
-    Analyze {
-        episode: String,
-        #[arg(long)]
-        revision: String,
-        /// Absolute executable; stdin JSON request, stdout strict JSON response.
-        #[arg(
-            long,
-            required_unless_present = "provider",
-            conflicts_with = "provider"
-        )]
-        processor: Option<PathBuf>,
-        /// Use the captured native client and model with its existing login.
-        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
-        provider: Option<String>,
-        #[arg(long = "processor-arg", allow_hyphen_values = true)]
-        args: Vec<String>,
-        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
-        timeout: u64,
-    },
+    Analyze(HookAnalyzeArgs),
     Draft {
         id: String,
     },
     /// Drain eligible capture episodes once per revision and selected processor.
-    Mine {
-        #[arg(long, default_value = ".")]
-        project_root: PathBuf,
-        #[arg(
-            long,
-            required_unless_present = "provider",
-            conflicts_with = "provider"
-        )]
-        processor: Option<PathBuf>,
-        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
-        provider: Option<String>,
-        #[arg(long = "processor-arg", allow_hyphen_values = true)]
-        args: Vec<String>,
-        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
-        timeout: u64,
-        #[arg(long, default_value_t=4, value_parser=clap::value_parser!(u16).range(1..=16))]
-        limit: u16,
-        #[arg(long)]
-        after: Option<String>,
-        /// Keep processing new revisions in the foreground until Ctrl-C.
-        #[arg(long, conflicts_with = "after")]
-        follow: bool,
-    },
+    Mine(HookMineArgs),
     /// Propose an inspected draft as a candidate habit; review is still required.
     Propose {
         id: String,
@@ -1261,6 +1260,87 @@ enum HookCmd {
         #[arg(long)]
         revision: String,
     },
+}
+
+#[derive(clap::Args)]
+struct HookSetupArgs {
+    #[arg(long, value_parser=["claude","codex"])]
+    client: String,
+    #[arg(long, default_value = ".")]
+    project_root: PathBuf,
+    #[arg(long)]
+    write: bool,
+    #[arg(long)]
+    remove: bool,
+    /// Select an existing profile reader. Otherwise reuse the project's granted client.
+    #[arg(long, conflicts_with = "disable_profile")]
+    profile_client: Option<String>,
+    /// Disable automatic profile delivery while retaining capture and profile read access.
+    #[arg(long, conflicts_with = "remove")]
+    disable_profile: bool,
+    /// Refine each admitted prompt with an explicitly selected provider.
+    #[arg(long, value_parser=["native","claude","codex"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
+    refiner_provider: Option<String>,
+    /// Custom refiner executable. Receives JSON on stdin and returns strict JSON.
+    #[arg(long, conflicts_with_all=["refiner_provider", "disable_refiner", "remove"])]
+    refiner_processor: Option<PathBuf>,
+    #[arg(
+        long = "refiner-arg",
+        requires = "refiner_processor",
+        allow_hyphen_values = true
+    )]
+    refiner_args: Vec<String>,
+    #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u64).range(1..=20))]
+    refiner_timeout: u64,
+    /// Disable automatic refinement while retaining local mining capture.
+    #[arg(long)]
+    disable_refiner: bool,
+}
+
+#[derive(clap::Args)]
+struct HookAnalyzeArgs {
+    episode: String,
+    #[arg(long)]
+    revision: String,
+    /// Absolute executable; stdin JSON request, stdout strict JSON response.
+    #[arg(
+        long,
+        required_unless_present = "provider",
+        conflicts_with = "provider"
+    )]
+    processor: Option<PathBuf>,
+    /// Use the captured native client and model with its existing login.
+    #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
+    provider: Option<String>,
+    #[arg(long = "processor-arg", allow_hyphen_values = true)]
+    args: Vec<String>,
+    #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
+    timeout: u64,
+}
+
+#[derive(clap::Args)]
+struct HookMineArgs {
+    #[arg(long, default_value = ".")]
+    project_root: PathBuf,
+    #[arg(
+        long,
+        required_unless_present = "provider",
+        conflicts_with = "provider"
+    )]
+    processor: Option<PathBuf>,
+    #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
+    provider: Option<String>,
+    #[arg(long = "processor-arg", allow_hyphen_values = true)]
+    args: Vec<String>,
+    #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=120))]
+    timeout: u64,
+    #[arg(long, default_value_t=4, value_parser=clap::value_parser!(u16).range(1..=16))]
+    limit: u16,
+    #[arg(long)]
+    after: Option<String>,
+    /// Keep processing new revisions in the foreground until Ctrl-C.
+    #[arg(long, conflicts_with = "after")]
+    follow: bool,
 }
 
 #[derive(Subcommand)]
@@ -1886,7 +1966,7 @@ fn run_cli_inner(
     let index_path = index_override.clone().unwrap_or_else(default_index_path);
 
     match cli.cmd {
-        Cmd::Index { root, force } => {
+        Cmd::Index(IndexArgs { root, force }) => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -1946,7 +2026,7 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::Enrich {
+        Cmd::Enrich(EnrichArgs {
             scip,
             facts,
             signature,
@@ -1954,7 +2034,7 @@ fn run_cli_inner(
             require_signature,
             trusted_key_ids,
             revoked_key_ids,
-        } => {
+        }) => {
             let store = open_enrichment_store(&index_path)?;
             let summary = match (scip, facts) {
                 (Some(scip), None) => {
@@ -2059,22 +2139,22 @@ fn run_cli_inner(
                 println!("{}", serde_json::to_string_pretty(&graph)?);
             }
         },
-        Cmd::Map {
+        Cmd::Map(MapArgs {
             path,
             format,
             depth,
             top,
             production_only,
-        } => {
+        }) => {
             commands::query::dispatch_map(&path, format, depth, top, production_only, &index_path)?
         }
-        Cmd::Impact {
+        Cmd::Impact(ImpactArgs {
             since,
             format,
             depth,
             top,
             root,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
@@ -2107,13 +2187,13 @@ fn run_cli_inner(
                 commands::query::render_change_impact(&response, format)?
             );
         }
-        Cmd::Brief {
+        Cmd::Brief(BriefArgs {
             role,
             since,
             budget_tokens,
             format,
             root,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::queries::BriefError::RootMismatch)?;
@@ -2180,7 +2260,7 @@ fn run_cli_inner(
             )?;
             println!("{}", serde_json::to_string(&packet)?);
         }
-        Cmd::Concept { query, top, format } => {
+        Cmd::Concept(ConceptArgs { query, top, format }) => {
             mmcg::queries::validate_concept_request(&query, top)?;
             let managed_root = if index_override.is_none() {
                 Some(std::env::current_dir()?.canonicalize()?)
@@ -2205,7 +2285,7 @@ fn run_cli_inner(
             }
             print!("{}", commands::query::render_concept(&response?, format)?);
         }
-        Cmd::Temporal {
+        Cmd::Temporal(TemporalArgs {
             since,
             format,
             root,
@@ -2214,7 +2294,7 @@ fn run_cli_inner(
             top,
             production_only,
             codeowners,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
@@ -2343,7 +2423,7 @@ fn run_cli_inner(
                 result.evidence_binding,
             );
         }
-        Cmd::Ui {
+        Cmd::Ui(UiArgs {
             since,
             root,
             path,
@@ -2365,7 +2445,7 @@ fn run_cli_inner(
             query,
             budget_tokens,
             port,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|_| mmcg::lens::LensError::RootUnavailable)?;
@@ -2420,7 +2500,7 @@ fn run_cli_inner(
             ));
             mmcg::mcp::serve(store)?;
         }
-        Cmd::Watch { root } => {
+        Cmd::Watch(WatchArgs { root }) => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -2428,16 +2508,16 @@ fn run_cli_inner(
             let store = Store::open(&index_path)?;
             mmcg::watcher::run(root, store)?;
         }
-        Cmd::Status { root, json } => {
+        Cmd::Status(StatusArgs { root, json }) => {
             let root = canonical_root(root)?;
             commands::onboard::status(&root, index_override.as_deref(), json)?;
         }
-        Cmd::History {
+        Cmd::History(HistoryArgs {
             query,
             kind,
             top,
             document_graph,
-        } => {
+        }) => {
             commands::query::dispatch_history(
                 &query,
                 kind.as_deref(),
@@ -2446,16 +2526,16 @@ fn run_cli_inner(
                 &index_path,
             )?;
         }
-        Cmd::Why { query, top } => {
+        Cmd::Why(WhyArgs { query, top }) => {
             commands::query::dispatch_why(&query, top, &index_path)?;
         }
-        Cmd::Next { root } => {
+        Cmd::Next(NextArgs { root }) => {
             let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_next_text());
         }
-        Cmd::Resume { root, task } => {
+        Cmd::Resume(ResumeArgs { root, task }) => {
             let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
             let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
@@ -2466,7 +2546,7 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::Uninstall { root, scope, force } => {
+        Cmd::Uninstall(UninstallArgs { root, scope, force }) => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -2575,25 +2655,25 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::VerifySpec {
+        Cmd::VerifySpec(VerifySpecArgs {
             spec,
             root,
             json,
             require_index,
             strict,
-        } => {
+        }) => {
             let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             commands::verify_spec(&spec, root, json, require_index, strict, &index_path)?;
         }
-        Cmd::AuditSpec {
+        Cmd::AuditSpec(AuditSpecArgs {
             spec,
             since,
             root,
             json,
             executor_report,
             bundle,
-        } => {
+        }) => {
             let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             commands::audit_spec(
@@ -2645,11 +2725,11 @@ fn run_cli_inner(
         Cmd::Audit(AuditCmd::PrepareOutput { root, path }) => {
             commands::audit::prepare_output(&root, &path)?;
         }
-        Cmd::Doctor {
+        Cmd::Doctor(DoctorArgs {
             root,
             json,
             explain,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -2667,19 +2747,19 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::Demo { scenario } => {
+        Cmd::Demo(DemoArgs { scenario }) => {
             commands::demo(&scenario)?;
         }
         Cmd::Tour => {
             commands::tour();
         }
-        Cmd::PrComment {
+        Cmd::PrComment(PrCommentArgs {
             bundle,
             root,
             expected_repository,
             expected_baseline,
             expected_head,
-        } => {
+        }) => {
             commands::pr_comment(
                 &bundle,
                 &root,
@@ -2691,13 +2771,13 @@ fn run_cli_inner(
         Cmd::PrCommentUntrusted { bundle } => {
             commands::pr_comment::run_untrusted(&bundle)?;
         }
-        Cmd::Ci {
+        Cmd::Ci(CiArgs {
             since,
             root,
             bundle_dir,
             changed_only,
             require_executor_report,
-        } => {
+        }) => {
             let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             let ok = commands::ci(
@@ -2714,11 +2794,11 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::NewSpec {
+        Cmd::NewSpec(NewSpecArgs {
             description,
             mode,
             root,
-        } => {
+        }) => {
             let root = root
                 .canonicalize()
                 .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
@@ -2726,7 +2806,7 @@ fn run_cli_inner(
                 .map_err(Box::<dyn std::error::Error>::from)?;
             commands::new_spec(&description, mode, &root)?;
         }
-        Cmd::RunTask {
+        Cmd::RunTask(RunTaskArgs {
             spec,
             root,
             reset,
@@ -2746,7 +2826,7 @@ fn run_cli_inner(
             strict,
             max_iterations,
             force_iteration,
-        } => {
+        }) => {
             let index_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             let index_path = index_path_for_root(index_override.as_deref(), &index_root);
             let outcome = commands::run_task(
@@ -2877,7 +2957,7 @@ fn run_cli_inner(
                     };
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
-                HookCmd::Setup {
+                HookCmd::Setup(HookSetupArgs {
                     client,
                     project_root,
                     write,
@@ -2889,7 +2969,7 @@ fn run_cli_inner(
                     refiner_args,
                     refiner_timeout,
                     disable_refiner,
-                } => {
+                }) => {
                     let refiner = (refiner_provider.is_some() || refiner_processor.is_some())
                         .then_some(hooks::RefinerConfig {
                             provider: refiner_provider,
@@ -2952,14 +3032,14 @@ fn run_cli_inner(
                     after,
                 } => hooks::episodes(&project_root, usize::from(limit), after.as_deref())?,
                 HookCmd::Show { episode } => hooks::show(&episode)?,
-                HookCmd::Analyze {
+                HookCmd::Analyze(HookAnalyzeArgs {
                     episode,
                     revision,
                     processor,
                     provider,
                     args,
                     timeout,
-                } => hooks::analyze(
+                }) => hooks::analyze(
                     &episode,
                     &revision,
                     processor.as_deref(),
@@ -2968,7 +3048,7 @@ fn run_cli_inner(
                     timeout,
                 )?,
                 HookCmd::Draft { id } => hooks::draft(&id)?,
-                HookCmd::Mine {
+                HookCmd::Mine(HookMineArgs {
                     project_root,
                     processor,
                     provider,
@@ -2977,7 +3057,7 @@ fn run_cli_inner(
                     limit,
                     after,
                     follow,
-                } => {
+                }) => {
                     if follow {
                         hooks::follow(
                             &project_root,
@@ -3287,6 +3367,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_command_tree_fits_a_one_megabyte_stack() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                use clap::CommandFactory;
+                Cli::command().debug_assert();
+                Cli::try_parse_from([
+                    "mastermind",
+                    "miner",
+                    "hooks",
+                    "worker",
+                    "start",
+                    "--client",
+                    "codex",
+                    "--provider",
+                    "native",
+                ])
+                .unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn root_scoped_commands_default_the_index_to_the_selected_repository() {
         let root = std::path::Path::new("/workspace/repository");
         assert_eq!(
@@ -3395,7 +3500,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(enrich.cmd, Cmd::Enrich { scip: Some(scip), facts: None, .. } if scip == std::path::Path::new("index.scip"))
+            matches!(enrich.cmd, Cmd::Enrich(EnrichArgs { scip: Some(scip), facts: None, .. }) if scip == std::path::Path::new("index.scip"))
         );
 
         let query = Cli::try_parse_from([
@@ -3427,7 +3532,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             enrich.cmd,
-            Cmd::Enrich { scip: None, facts: Some(path), .. }
+            Cmd::Enrich(EnrichArgs { scip: None, facts: Some(path), .. })
                 if path == std::path::Path::new("mastermind-facts.json")
         ));
 
@@ -3514,11 +3619,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             signed_import.cmd,
-            Cmd::Enrich {
+            Cmd::Enrich(EnrichArgs {
                 facts: Some(_),
                 require_signature: true,
                 ..
-            }
+            })
         ));
         assert!(Cli::try_parse_from([
             "mastermind",
@@ -3727,12 +3832,12 @@ mod tests {
         .unwrap();
         assert!(matches!(
             history.cmd,
-            Cmd::History {
+            Cmd::History(HistoryArgs {
                 query,
                 kind: Some(kind),
                 top: 5,
                 document_graph: None,
-            } if query == "webhook dedupe" && kind == "audit"
+            }) if query == "webhook dedupe" && kind == "audit"
         ));
 
         let history_with_graph = Cli::try_parse_from([
@@ -3745,10 +3850,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             history_with_graph.cmd,
-            Cmd::History {
+            Cmd::History(HistoryArgs {
                 document_graph: Some(path),
                 ..
-            } if path == std::path::Path::new(".mastermind/research/graph.json")
+            }) if path == std::path::Path::new(".mastermind/research/graph.json")
         ));
 
         let query_history_with_graph = Cli::try_parse_from([
@@ -3769,7 +3874,7 @@ mod tests {
         ));
 
         let why = Cli::try_parse_from(["mastermind", "why", "idempotency"]).unwrap();
-        assert!(matches!(why.cmd, Cmd::Why { query, top: 10 } if query == "idempotency"));
+        assert!(matches!(why.cmd, Cmd::Why(WhyArgs { query, top: 10 }) if query == "idempotency"));
 
         let decision = Cli::try_parse_from([
             "mastermind",
@@ -3781,7 +3886,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             decision.cmd,
-            Cmd::History { kind: Some(kind), .. } if kind == "architecture_decision"
+            Cmd::History(HistoryArgs { kind: Some(kind), .. }) if kind == "architecture_decision"
         ));
     }
 
@@ -3800,13 +3905,13 @@ mod tests {
         .unwrap();
         assert!(matches!(
             brief.cmd,
-            Cmd::Brief {
+            Cmd::Brief(BriefArgs {
                 role: BriefRoleArg::Executor,
                 since,
                 budget_tokens: 2_000,
                 format: BriefFormat::Json,
                 ..
-            } if since == "main"
+            }) if since == "main"
         ));
         for budget in ["255", "8001", "2000.0", "true"] {
             assert!(Cli::try_parse_from([
@@ -3846,11 +3951,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             concept.cmd,
-            Cmd::Concept {
+            Cmd::Concept(ConceptArgs {
                 query,
                 top: 7,
                 format: ConceptFormat::Json,
-            } if query == "request handler"
+            }) if query == "request handler"
         ));
         for top in ["0", "51", "1.0", "true"] {
             assert!(
@@ -3887,10 +3992,10 @@ mod tests {
         let map = Cli::try_parse_from(["mastermind", "map", ".", "--format", "sarif"]).unwrap();
         assert!(matches!(
             map.cmd,
-            Cmd::Map {
+            Cmd::Map(MapArgs {
                 format: MapFormat::Sarif,
                 ..
-            }
+            })
         ));
 
         let impact = Cli::try_parse_from([
@@ -3904,10 +4009,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             impact.cmd,
-            Cmd::Impact {
+            Cmd::Impact(ImpactArgs {
                 format: ImpactFormat::Sarif,
                 ..
-            }
+            })
         ));
     }
 
@@ -3934,7 +4039,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Temporal {
+            Cmd::Temporal(TemporalArgs {
                 since,
                 format: TemporalFormat::Json,
                 root,
@@ -3943,7 +4048,7 @@ mod tests {
                 top: 50,
                 production_only: true,
                 codeowners: Some(codeowners),
-            } if since == "origin/main"
+            }) if since == "origin/main"
                 && root.as_path() == std::path::Path::new(".")
                 && path == "services/payment"
                 && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
@@ -3968,7 +4073,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Ui {
+            Cmd::Ui(UiArgs {
                 since,
                 root,
                 path,
@@ -3985,7 +4090,7 @@ mod tests {
                 git_commits: 200,
                 port: 0,
                 ..
-            } if since == "origin/main"
+            }) if since == "origin/main"
                 && root.as_path() == std::path::Path::new(".")
                 && path == "."
                 && sarif.is_empty()
@@ -4026,7 +4131,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             overlays.cmd,
-            Cmd::Ui {
+            Cmd::Ui(UiArgs {
                 sarif,
                 coverage,
                 junit,
@@ -4036,7 +4141,7 @@ mod tests {
                 document_graph: Some(document_graph),
                 git_commits: 25,
                 ..
-            } if sarif == [PathBuf::from("semgrep.sarif"), PathBuf::from("codeql.sarif")]
+            }) if sarif == [PathBuf::from("semgrep.sarif"), PathBuf::from("codeql.sarif")]
                 && coverage == [PathBuf::from("lcov.info"), PathBuf::from("cobertura.xml")]
                 && junit == [PathBuf::from("junit.xml")]
                 && otel == [PathBuf::from("traces.json")]

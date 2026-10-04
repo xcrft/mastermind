@@ -184,6 +184,9 @@ the current grants. Analysis failures use bounded backoff. While idle, work stay
 durable until the next trigger; no provider worker or always-running process is
 started. `pipeline.local_analysis.retry_queue` exposes pending and retried work.
 Disabling delivery or revoking profile access pauses automatic processing.
+Every later change to a closed episode, including `SessionEnd` and late tool
+results, queues its new source revision. A successful `Stop` analysis cannot
+stand in for changed final evidence.
 
 ### Retain sources without filling the working journal
 

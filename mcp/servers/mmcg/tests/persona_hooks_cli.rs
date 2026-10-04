@@ -116,6 +116,50 @@ fn episode_capacity_automatically_archives_closed_sources_before_new_capture() {
 }
 
 #[test]
+fn local_candidates_follow_session_end_without_manual_replay() {
+    let f = Fixture::new();
+    assert!(f
+        .run(&["miner", "access", "grant", "--client", "codex"])
+        .status
+        .success());
+    f.success(&["miner", "hooks", "setup", "--client", "codex", "--write"]);
+    f.event("ended", "", "SessionStart", json!({"source":"startup"}));
+    f.event(
+        "ended",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"I prefer short code reviews\nonly for trivial changes."}),
+    );
+    f.event(
+        "ended",
+        "one",
+        "Stop",
+        json!({"last_assistant_message":"Reviewed."}),
+    );
+    let stopped = f.episode("one");
+    f.event("ended", "", "SessionEnd", json!({}));
+    let shown = f.success(&["miner", "hooks", "show", stopped["id"].as_str().unwrap()]);
+    assert_ne!(shown["episode"]["revision"], stopped["revision"]);
+    assert!(shown["episode"]["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let current = shown["drafts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|draft| draft["episode_revision"] == shown["episode"]["revision"])
+        .expect("SessionEnd must reanalyze the final source revision");
+    let draft = f.success(&["miner", "hooks", "draft", current["id"].as_str().unwrap()]);
+    assert_eq!(
+        draft["draft"]["content"]["behavior"],
+        "I prefer short code reviews only for trivial changes."
+    );
+    assert_eq!(draft["current"], true);
+    assert_eq!(draft["draft"]["attested"], false);
+}
+
+#[test]
 fn local_analysis_retries_on_the_next_native_event_after_profile_store_outage() {
     let f = Fixture::new();
     assert!(f

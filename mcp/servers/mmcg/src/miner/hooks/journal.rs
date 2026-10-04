@@ -760,6 +760,11 @@ impl Journal {
             }
             push_event(&mut ep, event);
             save_episode(&tx, &ep)?;
+            if ep.closed {
+                // SessionEnd and late tool/lifecycle events also change the
+                // evidence revision after Stop. Retry that final source.
+                revised_episode = Some(ep.id.clone());
+            }
         } else {
             if let Some(gap) = &incoming.gap {
                 add_gap(&mut session.gaps, gap);

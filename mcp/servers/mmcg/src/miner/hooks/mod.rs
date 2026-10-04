@@ -393,6 +393,21 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
             return Err("unsupported hook schema; capture has a coverage gap".into());
         }
     };
+    if incoming.model.is_none() && client_id == "claude" && incoming.kind == "Stop" {
+        // Missing or unsafe model metadata must not prevent local capture.
+        match native::transcript_model(&value, &root) {
+            Ok(Some((model, binding))) => {
+                incoming.digest = hash(&json!([incoming.digest, model, binding]));
+                incoming.model = Some(model);
+                incoming.model_binding = Some(binding);
+            }
+            Ok(None) => {}
+            Err(_) => eprintln!(
+                "{}",
+                json!({"model_capture":"omitted","reason":"native_transcript_unavailable"})
+            ),
+        }
+    }
     if incoming.kind == "UserPromptSubmit"
         && std::env::var_os("MMCG_INPUT_ORIGIN").as_deref()
             == Some(std::ffi::OsStr::new("automation"))
@@ -617,8 +632,10 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         json!({"status":"possible_tool_exposure","tool":tool_name,
         "native_event_digest":hash(v),"profile_revision":"unknown"})
     });
+    let model = native::hook_model(v, kind)?;
     Ok(Incoming {
-        model: native::hook_model(v, kind)?,
+        model_binding: model.as_ref().map(|_| json!({"source":"native_hook"})),
+        model,
         native_session: session.into(),
         native_turn: turn,
         native_key,
@@ -948,7 +965,13 @@ fn processor_receipt(
     if selected.is_some() {
         receipt["native_adapter"] = json!(native::VERSION);
         receipt["model"] = json!(input.model);
-        receipt["model_source"] = json!("native_hook");
+        receipt["model_source"] = input
+            .model_binding
+            .as_ref()
+            .and_then(|binding| binding.get("source"))
+            .cloned()
+            .unwrap_or(json!("native_hook"));
+        receipt["model_binding"] = json!(input.model_binding);
         receipt["source_client"] = json!(input.client);
     }
     Ok(receipt)

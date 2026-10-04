@@ -540,7 +540,7 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
         "run":state.value,"heartbeat_age_ms":age,"autostart":config.value.native_session.is_some() && observed!="stopped",
         "native_session":config.value.native_session,
         "checkpoint_store":"persona-events.db:hook_analysis","output":"unreviewed_drafts_only",
-        "permission_effect":"none","retry_policy":if config.value.native_session.is_some() {"new_native_session_or_explicit_restart"} else {"stop_on_processor_failure_explicit_restart"}
+        "permission_effect":"none","retry_policy":if config.value.native_session.is_some() {"three_bounded_attempts_then_new_native_session_or_explicit_restart"} else {"stop_on_processor_failure_explicit_restart"}
     }))
 }
 
@@ -597,7 +597,7 @@ pub fn arm_native(client: &str, root: &Path) -> Result<Value, Error> {
     }
     Ok(
         json!({"status":"armed","trigger":"SessionStart","existing_run":existing,
-        "provider":client,"model_source":"native_hook","budget_renewal":"new_native_session_only"}),
+        "provider":client,"model_source":"native_hook_or_session_transcript","budget_renewal":"new_native_session_only"}),
     )
 }
 
@@ -1311,7 +1311,9 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
         let mut last_version = None;
         let mut last_pass = Instant::now();
         let mut last_admission = Instant::now() - HEARTBEAT;
-        while !worker::interrupted() {
+        let mut failures = 0_u32;
+        refresh_profile(&runtime.config);
+        'poll: while !worker::interrupted() {
             if last_admission.elapsed() >= HEARTBEAT {
                 runtime.admission()?;
                 last_admission = Instant::now();
@@ -1346,6 +1348,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                     if worker::interrupted() {
                         break;
                     }
+                    let completed_before = runtime.state.completed;
                     for result in report["results"]
                         .as_array()
                         .ok_or("worker_batch_report_invalid")?
@@ -1358,7 +1361,30 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                     after = report["next_after"].as_str().map(str::to_owned);
                     runtime.state.next_after = after.clone();
                     runtime.record()?;
+                    if runtime.state.completed > completed_before {
+                        failures = 0;
+                        runtime.state.reason = None;
+                        refresh_profile(&runtime.config);
+                    }
                     if report["failed"] == true {
+                        failures += 1;
+                        if config.native_session.is_some()
+                            && failures < 3
+                            && runtime.state.attempts < config.settings.max_calls
+                        {
+                            runtime.state.reason = Some("worker_processor_retry_pending".into());
+                            runtime.record()?;
+                            // Retry within this run. Attempts are already charged;
+                            // stop, revocation and the runtime deadline stay live.
+                            for _ in 0..10 * failures {
+                                if worker::interrupted() {
+                                    break;
+                                }
+                                std::thread::sleep(POLL);
+                            }
+                            last_version = None;
+                            continue 'poll;
+                        }
                         return Err(runtime.halt("worker_processor_failed"));
                     }
                     if after.is_none() {
@@ -1404,6 +1430,22 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
     runtime.state.reason = Some(reason);
     runtime.record()?;
     Ok(json!({"schema":1,"worker_id":id,"run":runtime.state,"autostart":false}))
+}
+
+fn refresh_profile(config: &Config) {
+    // History scans belong in the supervised background process, outside the
+    // three-second capture hook. Reader grants are checked by the refresh too.
+    let result =
+        super::configured_profile_client(&config.project_root, &config.client).map(|reader| {
+            reader
+                .and_then(|reader| super::refresh_task_profile(&config.project_root, Some(&reader)))
+        });
+    if result.is_err() {
+        eprintln!(
+            "{}",
+            json!({"profile_refresh":"degraded","reason":"git_or_profile_unavailable"})
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

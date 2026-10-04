@@ -99,6 +99,7 @@ fn evaluate(input: Input) -> Result<Value, Error> {
         }
         let source = semantic::EpisodeInput {
             model: None,
+            model_binding: None,
             id: case.id.clone(),
             revision: "offline-evaluation".into(),
             client: "codex".into(),

@@ -10,7 +10,7 @@
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
@@ -1612,6 +1612,40 @@ pub(crate) fn read_regular_file_expected(
     control: ReadControl<'_>,
     expected_identity: Option<StableFileIdentity>,
 ) -> Result<BoundedFile, BoundedReadError> {
+    read_regular_file_slice(
+        root,
+        path,
+        max_bytes,
+        read_limit,
+        control,
+        expected_identity,
+        false,
+    )
+}
+
+/// Read a bounded suffix with the same no-follow and stable-snapshot checks as
+/// a full read. The caller must discard the first partial record.
+pub(crate) fn read_regular_file_tail(
+    root: &Path,
+    path: &Path,
+    max_bytes: u64,
+    read_limit: u64,
+    control: ReadControl<'_>,
+) -> Result<BoundedFile, BoundedReadError> {
+    let root = RootCapability::open(root)?;
+    read_regular_file_slice(&root, path, max_bytes, read_limit, control, None, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_regular_file_slice(
+    root: &RootCapability,
+    path: &Path,
+    max_bytes: u64,
+    read_limit: u64,
+    control: ReadControl<'_>,
+    expected_identity: Option<StableFileIdentity>,
+    tail: bool,
+) -> Result<BoundedFile, BoundedReadError> {
     control.check()?;
     root.verify()?;
     let relative = root.relative(path)?;
@@ -1632,6 +1666,12 @@ pub(crate) fn read_regular_file_expected(
     }
 
     let retained_limit = read_limit.min(max_bytes);
+    if tail {
+        file.seek(SeekFrom::Start(
+            metadata.len().saturating_sub(retained_limit),
+        ))
+        .map_err(BoundedReadError::Io)?;
+    }
     let capacity = usize::try_from(metadata.len().min(retained_limit)).unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
     let mut buffer = [0_u8; READ_CHUNK_BYTES];

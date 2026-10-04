@@ -38,6 +38,8 @@ pub(super) struct EpisodeInput {
     pub client: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<serde_json::Value>,
     pub project_root: String,
     pub project: String,
     pub events: Vec<EventInput>,
@@ -882,6 +884,7 @@ mod tests {
     fn input() -> EpisodeInput {
         EpisodeInput {
             model: None,
+            model_binding: None,
             id: "episode-1".into(),
             revision: "revision-1".into(),
             client: "codex".into(),

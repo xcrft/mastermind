@@ -207,6 +207,7 @@ mod tests {
     fn input(text: &str) -> semantic::EpisodeInput {
         semantic::EpisodeInput {
             model: None,
+            model_binding: None,
             id: "episode".into(),
             revision: "revision".into(),
             client: "codex".into(),

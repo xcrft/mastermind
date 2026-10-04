@@ -205,6 +205,30 @@ fn mmcg_entry(mmcg_binary: &Path) -> Result<Value, &'static str> {
     mmcg_entry_for_platform(mmcg_binary, NpmLauncherPlatform::current())
 }
 
+/// Use the same installed launcher for hooks and MCP. npm package replacement
+/// then reaches existing hooks instead of leaving them pinned to an old binary.
+pub(crate) fn hook_entry(mmcg_binary: &Path) -> Result<Vec<String>, &'static str> {
+    let entry = mmcg_entry(mmcg_binary)?;
+    let command = entry["command"]
+        .as_str()
+        .ok_or("hook_launcher_command_missing")?;
+    let mut args: Vec<String> = entry["args"]
+        .as_array()
+        .ok_or("hook_launcher_args_missing")?
+        .iter()
+        .map(|arg| {
+            arg.as_str()
+                .map(str::to_owned)
+                .ok_or("hook_launcher_arg_invalid")
+        })
+        .collect::<Result<_, _>>()?;
+    if args.pop().as_deref() != Some("serve") {
+        return Err("hook_launcher_entry_invalid");
+    }
+    args.insert(0, command.into());
+    Ok(args)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NpmLauncherPlatform {
     Other,

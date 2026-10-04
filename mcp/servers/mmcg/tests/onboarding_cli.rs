@@ -177,7 +177,17 @@ fn local_init_indexes_source_and_context_and_preserves_existing_documents() {
 fn explicit_capture_registers_audience_without_claiming_activation_or_profile_access() {
     let f = Fixture::new();
     f.client("codex");
-    let first = f.success(&["init", "--client", "codex", "--no-global", "--json"]);
+    let first = f.success(&[
+        "init",
+        "--client",
+        "codex",
+        "--mining",
+        "capture",
+        "--profile-access",
+        "off",
+        "--no-global",
+        "--json",
+    ]);
     let client = &first["observed"]["clients"][0];
     assert_eq!(client["mcp"]["status"], "configured");
     assert_eq!(client["hooks"]["capture"]["status"], "enabled");
@@ -198,6 +208,62 @@ fn explicit_capture_registers_audience_without_claiming_activation_or_profile_ac
     assert_eq!(
         disabled["observed"]["clients"][0]["hooks"]["capture"]["enabled"],
         false
+    );
+    f.no_provider_calls();
+}
+
+#[test]
+fn first_init_uses_the_active_client_and_arms_personalization_without_inference() {
+    let f = Fixture::new();
+    f.client("claude");
+    f.client("codex");
+    let output = f
+        .command(env!("CARGO_BIN_EXE_mmcg"))
+        .env("CODEX_THREAD_ID", "native-thread")
+        .args(["init", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let first: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(first["settings"]["clients"], serde_json::json!(["codex"]));
+    assert_eq!(first["settings"]["mining"], "on");
+    assert_eq!(first["settings"]["provider"], "native");
+    assert_eq!(first["settings"]["profile_access"], true);
+    assert_eq!(
+        first["observed"]["clients"][0]["profile_access"]["allowed"],
+        true
+    );
+    assert_eq!(
+        first["observed"]["clients"][0]["hooks"]["activation"]["status"],
+        "not_observed"
+    );
+    let settings = fs::read(f.root.join(".mastermind/setup.json")).unwrap();
+    f.success(&["init", "--json"]);
+    assert_eq!(
+        fs::read(f.root.join(".mastermind/setup.json")).unwrap(),
+        settings
+    );
+    f.no_provider_calls();
+}
+
+#[test]
+fn first_init_detects_an_installed_client_and_preserves_explicit_opt_outs() {
+    let f = Fixture::new();
+    f.client("codex");
+    let first = f.success(&[
+        "init",
+        "--mining",
+        "capture",
+        "--profile-access",
+        "off",
+        "--json",
+    ]);
+    assert_eq!(first["settings"]["clients"], serde_json::json!(["codex"]));
+    assert_eq!(first["settings"]["mining"], "capture");
+    assert_eq!(first["settings"]["profile_access"], false);
+    assert_eq!(
+        first["settings"],
+        f.success(&["init", "--json"])["settings"]
     );
     f.no_provider_calls();
 }

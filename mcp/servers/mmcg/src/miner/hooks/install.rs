@@ -69,17 +69,19 @@ pub(super) fn configure(
         .transpose()?
         .unwrap_or_else(|| json!({}));
     let mut config = original.clone();
-    let executable = std::env::current_exe()?.canonicalize()?;
-    let executable = executable
-        .to_str()
-        .ok_or("hook executable path must be valid UTF-8")?;
+    let entry = crate::setup::hook_entry(&std::env::current_exe()?.canonicalize()?)?;
+    let launcher = entry
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     let registration = format!(
         "# mastermind-persona-hook-v1:{client}:{}",
         crate::hex::encode(&Sha256::digest(project_text.as_bytes()))
     );
     let command = format!(
         "{} miner hooks receive --client {} --project-root {} {registration}",
-        shell_quote(executable),
+        launcher,
         shell_quote(client),
         shell_quote(project_text)
     );

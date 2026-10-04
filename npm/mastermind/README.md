@@ -18,10 +18,11 @@ npm install -g @xcraftmind/mastermind
 mastermind init
 ```
 
-The first interactive run asks for Claude Code, Codex, both, or no client, then
-the mining mode. It scaffolds the project, indexes code and documentation, and
-configures the selected client. An unattended first run without `--client`
-stays local. Choices are saved in `.mastermind/setup.json`.
+The first run detects the active client, or installed Claude Code and Codex
+clients. It scaffolds and indexes the project, installs workflows, enables the
+profile and arms bounded native mining. Each client mines with its own login
+and captured task model. Use `--client none` for local indexing only.
+Choices are saved in `.mastermind/setup.json`.
 
 | Command | Purpose |
 |---|---|
@@ -32,10 +33,11 @@ stays local. Choices are saved in `.mastermind/setup.json`.
 | `mastermind --help` | Show onboarding and project commands |
 | `mmcg --help` | Show the complete native CLI |
 
-Restart the selected client after setup. Registration does not establish client
-trust or a live connection. Local capture is the default for a selected client.
-Semantic mining, profile read access, and prompt refinement require separate
-opt-ins. Repeated `init` preserves miner budgets.
+Restart the selected client and review its generated definitions in `/hooks`.
+Registration does not establish client trust or a live connection. Use
+`--mining capture` for local learning or `--profile-access off` to disable profile
+delivery. Prompt refinement remains optional. Repeated `init` preserves miner
+budgets. Existing npm hooks use the package launcher after updates.
 
 | Platform | Support |
 |---|---|

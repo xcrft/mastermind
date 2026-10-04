@@ -26,9 +26,11 @@ npm install -g @xcraftmind/mastermind
 mastermind init
 ```
 
-The first interactive run asks for a client and mining mode. It creates project
-guidance, indexes code and documentation, and configures the selected client.
-An unattended first run stays local unless you pass `--client`.
+The first run detects the active client, or the installed Claude Code and Codex
+clients. It creates project guidance, indexes code and documentation, connects
+the clients, and enables profile delivery and bounded native mining. Each
+client uses its own login and the model captured from its task. Use
+`--client none` for local indexing only. Saved choices survive repeated `init`.
 
 | Command | Result |
 |---|---|
@@ -37,7 +39,8 @@ An unattended first run stays local unless you pass `--client`.
 | `mastermind update` | Update the package in its existing npm scope and refresh installed workflows |
 | `mastermind ui --since main` | Open the read-only Lens UI against your chosen Git baseline |
 
-Restart the selected client to load its configuration. Registration, session
+Restart the selected client and review the generated definitions in `/hooks`.
+Registration, session
 observations, and client trust are separate states. Keep `.mastermind/` working
 data out of version control. See [Getting started](docs/getting-started.md) for
 mining choices, Windows support, and other installation paths.
@@ -62,7 +65,9 @@ mining choices, Windows support, and other installation paths.
 ## Give an agent useful context
 
 `init --client claude|codex|all` connects Claude Code, Codex, or both.
-On first setup, a selected client defaults to local evidence capture.
+On first setup, selected clients receive the personal profile and automatically
+mine complete sessions with their captured model. Git observations refresh at
+init and in the background. macOS and Linux support native hooks.
 Other clients use [MCP setup](docs/README.md#start-here).
 
 | Context | Scope |
@@ -74,8 +79,9 @@ Other clients use [MCP setup](docs/README.md#start-here).
 | Workflow | Planning, execution, verification, and review |
 | Task evidence | Results, blockers, and the reviewed revision |
 
-Capture and personal-profile access are separate. `--profile-access on` opts
-the selected project and clients into reading reviewed preferences. Those
+Profile access is scoped to the selected project and clients. Use
+`--profile-access off` to disable it, or `--mining capture` to keep learning local.
+The profile includes Git observations and reviewed preferences. Those
 preferences grant no action permissions. Context previews expose revisions
 and omissions, not proof of model use. See [Architecture](docs/architecture.md)
 and [Persona hooks](docs/guides/persona-hooks.md).
@@ -104,7 +110,7 @@ Claude Code. Completion requires current evidence and resolved review.
 | Personal profile | Reviewed preferences remain advisory |
 | Task records | Local evidence does not independently establish correctness |
 | Native process policy | Uses client restrictions, not an OS sandbox |
-| Provider access | Indexing, deterministic queries, and Lens are local. Semantic mining, prompt refinement, drafting, execution, and review require explicit opt-in and can send content to a provider |
+| Provider access | Client init enables bounded native semantic mining. `--mining capture` keeps it local. Refinement, drafting, execution, and review use their separate options and can send content to a provider |
 | Miner budgets | Repeated `init` preserves each run's counters, including stopped or exhausted runs. `miner start` explicitly starts a new run |
 | Prompt refiner | Optional `--refiner on` uses additional calls outside the miner's call budget |
 

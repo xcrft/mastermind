@@ -18,6 +18,10 @@ model=args[args.index('--model')+1]
 request=json.load(sys.stdin)
 with open(os.environ['MMCG_TEST_HOME']+'/calls.jsonl','a') as f:
  f.write(json.dumps({'client':client,'model':model,'episode':request.get('episode',{}).get('id'),'cwd':os.getcwd(),'home':os.environ['HOME'],'codex_home':os.environ['CODEX_HOME'],'miner':os.environ.get('MASTERMIND_MINER'),'nested_claude':os.environ.get('CLAUDECODE'),'args':args})+'\n')
+if os.environ.get('MMCG_TEST_FAIL_ONCE')=='1':
+ marker=pathlib.Path(os.environ['MMCG_TEST_HOME'])/'failed-once'
+ if not marker.exists():
+  marker.write_text('transient failure'); sys.exit(75)
 # Inherited collection hooks must ignore the generated inference input.
 hook={'session_id':'internal-miner','hook_event_name':'UserPromptSubmit','prompt':'I prefer a synthetic preference from the model.'}
 env=dict(os.environ); env['HOME']=os.environ['MMCG_TEST_HOME']
@@ -81,6 +85,14 @@ impl Fixture {
             .env("MMCG_TEST_BIN", env!("CARGO_BIN_EXE_mmcg"))
             .env("MMCG_TEST_ROOT", &self.root)
             .env("MMCG_TEST_HOME", &self.home)
+            .env(
+                "MMCG_TEST_FAIL_ONCE",
+                if self.home.join("retry-test").exists() {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .args(args);
         command
     }
@@ -296,6 +308,13 @@ fn model_switch_applies_to_the_next_turn_without_rewriting_the_previous_model() 
         "UserPromptSubmit",
         json!({"prompt":"Inspect the callers before editing."}),
     );
+    f.event(
+        "claude",
+        "switch",
+        "one",
+        "Stop",
+        json!({"event_id":"late-stop","model":"claude-before"}),
+    );
     f.event("claude", "switch", "two", "Stop", json!({}));
     assert_eq!(
         f.success(&["miner", "hooks", "mine", "--provider", "native"])["failed"],
@@ -352,6 +371,125 @@ fn unknown_models_and_cross_client_overrides_never_start_inference() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("must match"));
     assert!(f.calls().is_empty());
+}
+
+#[test]
+fn claude_stop_recovers_the_actual_response_model_without_session_start_model() {
+    for subdirectory in [false, true] {
+        let f = Fixture::new();
+        let cwd = if subdirectory {
+            assert!(Command::new("/usr/bin/git")
+                .args(["init", "-q"])
+                .current_dir(&f.root)
+                .status()
+                .unwrap()
+                .success());
+            let child = f.root.join("src");
+            fs::create_dir(&child).unwrap();
+            child
+        } else {
+            f.root.clone()
+        };
+        let session = "8dc02f4d-5f46-4fdb-a4d1-1c7103723f1f";
+        let dir = f
+            .home
+            .join(".claude/projects")
+            .join(mmcg::miner::feedback::claude_project_slug(&cwd));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session}.jsonl"));
+        // A long session must not require reading its full history in a hook.
+        let prefix = format!(
+            "{}\n",
+            json!({"type":"progress","data":"x".repeat(700_000)})
+        );
+        let response = json!({"type":"assistant","sessionId":session,"cwd":cwd,
+        "isSidechain":false,"message":{"role":"assistant","model":"claude-response-model",
+        "content":[{"type":"text","text":"Checked the callers."}]}});
+        fs::write(&path, format!("{prefix}{response}\n")).unwrap();
+        f.event(
+            "claude",
+            session,
+            "",
+            "SessionStart",
+            json!({"source":"startup","cwd":cwd}),
+        );
+        f.event(
+            "claude",
+            session,
+            "one",
+            "UserPromptSubmit",
+            json!({"prompt":"Inspect the callers.","cwd":cwd}),
+        );
+        f.event(
+        "claude",
+        session,
+        "one",
+        "Stop",
+        json!({"transcript_path":path,"last_assistant_message":"Checked the callers.","cwd":cwd}),
+    );
+        let mined = f.success(&["miner", "hooks", "mine", "--provider", "native"]);
+        assert_eq!(mined["failed"], false);
+        assert_eq!(f.calls().len(), 1);
+        assert_eq!(f.calls()[0]["model"], "claude-response-model");
+        let episode = mined["results"][0]["episode"].as_str().unwrap();
+        let show = f.success(&["miner", "hooks", "show", episode]);
+        assert_eq!(
+            show["analyses"][0]["processor"]["model_source"],
+            "native_session_transcript"
+        );
+        assert!(show["episode"]["model_binding"]["record_digest"].is_string());
+    }
+}
+
+#[test]
+fn claude_transcript_model_requires_this_session_project_and_response() {
+    for mismatch in ["session", "cwd", "response", "sidechain"] {
+        let f = Fixture::new();
+        let session = "8dc02f4d-5f46-4fdb-a4d1-1c7103723f1f";
+        let dir = f
+            .home
+            .join(".claude/projects")
+            .join(mmcg::miner::feedback::claude_project_slug(&f.root));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session}.jsonl"));
+        let mut response = json!({"type":"assistant","sessionId":session,"cwd":f.root,
+            "isSidechain":false,"message":{"role":"assistant","model":"wrong-model",
+            "content":[{"type":"text","text":"Checked the callers."}]}});
+        match mismatch {
+            "session" => response["sessionId"] = json!("other-session"),
+            "cwd" => response["cwd"] = json!(f.home),
+            "response" => response["message"]["content"][0]["text"] = json!("Earlier response."),
+            _ => response["isSidechain"] = json!(true),
+        }
+        fs::write(&path, format!("{response}\n")).unwrap();
+        f.event(
+            "claude",
+            session,
+            "",
+            "SessionStart",
+            json!({"source":"startup"}),
+        );
+        f.event(
+            "claude",
+            session,
+            "one",
+            "UserPromptSubmit",
+            json!({"prompt":"Inspect the callers."}),
+        );
+        f.event(
+            "claude",
+            session,
+            "one",
+            "Stop",
+            json!({"transcript_path":path,"last_assistant_message":"Checked the callers."}),
+        );
+        let mined = f.success(&["miner", "hooks", "mine", "--provider", "native"]);
+        assert_eq!(
+            mined["skipped"][0]["reason"], "native_model_not_captured",
+            "{mismatch}"
+        );
+        assert!(f.calls().is_empty());
+    }
 }
 
 #[test]
@@ -480,6 +618,33 @@ fn explicit_stop_survives_a_new_native_session() {
     assert_eq!(f.worker()["run"]["run_id"], run);
     assert_eq!(f.worker()["autostart"], false);
     assert!(f.calls().is_empty());
+}
+
+#[test]
+fn automatic_worker_retries_a_transient_failure_without_resetting_the_budget() {
+    let f = Fixture::new();
+    fs::write(f.home.join("retry-test"), "enabled").unwrap();
+    f.automatic(2);
+    f.event(
+        "codex",
+        "retry-session",
+        "",
+        "SessionStart",
+        json!({"source":"startup","model":"gpt-retry-model"}),
+    );
+    f.event(
+        "codex",
+        "retry-session",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the callers."}),
+    );
+    f.event("codex", "retry-session", "one", "Stop", json!({}));
+    let terminal = f.terminal();
+    assert_eq!(f.calls().len(), 2, "{terminal}");
+    assert_eq!(terminal["run"]["attempts"], 2);
+    assert_eq!(terminal["run"]["completed"], 1);
+    assert_eq!(terminal["status"], "budget_exhausted");
 }
 
 #[test]

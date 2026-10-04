@@ -7,17 +7,19 @@ npm install -g @xcraftmind/mastermind
 mastermind init
 ```
 
-Requires Node.js 24+. The first interactive `init` asks for a client and mining
-mode. It creates project guidance, indexes code and documentation, and applies
-the selected client configuration. Choices are saved in `.mastermind/setup.json`.
+Requires Node.js 24+. The first `init` detects the active client, or installed
+Claude Code and Codex clients. It creates project guidance, indexes code and
+documentation, installs workflows, enables profile delivery and arms bounded
+native mining. Choices are saved in `.mastermind/setup.json`.
 
 ## 1. Choose your setup
 
 | First run | Behavior |
 |---|---|
-| Interactive terminal | Ask for `claude`, `codex`, `all`, or `none`, then mining for selected clients |
-| Unattended, without `--client` | Local scaffold and index only |
-| `--client claude`, `codex`, or `all` | Configure the selected clients, default to local capture |
+| Inside Claude Code or Codex | Select the active client when its CLI is available |
+| Outside an agent | Select installed native clients; ask in a terminal if none were found |
+| Unattended, no installed clients | Local scaffold and index only |
+| `--client claude`, `codex`, or `all` | Configure the selected clients with profile access and native mining |
 | `--client none` | Local project setup without client integration |
 | `--dry-run --json` | Show selected settings and proposed steps without writes or client calls |
 | Repeated `init` | Reuse saved choices and reconcile the requested components |
@@ -53,9 +55,11 @@ An incomplete setup reports failed components. Fix the reported issue and repeat
 | `--profile-access on` | Allow the selected clients to read this project's personal-profile view | None from the grant |
 | `--refiner on --provider native` | Refine user prompts through their captured native client and model | Extra calls outside the miner budget |
 
-Profile access and prompt refinement default to off. Refinement requires
-`--mining capture` or `on`. Capture alone grants no profile read access, and
-mined drafts require review before becoming active habits. See
+Selected clients receive profile access by default. Prompt refinement defaults
+to off and requires `--mining capture` or `on`. Profile delivery includes
+authored Git observations and reviewed rules; new mined drafts require review
+before becoming active habits. `--profile-access off` preserves that opt-out on
+future init runs. See
 [Persona hooks](guides/persona-hooks.md) for evidence and review boundaries.
 
 ```bash
@@ -69,6 +73,8 @@ mastermind init --client claude --mining on --provider native \
 | `--max-runtime` | Default 3600 seconds per client run, including idle time |
 | `--client all` | Each client has its own run and budget |
 | Repeated `init` | Keeps the existing run and counters, even when stopped, failed, interrupted, or exhausted |
+| Native `SessionStart` | Starts mining automatically; a new session may renew a terminal automatic run, except an explicit stop |
+| Transient processor failure | Automatic runs retry up to three consecutive attempts within the same budget |
 | Changed settings, capture generation, or processor | Requires an explicit restart instead of silently renewing a run |
 | `mastermind miner start` | Explicitly start or renew a run using saved choices |
 | `mastermind miner stop` | Stop the selected project's miners without deleting evidence |

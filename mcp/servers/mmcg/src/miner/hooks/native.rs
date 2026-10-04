@@ -5,7 +5,7 @@ use super::{semantic, Error};
 use serde_json::Value;
 use std::path::Path;
 
-pub(super) const VERSION: &str = "persona-native-processor-v1";
+pub(super) const VERSION: &str = "persona-native-processor-v2";
 
 pub(super) fn provider<'a>(requested: &'a str, client: &'a str) -> Result<&'a str, Error> {
     super::client(client)?;
@@ -45,6 +45,135 @@ pub(super) fn hook_model(value: &Value, kind: &str) -> Result<Option<String>, Er
             Ok(Some(model.into()))
         }
     }
+}
+
+/// Claude versions that omit `model` in hooks still record the actual model in
+/// the assistant response. Bind it to this Stop, session and project instead of
+/// guessing from config or a previous response.
+pub(super) fn transcript_model(
+    value: &Value,
+    root: &Path,
+) -> Result<Option<(String, Value)>, Error> {
+    use crate::bounded_fs::{self, ReadControl};
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    let Some(session) = value["session_id"]
+        .as_str()
+        .and_then(super::super::feedback::valid_session_id)
+    else {
+        return Ok(None);
+    };
+    let Some(last) = value["last_assistant_message"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(selected) = value["transcript_path"]
+        .as_str()
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+    else {
+        return Ok(None);
+    };
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".claude")))
+        .ok_or("Claude account directory is unavailable")?;
+    if !config.is_absolute() {
+        return Ok(None);
+    }
+    let Some(cwd) = value["cwd"]
+        .as_str()
+        .map(Path::new)
+        .filter(|cwd| cwd.is_absolute())
+    else {
+        return Ok(None);
+    };
+    let canonical_cwd = cwd.canonicalize()?;
+    if !canonical_cwd.starts_with(root) {
+        return Ok(None);
+    }
+    let dir = config
+        .join("projects")
+        .join(super::super::feedback::claude_project_slug(cwd));
+    let path = dir.join(format!("{session}.jsonl"));
+    if selected.file_name() != path.file_name()
+        || selected
+            .parent()
+            .ok_or("transcript parent missing")?
+            .canonicalize()?
+            != dir.canonicalize()?
+    {
+        return Ok(None);
+    }
+    const TAIL: u64 = 512 * 1024;
+    let control = ReadControl {
+        deadline: Some(Instant::now() + Duration::from_millis(250)),
+        interrupted: None,
+    };
+    let file = bounded_fs::read_regular_file_tail(&dir, &path, 256 * 1024 * 1024, TAIL, control)?;
+    let bytes = if file.declared_len > TAIL {
+        let Some(newline) = file.bytes.iter().position(|byte| *byte == b'\n') else {
+            return Ok(None);
+        };
+        &file.bytes[newline + 1..]
+    } else {
+        &file.bytes
+    };
+    let text = std::str::from_utf8(bytes)?;
+    for line in text.lines().rev() {
+        control.check()?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.len() > 128 * 1024 {
+            return Ok(None);
+        }
+        let Ok(record) = crate::setup::parse_json_unique(line.as_bytes()) else {
+            return Ok(None);
+        };
+        if record["type"] != "assistant" {
+            continue;
+        }
+        // The latest assistant record must match. Never search older answers
+        // after a conflicting latest record, even if their text happens to match.
+        if record["sessionId"] != session
+            || record["isSidechain"] == true
+            || record["message"]["role"] != "assistant"
+            || record["cwd"]
+                .as_str()
+                .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+                .as_deref()
+                != Some(canonical_cwd.as_path())
+        {
+            return Ok(None);
+        }
+        let Some(blocks) = record["message"]["content"].as_array() else {
+            return Ok(None);
+        };
+        let response = blocks
+            .iter()
+            .filter(|block| block["type"] == "text")
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if response.trim() != last.trim() {
+            return Ok(None);
+        }
+        let Some(model) = record["message"]["model"].as_str() else {
+            return Ok(None);
+        };
+        validate_model(model)?;
+        return Ok(Some((
+            model.into(),
+            json!({"source":"native_session_transcript",
+            "record_digest":super::hash(&record),"session_id":session}),
+        )));
+    }
+    Ok(None)
 }
 
 pub(super) fn analyze(

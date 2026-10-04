@@ -132,6 +132,8 @@ pub(super) struct Grant {
 struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_binding: Option<Value>,
     #[serde(default)]
     capture_version: u32,
     id: String,
@@ -161,6 +163,8 @@ struct Session {
 pub(super) struct Episode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<Value>,
     pub id: String,
     pub session: String,
     pub client: String,
@@ -193,6 +197,7 @@ pub(super) struct Draft {
 
 pub(super) struct Incoming {
     pub model: Option<String>,
+    pub model_binding: Option<Value>,
     pub native_session: String,
     pub native_turn: Option<String>,
     pub native_key: Option<String>,
@@ -514,6 +519,7 @@ impl Journal {
         ]));
         let mut session = self.session(&sid)?.unwrap_or_else(|| Session {
             model: None,
+            model_binding: None,
             capture_version: CAPTURE_VERSION,
             id: sid.clone(),
             native_id: incoming.native_session.clone(),
@@ -603,10 +609,15 @@ impl Journal {
             // A resumed or cleared session must not inherit a stale selection
             // when the native client omits its current model.
             session.model = incoming.model.clone();
+            session.model_binding = incoming.model_binding.clone();
         } else if incoming.model.is_some()
-            && !matches!(incoming.kind.as_str(), "SubagentStart" | "SubagentStop")
+            && !matches!(
+                incoming.kind.as_str(),
+                "SubagentStart" | "SubagentStop" | "Stop" | "Interrupt" | "StopFailure"
+            )
         {
             session.model = incoming.model.clone();
+            session.model_binding = incoming.model_binding.clone();
         }
         if session.project != project || session.repository != repository {
             add_gap(&mut session.gaps, "project_identity_changed");
@@ -683,6 +694,7 @@ impl Journal {
             let id = hash(&json!(["hook-episode-v1", sid, event_id]));
             let mut ep = Episode {
                 model: session.model.clone(),
+                model_binding: session.model_binding.clone(),
                 id: id.clone(),
                 session: sid.clone(),
                 client: grant.client.clone(),
@@ -744,6 +756,11 @@ impl Journal {
                 && !matches!(incoming.kind.as_str(), "SubagentStart" | "SubagentStop")
             {
                 ep.model = incoming.model.clone();
+                ep.model_binding = incoming.model_binding.clone();
+                if session.active.as_ref() == Some(id) {
+                    session.model = incoming.model.clone();
+                    session.model_binding = incoming.model_binding.clone();
+                }
             }
             if let Some(gap) = &incoming.gap {
                 // A known event belongs to this episode, including a late
@@ -1402,6 +1419,7 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     ]));
     Ok(EpisodeInput {
         model: ep.model,
+        model_binding: ep.model_binding,
         id: ep.id,
         revision,
         client: ep.client,

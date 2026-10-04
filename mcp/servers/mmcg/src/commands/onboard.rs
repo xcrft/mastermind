@@ -14,7 +14,7 @@ pub struct Options {
     /// Project directory. Choices are saved in .mastermind/setup.json.
     #[arg(default_value = ".")]
     pub root: PathBuf,
-    /// Client to connect. A first interactive run asks, unattended runs stay local unless selected.
+    /// Client to connect. Defaults to the active client, or installed native clients.
     #[arg(long, value_parser = ["claude", "codex", "all", "none"])]
     client: Option<String>,
     /// off disables capture, capture records local evidence, on starts bounded semantic mining.
@@ -29,7 +29,7 @@ pub struct Options {
     /// Maximum wall time per client run in seconds, including idle time.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
     max_runtime: Option<u64>,
-    /// Allow this project's selected MCP clients to read the personal profile.
+    /// Allow selected clients to read the personal profile. Enabled on first client setup.
     #[arg(long, value_parser = ["on", "off"])]
     profile_access: Option<String>,
     /// Refine each user prompt through the selected provider. Extra calls are outside the miner budget.
@@ -84,8 +84,10 @@ fn selection(
     previous: Option<&Settings>,
 ) -> Result<Settings, Error> {
     let mut settings = previous.cloned().unwrap_or_else(|| Settings::local(root));
-    let mut client = options.client.clone();
-    let mut mining = options.mining.clone();
+    let mut client = options
+        .client
+        .clone()
+        .or_else(|| previous.is_none().then(|| detected_client(root)).flatten());
     if previous.is_none()
         && client.is_none()
         && !options.dry_run
@@ -98,13 +100,6 @@ fn selection(
             "claude",
             &["claude", "codex", "all", "none"],
         )?);
-        if client.as_deref() != Some("none") && mining.is_none() {
-            mining = Some(ask(
-                "Mining: capture (local) | on (provider calls) | off",
-                "capture",
-                &["capture", "on", "off"],
-            )?);
-        }
     }
     if let Some(client) = client {
         settings.clients = match client.as_str() {
@@ -113,7 +108,9 @@ fn selection(
             _ => vec![client],
         };
         if previous.is_none() && !settings.clients.is_empty() {
-            settings.mining = Mining::Capture;
+            settings.mining = if cfg!(unix) { Mining::On } else { Mining::Off };
+            settings.provider = Some("native".into());
+            settings.profile_access = true;
         }
         if settings.clients.is_empty() {
             settings.mining = Mining::Off;
@@ -121,7 +118,7 @@ fn selection(
             settings.profile_access = false;
         }
     }
-    if let Some(mining) = mining {
+    if let Some(mining) = &options.mining {
         settings.mining = match mining.as_str() {
             "on" => Mining::On,
             "capture" => Mining::Capture,
@@ -131,18 +128,10 @@ fn selection(
     if let Some(provider) = &options.provider {
         settings.provider = Some(provider.clone());
     }
-    if settings.mining == Mining::On
+    if (settings.mining == Mining::On || options.refiner.as_deref() == Some("on"))
         && settings.provider.is_none()
-        && !options.json
-        && !options.dry_run
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal()
     {
-        settings.provider = Some(ask(
-            "Semantic provider, receives captured episodes",
-            "native",
-            &["native", "claude", "codex"],
-        )?);
+        settings.provider = Some("native".into());
     }
     if let Some(value) = options.max_calls {
         settings.max_calls = value;
@@ -163,6 +152,9 @@ fn selection(
     }
     if options.no_global {
         settings.workflow = false;
+    } else if previous.is_none() && options.workflow.is_none() {
+        settings.workflow = std::env::var_os("MASTERMIND_INSTALLER_JS").is_some()
+            && std::env::var_os("MASTERMIND_NODE").is_some();
     }
     if let Some(previous) = previous {
         settings.pending_removals.extend(
@@ -180,6 +172,27 @@ fn selection(
     }
     settings.validate(root)?;
     Ok(settings)
+}
+
+fn detected_client(root: &Path) -> Option<String> {
+    // Resolve executables without running them. Active-client markers take
+    // precedence over other installed clients; saved and explicit choices win.
+    let available = |client| mmcg::setup::resolve_native_cli(client, root).is_ok();
+    if std::env::var_os("CLAUDECODE").is_some_and(|value| !value.is_empty()) && available("claude")
+    {
+        return Some("claude".into());
+    }
+    if std::env::var_os("CODEX_THREAD_ID").is_some_and(|value| !value.is_empty())
+        && available("codex")
+    {
+        return Some("codex".into());
+    }
+    match (available("claude"), available("codex")) {
+        (true, true) => Some("all".into()),
+        (true, false) => Some("claude".into()),
+        (false, true) => Some("codex".into()),
+        (false, false) => None,
+    }
 }
 
 fn worker_options(settings: &Settings) -> background::StartOptions {
@@ -382,6 +395,14 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
             );
         }
     }
+    if settings.profile_access && !options.no_seed_style {
+        if let Some(reader) = settings.clients.first() {
+            let detail = mmcg::miner::profile::refresh_for_task(&root, reader).unwrap_or_else(
+                |error| json!({"status":"unavailable","reason":error.to_string(),"model":false}),
+            );
+            steps.push(json!({"component":"profile.git","status":"ok","detail":detail}));
+        }
+    }
     let success = steps.iter().all(|step| step["status"] == "ok");
     let observed = status_report(&root, index_override)?;
     emit(
@@ -561,6 +582,13 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
                     .as_str()
                     .unwrap_or("unknown")
             );
+            if client["hooks"]["activation"]["status"] == "not_observed" {
+                if let Some(activation) =
+                    client["hooks"]["native_registration"]["client_activation"].as_str()
+                {
+                    println!("    Activate: {activation}");
+                }
+            }
             let evidence = &client["hooks"]["evidence"];
             let analysis = match client["hooks"]["pipeline"]["analysis_requested"].as_bool() {
                 Some(true) => "requested",

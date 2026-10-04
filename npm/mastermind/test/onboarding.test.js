@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,6 +21,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const argv = process.argv.slice(2);
+if (argv[0] === 'exec') {
+  assert.equal(process.env.MASTERMIND_MINER, '1');
+  const model = argv[argv.indexOf('--model')+1];
+  const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+  const episode = request.episode;
+  assert.ok(episode);
+  fs.appendFileSync(path.join(process.env.FIXTURE_ACCOUNT, 'provider-calls.jsonl'),
+    JSON.stringify({model, episode: episode.id})+'\\n');
+  console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message',
+    text:JSON.stringify({schema:1, episode_id:episode.id, episode_revision:episode.revision, drafts:[]})}}));
+  console.log(JSON.stringify({type:'turn.completed'}));
+  process.exit(0);
+}
 fs.appendFileSync(path.join(process.env.HOME, 'native-calls.jsonl'), JSON.stringify(argv)+'\\n');
 if (process.env.FIXTURE_FORBID_NATIVE === '1') process.exit(91);
 assert.equal(argv[0], 'mcp', 'model calls are forbidden');
@@ -54,14 +68,19 @@ function assertCurrentIndex(index) {
   }
 }
 
-test("npm init installs real workflows and native capture with matching read-only status", {
+test("one npm init installs workflows, mines native sessions and delivers the profile", {
   skip: process.platform === "win32" ? "native hooks require Unix"
     : !NATIVE ? "set MMCG_TEST_BINARY to the built native binary" : false,
   timeout: 120_000,
-}, (t) => {
+}, async (t) => {
   assert.equal(path.isAbsolute(NATIVE), true, "MMCG_TEST_BINARY must be absolute");
   const temporary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mastermind-onboard-")));
-  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  t.after(() => {
+    if (fs.existsSync(path.join(root, ".mastermind", "setup.json"))) {
+      spawnSync(process.execPath, [launcher, "miner", "stop", "--json"], {cwd:root, env, timeout:10_000});
+    }
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
   const root = path.join(temporary, "project");
   const home = path.join(temporary, "home");
   const bin = path.join(temporary, "bin");
@@ -98,6 +117,7 @@ test("npm init installs real workflows and native capture with matching read-onl
     MASTERMIND_WORKFLOW_HOME: home, PATH: `${bin}:/usr/bin:/bin`, NO_COLOR: "1",
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
     FIXTURE_NODE: process.execPath, FIXTURE_LAUNCHER: launcher,
+    FIXTURE_ACCOUNT: home,
   };
   const run = (command, args, additions = {}) => {
     const output = spawnSync(command, args, { cwd: root, env: { ...env, ...additions },
@@ -111,11 +131,17 @@ test("npm init installs real workflows and native capture with matching read-onl
   fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n.mastermind/\n.codex/\n");
   fs.writeFileSync(path.join(root, "CONTEXT.md"), "# Context\n\nKeep this user-owned project description.\n");
   run("/usr/bin/git", ["init", "-q", "--initial-branch=main"]);
-  const first = mastermind(["init", "--client", "codex", "--mining", "capture", "--workflow", "on", "--json"]);
+  run("/usr/bin/git", ["config", "user.name", "Fixture User"]);
+  run("/usr/bin/git", ["config", "user.email", "fixture@example.invalid"]);
+  run("/usr/bin/git", ["add", "module.py", "CONTEXT.md", ".gitignore"]);
+  for (let i = 0; i < 12; i++) run("/usr/bin/git", ["commit", "--allow-empty", "-qm", `Adjust sample ${i}`]);
+  const first = mastermind(["init", "--json"]);
   assert.equal(first.status, "configured");
   assert.equal(first.settings.workflow, true);
-  assert.equal(first.settings.mining, "capture");
-  assert.equal(first.settings.profile_access, false);
+  assert.equal(first.settings.mining, "on");
+  assert.equal(first.settings.provider, "native");
+  assert.equal(first.settings.profile_access, true);
+  assert.equal(fs.existsSync(path.join(home, "provider-calls.jsonl")), false);
   const client = first.observed.clients[0];
   assert.equal(client.client, "codex");
   assert.equal(client.mcp.status, "configured");
@@ -123,7 +149,8 @@ test("npm init installs real workflows and native capture with matching read-onl
   assert.equal(client.hooks.capture.enabled, true);
   assert.equal(client.hooks.activation.status, "not_observed");
   assert.equal(client.hooks.mining.status, "not_configured");
-  assert.equal(client.profile_access.allowed, false);
+  assert.equal(client.profile_access.allowed, true);
+  assert.equal(first.steps.find(step => step.component === "profile.git").detail.status, "refreshed");
   assertCurrentIndex(first.observed.project.index);
   const manifestPath = path.join(home, ".codex", ".mastermind-workflow.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -155,8 +182,53 @@ test("npm init installs real workflows and native capture with matching read-onl
   assert.equal(status.clients[0].mcp.scope, "user_configuration_only");
   assert.equal(status.clients[0].workflow.clients[0].parity, true);
   assert.equal(status.clients[0].hooks.capture.generation, client.hooks.capture.generation);
-  assert.equal(status.clients[0].profile_access.allowed, false);
+  assert.equal(status.clients[0].profile_access.allowed, true);
   assertCurrentIndex(status.project.index);
   assert.equal(fs.readFileSync(callsPath, "utf8"), calls);
   assert.deepEqual(keep.map((file) => fs.readFileSync(file)), before);
+  const hooks = JSON.parse(fs.readFileSync(path.join(root, ".codex", "hooks.json"), "utf8"));
+  assert.ok(hooks.hooks.SessionStart[0].hooks[0].command.includes(launcher));
+  // Package replacement must reach existing hooks without another init.
+  const nativePath = path.join(nativePackage, "bin", "mmcg");
+  fs.unlinkSync(nativePath);
+  fs.writeFileSync(nativePath, `#!/bin/sh\nprintf updated > ${quote(path.join(home, "hook-runtime"))}\nexec ${quote(fs.realpathSync(NATIVE))} "$@"\n`, {mode:0o700});
+  const event = (kind, turn, extra = {}, project = root) => {
+    const definitions = project === root ? hooks : JSON.parse(fs.readFileSync(path.join(project, ".codex", "hooks.json"), "utf8"));
+    const command = definitions.hooks[kind][0].hooks[0].command;
+    const output = spawnSync("/bin/sh", ["-c", command], { cwd: project, env,
+      input: JSON.stringify({hook_event_name:kind, session_id:"native-session", cwd:project,
+        ...(turn ? {turn_id:turn} : {}), ...extra}), encoding:"utf8", timeout:10_000 });
+    assert.equal(output.status, 0, output.stderr);
+    return JSON.parse(output.stdout);
+  };
+  event("SessionStart", null, {source:"startup", model:"gpt-task-model"});
+  assert.equal(fs.readFileSync(path.join(home, "hook-runtime"), "utf8"), "updated");
+  const firstPrompt = event("UserPromptSubmit", "one", {prompt:"Review module.py. I prefer short reviews only for simple changes."});
+  assert.match(firstPrompt.hookSpecificOutput.additionalContext, /Mastermind task profile/);
+  event("Stop", "one", {last_assistant_message:"Reviewed module.py."});
+  const deadline = Date.now() + 15_000;
+  let live;
+  do {
+    live = mastermind(["status", "--json"], {FIXTURE_FORBID_NATIVE:"1"});
+    if (live.clients[0].hooks.mining.run?.completed > 0) break;
+    await pause(100);
+  } while (Date.now() < deadline);
+  assert.ok(live.clients[0].hooks.mining.run.completed > 0, JSON.stringify(live));
+  const inference = fs.readFileSync(path.join(home, "provider-calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.ok(inference.length > 0);
+  assert.ok(inference.every(call => call.model === "gpt-task-model"));
+  assert.ok(live.clients[0].hooks.pipeline.local_analysis.completed_revisions > 0);
+  const secondPrompt = event("UserPromptSubmit", "two", {prompt:"Check module.py again."});
+  assert.match(secondPrompt.hookSpecificOutput.additionalContext, /Mastermind task profile/);
+  const other = path.join(temporary, "second-project");
+  fs.mkdirSync(other);
+  fs.writeFileSync(path.join(other, "module.py"), "def other():\n    return True\n");
+  const second = mastermind(["init", other, "--json"]);
+  assert.equal(second.status, "configured");
+  assert.equal(second.settings.profile_access, true);
+  event("SessionStart", null, {source:"startup", model:"gpt-other-model"}, other);
+  const crossRepo = event("UserPromptSubmit", "one", {prompt:"Check module.py."}, other);
+  assert.match(crossRepo.hookSpecificOutput.additionalContext, /Mastermind task profile/);
+  const stopped = spawnSync(process.execPath, [launcher, "miner", "stop", other, "--json"], {cwd:other, env, timeout:10_000});
+  assert.equal(stopped.status, 0);
 });

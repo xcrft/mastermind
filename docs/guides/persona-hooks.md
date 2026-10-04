@@ -17,17 +17,18 @@ capture → local candidates → inspect → attest authorship → review habit 
 For project onboarding:
 
 ```bash
-mastermind init --client codex --mining capture
+mastermind init
 mastermind status --json
 ```
 
-The choice is saved for this repository. To also run bounded semantic mining,
-select `--mining on --provider native`. Each native `SessionStart` starts or
+The active client, or installed native clients, are selected automatically.
+First client setup enables profile delivery and `--mining on --provider native`.
+Use `--mining capture` for local learning without model calls. Each native `SessionStart` starts or
 observes a bounded worker for that client. A running worker keeps its budget.
 A new session may renew an exhausted or failed automatic run; resuming the same
 session and explicit stop do not renew it. `mastermind miner start`, `stop` and
 `status` use the saved choices. Repeated `init` preserves the spent budget. `miner start` explicitly renews a run. Personal profile delivery
-requires the separate `--profile-access on` option.
+is enabled for the selected project and clients; disable it with `--profile-access off`.
 
 For direct hook control, preview and install hooks:
 
@@ -53,7 +54,8 @@ and review the updated definitions in the client.
 |---|---|
 | Capture grant | This client and canonical project root only |
 | Existing hooks | Preserved |
-| Native hook trust and profile reads | Require separate authorization |
+| Native hook trust | Review in the client; init never grants trust |
+| Profile reads | Enabled for selected clients on first init; explicit opt-outs are retained |
 | Activation | Restart the client to capture `SessionStart` |
 | Installed receiver | Local capture and bounded explicit-statement candidates when profile delivery is enabled. Prompt refinement and semantic analysis require a selected processor |
 | Background mining | Started by `init --mining on` or explicit `miner start` / `hooks worker start`. Direct hook setup and status do not start it |
@@ -377,12 +379,12 @@ mastermind miner hooks analyze '<capture-episode-id>' \
 | Native processor | Contract |
 |---|---|
 | Selection | `native` resolves to the captured client; explicit `claude` or `codex` must match it |
-| Model | Captured `model`, passed explicitly to the CLI. Missing model metadata skips automatic semantic mining; local collection continues |
+| Model | Passed explicitly to the CLI from native events. When Claude omits it, Stop reads a bounded transcript tail and requires the same session, project and exact latest response. Missing metadata skips semantic mining; local collection continues |
 | Model changes | Codex model metadata is read from native events; Claude also records `PostModelSwitch`. Closed episodes keep their original model |
 | Claude | `--safe-mode --tools "" --strict-mcp-config` with an empty MCP list and no persistence. Subscription auth remains available |
 | Codex | Ephemeral read-only invocation with user config, project instructions, hooks, plugins, apps, memory and shell tools disabled. Its account directory is retained, with a private HOME |
 | Tool output | Native Codex results containing a tool execution are rejected; CLI catalog warnings are diagnostics |
-| Provenance | Processor executable digest, native adapter version, captured client and model are in the checkpoint and `show` analysis receipts, including empty results |
+| Provenance | Processor executable digest, adapter version, client, model and model source are in the checkpoint and `show` receipts, including empty results. Transcript recovery also retains the response record digest |
 | Credentials | Read only by the native CLI. Mastermind never copies credentials or falls back to another provider |
 | Unsupported client | Fails on unsupported flags or missing login. No ordinary-session fallback |
 
@@ -454,7 +456,7 @@ mastermind miner hooks worker stop --client codex --project-root .
 | Processor timeout / batch | 60 s / 4 by default, maximum 120 s / 16 |
 | Checkpoint | Episode revision and processor fingerprint, including direct executable digest |
 | Model selection | Native model identifier and adapter version are fingerprinted per episode. Transitive script dependencies and server-side model weight changes are not fingerprinted |
-| Failure | Stops. Retry requires an explicit start |
+| Failure | Automatic native runs retry up to three consecutive attempts within the existing budget. Other workers stop and require an explicit start |
 | Stop/revocation | Cancels the owned process group and withholds unfinished drafts. Cannot retract input already sent |
 | Crash/SIGKILL | Lost ownership reports `interrupted`. Restart respects completed checkpoints and outstanding lease expiry. Cleanup of an already running external processor is not guaranteed |
 | Native session | With saved `mining: on` and `provider: native`, `SessionStart` starts mining. A live run keeps its budget; only a new session may renew a terminal automatic run. Resume/replay and explicit stop do not renew it |

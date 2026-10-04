@@ -96,7 +96,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     let refiner_report = match &refiner {
         Ok(Some(config)) => json!({
             "status":if valid_refiner.is_some() {"configured"} else {"configuration_invalid"},
-            "selection":if config.provider.as_deref()==Some("claude") {"claude"} else {"custom_processor"},
+            "selection":config.provider.as_deref().unwrap_or("custom_processor"),
             "timeout_seconds":config.timeout_secs,"trigger":"UserPromptSubmit",
             "native_delivery":"additional_context","execution":"not_tested",
             "authority":"advisory","permission_effect":"none"
@@ -275,7 +275,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "managed_analysis":mining["status"],"foreground_workers":"not_observed",
         "publication":"authorship_attestation_and_review_required",
         "local_analysis":local_report,
-        "git_refresh":{"trigger":["native_executor_context","reviewed_task_completion"],
+        "git_refresh":{"trigger":["init","native_session_start","automatic_analysis_completion","native_executor_context","reviewed_task_completion"],
             "source":"committed_git","model":false,"uncommitted_changes":"not_mined"},
         "task_benefit":"unmeasured",
         "evaluation":{"command":"miner hooks evaluate-local --input <labeled-corpus.json>",

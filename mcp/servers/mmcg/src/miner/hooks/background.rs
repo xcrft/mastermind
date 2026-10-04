@@ -61,6 +61,8 @@ struct Settings {
 struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_episode: Option<String>,
     schema: u32,
     worker_id: String,
     client: String,
@@ -457,6 +459,12 @@ fn validate_config(config: &Config, id: &str) -> Result<(), Error> {
     if let Some(session) = &config.native_session {
         check_hex(session, 64)?;
     }
+    if let Some(episode) = &config.native_episode {
+        check_hex(episode, 64)?;
+        if config.native_session.is_none() {
+            return Err("worker_episode_requires_native_session".into());
+        }
+    }
     if config.schema != 1
         || config.worker_id != id
         || config.capture_generation <= 0
@@ -522,9 +530,12 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
     // Apply the same grace period to that startup gap as to a delayed pulse.
     let unresponsive = age.unwrap_or(now()?.saturating_sub(state.value.started_at_ms)) > 10_000;
     let active = matches!(state.value.status.as_str(), "starting" | "running");
-    let observed = if !held && active {
+    let stopped = store.stopped(&state.value.run_id)?;
+    let observed = if stopped && !held {
+        "stopped"
+    } else if !held && active {
         "interrupted"
-    } else if held && store.stopped(&state.value.run_id)? {
+    } else if held && stopped {
         "stopping"
     } else if held && state.value.status == "running" && unresponsive {
         "unresponsive"
@@ -539,8 +550,9 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
             "max_calls":config.value.settings.max_calls,"max_runtime":config.value.settings.max_runtime,"capture_generation":config.value.capture_generation},
         "run":state.value,"heartbeat_age_ms":age,"autostart":config.value.native_session.is_some() && observed!="stopped",
         "native_session":config.value.native_session,
+        "native_episode":config.value.native_episode,
         "checkpoint_store":"persona-events.db:hook_analysis","output":"unreviewed_drafts_only",
-        "permission_effect":"none","retry_policy":if config.value.native_session.is_some() {"three_bounded_attempts_then_new_native_session_or_explicit_restart"} else {"stop_on_processor_failure_explicit_restart"}
+        "permission_effect":"none","retry_policy":if config.value.native_session.is_some() {"three_bounded_attempts_then_new_completed_episode_native_session_or_explicit_restart"} else {"stop_on_processor_failure_explicit_restart"}
     }))
 }
 
@@ -559,6 +571,37 @@ pub fn ensure(client: &str, root: &Path, options: StartOptions) -> Result<Value,
 /// A shared running worker keeps its budget. A fresh session can renew a
 /// terminal automatic run, while replay and explicit stop never renew it.
 pub(super) fn on_session_start(client: &str, root: &Path, session: &str) -> Result<Value, Error> {
+    on_native_trigger(
+        client,
+        root,
+        StartMode::Session(hash(&json!(["native-mining-session-v1", session]))),
+    )
+}
+
+pub(super) fn on_episode_closed(
+    client: &str,
+    root: &Path,
+    session: &str,
+    episode: &str,
+) -> Result<Value, Error> {
+    let input = Journal::open(false)?.snapshot(episode)?;
+    if input.client != client
+        || Path::new(&input.project_root) != root
+        || !input.coverage_gaps.is_empty()
+    {
+        return Ok(json!({"status":"incomplete"}));
+    }
+    on_native_trigger(
+        client,
+        root,
+        StartMode::Episode {
+            session: hash(&json!(["native-mining-session-v1", session])),
+            episode: hash(&json!(["native-mining-episode-v1", episode])),
+        },
+    )
+}
+
+fn on_native_trigger(client: &str, root: &Path, mode: StartMode) -> Result<Value, Error> {
     let Some(saved) = crate::onboarding::load(root)? else {
         return Ok(json!({"status":"not_requested"}));
     };
@@ -577,7 +620,7 @@ pub(super) fn on_session_start(client: &str, root: &Path, session: &str) -> Resu
             max_runtime: Some(saved.max_runtime),
             ..Default::default()
         },
-        StartMode::Session(hash(&json!(["native-mining-session-v1", session]))),
+        mode,
     )
 }
 
@@ -596,8 +639,8 @@ pub fn arm_native(client: &str, root: &Path) -> Result<Value, Error> {
         }
     }
     Ok(
-        json!({"status":"armed","trigger":"SessionStart","existing_run":existing,
-        "provider":client,"model_source":"native_hook_or_session_transcript","budget_renewal":"new_native_session_only"}),
+        json!({"status":"armed","trigger":["SessionStart","new_completed_episode"],"existing_run":existing,
+        "provider":client,"model_source":"native_hook_or_session_transcript","budget_renewal":"new_completed_episode_or_native_session"}),
     )
 }
 
@@ -606,6 +649,7 @@ enum StartMode {
     Restart,
     Ensure,
     Session(String),
+    Episode { session: String, episode: String },
 }
 
 fn start_with_mode(
@@ -651,9 +695,20 @@ fn start_with_mode(
     let config = Config {
         native_session: match &mode {
             StartMode::Session(session) => Some(session.clone()),
+            StartMode::Episode { session, .. } => Some(session.clone()),
             _ => previous
                 .as_ref()
                 .and_then(|previous| previous.value.native_session.clone()),
+        },
+        native_episode: match &mode {
+            StartMode::Episode { episode, .. } => Some(episode.clone()),
+            StartMode::Session(session) => previous
+                .as_ref()
+                .filter(|previous| previous.value.native_session.as_ref() == Some(session))
+                .and_then(|previous| previous.value.native_episode.clone()),
+            _ => previous
+                .as_ref()
+                .and_then(|previous| previous.value.native_episode.clone()),
         },
         schema: 1,
         worker_id: id.clone(),
@@ -663,7 +718,8 @@ fn start_with_mode(
         settings: selected,
         processor: fingerprint,
     };
-    if matches!(&mode, StartMode::Session(_)) {
+    let automatic = matches!(&mode, StartMode::Session(_) | StartMode::Episode { .. });
+    if automatic {
         if let Some(report) = session_report(&store, &id, previous.as_ref(), &config)? {
             return Ok(report);
         }
@@ -673,7 +729,7 @@ fn start_with_mode(
             return Ok(report);
         }
     }
-    let startup_wait = if matches!(&mode, StartMode::Session(_)) {
+    let startup_wait = if automatic {
         Duration::from_secs(2)
     } else {
         START_WAIT
@@ -682,7 +738,7 @@ fn start_with_mode(
     let owner = acquire_start_owner(
         &store,
         previous.as_ref(),
-        matches!(&mode, StartMode::Session(_))
+        automatic
             && previous
                 .as_ref()
                 .is_some_and(|previous| native_processor_update(&previous.value, &config)),
@@ -783,7 +839,8 @@ fn session_report(
             report["status"].as_str(),
             Some("starting" | "running" | "stopping")
         );
-    let same_session = previous.value.native_session == selected.native_session;
+    let same_session = previous.value.native_session == selected.native_session
+        && previous.value.native_episode == selected.native_episode;
     if active && native_processor_update(&previous.value, selected) {
         let run = report["run"]["run_id"]
             .as_str()
@@ -798,6 +855,7 @@ fn session_report(
     if active || same_session || stopped {
         let mut retained = selected.clone();
         retained.native_session = previous.value.native_session.clone();
+        retained.native_episode = previous.value.native_episode.clone();
         if previous.value != retained {
             return Err("worker_configuration_differs_explicit_restart_required".into());
         }
@@ -816,7 +874,8 @@ fn session_report(
 fn native_processor_update(previous: &Config, selected: &Config) -> bool {
     if previous.native_session.is_none()
         || selected.native_session.is_none()
-        || previous.native_session == selected.native_session
+        || (previous.native_session == selected.native_session
+            && previous.native_episode == selected.native_episode)
         || selected.settings.processor.is_some()
         || !selected.settings.args.is_empty()
         || selected.settings.provider.as_deref() != Some(selected.client.as_str())
@@ -827,6 +886,7 @@ fn native_processor_update(previous: &Config, selected: &Config) -> bool {
     }
     let mut updated = previous.clone();
     updated.native_session = selected.native_session.clone();
+    updated.native_episode = selected.native_episode.clone();
     updated.processor = selected.processor.clone();
     updated == *selected
 }
@@ -993,12 +1053,12 @@ pub fn stop(client: &str, root: &Path) -> Result<Value, Error> {
     let run_id = report["run"]["run_id"]
         .as_str()
         .ok_or("worker_run_id_missing")?;
+    store.request_stop(run_id)?;
     if report["owner"] != "held" && report["run"]["status"] != "starting" {
-        return Ok(report);
+        return status_at(&store, &id);
     }
     // A parent can exit while its admitted child is waiting for a status
     // probe to release owner.lock. Cancel that run before it acquires owner.
-    store.request_stop(run_id)?;
     let deadline = Instant::now() + STOP_WAIT;
     loop {
         let mut report = status_at(&store, &id)?;
@@ -1509,6 +1569,7 @@ mod tests {
             };
             let config = Config {
                 native_session: None,
+                native_episode: None,
                 schema: 1,
                 worker_id: id.clone(),
                 client: "codex".into(),

@@ -438,6 +438,16 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     if kind == "Stop" && matches!(receipt["status"].as_str(), Some("recorded" | "duplicate")) {
         if let Some(episode) = receipt["episode"].as_str() {
             local::automatic(&mut db, &grant, episode);
+            if receipt["status"] == "recorded" {
+                if let Err(error) =
+                    background::on_episode_closed(client_id, &root, &native_session, episode)
+                {
+                    eprintln!(
+                        "{}",
+                        json!({"status":"degraded","component":"native_mining_resume","reason":error.to_string()})
+                    );
+                }
+            }
         }
     }
     if let Some(episode) = receipt["revised_episode"].as_str() {

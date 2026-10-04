@@ -5,7 +5,7 @@ use super::{semantic, Error};
 use serde_json::Value;
 use std::path::Path;
 
-pub(super) const VERSION: &str = "persona-native-processor-v3";
+pub(super) const VERSION: &str = "persona-native-processor-v4";
 
 pub(super) fn provider<'a>(requested: &'a str, client: &'a str) -> Result<&'a str, Error> {
     super::client(client)?;

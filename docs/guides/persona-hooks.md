@@ -25,8 +25,8 @@ The active client, or installed native clients, are selected automatically.
 First client setup enables profile delivery and `--mining on --provider native`.
 Use `--mining capture` for local learning without model calls. Each native `SessionStart` starts or
 observes a bounded worker for that client. A running worker keeps its budget.
-A new session may renew an exhausted or failed automatic run; resuming the same
-session and explicit stop do not renew it. `mastermind miner start`, `stop` and
+A new session or a newly completed episode may renew an exhausted or failed
+automatic run. Resuming, replay and explicit stop do not renew it. `mastermind miner start`, `stop` and
 `status` use the saved choices. Repeated `init` preserves the spent budget. `miner start` explicitly renews a run. Personal profile delivery
 is enabled for the selected project and clients; disable it with `--profile-access off`.
 
@@ -459,8 +459,8 @@ mastermind miner hooks worker stop --client codex --project-root .
 | Failure | Automatic native runs retry up to three consecutive attempts within the existing budget. Other workers stop and require an explicit start |
 | Stop/revocation | Cancels the owned process group and withholds unfinished drafts. Cannot retract input already sent |
 | Crash/SIGKILL | Lost ownership reports `interrupted`. Restart respects completed checkpoints and outstanding lease expiry. Cleanup of an already running external processor is not guaranteed |
-| Native session | With saved `mining: on` and `provider: native`, `SessionStart` starts mining. A live run keeps its budget; only a new session may renew a terminal automatic run. Resume/replay and explicit stop do not renew it |
-| Native update | A new session replaces an automatic worker whose native executable or adapter changed, under the same saved settings and capture grant. No repeated init is required. Custom processors and changed budgets still require explicit restart |
+| Native session | With saved `mining: on` and `provider: native`, `SessionStart` starts mining. A live run keeps its budget. A new session or a newly completed episode may renew a terminal automatic run, including in a long-running chat. Resume/replay and explicit stop do not renew it |
+| Native update | A new session or newly completed episode replaces an automatic worker whose native executable or adapter changed, under the same saved settings and capture grant. No repeated init is required. Custom processors and changed budgets still require explicit restart |
 | Output | Local unreviewed drafts. No automatic habit acceptance |
 
 Settings and run state live in `~/.mastermind/persona-workers/<id>/`. Completed

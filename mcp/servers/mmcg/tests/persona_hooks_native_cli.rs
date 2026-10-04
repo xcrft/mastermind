@@ -776,6 +776,75 @@ fn automatic_worker_replaces_an_updated_native_processor_on_a_new_session() {
 }
 
 #[test]
+fn a_new_completed_episode_renews_a_spent_automatic_run_in_the_same_session() {
+    let f = Fixture::new();
+    f.automatic(1);
+    f.event(
+        "codex",
+        "long-session",
+        "",
+        "SessionStart",
+        json!({"source":"startup","model":"gpt-auto-model"}),
+    );
+    f.event(
+        "codex",
+        "long-session",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the callers."}),
+    );
+    f.event("codex", "long-session", "one", "Stop", json!({}));
+    let first = f.terminal();
+    assert_eq!(first["status"], "budget_exhausted");
+    f.event(
+        "codex",
+        "long-session",
+        "two",
+        "UserPromptSubmit",
+        json!({"prompt":"Continue the inspection."}),
+    );
+    assert_eq!(f.worker()["run"]["run_id"], first["run"]["run_id"]);
+    f.event("codex", "long-session", "two", "Stop", json!({}));
+    let second = f.terminal();
+    assert_ne!(second["run"]["run_id"], first["run"]["run_id"]);
+    assert_eq!(second["run"]["attempts"], 1);
+    f.event(
+        "codex",
+        "long-session",
+        "",
+        "SessionStart",
+        json!({"source":"resume","model":"gpt-auto-model"}),
+    );
+    assert_eq!(
+        f.worker()["run"]["run_id"],
+        second["run"]["run_id"],
+        "resuming the session cannot renew the completed episode's run"
+    );
+    f.event("codex", "long-session", "two", "Stop", json!({}));
+    assert_eq!(
+        f.worker()["run"]["run_id"],
+        second["run"]["run_id"],
+        "a replay cannot renew the spent run"
+    );
+    f.success(&["miner", "hooks", "worker", "start", "--client", "codex"]);
+    f.success(&["miner", "hooks", "worker", "stop", "--client", "codex"]);
+    let stopped = f.terminal();
+    f.event(
+        "codex",
+        "long-session",
+        "three",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect another caller."}),
+    );
+    f.event("codex", "long-session", "three", "Stop", json!({}));
+    assert_eq!(
+        f.worker()["run"]["run_id"],
+        stopped["run"]["run_id"],
+        "an explicit stop remains stopped"
+    );
+}
+
+#[test]
 fn explicit_stop_survives_a_new_native_session() {
     let f = Fixture::new();
     f.automatic(2);

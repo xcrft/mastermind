@@ -74,8 +74,10 @@ mastermind init --client claude --mining on --provider native \
 | `--client all` | Each client has its own run and budget |
 | Repeated `init` | Keeps the existing run and counters, even when stopped, failed, interrupted, or exhausted |
 | Native `SessionStart` | Starts mining automatically; a new session may renew a terminal automatic run, except an explicit stop |
+| Newly completed native episode | May renew an exhausted or failed automatic run in the same chat. Replayed events and explicit stop never renew it |
 | Transient processor failure | Automatic runs retry up to three consecutive attempts within the same budget |
-| Changed settings, capture generation, or processor | Requires an explicit restart instead of silently renewing a run |
+| Native client or adapter update | A fresh native session or newly completed episode replaces the old automatic worker under unchanged saved settings |
+| Changed settings, capture generation, or custom processor | Requires an explicit restart instead of silently renewing a run |
 | `mastermind miner start` | Explicitly start or renew a run using saved choices |
 | `mastermind miner stop` | Stop the selected project's miners without deleting evidence |
 | `mastermind miner status --json` | Inspect those miners without starting them |

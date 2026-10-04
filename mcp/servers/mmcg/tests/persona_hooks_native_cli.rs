@@ -135,8 +135,12 @@ impl Fixture {
     }
 
     fn automatic(&self, max_calls: u64) {
+        self.automatic_client("codex", max_calls);
+    }
+
+    fn automatic_client(&self, client: &str, max_calls: u64) {
         let mut settings = mmcg::onboarding::Settings::local(&self.root);
-        settings.clients = vec!["codex".into()];
+        settings.clients = vec![client.into()];
         settings.mining = mmcg::onboarding::Mining::On;
         settings.provider = Some("native".into());
         settings.max_calls = max_calls;
@@ -374,6 +378,135 @@ fn unknown_models_and_cross_client_overrides_never_start_inference() {
 }
 
 #[test]
+fn automatic_claude_mining_waits_for_the_response_transcript_to_flush() {
+    let f = Fixture::new();
+    f.automatic_client("claude", 8);
+    let session = "8dc02f4d-5f46-4fdb-a4d1-1c7103723f1f";
+    let dir = f
+        .home
+        .join(".claude/projects")
+        .join(mmcg::miner::feedback::claude_project_slug(&f.root));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    fs::write(&path, "{\"type\":\"progress\"}\n").unwrap();
+    f.event(
+        "claude",
+        session,
+        "",
+        "SessionStart",
+        json!({"source":"startup"}),
+    );
+    f.event(
+        "claude",
+        session,
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the callers."}),
+    );
+    f.event(
+        "claude",
+        session,
+        "one",
+        "Stop",
+        json!({"transcript_path":path,"last_assistant_message":"Checked the callers.","prompt_id":"original-prompt"}),
+    );
+    let skipped = f.success(&["miner", "hooks", "mine", "--provider", "native"]);
+    assert_eq!(skipped["skipped"][0]["reason"], "native_model_not_captured");
+    assert!(f.calls().is_empty());
+    let response = json!({"type":"assistant","sessionId":session,"cwd":f.root,
+        "isSidechain":false,"message":{"role":"assistant","model":"claude-flushed-model",
+        "content":[{"type":"text","text":"Checked the callers."}]}});
+    let prompt = json!({"type":"user","sessionId":session,"cwd":f.root,
+        "isSidechain":false,"promptId":"original-prompt","message":{"role":"user"}});
+    fs::write(&path, format!("{prompt}\n{response}\n")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let calls = f.calls();
+        if let Some(call) = calls.first() {
+            assert_eq!(call["client"], "claude");
+            assert_eq!(call["model"], "claude-flushed-model");
+            let show = f.success(&["miner", "hooks", "show", call["episode"].as_str().unwrap()]);
+            if show["analyses"].as_array().unwrap().iter().any(|analysis| {
+                analysis["current"] == true && analysis["processor"]["provider"] == "claude"
+            }) {
+                assert_eq!(show["episode"]["model"], "claude-flushed-model");
+                assert_eq!(
+                    show["episode"]["model_binding"]["source"],
+                    "native_session_transcript"
+                );
+                f.event("claude", session, "one", "Stop",
+                    json!({"transcript_path":path,"last_assistant_message":"Checked the callers.","prompt_id":"original-prompt"}));
+                let after =
+                    f.success(&["miner", "hooks", "show", call["episode"].as_str().unwrap()]);
+                assert!(after["episode"]["coverage_gaps"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty());
+                f.event(
+                    "claude",
+                    session,
+                    "two",
+                    "UserPromptSubmit",
+                    json!({"prompt":"Continue the inspection."}),
+                );
+                let episodes = f.success(&["miner", "hooks", "episodes"]);
+                let next = episodes["episodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|episode| episode["closed"] == false)
+                    .unwrap();
+                let next = f.success(&["miner", "hooks", "show", next["id"].as_str().unwrap()]);
+                assert_eq!(next["episode"]["model"], "claude-flushed-model");
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "automatic worker did not recover the flushed response"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn delayed_model_binding_rejects_another_prompt_with_the_same_response() {
+    let f = Fixture::new();
+    let session = "8dc02f4d-5f46-4fdb-a4d1-1c7103723f1f";
+    let dir = f
+        .home
+        .join(".claude/projects")
+        .join(mmcg::miner::feedback::claude_project_slug(&f.root));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    fs::write(&path, "{\"type\":\"progress\"}\n").unwrap();
+    f.event(
+        "claude",
+        session,
+        "",
+        "SessionStart",
+        json!({"source":"startup"}),
+    );
+    f.event(
+        "claude",
+        session,
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the callers."}),
+    );
+    f.event("claude", session, "one", "Stop", json!({"transcript_path":path,"prompt_id":"original-prompt","last_assistant_message":"Done."}));
+    let response = json!({"type":"assistant","sessionId":session,"cwd":f.root,
+        "isSidechain":false,"message":{"role":"assistant","model":"another-prompt-model",
+        "content":[{"type":"text","text":"Done."}]}});
+    let prompt = json!({"type":"user","sessionId":session,"cwd":f.root,
+        "isSidechain":false,"promptId":"another-prompt","message":{"role":"user"}});
+    fs::write(&path, format!("{prompt}\n{response}\n")).unwrap();
+    let report = f.success(&["miner", "hooks", "mine", "--provider", "native"]);
+    assert_eq!(report["skipped"][0]["reason"], "native_model_not_captured");
+    assert!(f.calls().is_empty());
+}
+
+#[test]
 fn claude_stop_recovers_the_actual_response_model_without_session_start_model() {
     for subdirectory in [false, true] {
         let f = Fixture::new();
@@ -592,6 +725,54 @@ fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget()
         );
     }
     assert_eq!(f.calls().len(), 3); // Two automatic calls and one history checkpoint.
+}
+
+#[test]
+fn automatic_worker_replaces_an_updated_native_processor_on_a_new_session() {
+    let f = Fixture::new();
+    f.automatic(8);
+    f.event(
+        "codex",
+        "before-update",
+        "",
+        "SessionStart",
+        json!({"source":"startup","model":"gpt-auto-model"}),
+    );
+    let before = f.worker();
+    let executable = f.bin.join("codex");
+    fs::write(&executable, format!("{NATIVE}\n# Updated native client\n")).unwrap();
+    f.event(
+        "codex",
+        "after-update",
+        "",
+        "SessionStart",
+        json!({"source":"startup","model":"gpt-auto-model"}),
+    );
+    let after = f.worker();
+    assert_ne!(after["run"]["run_id"], before["run"]["run_id"]);
+    assert_ne!(
+        after["configuration"]["processor"]["executable"]["sha256"],
+        before["configuration"]["processor"]["executable"]["sha256"]
+    );
+    assert_eq!(after["configuration"]["max_calls"], 8);
+    f.event(
+        "codex",
+        "after-update",
+        "one",
+        "UserPromptSubmit",
+        json!({"prompt":"Inspect the callers."}),
+    );
+    f.event("codex", "after-update", "one", "Stop", json!({}));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = f.worker();
+        if state["run"]["completed"] == 1 {
+            assert_eq!(state["run"]["attempts"], 1);
+            break;
+        }
+        assert!(Instant::now() < deadline, "{state}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]

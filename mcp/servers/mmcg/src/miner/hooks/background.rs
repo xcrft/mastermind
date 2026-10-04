@@ -678,11 +678,16 @@ fn start_with_mode(
     } else {
         START_WAIT
     };
+    let startup_deadline = Instant::now() + startup_wait;
     let owner = acquire_start_owner(
         &store,
         previous.as_ref(),
+        matches!(&mode, StartMode::Session(_))
+            && previous
+                .as_ref()
+                .is_some_and(|previous| native_processor_update(&previous.value, &config)),
         ReadControl {
-            deadline: Some(Instant::now() + startup_wait),
+            deadline: Some(startup_deadline),
             interrupted: None,
         },
     )?;
@@ -733,7 +738,7 @@ fn start_with_mode(
             return Err(error);
         }
     };
-    let deadline = Instant::now() + startup_wait;
+    let deadline = startup_deadline;
     let child_id = child.id();
     let ready = || match ready_report(&store, &id, &run_id, child_id, config_identity) {
         Err(error) => {
@@ -779,6 +784,13 @@ fn session_report(
             Some("starting" | "running" | "stopping")
         );
     let same_session = previous.value.native_session == selected.native_session;
+    if active && native_processor_update(&previous.value, selected) {
+        let run = report["run"]["run_id"]
+            .as_str()
+            .ok_or("worker_run_id_missing")?;
+        store.request_stop(run)?;
+        return Ok(None);
+    }
     // Honor an explicit stop of this native configuration across new sessions.
     let stopped = report["status"] == "stopped"
         && previous.value.settings == selected.settings
@@ -799,6 +811,24 @@ fn session_report(
         return Err("worker_terminal_session_state_unavailable".into());
     }
     Ok(None)
+}
+
+fn native_processor_update(previous: &Config, selected: &Config) -> bool {
+    if previous.native_session.is_none()
+        || selected.native_session.is_none()
+        || previous.native_session == selected.native_session
+        || selected.settings.processor.is_some()
+        || !selected.settings.args.is_empty()
+        || selected.settings.provider.as_deref() != Some(selected.client.as_str())
+        || previous.processor["provider"] != selected.client
+        || previous.processor == selected.processor
+    {
+        return false;
+    }
+    let mut updated = previous.clone();
+    updated.native_session = selected.native_session.clone();
+    updated.processor = selected.processor.clone();
+    updated == *selected
 }
 
 // Called only while the lifecycle lock is held. A valid prior run is retained
@@ -833,6 +863,7 @@ fn ensured_report(
 fn acquire_start_owner(
     store: &Store,
     previous: Option<&Stored<Config>>,
+    wait_for_running: bool,
     control: ReadControl<'_>,
 ) -> Result<Option<bounded_fs::StableFileLock>, Error> {
     loop {
@@ -851,7 +882,10 @@ fn acquire_start_owner(
                         .read_control::<State>("state.json", control)?
                         .ok_or("worker_state_missing")?;
                     validate_state(&state.value, &config.value)?;
-                    if state.value.status == "running" && state.value.pid.is_some() {
+                    if !wait_for_running
+                        && state.value.status == "running"
+                        && state.value.pid.is_some()
+                    {
                         return Ok(None);
                     }
                 }
@@ -1326,6 +1360,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                 // Hash IDs are not chronological. Every pass, including after
                 // restart, begins at None. Durable completed revisions dedupe.
                 let mut after = None;
+                let mut model_pending = false;
                 loop {
                     let config = runtime.config.clone();
                     let remaining = config
@@ -1345,6 +1380,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                         after.as_deref(),
                         Some(&mut runtime),
                     )?;
+                    model_pending |= report["model_pending"] == true;
                     if worker::interrupted() {
                         break;
                     }
@@ -1391,7 +1427,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                         break;
                     }
                 }
-                last_version = Some(version);
+                last_version = (!model_pending).then_some(version);
                 last_pass = Instant::now();
             }
             // Journal polling is deliberately slower than cancellation. The
@@ -1870,6 +1906,7 @@ mod tests {
         let owner = acquire_start_owner(
             &f.store,
             Some(&config),
+            false,
             ReadControl {
                 deadline: Some(Instant::now() + START_WAIT),
                 interrupted: Some(&release_after_busy_probe),
@@ -1884,6 +1921,7 @@ mod tests {
         assert!(acquire_start_owner(
             &f.store,
             Some(&config),
+            false,
             ReadControl {
                 deadline: Some(Instant::now() + START_WAIT),
                 interrupted: None,

@@ -379,12 +379,12 @@ mastermind miner hooks analyze '<capture-episode-id>' \
 | Native processor | Contract |
 |---|---|
 | Selection | `native` resolves to the captured client; explicit `claude` or `codex` must match it |
-| Model | Passed explicitly to the CLI from native events. When Claude omits it, Stop reads a bounded transcript tail and requires the same session, project and exact latest response. Missing metadata skips semantic mining; local collection continues |
+| Model | Passed explicitly to the CLI from native events. When Claude omits it, Stop reads a bounded transcript tail and requires the same session, project, prompt ID when available, and exact latest response. If Claude has not flushed its response yet, the bounded worker retries without making a model call. Missing metadata skips semantic mining; local collection continues |
 | Model changes | Codex model metadata is read from native events; Claude also records `PostModelSwitch`. Closed episodes keep their original model |
 | Claude | `--safe-mode --tools "" --strict-mcp-config` with an empty MCP list and no persistence. Subscription auth remains available |
 | Codex | Ephemeral read-only invocation with user config, project instructions, hooks, plugins, apps, memory and shell tools disabled. Its account directory is retained, with a private HOME |
 | Tool output | Native Codex results containing a tool execution are rejected; CLI catalog warnings are diagnostics |
-| Provenance | Processor executable digest, adapter version, client, model and model source are in the checkpoint and `show` receipts, including empty results. Transcript recovery also retains the response record digest |
+| Provenance | Processor executable digest, adapter version, client, model and model source are in the checkpoint and `show` receipts, including empty results. Transcript recovery also retains the response record digest and, when available, the prompt ID and prompt record digest |
 | Credentials | Read only by the native CLI. Mastermind never copies credentials or falls back to another provider |
 | Unsupported client | Fails on unsupported flags or missing login. No ordinary-session fallback |
 
@@ -460,6 +460,7 @@ mastermind miner hooks worker stop --client codex --project-root .
 | Stop/revocation | Cancels the owned process group and withholds unfinished drafts. Cannot retract input already sent |
 | Crash/SIGKILL | Lost ownership reports `interrupted`. Restart respects completed checkpoints and outstanding lease expiry. Cleanup of an already running external processor is not guaranteed |
 | Native session | With saved `mining: on` and `provider: native`, `SessionStart` starts mining. A live run keeps its budget; only a new session may renew a terminal automatic run. Resume/replay and explicit stop do not renew it |
+| Native update | A new session replaces an automatic worker whose native executable or adapter changed, under the same saved settings and capture grant. No repeated init is required. Custom processors and changed budgets still require explicit restart |
 | Output | Local unreviewed drafts. No automatic habit acceptance |
 
 Settings and run state live in `~/.mastermind/persona-workers/<id>/`. Completed

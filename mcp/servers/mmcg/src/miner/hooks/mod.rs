@@ -397,7 +397,6 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         // Missing or unsafe model metadata must not prevent local capture.
         match native::transcript_model(&value, &root) {
             Ok(Some((model, binding))) => {
-                incoming.digest = hash(&json!([incoming.digest, model, binding]));
                 incoming.model = Some(model);
                 incoming.model_binding = Some(binding);
             }
@@ -406,6 +405,9 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
                 "{}",
                 json!({"model_capture":"omitted","reason":"native_transcript_unavailable"})
             ),
+        }
+        if incoming.model.is_none() {
+            incoming.model_binding = native::pending_transcript_binding(&value);
         }
     }
     if incoming.kind == "UserPromptSubmit"
@@ -535,10 +537,10 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
     if !supported.contains(&kind) {
         return Err("unsupported hook event".into());
     }
-    let turn = v
-        .get("turn_id")
-        .filter(|value| !value.is_null())
-        .map(|_| identifier(v, "turn_id"))
+    let turn = ["turn_id", "prompt_id"]
+        .into_iter()
+        .find(|key| v.get(*key).is_some_and(|value| !value.is_null()))
+        .map(|key| identifier(v, key))
         .transpose()?
         .map(str::to_owned);
     let tool = v
@@ -779,6 +781,7 @@ pub fn follow(
         // A periodic pass also retries expired leases left by crashed workers.
         if last_version != Some(version) || last_pass.elapsed() >= Duration::from_secs(30) {
             let mut after = None;
+            let mut model_pending = false;
             loop {
                 let report = mine_page(
                     &root,
@@ -789,6 +792,7 @@ pub fn follow(
                     limit,
                     after.as_deref(),
                 )?;
+                model_pending |= report["model_pending"] == true;
                 if worker::interrupted() {
                     break;
                 }
@@ -809,7 +813,7 @@ pub fn follow(
                     break;
                 }
             }
-            last_version = Some(version);
+            last_version = (!model_pending).then_some(version);
             last_pass = Instant::now();
         }
         for _ in 0..20 {
@@ -860,6 +864,7 @@ fn mine_page_controlled(
     let mut visited = 0;
     let mut attempts = 0;
     let mut failure = false;
+    let mut model_pending = false;
     for row in rows.iter().take(32) {
         if worker::interrupted() || attempts >= limit {
             break;
@@ -867,7 +872,7 @@ fn mine_page_controlled(
         let id = row["id"].as_str().ok_or("episode id unavailable")?;
         next = Some(id.to_owned());
         visited += 1;
-        let input = db.snapshot(id)?;
+        let mut input = db.snapshot(id)?;
         if control
             .as_ref()
             .is_some_and(|control| control.client() != input.client)
@@ -879,7 +884,26 @@ fn mine_page_controlled(
             continue;
         }
         if processor.is_none() && input.model.is_none() {
+            if let Ok(Some((model, binding))) = native::pending_model(&input) {
+                if db.bind_model(&input, model, binding)? {
+                    input = db.snapshot(id)?;
+                    if let Some(grant) = db.grant(&input.client, &root)? {
+                        local::automatic(&mut db, &grant, id);
+                        let _ = local::drain(&mut db, &grant);
+                    }
+                }
+            }
+        }
+        if processor.is_none() && input.model.is_none() {
+            model_pending |= input
+                .model_binding
+                .as_ref()
+                .is_some_and(|binding| binding["source"] == "native_session_transcript_pending");
             skipped.push(json!({"episode":id,"reason":"native_model_not_captured"}));
+            continue;
+        }
+        if !input.coverage_gaps.is_empty() {
+            skipped.push(json!({"episode":id,"reason":"incomplete"}));
             continue;
         }
         let processor_receipt = processor_receipt(&input, processor, provider, args)?;
@@ -942,7 +966,7 @@ fn mine_page_controlled(
     }
     let next = if visited < rows.len() { next } else { None };
     Ok(
-        json!({"results":results,"skipped":skipped,"next_after":next,"failed":failure,
+        json!({"results":results,"skipped":skipped,"next_after":next,"failed":failure,"model_pending":model_pending,
         "note":"Only unreviewed hypotheses are stored. No provider requests are scheduled after this worker exits."}),
     )
 }

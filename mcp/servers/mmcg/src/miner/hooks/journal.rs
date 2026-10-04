@@ -503,6 +503,51 @@ impl Journal {
         Ok(snapshot)
     }
 
+    pub fn bind_model(
+        &mut self,
+        expected: &EpisodeInput,
+        model: String,
+        binding: Value,
+    ) -> Result<bool, Error> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = snapshot_at(&tx, &expected.id)?;
+        let archived: bool = tx.query_row(
+            "SELECT json_type(data,'$.archive') IS NOT NULL FROM hook_episode WHERE id=?1",
+            [&expected.id],
+            |row| row.get(0),
+        )?;
+        if archived
+            || current.revision != expected.revision
+            || current.model.is_some()
+            || !current.coverage_gaps.is_empty()
+        {
+            return Ok(false);
+        }
+        let mut ep = load_episode(&tx, &expected.id)?;
+        ep.model = Some(model.clone());
+        ep.model_binding = Some(binding.clone());
+        // Delayed transcript writes belong to this response only. They cannot
+        // replace the active model of a newer turn in the same session.
+        let mut session: Session = serde_json::from_str(&tx.query_row(
+            "SELECT data FROM hook_session WHERE id=?1",
+            [&ep.session],
+            |row| row.get::<_, String>(0),
+        )?)?;
+        if session.started
+            && session.active.as_deref() == Some(ep.id.as_str())
+            && session.model.is_none()
+        {
+            session.model = Some(model);
+            session.model_binding = Some(binding);
+            save_session(&tx, &session)?;
+        }
+        save_episode(&tx, &ep)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn receive(
         &mut self,
         grant: &Grant,
@@ -751,6 +796,16 @@ impl Journal {
         }
         if let Some(id) = &target {
             let mut ep = load_episode(&tx, id)?;
+            if !ep.closed
+                && incoming.kind == "Stop"
+                && incoming
+                    .model_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding["source"] == "native_session_transcript_pending")
+            {
+                ep.model = None;
+                ep.model_binding = incoming.model_binding.clone();
+            }
             if !ep.closed
                 && incoming.model.is_some()
                 && !matches!(incoming.kind.as_str(), "SubagentStart" | "SubagentStop")

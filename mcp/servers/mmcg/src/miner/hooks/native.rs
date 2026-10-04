@@ -5,7 +5,7 @@ use super::{semantic, Error};
 use serde_json::Value;
 use std::path::Path;
 
-pub(super) const VERSION: &str = "persona-native-processor-v2";
+pub(super) const VERSION: &str = "persona-native-processor-v3";
 
 pub(super) fn provider<'a>(requested: &'a str, client: &'a str) -> Result<&'a str, Error> {
     super::client(client)?;
@@ -47,6 +47,52 @@ pub(super) fn hook_model(value: &Value, kind: &str) -> Result<Option<String>, Er
     }
 }
 
+pub(super) fn pending_transcript_binding(value: &Value) -> Option<Value> {
+    let session = value["session_id"]
+        .as_str()
+        .and_then(super::super::feedback::valid_session_id)?;
+    let path = |key: &str| {
+        value[key]
+            .as_str()
+            .filter(|path| path.len() <= 4096 && Path::new(path).is_absolute())
+    };
+    let cwd = path("cwd")?;
+    let transcript = path("transcript_path")?;
+    let response = value["last_assistant_message"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())?;
+    Some(
+        serde_json::json!({"source":"native_session_transcript_pending",
+        "session_id":session,"cwd":cwd,"transcript_path":transcript,
+        "prompt_id":value.get("prompt_id"),
+        "response_digest":super::hash(&Value::String(response.trim().into()))}),
+    )
+}
+
+pub(super) fn pending_model(
+    input: &semantic::EpisodeInput,
+) -> Result<Option<(String, Value)>, Error> {
+    let Some(binding) = input.model_binding.as_ref().filter(|binding| {
+        input.client == "claude"
+            && input.model.is_none()
+            && binding["source"] == "native_session_transcript_pending"
+    }) else {
+        return Ok(None);
+    };
+    let Some(response) = input.events.iter().rev().find(|event| event.kind == "Stop") else {
+        return Ok(None);
+    };
+    if binding["response_digest"] != super::hash(&Value::String(response.text.trim().into())) {
+        return Ok(None);
+    }
+    transcript_model(
+        &serde_json::json!({"session_id":binding["session_id"],"cwd":binding["cwd"],
+            "transcript_path":binding["transcript_path"],"prompt_id":binding["prompt_id"],
+            "last_assistant_message":response.text}),
+        Path::new(&input.project_root),
+    )
+}
+
 /// Claude versions that omit `model` in hooks still record the actual model in
 /// the assistant response. Bind it to this Stop, session and project instead of
 /// guessing from config or a previous response.
@@ -69,6 +115,18 @@ pub(super) fn transcript_model(
         .filter(|text| !text.trim().is_empty())
     else {
         return Ok(None);
+    };
+    let prompt = match value.get("prompt_id").filter(|value| !value.is_null()) {
+        Some(value) => {
+            let Some(prompt) = value
+                .as_str()
+                .and_then(super::super::feedback::valid_session_id)
+            else {
+                return Ok(None);
+            };
+            Some(prompt)
+        }
+        None => None,
     };
     let Some(selected) = value["transcript_path"]
         .as_str()
@@ -124,6 +182,7 @@ pub(super) fn transcript_model(
         &file.bytes
     };
     let text = std::str::from_utf8(bytes)?;
+    let mut candidate: Option<(String, Value)> = None;
     for line in text.lines().rev() {
         control.check()?;
         if line.trim().is_empty() {
@@ -135,6 +194,27 @@ pub(super) fn transcript_model(
         let Ok(record) = crate::setup::parse_json_unique(line.as_bytes()) else {
             return Ok(None);
         };
+        if candidate.is_some() {
+            if record["type"] == "user" && record["promptId"].is_string() {
+                if record["promptId"].as_str() != prompt
+                    || record["sessionId"] != session
+                    || record["isSidechain"] == true
+                    || record["message"]["role"] != "user"
+                    || record["cwd"]
+                        .as_str()
+                        .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+                        .as_deref()
+                        != Some(canonical_cwd.as_path())
+                {
+                    return Ok(None);
+                }
+                let mut candidate = candidate.take().ok_or("response model missing")?;
+                candidate.1["prompt_id"] = serde_json::json!(prompt);
+                candidate.1["prompt_record_digest"] = serde_json::json!(super::hash(&record));
+                return Ok(Some(candidate));
+            }
+            continue;
+        }
         if record["type"] != "assistant" {
             continue;
         }
@@ -167,11 +247,15 @@ pub(super) fn transcript_model(
             return Ok(None);
         };
         validate_model(model)?;
-        return Ok(Some((
+        let selected = (
             model.into(),
             json!({"source":"native_session_transcript",
             "record_digest":super::hash(&record),"session_id":session}),
-        )));
+        );
+        if prompt.is_none() {
+            return Ok(Some(selected));
+        }
+        candidate = Some(selected);
     }
     Ok(None)
 }

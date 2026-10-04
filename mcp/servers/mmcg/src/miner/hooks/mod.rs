@@ -8,6 +8,7 @@ mod influence;
 mod install;
 mod journal;
 mod local;
+mod native;
 mod profile_context;
 mod quality;
 pub mod readiness;
@@ -385,20 +386,38 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         delivery.clear()?;
         return print(&json!({}));
     }
-    let incoming = match normalize(&value) {
+    let mut incoming = match normalize(&value) {
         Ok(event) => event,
         Err(_) => {
             db.finish_ignored(&grant, Some("unsupported_hook_schema"))?;
             return Err("unsupported hook schema; capture has a coverage gap".into());
         }
     };
+    if incoming.kind == "UserPromptSubmit"
+        && std::env::var_os("MMCG_INPUT_ORIGIN").as_deref()
+            == Some(std::ffi::OsStr::new("automation"))
+    {
+        incoming.origin = "automation_or_agent".into();
+        incoming.digest = hash(&json!([incoming.digest, "native_automation_origin_v1"]));
+    }
     let kind = incoming.kind.clone();
+    let native_session = incoming.native_session.clone();
     let repository = profile::persona_repository_id(&root).unwrap_or_default();
     if !delivery.current()? {
         return Err("capture was revoked during delivery".into());
     }
     let receipt = db.receive(&grant, incoming, &project, &repository)?;
     delivery.clear()?;
+    if kind == "SessionStart" && receipt["status"] == "recorded" {
+        if let Err(error) = background::on_session_start(client_id, &root, &native_session) {
+            // Capture has already committed. A failed optional worker start
+            // cannot turn the native event into missing personal evidence.
+            eprintln!(
+                "{}",
+                json!({"status":"degraded","component":"native_mining_start","reason":error.to_string()})
+            );
+        }
+    }
     if kind == "Stop" && matches!(receipt["status"].as_str(), Some("recorded" | "duplicate")) {
         if let Some(episode) = receipt["episode"].as_str() {
             local::automatic(&mut db, &grant, episode);
@@ -496,6 +515,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         "SubagentStop",
         "Interrupt",
         "StopFailure",
+        "PostModelSwitch",
     ];
     if !supported.contains(&kind) {
         return Err("unsupported hook event".into());
@@ -598,6 +618,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         "native_event_digest":hash(v),"profile_revision":"unknown"})
     });
     Ok(Incoming {
+        model: native::hook_model(v, kind)?,
         native_session: session.into(),
         native_turn: turn,
         native_key,
@@ -634,7 +655,7 @@ pub fn show(episode: &str) -> Result<(), Error> {
     check_id(episode)?;
     let db = Journal::open(false)?;
     print(
-        &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,
+        &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,"analyses":db.analysis_receipts(episode)?,
         "note":"User-channel text is unverified authorship. Stop is an observed boundary, not task completion. Tool output is not proof of a human preference."}),
     )
 }
@@ -668,12 +689,20 @@ pub fn analyze(
     if input.revision != revision {
         return Err("episode revision changed; inspect again".into());
     }
+    let processor_receipt = processor_receipt(&input, processor, provider, args)?;
     let drafts = match (processor, provider) {
         (Some(processor), None) => semantic::analyze(&input, processor, args, timeout)?,
-        (None, Some("claude")) if args.is_empty() => semantic::analyze_claude(&input, timeout)?,
-        _ => return Err("select either --processor with arguments or --provider claude".into()),
+        (None, Some(provider)) if args.is_empty() => native::analyze(&input, provider, timeout)?,
+        _ => {
+            return Err(
+                "select either --processor with arguments or --provider native, claude or codex"
+                    .into(),
+            )
+        }
     };
-    let processor_receipt = json!({"path":processor,"provider":provider,"arguments_digest":hash(&json!(args)),"protocol":EXTRACTOR});
+    if processor_receipt != self::processor_receipt(&input, processor, provider, args)? {
+        return Err("semantic processor changed during analysis".into());
+    }
     let mut db = Journal::open(true)?;
     let current = db.snapshot(episode)?;
     if current.revision != revision || !current.coverage_gaps.is_empty() {
@@ -806,7 +835,6 @@ fn mine_page_controlled(
     if !journal::path()?.exists() {
         return Ok(json!({"results":[],"next_after":null,"failed":false}));
     }
-    let processor_receipt = background::processor_fingerprint(&root, processor, provider, args)?;
     let mut db = Journal::open(true)?;
     let rows = db.list(&root, 33, after.unwrap_or(""))?;
     let mut results = vec![];
@@ -833,6 +861,11 @@ fn mine_page_controlled(
             skipped.push(json!({"episode":id,"reason":"incomplete"}));
             continue;
         }
+        if processor.is_none() && input.model.is_none() {
+            skipped.push(json!({"episode":id,"reason":"native_model_not_captured"}));
+            continue;
+        }
+        let processor_receipt = processor_receipt(&input, processor, provider, args)?;
         let Some(lease) = db.claim_analysis(id, &input.revision, &processor_receipt, timeout)?
         else {
             skipped.push(json!({"episode":id,"reason":"completed_or_leased_or_changed"}));
@@ -845,18 +878,21 @@ fn mine_page_controlled(
             }
             let drafts = match (processor, provider) {
                 (Some(processor), None) => semantic::analyze(&input, processor, args, timeout)?,
-                (None, Some("claude")) if args.is_empty() => {
-                    semantic::analyze_claude(&input, timeout)?
+                (None, Some(provider)) if args.is_empty() => {
+                    native::analyze(&input, provider, timeout)?
                 }
                 _ => {
                     return Err(
-                        "select either --processor with arguments or --provider claude".into(),
+                        "select either --processor with arguments or --provider native, claude or codex".into(),
                     )
                 }
             };
             let current = db.snapshot(id)?;
             if current.revision != input.revision || !current.coverage_gaps.is_empty() {
                 return Err("episode changed during analysis".into());
+            }
+            if processor_receipt != self::processor_receipt(&input, processor, provider, args)? {
+                return Err("semantic processor changed during analysis".into());
             }
             if let Some(control) = control.as_mut() {
                 control.before_publish()?;
@@ -892,6 +928,30 @@ fn mine_page_controlled(
         json!({"results":results,"skipped":skipped,"next_after":next,"failed":failure,
         "note":"Only unreviewed hypotheses are stored. No provider requests are scheduled after this worker exits."}),
     )
+}
+
+fn processor_receipt(
+    input: &semantic::EpisodeInput,
+    processor: Option<&Path>,
+    provider: Option<&str>,
+    args: &[String],
+) -> Result<Value, Error> {
+    let selected = provider
+        .map(|provider| native::provider(provider, &input.client))
+        .transpose()?;
+    let mut receipt = background::processor_fingerprint(
+        Path::new(&input.project_root),
+        processor,
+        selected,
+        args,
+    )?;
+    if selected.is_some() {
+        receipt["native_adapter"] = json!(native::VERSION);
+        receipt["model"] = json!(input.model);
+        receipt["model_source"] = json!("native_hook");
+        receipt["source_client"] = json!(input.client);
+    }
+    Ok(receipt)
 }
 
 pub fn draft(id: &str) -> Result<(), Error> {

@@ -113,9 +113,9 @@ Empty drafts are valid. A draft follows the supplied response example:
 | Exact source match | Does not establish human authorship or semantic accuracy |
 | Coverage gap or known profile influence | Reject analysis |
 | Inference boundary | No identity, psychology, sensitive traits, permissions or global habit from one task |
-| `--provider claude` | Explicit provider request, may send episode text externally |
-| Built-in isolation | Bare mode, no tools, MCP discovery, project settings or persistent sessions |
-| Credentials | API/provider credentials, not subscription OAuth/keychain access |
+| `--provider native` | Uses the captured native client and model; may send episode text externally |
+| Built-in isolation | Claude safe mode with tools disabled; Codex ephemeral read-only inference with context discovery disabled and tool executions rejected |
+| Credentials | Native CLI login, including subscriptions. No credentials are copied |
 | Unsupported flag | Fail without falling back to a normal client session |
 
 | Capture or analysis resource | Bound |

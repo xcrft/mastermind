@@ -90,6 +90,9 @@ pub(super) fn configure(
     });
     let mut events = COMMON_EVENTS.to_vec();
     events.push(extra_event);
+    if client == "claude" {
+        events.push("PostModelSwitch");
+    }
     let mut generated = serde_json::Map::new();
     for event in &events {
         let mut event_handler = handler.clone();
@@ -112,6 +115,7 @@ pub(super) fn configure(
                 "Mastermind: Capture response and collect local candidates",
             "Stop" => "Mastermind: Record agent response",
             "SessionEnd" => "Mastermind: Record session end",
+            "PostModelSwitch" => "Mastermind: Record model selection",
             "PreCompact" => "Mastermind: Record compaction boundary",
             "SubagentStart" => "Mastermind: Record subagent start",
             "SubagentStop" => "Mastermind: Record subagent completion",

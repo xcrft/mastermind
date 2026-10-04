@@ -1116,7 +1116,7 @@ enum HookCmd {
         #[arg(long, conflicts_with = "remove")]
         disable_profile: bool,
         /// Refine each admitted prompt with an explicitly selected provider.
-        #[arg(long, value_parser=["claude"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
+        #[arg(long, value_parser=["native","claude","codex"], conflicts_with_all=["refiner_processor", "disable_refiner", "remove"])]
         refiner_provider: Option<String>,
         /// Custom refiner executable. Receives JSON on stdin and returns strict JSON.
         #[arg(long, conflicts_with_all=["refiner_provider", "disable_refiner", "remove"])]
@@ -1153,7 +1153,7 @@ enum HookCmd {
             conflicts_with = "provider"
         )]
         processor: Option<PathBuf>,
-        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
         provider: Option<String>,
         #[arg(long = "processor-arg", allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1206,8 +1206,8 @@ enum HookCmd {
             conflicts_with = "provider"
         )]
         processor: Option<PathBuf>,
-        /// Explicit Claude API/provider request in isolated bare mode, without tools.
-        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        /// Use the captured native client and model with its existing login.
+        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
         provider: Option<String>,
         #[arg(long = "processor-arg", allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1227,7 +1227,7 @@ enum HookCmd {
             conflicts_with = "provider"
         )]
         processor: Option<PathBuf>,
-        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
         provider: Option<String>,
         #[arg(long = "processor-arg", allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1272,7 +1272,7 @@ enum HookWorkerCmd {
         project_root: PathBuf,
         #[arg(long, conflicts_with = "provider")]
         processor: Option<PathBuf>,
-        #[arg(long, value_parser=["claude"], conflicts_with="args")]
+        #[arg(long, value_parser=["native","claude","codex"], conflicts_with="args")]
         provider: Option<String>,
         #[arg(long = "processor-arg", allow_hyphen_values = true)]
         args: Vec<String>,

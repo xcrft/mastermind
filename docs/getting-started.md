@@ -49,9 +49,9 @@ An incomplete setup reports failed components. Fix the reported issue and repeat
 |---|---|---|
 | `--mining off` | Disable capture and stop the managed miner | None from mining |
 | `--mining capture` | Record local interaction evidence for later inspection | None unless the refiner is enabled |
-| `--mining on --provider claude` | Capture and start bounded semantic mining | Sends eligible episodes to Claude through the local CLI |
+| `--mining on --provider native` | Capture and start bounded semantic mining | Uses each captured client and its active model through the native CLI |
 | `--profile-access on` | Allow the selected clients to read this project's personal-profile view | None from the grant |
-| `--refiner on --provider claude` | Refine user prompts through Claude | Extra calls outside the miner budget |
+| `--refiner on --provider native` | Refine user prompts through their captured native client and model | Extra calls outside the miner budget |
 
 Profile access and prompt refinement default to off. Refinement requires
 `--mining capture` or `on`. Capture alone grants no profile read access, and
@@ -59,7 +59,7 @@ mined drafts require review before becoming active habits. See
 [Persona hooks](guides/persona-hooks.md) for evidence and review boundaries.
 
 ```bash
-mastermind init --client claude --mining on --provider claude \
+mastermind init --client claude --mining on --provider native \
   --max-calls 64 --max-runtime 3600
 ```
 

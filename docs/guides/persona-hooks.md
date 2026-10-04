@@ -22,9 +22,11 @@ mastermind status --json
 ```
 
 The choice is saved for this repository. To also run bounded semantic mining,
-select `--mining on --provider claude`. `mastermind miner start`, `stop` and
-`status` use those saved choices. Repeated `init` preserves the run and its
-spent budget. `miner start` explicitly renews a run. Personal profile delivery
+select `--mining on --provider native`. Each native `SessionStart` starts or
+observes a bounded worker for that client. A running worker keeps its budget.
+A new session may renew an exhausted or failed automatic run; resuming the same
+session and explicit stop do not renew it. `mastermind miner start`, `stop` and
+`status` use the saved choices. Repeated `init` preserves the spent budget. `miner start` explicitly renews a run. Personal profile delivery
 requires the separate `--profile-access on` option.
 
 For direct hook control, preview and install hooks:
@@ -227,12 +229,12 @@ Select a processor once for this client and project:
 
 ```bash
 mastermind miner hooks setup --client codex --project-root . \
-  --refiner-provider claude --refiner-timeout 8 --write
+  --refiner-provider native --refiner-timeout 8 --write
 ```
 
 Use `--refiner-processor /absolute/path/to/processor` for a local or custom
-processor. Repeat `--refiner-arg=VALUE` for its arguments. The built-in Claude
-adapter uses the isolated API/provider contract described below. Setup without
+processor. Repeat `--refiner-arg=VALUE` for its arguments. The native adapters
+use the captured client and model with their existing login, as described below. Setup without
 refiner options preserves the selection. `--disable-refiner --write` disables
 refinement while retaining capture. Restart and trust the updated hook definitions.
 
@@ -365,19 +367,34 @@ is offered only after its exposure receipt is durable.
 
 ## 3. Analyze with a selected processor
 
-To send one inspected episode to the built-in Claude processor:
+To send one inspected episode to its native client and model:
 
 ```bash
 mastermind miner hooks analyze '<capture-episode-id>' \
-  --revision '<episode-revision>' --provider claude --timeout 60
+  --revision '<episode-revision>' --provider native --timeout 60
 ```
 
-| Built-in Claude processor | Contract |
+| Native processor | Contract |
 |---|---|
-| Invocation | Explicit provider request using `--bare`, limited to one agentic turn with [`--max-turns`](https://code.claude.com/docs/en/cli-reference) |
-| Disabled | Tools, MCP discovery, project settings, persistence and browser integration |
-| Credentials | API/provider credentials required. Subscription OAuth/keychain credentials are not used |
-| Unsupported client | Fail without an interactive-session fallback |
+| Selection | `native` resolves to the captured client; explicit `claude` or `codex` must match it |
+| Model | Captured `model`, passed explicitly to the CLI. Missing model metadata skips automatic semantic mining; local collection continues |
+| Model changes | Codex model metadata is read from native events; Claude also records `PostModelSwitch`. Closed episodes keep their original model |
+| Claude | `--safe-mode --tools "" --strict-mcp-config` with an empty MCP list and no persistence. Subscription auth remains available |
+| Codex | Ephemeral read-only invocation with user config, project instructions, hooks, plugins, apps, memory and shell tools disabled. Its account directory is retained, with a private HOME |
+| Tool output | Native Codex results containing a tool execution are rejected; CLI catalog warnings are diagnostics |
+| Provenance | Processor executable digest, native adapter version, captured client and model are in the checkpoint and `show` analysis receipts, including empty results |
+| Credentials | Read only by the native CLI. Mastermind never copies credentials or falls back to another provider |
+| Unsupported client | Fails on unsupported flags or missing login. No ordinary-session fallback |
+
+Automated native callers can set `MMCG_INPUT_ORIGIN=automation` to retain
+client/model delivery observations while labeling their prompts
+`automation_or_agent`. These prompts cannot supply personal evidence. Generated
+workflow controllers keep using `MMCG_INPUT_ORIGIN=controller`, which skips
+capture entirely.
+
+Native CLI contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Codex exec](https://learn.chatgpt.com/docs/cli/reference), and
+[Claude CLI](https://code.claude.com/docs/en/cli-reference).
 
 For a processor you control:
 
@@ -402,8 +419,8 @@ mastermind miner hooks analyze '<capture-episode-id>' \
 ### Process new episodes
 
 ```bash
-mastermind miner hooks mine --project-root . --provider claude --limit 4
-mastermind miner hooks mine --project-root . --provider claude --follow
+mastermind miner hooks mine --project-root . --provider native --limit 4
+mastermind miner hooks mine --project-root . --provider native --follow
 ```
 
 | Worker condition | Behavior |
@@ -421,7 +438,7 @@ mastermind miner hooks mine --project-root . --provider claude --follow
 
 ```bash
 mastermind miner hooks worker start --client codex --project-root . \
-  --provider claude --max-calls 64 --max-runtime 3600
+  --provider native --max-calls 64 --max-runtime 3600
 mastermind miner hooks worker status --client codex --project-root .
 mastermind miner hooks worker stop --client codex --project-root .
 ```
@@ -436,11 +453,11 @@ mastermind miner hooks worker stop --client codex --project-root .
 | Runtime budget | Default 3,600 s, range 1–86,400 s |
 | Processor timeout / batch | 60 s / 4 by default, maximum 120 s / 16 |
 | Checkpoint | Episode revision and processor fingerprint, including direct executable digest |
-| Transitive scripts/model version | Not fingerprinted. Explicit restart/re-analysis remains available |
+| Model selection | Native model identifier and adapter version are fingerprinted per episode. Transitive script dependencies and server-side model weight changes are not fingerprinted |
 | Failure | Stops. Retry requires an explicit start |
 | Stop/revocation | Cancels the owned process group and withholds unfinished drafts. Cannot retract input already sent |
 | Crash/SIGKILL | Lost ownership reports `interrupted`. Restart respects completed checkpoints and outstanding lease expiry. Cleanup of an already running external processor is not guaranteed |
-| Boot/session restart | No automatic startup or budget renewal |
+| Native session | With saved `mining: on` and `provider: native`, `SessionStart` starts mining. A live run keeps its budget; only a new session may renew a terminal automatic run. Resume/replay and explicit stop do not renew it |
 | Output | Local unreviewed drafts. No automatic habit acceptance |
 
 Settings and run state live in `~/.mastermind/persona-workers/<id>/`. Completed

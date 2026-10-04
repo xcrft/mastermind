@@ -149,6 +149,7 @@ impl Journal {
         // Retain exactly the captured text. Redaction/truncation must never be
         // undone by copying raw stdin into a second store or model request.
         let input = Input {
+            model: ep.model.clone(),
             id: id.clone(),
             event_id: event_id.into(),
             episode_id: episode.into(),
@@ -309,6 +310,7 @@ pub(super) fn admitted_prompt(
         && session.gaps.is_empty()
         && session.active.as_deref() == Some(input.episode_id.as_str())
         && ep.session == input.session_id
+        && ep.model == input.model
         && ep.gaps.is_empty()
         && !ep.closed
         && (allow_open_tools || ep.open_tools.is_empty())

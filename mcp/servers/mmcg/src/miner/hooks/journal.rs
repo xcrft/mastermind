@@ -45,6 +45,9 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                     episode TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL,
                     completed INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(episode,revision,processor));
+                CREATE TABLE IF NOT EXISTS hook_analysis_receipt (
+                    episode TEXT NOT NULL, revision TEXT NOT NULL, processor TEXT NOT NULL,
+                    data TEXT NOT NULL, PRIMARY KEY(episode,revision,processor));
                 CREATE TABLE IF NOT EXISTS hook_refiner (
                     client TEXT NOT NULL, project_root TEXT NOT NULL, revision INTEGER NOT NULL,
                     data TEXT, PRIMARY KEY(client,project_root));
@@ -127,6 +130,8 @@ pub(super) struct Grant {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(default)]
     capture_version: u32,
     id: String,
@@ -154,6 +159,8 @@ struct Session {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Episode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub id: String,
     pub session: String,
     pub client: String,
@@ -185,6 +192,7 @@ pub(super) struct Draft {
 }
 
 pub(super) struct Incoming {
+    pub model: Option<String>,
     pub native_session: String,
     pub native_turn: Option<String>,
     pub native_key: Option<String>,
@@ -505,6 +513,7 @@ impl Journal {
             incoming.native_session
         ]));
         let mut session = self.session(&sid)?.unwrap_or_else(|| Session {
+            model: None,
             capture_version: CAPTURE_VERSION,
             id: sid.clone(),
             native_id: incoming.native_session.clone(),
@@ -590,6 +599,15 @@ impl Journal {
         if incoming.forked {
             add_gap(&mut session.gaps, "fork_or_delegated_session");
         }
+        if incoming.kind == "SessionStart" {
+            // A resumed or cleared session must not inherit a stale selection
+            // when the native client omits its current model.
+            session.model = incoming.model.clone();
+        } else if incoming.model.is_some()
+            && !matches!(incoming.kind.as_str(), "SubagentStart" | "SubagentStop")
+        {
+            session.model = incoming.model.clone();
+        }
         if session.project != project || session.repository != repository {
             add_gap(&mut session.gaps, "project_identity_changed");
         }
@@ -664,6 +682,7 @@ impl Journal {
             }
             let id = hash(&json!(["hook-episode-v1", sid, event_id]));
             let mut ep = Episode {
+                model: session.model.clone(),
                 id: id.clone(),
                 session: sid.clone(),
                 client: grant.client.clone(),
@@ -720,6 +739,12 @@ impl Journal {
         }
         if let Some(id) = &target {
             let mut ep = load_episode(&tx, id)?;
+            if !ep.closed
+                && incoming.model.is_some()
+                && !matches!(incoming.kind.as_str(), "SubagentStart" | "SubagentStop")
+            {
+                ep.model = incoming.model.clone();
+            }
             if let Some(gap) = &incoming.gap {
                 // A known event belongs to this episode, including a late
                 // tool result. It cannot invalidate unrelated past/future
@@ -769,7 +794,10 @@ impl Journal {
             if let Some(gap) = &incoming.gap {
                 add_gap(&mut session.gaps, gap);
             }
-            if !matches!(incoming.kind.as_str(), "SessionStart" | "SessionEnd") {
+            if !matches!(
+                incoming.kind.as_str(),
+                "SessionStart" | "SessionEnd" | "PostModelSwitch"
+            ) {
                 add_gap(&mut session.gaps, "event_without_user_turn");
             }
         }
@@ -968,6 +996,17 @@ impl Journal {
             ON CONFLICT(episode,revision,processor) DO UPDATE SET completed=1,lease_until=0",
             params![input.id, input.revision, hash(&processor)],
         )?;
+        // Empty results need the same auditable client/model binding as drafts.
+        tx.execute(
+            "INSERT INTO hook_analysis_receipt(episode,revision,processor,data) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(episode,revision,processor) DO UPDATE SET data=excluded.data",
+            params![
+                input.id,
+                input.revision,
+                hash(&processor),
+                processor.to_string()
+            ],
+        )?;
         tx.commit()?;
         Ok(result)
     }
@@ -979,6 +1018,42 @@ impl Journal {
                     r.get(0)
                 })?;
         Ok(serde_json::from_str(&data)?)
+    }
+
+    pub fn analysis_receipts(&self, id: &str) -> Result<Vec<Value>, Error> {
+        if !self
+            .conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_analysis_receipt'",
+            )?
+            .exists([])?
+        {
+            return Ok(vec![]);
+        }
+        let current = self.snapshot(id)?;
+        let mut query = self.conn.prepare(
+            "SELECT r.revision,r.processor,r.data FROM hook_analysis_receipt r
+             JOIN hook_analysis a USING(episode,revision,processor)
+             WHERE r.episode=?1 AND a.completed=1
+             ORDER BY (r.revision=?2) DESC,r.revision,r.processor LIMIT 32",
+        )?;
+        let rows = query.query_map([id, current.revision.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (revision, digest, data) = row?;
+            let receipt: Value = serde_json::from_str(&data)?;
+            if hash(&receipt) != digest {
+                return Err("analysis receipt digest mismatch".into());
+            }
+            Ok(json!({"revision":revision,"processor":receipt,
+                "current":revision==current.revision && current.coverage_gaps.is_empty()}))
+        })
+        .collect()
     }
 
     pub fn claim_analysis(
@@ -1176,6 +1251,7 @@ impl Journal {
         tx.execute("DELETE FROM hook_episode WHERE id=?1", [id])?;
         tx.execute("DELETE FROM hook_event WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
+        tx.execute("DELETE FROM hook_analysis_receipt WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_local_queue WHERE episode=?1", [id])?;
         tx.commit()?;
@@ -1325,6 +1401,7 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
         grant.gap
     ]));
     Ok(EpisodeInput {
+        model: ep.model,
         id: ep.id,
         revision,
         client: ep.client,

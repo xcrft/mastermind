@@ -180,7 +180,14 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     } else {
         json!({"status":"unsupported","reason":"managed_worker_requires_unix"})
     };
-    mining["autostart"] = json!(false);
+    mining["native_session_trigger_requested"] = json!(
+        analysis_requested == Some(true)
+            && settings
+                .as_ref()
+                .ok()
+                .and_then(|settings| settings.as_ref())
+                .is_some_and(|settings| settings.provider.as_deref() == Some("native"))
+    );
     mining["foreground_workers"] = json!("not_observed");
     mining["output"] = json!("unreviewed_drafts_only");
 

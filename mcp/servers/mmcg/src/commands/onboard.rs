@@ -20,8 +20,8 @@ pub struct Options {
     /// off disables capture, capture records local evidence, on starts bounded semantic mining.
     #[arg(long, value_parser = ["off", "capture", "on"])]
     mining: Option<String>,
-    /// Explicit provider for semantic mining and optional prompt refinement.
-    #[arg(long, value_parser = ["claude"])]
+    /// native uses each captured client's login and model for mining and refinement.
+    #[arg(long, value_parser = ["native", "claude", "codex"])]
     provider: Option<String>,
     /// Maximum provider attempts per client run. Repeated init never renews a run.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=10_000))]
@@ -140,8 +140,8 @@ fn selection(
     {
         settings.provider = Some(ask(
             "Semantic provider, receives captured episodes",
-            "claude",
-            &["claude"],
+            "native",
+            &["native", "claude", "codex"],
         )?);
     }
     if let Some(value) = options.max_calls {
@@ -374,7 +374,11 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
             stage(
                 &mut steps,
                 &format!("{client}.mining"),
-                background::ensure(client, &root, worker_options(&settings)),
+                if settings.provider.as_deref() == Some("native") {
+                    background::arm_native(client, &root)
+                } else {
+                    background::ensure(client, &root, worker_options(&settings))
+                },
             );
         }
     }
@@ -629,7 +633,7 @@ pub fn miner(
         return Err("client is not selected in this project's setup".into());
     }
     if action == "start" && settings.mining != Mining::On {
-        return Err("enable semantic mining with init --mining on --provider claude first".into());
+        return Err("enable semantic mining with init --mining on --provider native first".into());
     }
     let mut steps = Vec::new();
     for selected in settings

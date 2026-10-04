@@ -52,10 +52,10 @@ impl Config {
                     }
                 }
             }
-            (None, Some("claude")) if self.args.is_empty() => {}
+            (None, Some("native" | "claude" | "codex")) if self.args.is_empty() => {}
             _ => {
                 return Err(
-                    "select exactly one refiner executable or provider claude, with arguments only for a custom executable"
+                    "select exactly one refiner executable or provider native, claude or codex, with arguments only for a custom executable"
                         .into(),
                 );
             }
@@ -83,6 +83,8 @@ pub(super) struct Input {
     pub episode_id: String,
     pub session_id: String,
     pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub project_root: String,
     pub prompt_digest: String,
     pub capture_generation: i64,
@@ -198,12 +200,16 @@ pub(super) fn process(input: &Input, config: &Config) -> Result<Response, Error>
             Some(isolated.path()),
         )?
     } else {
-        // validate() admits only the explicit Claude provider here. There is
-        // no credential discovery or fallback to a different native session.
-        semantic::run_claude(
+        super::native::run(
             request,
             INSTRUCTIONS,
             Path::new(&input.project_root),
+            config
+                .provider
+                .as_deref()
+                .ok_or("refiner provider is absent")?,
+            &input.client,
+            input.model.as_deref(),
             config.timeout_secs,
         )?
     };
@@ -469,6 +475,7 @@ mod tests {
 
     fn input(original: &str) -> Input {
         Input {
+            model: None,
             id: "intake-1".into(),
             event_id: "event-1".into(),
             episode_id: "episode-1".into(),

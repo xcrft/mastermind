@@ -21,7 +21,7 @@ mastermind doctor --workflow --client codex
 
 `init` indexes code and documents and configures local capture. Restart Codex,
 trust the project and inspect `/hooks`. Semantic mining requires
-`--mining on --provider claude`. On Windows select `--mining off` because native
+`--mining on --provider native`. On Windows select `--mining off` because native
 hooks and managed workers require Unix. See [onboarding](../getting-started.md).
 
 ## Register MCP only

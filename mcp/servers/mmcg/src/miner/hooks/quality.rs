@@ -98,6 +98,7 @@ fn evaluate(input: Input) -> Result<Value, Error> {
             return Err("evaluation label is duplicated or absent from exact user prose".into());
         }
         let source = semantic::EpisodeInput {
+            model: None,
             id: case.id.clone(),
             revision: "offline-evaluation".into(),
             client: "codex".into(),

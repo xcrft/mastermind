@@ -59,6 +59,8 @@ struct Settings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_session: Option<String>,
     schema: u32,
     worker_id: String,
     client: String,
@@ -369,7 +371,7 @@ fn validate_selection(
 ) -> Result<(), Error> {
     match (processor, provider) {
         (Some(path), None) if path.is_absolute() => {}
-        (None, Some("claude")) if args.is_empty() => {}
+        (None, Some("native" | "claude" | "codex")) if args.is_empty() => {}
         _ => return Err("worker_processor_selection_invalid".into()),
     }
     if args.len() > 32
@@ -420,7 +422,7 @@ pub(super) fn processor_fingerprint(
     validate_selection(processor, provider, args)?;
     let path = match processor {
         Some(path) => path.canonicalize()?,
-        None => crate::setup::resolve_native_cli("claude", root)
+        None => crate::setup::resolve_native_cli(provider.ok_or("worker_provider_missing")?, root)
             .map_err(|_| "worker_provider_executable_unavailable")?,
     };
     let parent = RootCapability::open(path.parent().ok_or("worker_executable_invalid")?)?;
@@ -440,14 +442,21 @@ pub(super) fn processor_fingerprint(
     if file.identity.attributes() & 0o111 == 0 {
         return Err("worker_processor_not_executable".into());
     }
-    Ok(json!({
+    let mut receipt = json!({
         "path":processor.map(|_| &path),"provider":provider,
         "arguments_digest":hash(&json!(args)),"protocol":EXTRACTOR,
         "executable":{"path":path,"sha256":crate::hex::encode(&writer.0.finalize()),"bytes":file.declared_len}
-    }))
+    });
+    if provider.is_some() {
+        receipt["native_adapter"] = json!(super::native::VERSION);
+    }
+    Ok(receipt)
 }
 
 fn validate_config(config: &Config, id: &str) -> Result<(), Error> {
+    if let Some(session) = &config.native_session {
+        check_hex(session, 64)?;
+    }
     if config.schema != 1
         || config.worker_id != id
         || config.capture_generation <= 0
@@ -528,9 +537,10 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
         "config_revision":revision(&config.value)?,
         "configuration":{"processor":config.value.processor,"timeout":config.value.settings.timeout,"limit":config.value.settings.limit,
             "max_calls":config.value.settings.max_calls,"max_runtime":config.value.settings.max_runtime,"capture_generation":config.value.capture_generation},
-        "run":state.value,"heartbeat_age_ms":age,"autostart":false,
+        "run":state.value,"heartbeat_age_ms":age,"autostart":config.value.native_session.is_some() && observed!="stopped",
+        "native_session":config.value.native_session,
         "checkpoint_store":"persona-events.db:hook_analysis","output":"unreviewed_drafts_only",
-        "permission_effect":"none","retry_policy":"stop_on_processor_failure_explicit_restart"
+        "permission_effect":"none","retry_policy":if config.value.native_session.is_some() {"new_native_session_or_explicit_restart"} else {"stop_on_processor_failure_explicit_restart"}
     }))
 }
 
@@ -545,10 +555,57 @@ pub fn ensure(client: &str, root: &Path, options: StartOptions) -> Result<Value,
     start_with_mode(client, root, options, StartMode::Ensure)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Only the saved, explicit native mining selection arms this session trigger.
+/// A shared running worker keeps its budget. A fresh session can renew a
+/// terminal automatic run, while replay and explicit stop never renew it.
+pub(super) fn on_session_start(client: &str, root: &Path, session: &str) -> Result<Value, Error> {
+    let Some(saved) = crate::onboarding::load(root)? else {
+        return Ok(json!({"status":"not_requested"}));
+    };
+    if saved.mining != crate::onboarding::Mining::On
+        || saved.provider.as_deref() != Some("native")
+        || !saved.clients.iter().any(|selected| selected == client)
+    {
+        return Ok(json!({"status":"not_requested"}));
+    }
+    start_with_mode(
+        client,
+        root,
+        StartOptions {
+            provider: Some("native".into()),
+            max_calls: Some(saved.max_calls),
+            max_runtime: Some(saved.max_runtime),
+            ..Default::default()
+        },
+        StartMode::Session(hash(&json!(["native-mining-session-v1", session]))),
+    )
+}
+
+/// Native mode waits for a real session rather than starting a model at init.
+/// Replace only an incompatible owned worker; compatible runs keep their budget.
+pub fn arm_native(client: &str, root: &Path) -> Result<Value, Error> {
+    let mut existing = status(client, root)?;
+    let processor = &existing["configuration"]["processor"];
+    if existing["owner"] == "held"
+        && (processor["provider"] != client
+            || processor["native_adapter"] != super::native::VERSION)
+    {
+        existing = stop(client, root)?;
+        if existing["owner"] == "held" {
+            return Err("worker_is_still_stopping".into());
+        }
+    }
+    Ok(
+        json!({"status":"armed","trigger":"SessionStart","existing_run":existing,
+        "provider":client,"model_source":"native_hook","budget_renewal":"new_native_session_only"}),
+    )
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum StartMode {
     Restart,
     Ensure,
+    Session(String),
 }
 
 fn start_with_mode(
@@ -575,6 +632,9 @@ fn start_with_mode(
         options,
         previous.as_ref().map(|value| &value.value.settings),
     )?;
+    if let Some(provider) = selected.provider.as_deref() {
+        selected.provider = Some(super::native::provider(provider, client)?.into());
+    }
     let fingerprint = processor_fingerprint(
         &root,
         selected.processor.as_deref(),
@@ -589,6 +649,12 @@ fn start_with_mode(
         ));
     }
     let config = Config {
+        native_session: match &mode {
+            StartMode::Session(session) => Some(session.clone()),
+            _ => previous
+                .as_ref()
+                .and_then(|previous| previous.value.native_session.clone()),
+        },
         schema: 1,
         worker_id: id.clone(),
         client: client.into(),
@@ -597,16 +663,26 @@ fn start_with_mode(
         settings: selected,
         processor: fingerprint,
     };
+    if matches!(&mode, StartMode::Session(_)) {
+        if let Some(report) = session_report(&store, &id, previous.as_ref(), &config)? {
+            return Ok(report);
+        }
+    }
     if mode == StartMode::Ensure {
         if let Some(report) = ensured_report(&store, &id, previous.as_ref(), &config)? {
             return Ok(report);
         }
     }
+    let startup_wait = if matches!(&mode, StartMode::Session(_)) {
+        Duration::from_secs(2)
+    } else {
+        START_WAIT
+    };
     let owner = acquire_start_owner(
         &store,
         previous.as_ref(),
         ReadControl {
-            deadline: Some(Instant::now() + START_WAIT),
+            deadline: Some(Instant::now() + startup_wait),
             interrupted: None,
         },
     )?;
@@ -657,7 +733,7 @@ fn start_with_mode(
             return Err(error);
         }
     };
-    let deadline = Instant::now() + START_WAIT;
+    let deadline = Instant::now() + startup_wait;
     let child_id = child.id();
     let ready = || match ready_report(&store, &id, &run_id, child_id, config_identity) {
         Err(error) => {
@@ -685,6 +761,44 @@ fn start_with_mode(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn session_report(
+    store: &Store,
+    id: &str,
+    previous: Option<&Stored<Config>>,
+    selected: &Config,
+) -> Result<Option<Value>, Error> {
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let mut report = status_at(store, id)?;
+    let active = report["owner"] == "held"
+        || matches!(
+            report["status"].as_str(),
+            Some("starting" | "running" | "stopping")
+        );
+    let same_session = previous.value.native_session == selected.native_session;
+    // Honor an explicit stop of this native configuration across new sessions.
+    let stopped = report["status"] == "stopped"
+        && previous.value.settings == selected.settings
+        && previous.value.processor == selected.processor;
+    if active || same_session || stopped {
+        let mut retained = selected.clone();
+        retained.native_session = previous.value.native_session.clone();
+        if previous.value != retained {
+            return Err("worker_configuration_differs_explicit_restart_required".into());
+        }
+        report["started"] = json!(false);
+        return Ok(Some(report));
+    }
+    if !matches!(
+        report["status"].as_str(),
+        Some("failed" | "budget_exhausted" | "interrupted" | "stopped")
+    ) {
+        return Err("worker_terminal_session_state_unavailable".into());
+    }
+    Ok(None)
 }
 
 // Called only while the lifecycle lock is held. A valid prior run is retained
@@ -910,6 +1024,11 @@ impl Runtime {
         if !grant.enabled || grant.generation != self.config.capture_generation {
             return Err(self.halt("worker_capture_revoked_or_restarted"));
         }
+        Ok(())
+    }
+
+    fn processor_admission(&self) -> Result<(), Error> {
+        self.admission()?;
         let current = processor_fingerprint(
             &self.config.project_root,
             self.config.settings.processor.as_deref(),
@@ -929,7 +1048,7 @@ impl BatchControl for Runtime {
     }
 
     fn before_attempt(&mut self) -> Result<(), Error> {
-        self.admission()?;
+        self.processor_admission()?;
         if self.state.attempts >= self.config.settings.max_calls {
             return Err(self.halt("worker_call_budget_exhausted"));
         }
@@ -940,7 +1059,7 @@ impl BatchControl for Runtime {
     }
 
     fn before_publish(&mut self) -> Result<(), Error> {
-        self.admission()
+        self.processor_admission()
     }
 }
 
@@ -1311,6 +1430,7 @@ mod tests {
                 root: RootCapability::open(&directory).unwrap(),
             };
             let config = Config {
+                native_session: None,
                 schema: 1,
                 worker_id: id.clone(),
                 client: "codex".into(),

@@ -359,7 +359,7 @@ and semantic drafts. [Mining algebra](persona-mining-contract.md) and
 mmcg miner hooks setup --client codex --project-root . --write
 mmcg miner hooks status --client codex --project-root .
 mmcg miner hooks worker start --client codex --project-root . \
-  --provider claude --max-calls 64 --max-runtime 3600
+  --provider native --max-calls 64 --max-runtime 3600
 mmcg miner hooks worker status --client codex --project-root .
 mmcg miner hooks worker stop --client codex --project-root .
 ```
@@ -401,7 +401,9 @@ selected client integrations and mining. Unattended runs without a selected
 client stay local. `--no-index` skips that refresh, `--workflow off` skips bundled
 workflows, and `--seed-style` opts into Git profile enrichment. Drafting requires
 `--draft-with claude`. `--no-claude` remains a compatibility flag.
-`--mining on --provider claude` starts one bounded run per selected client.
+`--mining on --provider native` arms bounded mining on native `SessionStart`.
+A live worker keeps its budget; a new session may renew a terminal automatic run.
+Resume/replay and an explicit stop do not renew it.
 Repeated `init` preserves existing run IDs and spent budgets. `miner start`
 explicitly starts a new run. See [onboarding](../getting-started.md).
 `doctor` checks configuration, handshake, installed agent contracts and optional

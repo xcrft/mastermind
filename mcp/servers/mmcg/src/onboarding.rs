@@ -84,13 +84,13 @@ impl Settings {
         if self
             .provider
             .as_deref()
-            .is_some_and(|value| value != "claude")
+            .is_some_and(|value| !matches!(value, "native" | "claude" | "codex"))
         {
-            return Err("supported semantic provider: claude".into());
+            return Err("supported semantic providers: native, claude, codex".into());
         }
         if (self.mining == Mining::On || self.refiner) && self.provider.is_none() {
             return Err(
-                "semantic mining and refinement require an explicit --provider claude".into(),
+                "semantic mining and refinement require an explicit --provider native, claude or codex".into(),
             );
         }
         if self.refiner && self.mining == Mining::Off {

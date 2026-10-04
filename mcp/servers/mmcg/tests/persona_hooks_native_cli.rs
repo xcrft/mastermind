@@ -17,7 +17,7 @@ args=sys.argv[1:]
 model=args[args.index('--model')+1]
 request=json.load(sys.stdin)
 with open(os.environ['MMCG_TEST_HOME']+'/calls.jsonl','a') as f:
- f.write(json.dumps({'client':client,'model':model,'cwd':os.getcwd(),'home':os.environ['HOME'],'codex_home':os.environ['CODEX_HOME'],'miner':os.environ.get('MASTERMIND_MINER'),'nested_claude':os.environ.get('CLAUDECODE'),'args':args})+'\n')
+ f.write(json.dumps({'client':client,'model':model,'episode':request.get('episode',{}).get('id'),'cwd':os.getcwd(),'home':os.environ['HOME'],'codex_home':os.environ['CODEX_HOME'],'miner':os.environ.get('MASTERMIND_MINER'),'nested_claude':os.environ.get('CLAUDECODE'),'args':args})+'\n')
 # Inherited collection hooks must ignore the generated inference input.
 hook={'session_id':'internal-miner','hook_event_name':'UserPromptSubmit','prompt':'I prefer a synthetic preference from the model.'}
 env=dict(os.environ); env['HOME']=os.environ['MMCG_TEST_HOME']
@@ -393,6 +393,20 @@ fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget()
     f.automatic(1);
     let mut prior_run = Value::Null;
     for session in ["first", "second"] {
+        if !prior_run.is_null() {
+            // Resume revised the preceding episode. Checkpoint that history
+            // before testing the next run's single-call budget on its new turn.
+            let previous = f.success(&["miner", "hooks", "mine", "--provider", "native"]);
+            assert_eq!(previous["failed"], false);
+            assert_eq!(previous["results"].as_array().unwrap().len(), 1);
+        }
+        let previous_episodes = f.success(&["miner", "hooks", "episodes"])["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|episode| episode["id"].clone())
+            .collect::<Vec<_>>();
+        let previous_calls = f.calls().len();
         f.event(
             "codex",
             session,
@@ -415,7 +429,17 @@ fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget()
         let terminal = f.terminal();
         assert_eq!(terminal["status"], "budget_exhausted");
         assert_eq!(terminal["run"]["attempts"], 1);
-        assert_eq!(terminal["run"]["completed"], 1);
+        assert_eq!(terminal["run"]["completed"], 1, "{session}: {terminal}");
+        let calls = f.calls();
+        assert_eq!(calls.len(), previous_calls + 1);
+        let episodes = f.success(&["miner", "hooks", "episodes"]);
+        let current_episode = episodes["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|episode| !previous_episodes.contains(&episode["id"]))
+            .unwrap();
+        assert_eq!(calls.last().unwrap()["episode"], current_episode["id"]);
         f.event(
             "codex",
             session,
@@ -429,7 +453,7 @@ fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget()
             "resume cannot renew the spent budget"
         );
     }
-    assert_eq!(f.calls().len(), 2);
+    assert_eq!(f.calls().len(), 3); // Two automatic calls and one history checkpoint.
 }
 
 #[test]

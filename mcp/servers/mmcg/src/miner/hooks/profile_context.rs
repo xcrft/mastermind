@@ -169,7 +169,16 @@ fn relative_path(candidate: &str, root: &Path) -> Option<String> {
     {
         return None;
     }
-    let candidate = candidate.split(':').next()?;
+    let mut candidate = candidate;
+    // Strip only numeric line/column suffixes, preserving a Windows drive colon.
+    for _ in 0..2 {
+        match candidate.rsplit_once(':') {
+            Some((path, line)) if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) => {
+                candidate = path;
+            }
+            _ => break,
+        }
+    }
     let path = Path::new(candidate.strip_prefix("./").unwrap_or(candidate));
     let path = if path.is_absolute() {
         path.strip_prefix(root).ok()?
@@ -186,7 +195,11 @@ fn relative_path(candidate: &str, root: &Path) -> Option<String> {
     if !filename.contains('.') && !matches!(filename, "Dockerfile" | "Makefile") {
         return None;
     }
-    Some(path.to_str()?.to_owned())
+    let relative = path.to_str()?;
+    if relative.contains(':') {
+        return None;
+    }
+    Some(relative.to_owned())
 }
 
 #[cfg(test)]
@@ -195,10 +208,19 @@ mod tests {
 
     #[test]
     fn selects_literal_paths_without_inferring_a_language_or_edit_scope() {
-        let root = Path::new("/work/project");
-        assert_eq!(path_literals("пофикси `src/api.rs` и ./tests/api.py:12, потом src/api.rs. Также `/work/project/web/app.ts` и `docs/my notes.md`", root),
-            ["docs/my notes.md", "src/api.rs", "tests/api.py", "web/app.ts"]);
-        assert!(path_literals("исправь это и продолжай предыдущую задачу", root).is_empty());
+        let root = std::env::temp_dir().join("mmcg-profile-context-test");
+        let absolute = root.join("web/app.ts").to_str().unwrap().replace('\\', "/");
+        let prompt = format!("пофикси `src/api.rs` и ./tests/api.py:12, потом src/api.rs. Также `{absolute}:7:2` и `docs/my notes.md`");
+        assert_eq!(
+            path_literals(&prompt, &root),
+            [
+                "docs/my notes.md",
+                "src/api.rs",
+                "tests/api.py",
+                "web/app.ts"
+            ]
+        );
+        assert!(path_literals("исправь это и продолжай предыдущую задачу", &root).is_empty());
     }
 
     #[test]
@@ -212,6 +234,9 @@ mod tests {
             "$HOME/private.py",
             "~/private.rs",
             "C:\\private.py",
+            "C:/private.py",
+            "src/api.rs:unknown",
+            "src/api.rs:12:unknown",
             "src/\0api.py",
         ] {
             assert!(relative_path(candidate, root).is_none(), "{candidate}");

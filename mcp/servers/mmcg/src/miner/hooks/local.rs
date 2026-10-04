@@ -210,7 +210,11 @@ mod tests {
             id: "episode".into(),
             revision: "revision".into(),
             client: "codex".into(),
-            project_root: "/project".into(),
+            project_root: std::env::temp_dir()
+                .join("mmcg-local-extractor-test")
+                .to_str()
+                .unwrap()
+                .into(),
             project: "project".into(),
             coverage_gaps: vec![],
             profile_influenced: false,

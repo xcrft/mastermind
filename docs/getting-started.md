@@ -10,7 +10,7 @@ mastermind init
 Requires Node.js 24+. The first `init` detects the active client, or installed
 Claude Code and Codex clients. It creates project guidance, indexes code and
 documentation, installs workflows, enables profile delivery and arms bounded
-native mining. Choices are saved in `.mastermind/setup.json`.
+mining inside the current agent task. Choices are saved in `.mastermind/setup.json`.
 
 ## 1. Choose your setup
 
@@ -19,7 +19,7 @@ native mining. Choices are saved in `.mastermind/setup.json`.
 | Inside Claude Code or Codex | Select the active client when its CLI is available |
 | Outside an agent | Select installed native clients; ask in a terminal if none were found |
 | Unattended, no installed clients | Local scaffold and index only |
-| `--client claude`, `codex`, or `all` | Configure the selected clients with profile access and native mining |
+| `--client claude`, `codex`, or `all` | Configure the selected clients with profile access and task mining |
 | `--client none` | Local project setup without client integration |
 | `--dry-run --json` | Show selected settings and proposed steps without writes or client calls |
 | Repeated `init` | Reuse saved choices and reconcile the requested components |
@@ -51,16 +51,34 @@ An incomplete setup reports failed components. Fix the reported issue and repeat
 |---|---|---|
 | `--mining off` | Disable capture and stop the managed miner | None from mining |
 | `--mining capture` | Record local interaction evidence for later inspection | None unless the refiner is enabled |
+| `--mining task` | The current agent proposes up to two source-cited candidates; local code seals them after Stop | No separate model invocation. Extra task context and tool use consume the current client's usage |
 | `--mining on --provider native` | Capture and start bounded semantic mining | Uses each captured client and its active model through the native CLI |
 | `--profile-access on` | Allow the selected clients to read this project's personal-profile view | None from the grant |
 | `--refiner on --provider native` | Refine user prompts through their captured native client and model | Extra calls outside the miner budget |
 
 Selected clients receive profile access by default. Prompt refinement defaults
-to off and requires `--mining capture` or `on`. Profile delivery includes
+to off and requires `--mining capture`, `task` or `on`. Profile delivery includes
 authored Git observations and reviewed rules; new mined drafts require review
 before becoming active habits. `--profile-access off` preserves that opt-out on
 future init runs. See
 [Persona hooks](guides/persona-hooks.md) for evidence and review boundaries.
+
+Task mining is the first-init default on supported native clients. The hook
+adds a short instruction and a ticket for `mmcg_mining_submit`. The agent may
+skip submission when there is no concrete preference. Local code rejects
+invented or quoted sources, foreign or expired tickets, and incomplete Stop
+events. It never invokes another model for task mining. Configuration does not
+prove that the agent followed the instruction or that a hypothesis is correct.
+
+To switch an existing repository while preserving its other saved choices:
+
+```bash
+mastermind init --mining task
+```
+
+Restart the client so its MCP server exposes the new submission tool. Existing
+saved background-mining choices remain unchanged until explicitly switched.
+For optional separate background analysis:
 
 ```bash
 mastermind init --client claude --mining on --provider native \

@@ -133,7 +133,7 @@ mastermind doctor                   diagnose setup and index problems\n\n\
 Install via npm for bundled workflows: npm install -g @xcraftmind/mastermind\n\
 The npm wrapper also provides update, install, list and short help.\n\n\
 Use --help on any command for its options. Local indexing does not call a model.\n\
-Semantic mining, refinement and scaffold drafting require explicit provider selection."
+Task mining uses the current agent. Separate mining, refinement and scaffold drafting use a selected provider."
 )]
 struct Cli {
     /// Path to the SQLite index file. Root-scoped commands default to
@@ -1144,6 +1144,11 @@ enum MinerCmd {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    #[command(hide = true)]
+    FinishTask {
+        #[arg(long)]
+        episode: String,
+    },
     /// Evaluate labeled source spans and paired task outcomes offline. No model or publication.
     EvaluateLocal {
         #[arg(long)]
@@ -3018,6 +3023,7 @@ fn run_cli_inner(
                     client,
                     project_root,
                 } => hooks::receive(&client, &project_root)?,
+                HookCmd::FinishTask { episode } => hooks::finish_task_mining(&episode)?,
                 HookCmd::Status {
                     client,
                     project_root,

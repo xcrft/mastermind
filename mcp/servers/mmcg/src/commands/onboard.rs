@@ -17,8 +17,8 @@ pub struct Options {
     /// Client to connect. Defaults to the active client, or installed native clients.
     #[arg(long, value_parser = ["claude", "codex", "all", "none"])]
     client: Option<String>,
-    /// off disables capture, capture records local evidence, on starts bounded semantic mining.
-    #[arg(long, value_parser = ["off", "capture", "on"])]
+    /// task mines in the current agent task, on starts a separate miner, capture records locally, off disables hooks.
+    #[arg(long, value_parser = ["off", "capture", "task", "on"])]
     mining: Option<String>,
     /// native uses each captured client's login and model for mining and refinement.
     #[arg(long, value_parser = ["native", "claude", "codex"])]
@@ -108,8 +108,11 @@ fn selection(
             _ => vec![client],
         };
         if previous.is_none() && !settings.clients.is_empty() {
-            settings.mining = if cfg!(unix) { Mining::On } else { Mining::Off };
-            settings.provider = Some("native".into());
+            settings.mining = if cfg!(unix) {
+                Mining::Task
+            } else {
+                Mining::Off
+            };
             settings.profile_access = true;
         }
         if settings.clients.is_empty() {
@@ -121,6 +124,7 @@ fn selection(
     if let Some(mining) = &options.mining {
         settings.mining = match mining.as_str() {
             "on" => Mining::On,
+            "task" => Mining::Task,
             "capture" => Mining::Capture,
             _ => Mining::Off,
         };

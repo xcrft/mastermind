@@ -298,6 +298,11 @@ static TOOLS: &[ToolDef] = &[
     refreshable_tool("mmcg_concept", schema_concept, handle_concept),
     read_only_tool("mmcg_context", schema_context, handle_context),
     read_only_tool("mmcg_profile", schema_profile, handle_profile),
+    additive_tool(
+        "mmcg_mining_submit",
+        schema_mining_submit,
+        handle_mining_submit,
+    ),
 ];
 
 pub(crate) fn is_known_tool(name: &str) -> bool {
@@ -332,6 +337,7 @@ fn tool_requires_fresh_index(name: &str) -> bool {
             | "mmcg_change_class"
             | "mmcg_context"
             | "mmcg_profile"
+            | "mmcg_mining_submit"
     )
 }
 
@@ -3741,6 +3747,35 @@ fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         .map_err(|error| HandlerError::internal("profile_view", error))
 }
 
+fn schema_mining_submit() -> Value {
+    json!({"name":"mmcg_mining_submit",
+        "description":"Stage at most two source-cited working-preference candidates from the current native task. Requires the ticket supplied by its UserPromptSubmit hook and task mining enabled for this server's root and configured MMCG_PROFILE_CLIENT. Checks original user prose locally, then seals only after a complete Stop. Unverified authorship; no habit acceptance, profile publication or model invocation. Skip if no concrete signal exists.",
+        "inputSchema":{"type":"object","additionalProperties":false,"required":["ticket_id","candidates"],
+            "properties":{"ticket_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+                "candidates":{"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,
+                    "required":["when","behavior","exception","evidence_kind","quote"],
+                    "properties":{"when":{"type":"string","minLength":8,"maxLength":200},
+                        "behavior":{"type":"string","minLength":8,"maxLength":200},
+                        "exception":{"type":"string","minLength":1,"maxLength":200},
+                        "quote":{"type":"string","minLength":8,"maxLength":300},
+                        "evidence_kind":{"type":"string","enum":["technical_approach","workflow_pattern","communication_preference","tool_preference","review_preference"]}}}}}}})
+}
+
+fn handle_mining_submit(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
+    let ticket = non_blank_str_arg(args, "ticket_id")?;
+    let candidates = args
+        .get("candidates")
+        .ok_or_else(|| HandlerError::InvalidArguments("Missing candidates".into()))?;
+    let root = store.serve_root().ok_or_else(|| {
+        HandlerError::InvalidArguments("Task mining requires a served project root".into())
+    })?;
+    let client = std::env::var("MMCG_PROFILE_CLIENT").map_err(|_| {
+        HandlerError::InvalidArguments("Task mining requires a configured client".into())
+    })?;
+    crate::miner::hooks::submit_task_mining(root, &client, ticket, candidates)
+        .map_err(|error| HandlerError::internal("task_mining_submit", error))
+}
+
 fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let file = queries::normalize_map_path(non_blank_str_arg(args, "file")?)
         .ok()
@@ -4415,7 +4450,7 @@ mod tests {
         }
 
         let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(), 35);
         assert!(legacy["tools"]
             .as_array()
             .unwrap()
@@ -4424,13 +4459,13 @@ mod tests {
 
         let current = tools_list(ProtocolVersion::Current);
         let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 35);
         let mut readers = 0;
         let mut refreshers = 0;
         for tool in tools {
             let annotations = &tool["annotations"];
             assert!(annotations.get("openWorldHint").is_none());
-            if tool["name"] == "mmcg_scratchpad_append" {
+            if tool["name"] == "mmcg_scratchpad_append" || tool["name"] == "mmcg_mining_submit" {
                 assert_eq!(
                     annotations,
                     &json!({
@@ -6870,7 +6905,7 @@ mod checks {
     #[test]
     fn tools_list_covers_every_handler() {
         let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 34, "expected 34 tools, got {}", listed.len());
+        assert_eq!(listed.len(), 35, "expected 35 tools, got {}", listed.len());
         for name in &listed {
             assert!(
                 TOOLS.iter().any(|t| &t.name == name),
@@ -7321,6 +7356,7 @@ mod checks {
             "mmcg_change_class",
             "mmcg_context",
             "mmcg_profile",
+            "mmcg_mining_submit",
         ];
         for tool in TOOLS {
             assert_eq!(

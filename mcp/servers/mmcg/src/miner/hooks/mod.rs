@@ -14,6 +14,7 @@ mod quality;
 pub mod readiness;
 mod refiner;
 mod semantic;
+mod task_mining;
 mod worker;
 
 pub use refiner::Config as RefinerConfig;
@@ -439,6 +440,7 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         if let Some(episode) = receipt["episode"].as_str() {
             local::automatic(&mut db, &grant, episode);
             if receipt["status"] == "recorded" {
+                task_mining::on_stop(&mut db, &grant, episode);
                 if let Err(error) =
                     background::on_episode_closed(client_id, &root, &native_session, episode)
                 {
@@ -491,6 +493,14 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
                 }
             }
         }
+        if let Some(episode) = receipt["episode"].as_str() {
+            let used = contexts.iter().map(String::len).sum::<usize>() + 2 * contexts.len();
+            match task_mining::context(&mut db, &grant, episode, used) {
+                Ok(Some(context)) => contexts.push(context),
+                Ok(None) => {}
+                Err(_) => eprintln!("Mastermind: task mining context withheld"),
+            }
+        }
         if let (Some(reader), Some(episode)) =
             (grant.profile_client.as_deref(), receipt["episode"].as_str())
         {
@@ -513,6 +523,21 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":contexts.join("\n\n")}})
     };
     print(&output)
+}
+
+pub fn submit_task_mining(
+    root: &Path,
+    client_id: &str,
+    ticket: &str,
+    candidates: &Value,
+) -> Result<Value, Error> {
+    client(client_id)?;
+    let root = root.canonicalize()?;
+    Journal::open(true)?.submit_task_mining(&root, client_id, ticket, candidates)
+}
+
+pub fn finish_task_mining(episode: &str) -> Result<(), Error> {
+    task_mining::finish(episode)
 }
 
 fn identifier<'a>(v: &'a Value, name: &str) -> Result<&'a str, Error> {
@@ -684,7 +709,7 @@ pub fn show(episode: &str) -> Result<(), Error> {
     check_id(episode)?;
     let db = Journal::open(false)?;
     print(
-        &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,"analyses":db.analysis_receipts(episode)?,
+        &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,"task_mining":db.task_mining_receipt(episode)?,"analyses":db.analysis_receipts(episode)?,
         "note":"User-channel text is unverified authorship. Stop is an observed boundary, not task completion. Tool output is not proof of a human preference."}),
     )
 }

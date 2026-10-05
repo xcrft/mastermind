@@ -22,13 +22,44 @@ mastermind status --json
 ```
 
 The active client, or installed native clients, are selected automatically.
-First client setup enables profile delivery and `--mining on --provider native`.
-Use `--mining capture` for local learning without model calls. Each native `SessionStart` starts or
+First client setup enables profile delivery and `--mining task`.
+The current native agent proposes candidates through `mmcg_mining_submit`; no
+separate model is launched. Extra context, reasoning and tool use still consume
+the current client's usage. Use `--mining capture` for local collection without
+semantic task analysis, or `--mining on --provider native` for a separate miner.
+With that optional background mode, each native `SessionStart` starts or
 observes a bounded worker for that client. A running worker keeps its budget.
 A new session or a newly completed episode may renew an exhausted or failed
 automatic run. Resuming, replay and explicit stop do not renew it. `mastermind miner start`, `stop` and
 `status` use the saved choices. Repeated `init` preserves the spent budget. `miner start` explicitly renews a run. Personal profile delivery
 is enabled for the selected project and clients; disable it with `--profile-access off`.
+
+### Mine in the current task
+
+`UserPromptSubmit` issues a ticket tied to the original event, capture
+generation, native client and repository. A short instruction asks the current
+agent to submit at most two concrete work-preference candidates before its
+final answer. If there is no signal or the tool is unavailable, skip submission.
+There is no forced continuation or model fallback.
+
+`mmcg_mining_submit` takes `ticket_id` and `candidates`. Each candidate contains
+`when`, `behavior`, `exception`, `evidence_kind` and an exact `quote` from the
+original user prose. The host derives the source event; the agent cannot select
+another repository, session or author. Model metadata comes from native
+capture, never from the submission.
+
+Local checks reject invented citations, quoted/code material, changed sources,
+foreign or superseded tickets and conflicting replay. Submission is pending
+until a complete `Stop`; missing tool results or revoked capture withhold it.
+A local finalizer can wait briefly for a delayed Claude transcript model and
+refresh authored Git observations. It does not call a model. Inspect
+`task_mining` and `analyses` in `mastermind miner hooks show <episode>`.
+
+Authorship remains unverified. The same review and promotion gates apply to
+task proposals as to separate semantic mining. An offered instruction is not
+proof of agent adherence, semantic correctness or usefulness. `init --mining
+task` stops the old managed miner; repeated init preserves explicit mode
+choices. A new client session is needed to load the updated MCP tool catalog.
 
 For direct hook control, preview and install hooks:
 

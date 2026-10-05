@@ -68,7 +68,7 @@ function assertCurrentIndex(index) {
   }
 }
 
-test("one npm init installs workflows, mines native sessions and delivers the profile", {
+test("one npm init installs workflows, mines in the task and delivers the profile", {
   skip: process.platform === "win32" ? "native hooks require Unix"
     : !NATIVE ? "set MMCG_TEST_BINARY to the built native binary" : false,
   timeout: 120_000,
@@ -138,8 +138,8 @@ test("one npm init installs workflows, mines native sessions and delivers the pr
   const first = mastermind(["init", "--json"]);
   assert.equal(first.status, "configured");
   assert.equal(first.settings.workflow, true);
-  assert.equal(first.settings.mining, "on");
-  assert.equal(first.settings.provider, "native");
+  assert.equal(first.settings.mining, "task");
+  assert.equal(first.settings.provider, null);
   assert.equal(first.settings.profile_access, true);
   assert.equal(fs.existsSync(path.join(home, "provider-calls.jsonl")), false);
   const client = first.observed.clients[0];
@@ -148,7 +148,8 @@ test("one npm init installs workflows, mines native sessions and delivers the pr
   assert.equal(client.workflow.clients[0].parity, true);
   assert.equal(client.hooks.capture.enabled, true);
   assert.equal(client.hooks.activation.status, "not_observed");
-  assert.equal(client.hooks.mining.status, "not_configured");
+  assert.equal(client.hooks.mining.status, "configured");
+  assert.equal(client.hooks.mining.execution, "in_session");
   assert.equal(client.profile_access.allowed, true);
   assert.equal(first.steps.find(step => step.component === "profile.git").detail.status, "refreshed");
   assertCurrentIndex(first.observed.project.index);
@@ -205,18 +206,34 @@ test("one npm init installs workflows, mines native sessions and delivers the pr
   assert.equal(fs.readFileSync(path.join(home, "hook-runtime"), "utf8"), "updated");
   const firstPrompt = event("UserPromptSubmit", "one", {prompt:"Review module.py. I prefer short reviews only for simple changes."});
   assert.match(firstPrompt.hookSpecificOutput.additionalContext, /Mastermind task profile/);
+  const ticket = firstPrompt.hookSpecificOutput.additionalContext.match(/ticket_id="([a-f0-9]{64})"/)[1];
+  const messages = [
+    {jsonrpc:"2.0", id:0, method:"initialize", params:{protocolVersion:"2025-11-25", capabilities:{}, clientInfo:{name:"fixture",version:"1"}}},
+    {jsonrpc:"2.0", method:"notifications/initialized"},
+    {jsonrpc:"2.0", id:1, method:"tools/call", params:{name:"mmcg_mining_submit", arguments:{ticket_id:ticket, candidates:[
+      {when:"Reviewing simple changes", behavior:"Keep the review concise", exception:"Only for simple changes", evidence_kind:"review_preference", quote:"I prefer short reviews only for simple changes."}
+    ]}}},
+  ];
+  const submitted = spawnSync(process.execPath, [launcher,"serve"], {cwd:root, env:{...env,MMCG_PROFILE_CLIENT:"codex"},
+    input:messages.map(JSON.stringify).join("\n")+"\n", encoding:"utf8", timeout:10_000});
+  assert.equal(submitted.status, 0, submitted.stderr);
+  const receipt = submitted.stdout.trim().split("\n").map(JSON.parse).find(value => value.id === 1);
+  assert.equal(receipt.error, undefined, JSON.stringify(receipt));
+  assert.notEqual(receipt.result.isError, true, JSON.stringify(receipt));
   event("Stop", "one", {last_assistant_message:"Reviewed module.py."});
   const deadline = Date.now() + 15_000;
   let live;
   do {
     live = mastermind(["status", "--json"], {FIXTURE_FORBID_NATIVE:"1"});
-    if (live.clients[0].hooks.mining.run?.completed > 0) break;
+    if (live.clients[0].hooks.pipeline.local_analysis.completed_revisions > 0) break;
     await pause(100);
   } while (Date.now() < deadline);
-  assert.ok(live.clients[0].hooks.mining.run.completed > 0, JSON.stringify(live));
-  const inference = fs.readFileSync(path.join(home, "provider-calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-  assert.ok(inference.length > 0);
-  assert.ok(inference.every(call => call.model === "gpt-task-model"));
+  assert.equal(live.clients[0].hooks.mining.execution, "in_session");
+  assert.equal(fs.existsSync(path.join(home, "provider-calls.jsonl")), false);
+  const episode = mastermind(["miner","hooks","episodes"]).episodes[0].id;
+  const analysis = mastermind(["miner","hooks","show",episode]).analyses.find(value => value.processor.engine === "current_task_agent");
+  assert.equal(analysis.current, true);
+  assert.equal(analysis.processor.model, "gpt-task-model");
   assert.ok(live.clients[0].hooks.pipeline.local_analysis.completed_revisions > 0);
   const secondPrompt = event("UserPromptSubmit", "two", {prompt:"Check module.py again."});
   assert.match(secondPrompt.hookSpecificOutput.additionalContext, /Mastermind task profile/);

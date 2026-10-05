@@ -17,6 +17,7 @@ mod archive;
 mod intake;
 mod local;
 pub(in crate::miner) mod task;
+mod task_mining;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
@@ -63,6 +64,8 @@ const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_local_queue (
                     episode TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
                     next_attempt INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS hook_task_mining (
+                    id TEXT PRIMARY KEY, episode TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS hook_archive_file (digest TEXT PRIMARY KEY, episode TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS hook_archive_episode ON hook_archive_file(episode);
                 CREATE TABLE IF NOT EXISTS hook_archive_delete (digest TEXT PRIMARY KEY);";
@@ -1325,6 +1328,7 @@ impl Journal {
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis_receipt WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
+        tx.execute("DELETE FROM hook_task_mining WHERE episode IN (SELECT id FROM hook_episode WHERE session=?1) OR episode=?2", params![forgotten.session, id])?;
         tx.execute("DELETE FROM hook_local_queue WHERE episode=?1", [id])?;
         tx.commit()?;
         archive::drain_deletes(&self.conn)?;

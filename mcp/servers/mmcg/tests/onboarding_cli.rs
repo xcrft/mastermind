@@ -226,8 +226,8 @@ fn first_init_uses_the_active_client_and_arms_personalization_without_inference(
     assert!(output.status.success(), "{output:?}");
     let first: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(first["settings"]["clients"], serde_json::json!(["codex"]));
-    assert_eq!(first["settings"]["mining"], "on");
-    assert_eq!(first["settings"]["provider"], "native");
+    assert_eq!(first["settings"]["mining"], "task");
+    assert!(first["settings"]["provider"].is_null());
     assert_eq!(first["settings"]["profile_access"], true);
     assert_eq!(
         first["observed"]["clients"][0]["profile_access"]["allowed"],

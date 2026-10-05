@@ -477,11 +477,11 @@ MMCG_TEMPLATE_MIRRORS: list[tuple[str, str]] = [
 # without forcing the same long inventory into every user-facing README.
 
 MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
-MMCG_EXPECTED_LAST_TOOL = "mmcg_profile"
+MMCG_EXPECTED_LAST_TOOL = "mmcg_mining_submit"
 MMCG_EXPECTED_BEHAVIOR_COUNTS = {
     "refreshable_tool": 21,
     "read_only_tool": 12,
-    "additive_tool": 1,
+    "additive_tool": 2,
 }
 
 # The reference owns the complete catalog; integration guides link to it.

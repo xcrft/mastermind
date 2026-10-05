@@ -37,7 +37,12 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
             }
         })
     });
-    let analysis_requested = requested_mode.map(|mode| mode == crate::onboarding::Mining::On);
+    let analysis_requested = requested_mode.map(|mode| {
+        matches!(
+            mode,
+            crate::onboarding::Mining::On | crate::onboarding::Mining::Task
+        )
+    });
     let evidence = match &database {
         Ok(Some(db)) => db.capture_evidence_summary(client, &root).unwrap_or_else(
             |_| json!({"status":"unavailable","reason":"capture_evidence_summary_unavailable"}),
@@ -174,14 +179,16 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     } else {
         json!({"status":"unsupported","reason":"native_hooks_require_unix","local_hooks_disabled":null})
     };
-    let mut mining = if cfg!(unix) {
+    let mut mining = if requested_mode == Some(crate::onboarding::Mining::Task) {
+        super::task_mining::status()
+    } else if cfg!(unix) {
         background::status(client, &root)
             .unwrap_or_else(|_| json!({"status":"unavailable","reason":"worker_state_unavailable"}))
     } else {
         json!({"status":"unsupported","reason":"managed_worker_requires_unix"})
     };
     mining["native_session_trigger_requested"] = json!(
-        analysis_requested == Some(true)
+        requested_mode == Some(crate::onboarding::Mining::On)
             && settings
                 .as_ref()
                 .ok()
@@ -239,7 +246,8 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         }
         if mining["status"] == "unavailable" {
             warnings.push("managed_miner_state_unavailable");
-        } else if (analysis_requested == Some(true) && mining["status"] != "running")
+        } else if (requested_mode == Some(crate::onboarding::Mining::On)
+            && mining["status"] != "running")
             || (analysis_requested.is_none()
                 && !matches!(
                     mining["status"].as_str(),
@@ -275,7 +283,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         "managed_analysis":mining["status"],"foreground_workers":"not_observed",
         "publication":"authorship_attestation_and_review_required",
         "local_analysis":local_report,
-        "git_refresh":{"trigger":["init","native_session_start","automatic_analysis_completion","native_executor_context","reviewed_task_completion"],
+        "git_refresh":{"trigger":["init","native_session_start","automatic_analysis_completion","local_task_stop","native_executor_context","reviewed_task_completion"],
             "source":"committed_git","model":false,"uncommitted_changes":"not_mined"},
         "task_benefit":"unmeasured",
         "evaluation":{"command":"miner hooks evaluate-local --input <labeled-corpus.json>",

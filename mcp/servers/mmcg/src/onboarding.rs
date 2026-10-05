@@ -16,6 +16,7 @@ const MAX_BYTES: u64 = 16 * 1024;
 pub enum Mining {
     Off,
     Capture,
+    Task,
     On,
 }
 
@@ -94,7 +95,7 @@ impl Settings {
             );
         }
         if self.refiner && self.mining == Mining::Off {
-            return Err("refinement requires hooks: choose --mining capture or on".into());
+            return Err("refinement requires hooks: choose --mining capture, task or on".into());
         }
         if self.clients.is_empty()
             && (self.mining != Mining::Off || self.profile_access || self.refiner)

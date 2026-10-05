@@ -7,7 +7,7 @@
 <p align="center">Repository context and evidence-backed workflows for coding agents.</p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/badge/npm-v3.1.0-CB3837?logo=npm" alt="npm version 3.1.0"></a>
+  <a href="https://www.npmjs.com/package/@xcraftmind/mastermind"><img src="https://img.shields.io/badge/npm-v3.2.0-CB3837?logo=npm" alt="npm version 3.2.0"></a>
   <a href="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml"><img src="https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4f46e5.svg" alt="MIT license"></a>
 </p>
@@ -18,8 +18,8 @@ evidence before completion.
 
 ## Quick start
 
-Current-task mining is on `main`, pending the next package release. Use the
-[source build](docs/getting-started.md#current-source-build) to try it now.
+Current-task mining requires Mastermind 3.2.0 or newer. See the
+[source build](docs/getting-started.md#current-source-build) instructions for local development.
 
 Requires Node.js 24+. The [npm manifest](npm/mastermind/package.json) lists
 prebuilt binaries for macOS, Linux, and Windows. Run these commands inside your repository:

@@ -1,7 +1,7 @@
 # Getting started
 
-Task mining described below is unreleased after npm `3.1.0`. Use a
-[current source build](#current-source-build) for that mode until the next release.
+Current-task mining requires Mastermind 3.2.0 or newer. For local development,
+use a [source build](#current-source-build).
 
 Run these commands inside your repository:
 

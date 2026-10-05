@@ -1593,7 +1593,7 @@ fn foreground_worker_cancellation_terminates_provider_and_releases_its_lease() {
     fs::write(
         &processor,
         format!(
-            "#!/bin/sh\ncat >/dev/null\necho $$ > '{}'\nsleep 30\n",
+            "#!/bin/sh\ncat >/dev/null\necho $$ > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nsleep 30\n",
             pid_file.display()
         ),
     )

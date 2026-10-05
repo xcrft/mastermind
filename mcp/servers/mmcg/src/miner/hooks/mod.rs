@@ -20,6 +20,7 @@ mod worker;
 pub use refiner::Config as RefinerConfig;
 
 use super::{collection, curation, feedback, profile, store};
+use crate::bounded_fs::BoundedReadError;
 use journal::{Draft, Incoming, Journal};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -941,7 +942,18 @@ fn mine_page_controlled(
             skipped.push(json!({"episode":id,"reason":"incomplete"}));
             continue;
         }
-        let processor_receipt = processor_receipt(&input, processor, provider, args)?;
+        let processor_receipt = match processor_receipt(&input, processor, provider, args) {
+            Err(error)
+                if worker::interrupted()
+                    && matches!(
+                        error.downcast_ref::<BoundedReadError>(),
+                        Some(BoundedReadError::Interrupted)
+                    ) =>
+            {
+                break;
+            }
+            result => result?,
+        };
         let Some(lease) = db.claim_analysis(id, &input.revision, &processor_receipt, timeout)?
         else {
             skipped.push(json!({"episode":id,"reason":"completed_or_leased_or_changed"}));

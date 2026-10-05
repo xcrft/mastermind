@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup. Capture runs locally and drafts require review. Separate background
   analysis remains available through `--mining on`.
 
+### Fixed
+
+- Stop foreground mining cleanly when Ctrl-C interrupts processor hashing.
+
 ## [3.1.0] - 2026-09-28
 
 ### Fixed

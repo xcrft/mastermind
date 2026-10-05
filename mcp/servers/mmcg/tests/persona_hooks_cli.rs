@@ -1411,12 +1411,18 @@ fn batch_worker_checkpoints_empty_results_and_retries_failed_processors() {
     assert_eq!(f.success(&args)["results"].as_array().unwrap().len(), 1);
 }
 
-struct ForegroundWorker(std::process::Child);
+struct ForegroundWorker {
+    child: std::process::Child,
+    log: PathBuf,
+}
 
 impl ForegroundWorker {
     fn start(f: &Fixture, processor: &std::path::Path) -> Self {
-        Self(
-            f.command()
+        let log = f._temp.path().join("foreground-worker.log");
+        let output = fs::File::create(&log).unwrap();
+        Self {
+            child: f
+                .command()
                 .args([
                     "miner",
                     "hooks",
@@ -1427,39 +1433,48 @@ impl ForegroundWorker {
                     "--processor",
                 ])
                 .arg(processor)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(output.try_clone().unwrap())
+                .stderr(output)
                 .spawn()
                 .unwrap(),
-        )
+            log,
+        }
     }
 
     fn stop(&mut self, signal: libc::c_int) {
         // SAFETY: this test owns the live worker child.
-        assert_eq!(unsafe { libc::kill(self.0.id() as libc::pid_t, signal) }, 0);
+        assert_eq!(
+            unsafe { libc::kill(self.child.id() as libc::pid_t, signal) },
+            0
+        );
         wait_until("foreground worker cancellation", || {
-            self.0.try_wait().unwrap().is_some()
+            self.child.try_wait().unwrap().is_some()
         });
-        assert!(self.0.wait().unwrap().success());
+        let status = self.child.wait().unwrap();
+        assert!(
+            status.success(),
+            "foreground worker exited with {status}:\n{}",
+            fs::read_to_string(&self.log).unwrap()
+        );
     }
 }
 
 impl Drop for ForegroundWorker {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
+        if self.child.try_wait().ok().flatten().is_none() {
             // SAFETY: the un-reaped child is owned by this fixture. Let its
             // normal cancellation path clean up its processor process group.
             unsafe {
-                libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
+                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
             }
             for _ in 0..100 {
-                if self.0.try_wait().ok().flatten().is_some() {
+                if self.child.try_wait().ok().flatten().is_some() {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 }
@@ -1534,6 +1549,39 @@ fn foreground_worker_observes_new_and_revised_episodes_without_repeating_complet
     assert_ne!(revised["revision"], first["revision"]);
     worker.stop(libc::SIGINT);
     assert!(!f.home.join(".mastermind/style.db").exists());
+}
+
+#[test]
+fn foreground_worker_cancellation_during_fingerprinting_never_starts_the_provider() {
+    let f = Fixture::new();
+    f.capture("fingerprint-session", "fingerprint-turn");
+    let processor = f._temp.path().join("large-processor");
+    let marker = f._temp.path().join("provider-started");
+    fs::write(
+        &processor,
+        format!("#!/bin/sh\nprintf x > '{}'\nexit 1\n#", marker.display()),
+    )
+    .unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&processor).unwrap();
+    // A sparse executable keeps hashing in flight long enough to interrupt it.
+    file.set_len(128 * 1024 * 1024).unwrap();
+    file.set_times(fs::FileTimes::new().set_accessed(std::time::UNIX_EPOCH))
+        .unwrap();
+    drop(file);
+    fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut worker = ForegroundWorker::start(&f, &processor);
+    wait_until("processor fingerprint read", || {
+        fs::metadata(&processor).unwrap().accessed().unwrap() > std::time::UNIX_EPOCH
+    });
+    worker.stop(libc::SIGINT);
+    assert!(!marker.exists(), "provider started after cancellation");
+    let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT COUNT(*) FROM hook_analysis", [], |r| r.get(0))
+            .unwrap(),
+        0,
+        "cancellation before analysis must not claim an episode"
+    );
 }
 
 #[test]

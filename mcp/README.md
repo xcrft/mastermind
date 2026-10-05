@@ -8,6 +8,7 @@ explicitly granted personal context.
 |---|---|
 | Structural queries | May refresh the managed derived index |
 | `mmcg_scratchpad_append` | Appends a local note |
+| `mmcg_mining_submit` | Stages source-cited proposals from the current task |
 | Other queries | Read-only |
 | Arbitrary SQL or executable plugins | Not exposed |
 

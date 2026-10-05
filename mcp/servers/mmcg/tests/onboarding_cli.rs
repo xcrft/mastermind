@@ -170,6 +170,16 @@ fn local_init_indexes_source_and_context_and_preserves_existing_documents() {
         fs::read_to_string(f.root.join("CLAUDE.md")).unwrap(),
         "user-owned instructions\n"
     );
+    for args in [vec!["init"], vec!["status"]] {
+        let output = f.run(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Restart"),
+            "local setup and read-only status must not request a client restart"
+        );
+    }
     assert_eq!(fs::read_dir(&f.home).unwrap().count(), 0);
 }
 
@@ -202,6 +212,17 @@ fn explicit_capture_registers_audience_without_claiming_activation_or_profile_ac
         second["observed"]["clients"][0]["hooks"]["capture"]["generation"]
     );
     assert_eq!(fs::read(f.root.join(".codex/hooks.json")).unwrap(), hooks);
+    for (args, restart) in [(vec!["init"], true), (vec!["status"], false)] {
+        let output = f.run(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Restart"),
+            restart,
+            "{args:?}"
+        );
+    }
     f.success(&["init", "--refiner", "on", "--provider", "claude", "--json"]);
     let disabled = f.success(&["init", "--mining", "off", "--json"]);
     assert_eq!(disabled["settings"]["refiner"], false);

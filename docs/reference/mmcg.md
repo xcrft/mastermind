@@ -353,33 +353,21 @@ publication and access. [Client hooks](../guides/persona-hooks.md) cover capture
 and semantic drafts. [Mining algebra](persona-mining-contract.md) and
 [extraction quality](persona-quality.md) describe what the evidence establishes.
 
-### Native hooks and managed mining
+### Native hooks and mining
 
 ```bash
-mmcg miner hooks setup --client codex --project-root . --write
+mmcg init --client codex --workflow off
 mmcg miner hooks status --client codex --project-root .
-mmcg miner hooks worker start --client codex --project-root . \
-  --provider native --max-calls 64 --max-runtime 3600
-mmcg miner hooks worker status --client codex --project-root .
-mmcg miner hooks worker stop --client codex --project-root .
 ```
 
-| Operation or state | Meaning |
-|---|---|
-| Hook setup | Installs local capture definitions and a scoped capture grant. Does not start a miner |
-| Refiner selection | Optional prompt interpretation on admitted input, separate from habit analysis |
-| `worker start` | Explicit managed run on macOS/Linux, one owner per client and canonical project root |
-| Repeated start | Keeps the active run and its budget. A stopped restart can reuse saved settings |
-| `worker status` | Read-only ownership, heartbeat, counters and configuration. Does not start a process |
-| `worker stop` | Requests cooperative cancellation of the owned processor group |
-| `hooks status` / `doctor` | Separate registration, capture, session, refiner and managed-miner states |
-| Observed `SessionStart` | Local observation in the current capture generation, not verified client trust/loading |
-| Mining output | Unreviewed drafts with event-level exposure. Human authorship and habit approval require review |
-
-Defaults are 64 processor invocations and 3,600 seconds per managed run, with
-60 seconds per attempt and batches of 4. These are local invocation limits, not
-token or provider billing limits. Original observations retain the exposure
-recorded when they were captured. See [setup, budgets and recovery](../guides/persona-hooks.md#run-a-managed-worker).
+Fresh native client setup defaults to task mining: the current agent proposes
+candidates and local code seals them after complete capture. Direct hook setup
+installs capture without starting a worker. Status and doctor read readiness
+observations without executing a provider. Candidate output requires authorship
+and habit review. See the authoritative [capture](persona.md#native-capture),
+[task mining](persona.md#mining-in-the-current-task),
+[processor](persona.md#hook-processor-contract) and
+[managed worker](persona.md#managed-workers) contracts.
 
 ### Project and client setup
 
@@ -399,13 +387,12 @@ mmcg setup generic --scope project --config ./mcp.json
 `init` saves project choices and reconciles scaffolding, the code/document index,
 selected client integrations and mining. Unattended runs without a selected
 client stay local. `--no-index` skips that refresh, `--workflow off` skips bundled
-workflows, and `--seed-style` opts into Git profile enrichment. Drafting requires
+workflows, and `--seed-style` explicitly seeds Git observations during scaffolding.
+Profile-enabled client setup also refreshes authored Git observations locally. Drafting requires
 `--draft-with claude`. `--no-claude` remains a compatibility flag.
-`--mining on --provider native` arms bounded mining on native `SessionStart`.
-A live worker keeps its budget; a new session may renew a terminal automatic run.
-Resume/replay and an explicit stop do not renew it.
-Repeated `init` preserves existing run IDs and spent budgets. `miner start`
-explicitly starts a new run. See [onboarding](../getting-started.md).
+First native client setup selects task mining and profile access, with refinement
+off. Separate background mining requires `--mining on --provider native`.
+Saved choices survive repeated init. See [onboarding](../getting-started.md).
 `doctor` checks configuration, handshake, installed agent contracts and optional
 hook readiness. An unconfigured optional hook client is not a failure. Readiness
 inspection neither invokes a provider nor establishes model quality.
@@ -1498,7 +1485,7 @@ Tool-specific arguments and response bounds are listed below. The
 | `mmcg_project_profile` | optional `query` (FTS5, max 256 characters), `top` (default 12, max 32) | Read-only projection from indexed root `CONTEXT.md`. Returns bounded section excerpts and headings with full-section line-range citations. It also returns separately bounded `claim_candidates` extracted only from one-line `Decision` and `Status` fields in decision-log entries, with exact decision-line citations, record and file digests, extractor version, and `status: candidate`. `source_status` repeats the Markdown value and does not establish human review: `review_status` stays `unknown`. A search snippet may cover only part of its cited section. `excerpt_truncated` and `heading_truncated` flag shortened text. The tool withholds all text when the history, section, or claim extraction index is stale or incomplete. Upgrading an existing index requires `mastermind index .`. Secret-like or malformed decision entries make extraction incomplete, and a heuristic cannot guarantee all secrets are found. Markdown is the source of truth. Code links are unverified. The person's global profile remains separate in `mmcg_profile`. |
 | `mmcg_context` | required `since`, `role`. Optional `paths`, `workflow`, `query`, `budget_tokens` (default 8000, 1024–16000) | Read-only context preview combining code, project, optional documentation, granted personal advice and historical tasks. Root and profile audience are server-bound. No refresh, mining, model invocation or delivery receipt. Layers retain their own freshness/review/source-verification metadata and revisions. A whole over-budget layer is omitted with its reason. Budget measures compact packet UTF-8 JSON bytes / 4, with MCP framing additional. See [composition contract](persona-context.md). |
 | `mmcg_profile` | optional `paths` (max 64), `role` (`planner`, `executor`, `auditor`), `workflow`, `budget_tokens` (default 1500, 256–8000) | Read-only view of the user's global mined profile (`~/.mastermind/style.db`). Requires `MMCG_PROFILE_CLIENT` in this MCP server's environment and an explicit `miner access grant` for that client and canonical served project root. Missing access or store returns `access_denied` without profile data or creating a store. Active feedback and locally reviewed habits with current source records are exposed. Quotes stay local. Episode independence is user asserted. Project, path/language, role and workflow applicability is evaluated before source I/O. `source_verification` covers selected claims only, so unrelated sources cannot spend the read budget or mark this selection incomplete. Unchecked selected claims are withheld. This grant still exposes aggregate Git observations across all mined repositories. Source-level access is not implemented. Git-derived rules, workflow, range, and associations carry an unverified author-filter label and are advisory. The response includes `store_revision` for canonical SQL inputs and `profile_revision` for the live verified selection, with `revision_scope=selected_claims_and_git_aggregate`. The latter changes when a selected source becomes unavailable and is not the static Markdown publication hash. Over budget, omitted lists are named in `omitted`. An oversized role/workflow echo can also be omitted as `selection`, while its exact input remains bound by `profile_revision`. |
-| `mmcg_mining_submit` | `ticket_id` (from the current prompt hook), `candidates` (0–2 objects with `when`, `behavior`, `exception`, `evidence_kind`, `quote`) | Stages unreviewed preference drafts in `--mining task` mode. The serving root and configured client must match an active ticket. Quotes must be exact original user prose; quoted material, code, secrets, incomplete capture, stale tickets and conflicting submissions are rejected. Source event, client and model come from captured state, not caller arguments. A local finalizer seals drafts only after a complete `Stop`, and waits briefly for delayed Claude model metadata. It starts no separate LLM request and does not attest authorship, accept habits or publish profile rules. Agent adherence and interpretation quality remain unverified. |
+| `mmcg_mining_submit` | `ticket_id` (from the current prompt hook), `candidates` (0–2 objects with `when`, `behavior`, `exception`, `evidence_kind`, `quote`) | Stages current-task proposals citing exact original user prose. Root/client must match the active ticket. Complete `Stop` seals unreviewed drafts without a separate model request. Source admission, replay and review rules are in [task mining](persona.md#mining-in-the-current-task). |
 
 ### Local scratchpad
 

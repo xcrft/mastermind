@@ -734,52 +734,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slugify_ascii_basic() {
-        assert_eq!(slugify("fix the context doctor"), "fix-the-context-doctor");
+    fn slugify_preserves_ascii_words_and_bounds_the_task_name() {
+        for (input, expected) in [
+            (
+                "fix the context doctor".into(),
+                "fix-the-context-doctor".into(),
+            ),
+            ("починить проверку контекста и аудит".into(), "task".into()),
+            ("проверка".into(), "task".into()),
+            (
+                "абвгдеёжзийклмнопрстуфхцчшщъыьэюяabcde".into(),
+                "abcde".into(),
+            ),
+            (String::new(), "task".into()),
+            ("---".into(), "task".into()),
+            ("a".repeat(60), "a".repeat(40)),
+            (format!("{} tail", "a".repeat(39)), "a".repeat(39)),
+        ] {
+            assert_eq!(slugify(&input), expected, "{input}");
+        }
     }
 
     #[test]
-    fn slugify_unicode_no_panic() {
-        let s = slugify("починить проверку контекста и аудит");
-        assert!(!s.is_empty());
-        assert!(s.is_ascii(), "slug must be ASCII-only, got: {s:?}");
-    }
-
-    #[test]
-    fn slugify_all_unicode_falls_back_to_task() {
-        assert_eq!(slugify("проверка"), "task");
-    }
-
-    #[test]
-    fn slugify_long_unicode_does_not_panic() {
-        let long = "абвгдеёжзийклмнопрстуфхцчшщъыьэюяabcde";
-        let s = slugify(long);
-        assert!(s.len() <= 40);
-        assert!(s.is_ascii());
-    }
-
-    #[test]
-    fn slugify_truncates_at_40_chars_cleanly() {
-        let long = "a".repeat(60);
-        let s = slugify(&long);
-        assert!(s.len() <= 40);
-    }
-
-    #[test]
-    fn yaml_quote_plain() {
-        assert_eq!(yaml_quote("hello world"), "\"hello world\"");
-    }
-
-    #[test]
-    fn yaml_quote_colon_in_title() {
-        let q = yaml_quote("fix: context doctor");
-        assert_eq!(q, "\"fix: context doctor\"");
-    }
-
-    #[test]
-    fn yaml_quote_inner_double_quote() {
-        let q = yaml_quote(r#"fix "broken" audit"#);
-        assert_eq!(q, r#""fix \"broken\" audit""#);
+    fn yaml_quote_roundtrips_titles_and_control_characters() {
+        for input in [
+            "hello world",
+            "fix: context doctor",
+            r#"fix "broken" audit"#,
+            "line\ncarriage\rtab\tbackspace\u{0008}formfeed\u{000c}bell\u{0007}\\",
+        ] {
+            let quoted = yaml_quote(input);
+            assert!(quoted.starts_with('"') && quoted.ends_with('"'), "{quoted}");
+            assert_eq!(serde_norway::from_str::<String>(&quoted).unwrap(), input);
+        }
     }
 
     #[test]

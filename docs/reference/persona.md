@@ -9,6 +9,8 @@ hook setup or [context composition](persona-context.md) for delivery to an agent
 | Data | Location | Use |
 |---|---|---|
 | Hook events, coverage, drafts and exposure records | `~/.mastermind/persona-events.db` | Local capture journal |
+| Archived episode payloads | `~/.mastermind/persona-archive/*.json` | Private sources retained outside the working journal |
+| Managed worker configuration and runs | `~/.mastermind/persona-workers/<id>/` | Optional separate processor state |
 | Personal evidence, claims, reviews and grants | `~/.mastermind/style.db` | User-global profile across repositories |
 | Generated profile | `~/.mastermind/style.md` | Local inspection snapshot, schema 5 |
 | Unreviewed deep interpretation | `style.deep-candidate-*.md` in the profile directory | Local review input |
@@ -72,6 +74,138 @@ mmcg miner access revoke . --client claude
 
 See [MCP arguments and result fields](mmcg.md#mcp-tools).
 
+## Native capture
+
+First client setup through `init` enables capture, profile access and task mining
+on macOS/Linux. Direct `hooks setup` previews changes unless `--write` is given:
+
+```bash
+mmcg miner hooks setup --client codex --project-root .
+mmcg miner hooks setup --client codex --project-root . --write
+mmcg miner hooks status --client codex --project-root .
+```
+
+| Setup operation | Contract |
+|---|---|
+| Capture grant | Exact native client and canonical project root |
+| Existing hooks | Preserved in `.codex/hooks.json` or `.claude/settings.local.json` |
+| Direct setup | Reuses the configured profile reader or the native client's existing read grant. Creates no new profile read grant |
+| Ordinary setup | Preserves delivery and refiner choices. Starts no managed worker |
+| `--disable-profile` | Disables delivery and automatic local extraction, retaining capture and MCP read access |
+| Reenable delivery | Explicit `--profile-client CLIENT` or `init --profile-access on` |
+| `--remove --write` | Revokes capture before editing configuration. Retains local evidence |
+| Client trust/loading | Must be completed in the native client. Restart for a fresh `SessionStart` |
+| Windows | Native hooks and managed workers unsupported |
+
+Status and doctor report registration, capture, session, local analysis, task
+mining, profile, refiner and managed-worker observations separately. Registration
+can be current, missing/stale, unavailable or unsupported. Local disable flags
+are separate. `SessionStart` establishes an observation in the current generation,
+not client trust. Offers and processed empty analyses count as observations,
+not model use or accuracy. Reads start no process, approve no claim and create
+no drafts. `pipeline.next_actions` describes recovery for missing evidence.
+
+| Capture event | Admission and coverage |
+|---|---|
+| `SessionEnd` | Closes prompt admission until a fresh `SessionStart` |
+| Late `Stop` with turn ID | Closes only the matching turn, without replacing newer response context |
+| Unknown/reused turn ID or overlapping prompts without both IDs | Coverage gap rather than inferred attribution |
+| Empty current response | Clears earlier assistant context |
+| Repeated `SessionEnd` without event ID | Records replay ambiguity |
+| Lost retained text | Marks every episode using that event incomplete, including later context uses |
+| Ambiguous identity, unattributed loss, fork or delivery failure | Fences the session or capture grant |
+| Earlier capture versions | Remain historical with their original gaps. Upgrading cannot repair them |
+| `MMCG_INPUT_ORIGIN=controller` or miner recursion guard | Skips generated input before journal writes |
+| `MMCG_INPUT_ORIGIN=automation` | Retains client/model observations, but labels input `automation_or_agent`, ineligible for personal quotes |
+
+An admitted prompt can receive a planner profile through `additionalContext`
+after capture and its exposure receipt commit. Selection uses literal repository
+paths from the original prompt. Without paths, language-scoped advice is
+withheld. A refiner continuation may use its explicitly bound spec's paths and
+workflow. An ordinary request cannot inherit the preceding task's scope.
+Missing SessionStart, incomplete capture, changed grants or unavailable storage
+withhold delivery without discarding the captured event.
+
+| Recorded influence | Candidate extraction and promotion |
+|---|---|
+| `no_recorded_prior_exposure` | Eligible original prose still requires authorship attestation and review |
+| `dependent_observation` | Inspectable, cannot count as unexposed habit support |
+| `unknown_influence` | Inspectable, requires new eligible evidence for promotion |
+| Generated/refined text | Context only, never positive human habit evidence |
+
+Influence is recorded before the current advisory. Profile/refiner offers and
+recognized MCP/profile-file reads affect later events. Every support and
+contradiction contributes to a draft's classification. Resume and recovery do
+not clear prior exposure. Detection covers supported delivery paths only and
+does not establish statistical independence. Session summaries retain the last
+32 exposures and an omission count. Older episode receipts remain intact.
+
+## Mining in the current task
+
+`--mining task` uses the current native agent instead of launching a processor.
+`UserPromptSubmit` offers a ticket and a short optional instruction. The agent
+may call [`mmcg_mining_submit`](mmcg.md#mcp-tools) before its final answer, or skip
+it when no concrete preference exists. There is no forced continuation or
+provider fallback. Extra context, reasoning and tool calls use the client's
+normal allowance.
+
+| Task submission | Contract |
+|---|---|
+| Ticket | Bound to original prompt event, capture generation, client and repository |
+| Candidate | `when`, `behavior`, `exception`, `evidence_kind`, exact original `quote` |
+| Bounds | 0–2 candidates, submission at most 8 KiB. Text and citation limits match the processor schema below |
+| Source selection | Host-derived event. Caller cannot select another root, client, session or author |
+| Client and model metadata | From native capture, never caller-supplied. Proposer identity remains unverified |
+| Admission | Rejects stale/foreign tickets, changed sources, ineligible quotations and incomplete capture |
+| Retry | Identical active submission is idempotent. Conflicting submission rejected |
+| Before `Stop` | Pending submission, no analysis or persisted semantic draft |
+| Complete `Stop` | Rechecks source, grants and mode, then seals unreviewed drafts |
+| Delayed Claude model | Local finalizer can wait up to 4 seconds for transcript binding, outside the native hook deadline |
+| Finalizer | Local admission, sealing and authored Git refresh. No model call |
+| Inspection | `hooks show` exposes `task_mining`, analyses and draft IDs. Read full content with `hooks draft` |
+| Mode change | Explicit `init --mining task` stops the managed miner. Repeated init preserves saved choices |
+
+An offered instruction does not prove agent adherence, interpretation quality
+or usefulness. Sealing neither attests authorship nor activates a rule. A new
+client session is required to load an updated MCP catalog.
+
+## Local extraction and retention
+
+With profile delivery enabled and an existing read grant, complete closed
+episodes also run the `persona-explicit-v2` detector. It shares the detector
+with transcript collection and invokes no model. `Stop`, later context,
+`SessionEnd` and late tool results queue changed episode revisions.
+
+| Local extraction | Contract |
+|---|---|
+| Text | Exact eligible original user prose, no inferred role, motive or result |
+| Bounds | 128 prompt lines, 8 drafts per episode, complete normalized statement at most 200 characters |
+| Multiline condition/exception | Retained in the same source span. Oversized spans omitted whole |
+| Checkpoint | Episode revision and processor fingerprint, including empty results |
+| Replay | `hooks mine-local`, 1–16 episodes/page. Use `next_after` for the same pass, start without it for revised sources |
+| Retry | Native events, executor context and reviewed completion process up to four durable queue entries under current grants, with bounded failure backoff |
+| Unavailable store | Work remains queued until the next trigger. No idle background service is started |
+| Delivery disabled or profile access revoked | Automatic local processing paused |
+| Changed bindings | Require authorship review again |
+| Quality | [Synthetic regression and source-span evaluation](persona-quality.md), real-history accuracy and task benefit unmeasured |
+
+Capture archives inactive payloads under active-episode or database pressure.
+Current episodes remain in the working set. Archives preserve gaps, deduplication
+identity and review bindings. Source reads check the archive digest and keep
+the original evidence revision. Missing or changed archives withhold dependent
+claims. `pipeline.retention` separates active and archived counts.
+
+```bash
+mmcg miner hooks archive --project-root . --limit 32
+```
+
+The 2,000-episode bound applies to active payloads. Metadata and other journal
+records still share the 64 MiB database cap. Archive storage grows until an
+explicit `hooks forget`, which removes archived copies and adjacent copied
+context. Transferred profile audit quotes, backups and external processor data
+are outside that erasure. Recovery starts a new generation without reconstructing
+lost events or clearing historical gaps.
+
 ## Hook processor contract
 
 | Entry point | Execution contract |
@@ -111,18 +245,36 @@ Empty drafts are valid. A draft follows the supplied response example:
 | Contradiction | May also cite `next_turn_context` |
 | Ineligible span | Code, quotation, pasted document, instruction wrapper, assistant/tool text or recognized secret |
 | Exact source match | Does not establish human authorship or semantic accuracy |
-| Coverage gap or known profile influence | Reject analysis |
+| Coverage gap | Reject analysis |
+| Known profile/refiner influence | Retain exposure classification. Cannot become independent habit support |
 | Inference boundary | No identity, psychology, sensitive traits, permissions or global habit from one task |
 | `--provider native` | Uses the captured native client and model; may send episode text externally |
 | Built-in isolation | Claude safe mode with tools disabled; Codex ephemeral read-only inference with context discovery disabled and tool executions rejected |
 | Credentials | Native CLI login, including subscriptions. No credentials are copied |
 | Unsupported flag | Fail without falling back to a normal client session |
 
+`native` resolves to the captured client. Explicit `claude` or `codex` must
+match it. The captured model is passed to the CLI. Codex supplies model events,
+and Claude also records `PostModelSwitch`. When Claude omits the model, a bounded
+transcript tail must match the session, project, latest response and prompt ID
+when available. Pending transcript flush is retried without a model call.
+Missing metadata skips separate semantic mining, retaining local collection.
+Closed episodes keep their original model.
+
+Claude uses `--safe-mode --tools "" --strict-mcp-config` with an empty MCP list
+and no persistence. Codex disables user config, project instructions, hooks,
+plugins, apps, memory and shell tools in an ephemeral read-only invocation.
+Its account directory is retained with a private HOME. Results containing tool
+execution are rejected. Catalog warnings are diagnostics. Receipts retain
+client/model source, executable digest and adapter version, including empty
+analyses. Transcript binding also records the response digest and any available
+prompt identity and digest.
+
 | Capture or analysis resource | Bound |
 |---|---|
 | Native hook command | 3 seconds |
 | Native JSON / retained text per event | 4 MiB / 16 KiB. Unavailable retained content marks each episode that uses the event incomplete; an unattributed loss or envelope over 4 MiB fences the session/capture until recovery |
-| Journal / retained episodes | 64 MiB / 2,000 |
+| Journal / active episode payloads | 64 MiB / 2,000, with [archive retention](#local-extraction-and-retention) |
 | Events / stored bytes per episode | 128 / 512 KiB |
 | Processor request / stdout / stderr | 512 KiB / 64 KiB / 16 KiB |
 | Processor timeout | 1–120 seconds, default 60 |
@@ -138,8 +290,110 @@ Empty drafts are valid. A draft follows the supplied response example:
 | Interruption | Release unfinished lease for retry. Cannot retract a received provider request |
 | Contention, crash, unsupported input, redaction or missing lifecycle/tool event | Mark incomplete delivery and withhold evidence |
 | Recovery | New generation, no reconstruction of lost events |
-| `MMCG_INPUT_ORIGIN=controller` or miner recursion guard | Skip generated input before journal writes |
-| Other profile exposure | Recognition limited to supported paths |
+
+Native client contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Codex exec](https://learn.chatgpt.com/docs/cli/reference),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference).
+
+## Managed workers
+
+Separate analysis is optional. Enable it through `init --mining on --provider
+native` or start a worker directly:
+
+```bash
+mmcg miner hooks worker start --client codex --project-root . \
+  --provider native --max-calls 64 --max-runtime 3600
+mmcg miner hooks worker status --client codex --project-root .
+mmcg miner hooks worker stop --client codex --project-root .
+```
+
+The shorter `miner start`, `stop` and `status` commands use saved project/client
+choices. Add `--client claude` or `codex` to select one configured client.
+
+| Managed worker | Contract |
+|---|---|
+| Ownership | One owner per client and canonical root |
+| Start | `started: true` means the bound child published run state. Inspect `run.reason`, it may already have failed |
+| Running owner | Reused without resetting counters. Stop before changing worker settings |
+| Restart | Without processor/budget flags, reuses saved settings for a new bounded run |
+| Call budget | Reserved before invocation. Default 64, range 1–10,000. Client retries and token/billing usage unmeasured |
+| Runtime budget | Includes idle time. Default 3,600 s, range 1–86,400 s |
+| Timeout / batch | Default 60 s / 4, maximum 120 s / 16 |
+| Repeated init | Retains run ID and spent counters, including stopped, failed, interrupted and exhausted runs |
+| Checkpoint | Episode revision and processor fingerprint, including executable digest, native model and adapter |
+| Fingerprint exclusions | Transitive script dependencies and server-side model weights |
+| Native automatic start | Saved `mining: on` and `provider: native` start/observe the worker at `SessionStart` |
+| Automatic renewal | A new session or newly completed episode may renew a terminal automatic run. Live runs retain budget. Resume, replay and explicit stop do not renew it |
+| Native update | A new session or completed episode replaces an automatic worker whose executable or adapter changed under unchanged settings/grant |
+| Changed settings, generation or custom processor | Requires explicit restart |
+| Automatic transient failure | Up to three consecutive attempts within the current budget |
+| Other worker failure | Stops, requires explicit start |
+| Stop/revocation | Cancels the owned process group, withholds unfinished drafts. Cannot retract sent provider input |
+| Crash/SIGKILL | Lost ownership reports `interrupted`. Completed checkpoints and outstanding lease expiry retained, external processor cleanup not guaranteed |
+| Status | Read-only ownership, state, heartbeat and budget. Foreground workers not observed |
+| Capture-mode status | Earlier terminal workers are history. An active unwanted worker or unavailable state produces a warning |
+
+No separate queue or login service is installed. Completed revisions use the
+capture journal checkpoints. Exact worker bounds are implemented in
+[background.rs](../../mcp/servers/mmcg/src/miner/hooks/background.rs).
+
+## Prompt refinement and intake
+
+Refinement is separately enabled through `init --refiner on --provider native`
+or direct hook configuration:
+
+```bash
+mmcg miner hooks setup --client codex --project-root . \
+  --refiner-provider native --refiner-timeout 8 --write
+```
+
+For a custom processor, use `--refiner-processor PATH` and repeated
+`--refiner-arg=VALUE`. Setup without these options preserves the selection.
+`--disable-refiner --write` disables refinement without disabling capture.
+Restart and trust the updated definitions.
+
+| Intake result | Contract |
+|---|---|
+| Original | Captured text and SHA-256 of its UTF-8 bytes, still delivered to the agent |
+| `passthrough` | Byte-identical original |
+| `refined` | Separate proposed text, at most 16 KiB |
+| `ask` | Up to 3 questions, no planner/executor handoff |
+| Workflow activation | Model interprets intent, must cite exact eligible original prose. Advisory handoff to `mastermind-task-planning` |
+| Continuation | Only this session's explicitly bound current spec. Changed specs, incomplete handoffs and completed tasks withheld |
+| Native delivery | `additionalContext`, no execution, tool permission or approval |
+| Incomplete/redacted/generated input | No processor invocation |
+| Failure/invalid output | `degraded`, original retained, no workflow handoff |
+| Admission changes | Concurrent revocation, reconfiguration, new prompt or end withholds the result |
+| Crash with `pending` receipt | Unknown outcome, not automatically retried |
+| Unstable native event identity | Ambiguous identical repeats quarantined |
+
+| Refiner bound | Value |
+|---|---|
+| Attempts | At most one per captured prompt, including failure, outside managed miner budget |
+| Processor timeout | 1–20 s, default 8 s |
+| Native prompt hook timeout | Processor timeout + 3 s, other hooks 3 s |
+| Original / response | 16 KiB / 64 KiB |
+| Combined native context | 8 KiB. Oversized refinement uses a receipt reference, profile may be omitted |
+| Client retries and token usage | Unmeasured |
+
+Inspect `intake` in `hooks show`, then read `hooks intake INTAKE_ID`. Bind a
+planned spec with `hooks bind-task INTAKE_ID --spec PATH` before preflight:
+
+| Task binding | Rule |
+|---|---|
+| Source | Current offered activation/continuation, exact original and proposed digests |
+| Replacement | `--expected-binding REVISION` from `state.intake.json` |
+| Identical repeat | Same receipt, never creates or executes another task |
+| Continuation | Same session, exact spec and current binding, no latest-task inference |
+| Crash | `prepared` marker blocks execution. Retry the same intake or CAS-replace with a current admitted intake |
+| Revocation, gaps, forgetting | Block new use, retain historical completed tasks |
+| Local marker | IDs and digests only, raw input stays in the global journal |
+| Execution evidence | Preflight, invocation, verification and review bind the same intake revision |
+
+Binding establishes provenance, not scope approval or preserved meaning. The
+executor receives original and proposed text as source data in its hashed
+prompt. Clients may ignore/truncate context or continue after a hook timeout.
+Neither a receipt nor an offered advisory proves that the workflow ran.
 
 ## Transcript admission
 

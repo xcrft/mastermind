@@ -642,9 +642,19 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
     if report["status"] == "planned" {
         println!("{}", serde_json::to_string_pretty(&report["settings"])?);
     }
-    println!(
-        "  Use --json for component details. Restart the selected client to load MCP and hooks."
-    );
+    println!("  Use --json for component details.");
+    if report["status"] == "configured"
+        && report["settings"]["clients"]
+            .as_array()
+            .is_some_and(|clients| !clients.is_empty())
+    {
+        let components = if report["settings"]["mining"] == "off" {
+            "MCP"
+        } else {
+            "MCP and hooks"
+        };
+        println!("  Restart the selected client to load {components}.");
+    }
     Ok(())
 }
 

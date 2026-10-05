@@ -1,5 +1,8 @@
 # Getting started
 
+Task mining described below is unreleased after npm `3.1.0`. Use a
+[current source build](#current-source-build) for that mode until the next release.
+
 Run these commands inside your repository:
 
 ```bash
@@ -9,8 +12,8 @@ mastermind init
 
 Requires Node.js 24+. The first `init` detects the active client, or installed
 Claude Code and Codex clients. It creates project guidance, indexes code and
-documentation, installs workflows, enables profile delivery and arms bounded
-mining inside the current agent task. Choices are saved in `.mastermind/setup.json`.
+documentation, installs workflows, enables profile delivery and mines
+preferences in the current agent task. Choices are saved in `.mastermind/setup.json`.
 
 ## 1. Choose your setup
 
@@ -27,23 +30,17 @@ mining inside the current agent task. Choices are saved in `.mastermind/setup.js
 For an explicit setup:
 
 ```bash
-mastermind init --client codex --mining capture
+mastermind init --client codex
 mastermind status --json
 ```
 
 Restart the client after setup. Complete any trust prompt in that client.
 Mastermind does not grant native client trust.
 
-| State | What it establishes |
-|---|---|
-| Saved settings | Requested choices for this project |
-| MCP and hook registration | Configuration was inspected or written |
-| Session observation | A local `SessionStart` was captured for the current generation |
-| Client trust and live MCP connection | Not independently established by those records |
-| `status --json` | Observed component states, missing evidence, and the next task action |
-
 An incomplete setup reports failed components. Fix the reported issue and repeat
 `init`. Existing `CONTEXT.md` and `CLAUDE.md` are preserved unless `--force` is used.
+Use `status --json` to inspect configuration, observed sessions and missing
+evidence. Saved configuration alone does not establish a live client connection.
 
 ## 2. Select mining and profile access
 
@@ -51,7 +48,7 @@ An incomplete setup reports failed components. Fix the reported issue and repeat
 |---|---|---|
 | `--mining off` | Disable capture and stop the managed miner | None from mining |
 | `--mining capture` | Record local interaction evidence for later inspection | None unless the refiner is enabled |
-| `--mining task` | The current agent proposes up to two source-cited candidates; local code seals them after Stop | No separate model invocation. Extra task context and tool use consume the current client's usage |
+| `--mining task` (macOS/Linux default) | The current agent proposes candidates, saved locally after complete Stop | No separate model invocation. Extra task context and tool use consume the current client's usage |
 | `--mining on --provider native` | Capture and start bounded semantic mining | Uses each captured client and its active model through the native CLI |
 | `--profile-access on` | Allow the selected clients to read this project's personal-profile view | None from the grant |
 | `--refiner on --provider native` | Refine user prompts through their captured native client and model | Extra calls outside the miner budget |
@@ -63,13 +60,6 @@ before becoming active habits. `--profile-access off` preserves that opt-out on
 future init runs. See
 [Persona hooks](guides/persona-hooks.md) for evidence and review boundaries.
 
-Task mining is the first-init default on supported native clients. The hook
-adds a short instruction and a ticket for `mmcg_mining_submit`. The agent may
-skip submission when there is no concrete preference. Local code rejects
-invented or quoted sources, foreign or expired tickets, and incomplete Stop
-events. It never invokes another model for task mining. Configuration does not
-prove that the agent followed the instruction or that a hypothesis is correct.
-
 To switch an existing repository while preserving its other saved choices:
 
 ```bash
@@ -78,31 +68,8 @@ mastermind init --mining task
 
 Restart the client so its MCP server exposes the new submission tool. Existing
 saved background-mining choices remain unchanged until explicitly switched.
-For optional separate background analysis:
-
-```bash
-mastermind init --client claude --mining on --provider native \
-  --max-calls 64 --max-runtime 3600
-```
-
-| Budget or lifecycle | Contract |
-|---|---|
-| `--max-calls` | Default 64 processor attempts per client run |
-| `--max-runtime` | Default 3600 seconds per client run, including idle time |
-| `--client all` | Each client has its own run and budget |
-| Repeated `init` | Keeps the existing run and counters, even when stopped, failed, interrupted, or exhausted |
-| Native `SessionStart` | Starts mining automatically; a new session may renew a terminal automatic run, except an explicit stop |
-| Newly completed native episode | May renew an exhausted or failed automatic run in the same chat. Replayed events and explicit stop never renew it |
-| Transient processor failure | Automatic runs retry up to three consecutive attempts within the same budget |
-| Native client or adapter update | A fresh native session or newly completed episode replaces the old automatic worker under unchanged saved settings |
-| Changed settings, capture generation, or custom processor | Requires an explicit restart instead of silently renewing a run |
-| `mastermind miner start` | Explicitly start or renew a run using saved choices |
-| `mastermind miner stop` | Stop the selected project's miners without deleting evidence |
-| `mastermind miner status --json` | Inspect those miners without starting them |
-
-The short miner commands use the saved client selection. Add `--client claude`
-or `--client codex` to target one selected client. A running worker with the same
-configuration is reused. Stop it before restarting with changed worker settings.
+For separate analysis, see [managed workers](reference/persona.md#managed-workers).
+Its call/runtime budgets and automatic renewal apply only to that mode.
 
 ## 3. Inspect the repository
 
@@ -157,14 +124,14 @@ workflow updates.
 | `--workflow on\|off` | Save whether `init` installs bundled workflows for selected clients |
 | `--no-global` | Alias for `--workflow off` |
 | `--draft-with claude` | Explicitly use Claude to draft new scaffold documents, which may edit files and use provider calls |
-| `--seed-style` | Explicitly seed the personal profile from authored Git history |
+| `--seed-style` | Explicitly seed Git observations during scaffolding |
 | `--no-index` | Skip this index refresh |
 | `--force` | Replace scaffold documents with backups, while client customization conflicts remain protected |
 
-Workflows default to on for selected clients. Context drafting and Git profile
-seeding are off by default. `--workflow off` skips workflow installation and
-leaves MCP and mining choices separate. See `mastermind init --help` for all
-options. The hidden compatibility flag `--no-claude` is no longer needed.
+Bundled workflows default to on for selected clients. Scaffold drafting is off.
+Profile-enabled client setup refreshes authored Git observations locally.
+`--workflow off` leaves MCP and mining choices separate. See
+`mastermind init --help` for all options.
 
 ## Optional: use task control
 
@@ -203,6 +170,23 @@ Cargo supplies the native CLI without the npm workflow bundle. Sources:
 [npm manifest](../npm/mastermind/package.json),
 [Cargo manifest](../mcp/servers/mmcg/Cargo.toml).
 
+### Current source build
+
+From this repository's source checkout:
+
+```bash
+cargo install --path mcp/servers/mmcg --locked
+```
+
+Then run inside the repository you want to work on:
+
+```bash
+mmcg init --workflow off
+```
+
+This uses the current native CLI without the npm workflow installer. Native
+client setup, profile access and task mining are available on macOS/Linux.
+
 For component-level setup, use `mastermind install`, `mastermind setup`, or
 `mastermind miner hooks`. Client guides cover advanced scope and removal:
 [Claude Code](integrations/claude-code.md), [Codex](integrations/codex.md),
@@ -226,6 +210,7 @@ ignore policy when sharing project files.
 | Operation | Model access |
 |---|---|
 | Default scaffold, indexing, deterministic queries, Lens, export | None |
+| Task mining | Current agent, no separate request |
 | `init --draft-with claude` | Explicit Claude-assisted document drafting |
 | Mining or refinement with an explicit provider | Captured episodes or user prompts sent through the selected provider |
 | Native task execution and review | Explicit Claude operations |

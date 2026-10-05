@@ -265,11 +265,16 @@ fn the_current_task_stages_and_seals_source_cited_drafts_without_inference() {
     let ticket = f.offer("one", PROMPT);
     let result = f.submit(&ticket, f.candidates(PROMPT), "codex");
     assert!(!failed(&result), "{result}");
-    assert!(!f.episode()["drafts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|draft| draft["processor"]["engine"] == "current_task_agent"));
+    let pending = f.episode();
+    assert_eq!(pending["task_mining"]["status"], "submitted");
+    assert!(
+        pending["drafts"].as_array().unwrap().is_empty(),
+        "{pending}"
+    );
+    assert!(
+        pending["analyses"].as_array().unwrap().is_empty(),
+        "{pending}"
+    );
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "codex")));
     f.event(
         "Stop",

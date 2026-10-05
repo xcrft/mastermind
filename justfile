@@ -135,8 +135,7 @@ security:
 evals *ARGS:
     bash evals/run-verified.sh {{ARGS}}
 
-# Copy canonical CLAUDE.md / spec template into the mmcg crate mirror.
-# Run after editing the canonical files — otherwise `cargo publish` ships a stale mmcg init.
+# Sync project context and workflow templates shipped by the Cargo package.
 sync-templates:
     cp agents/claude-md/mastermind-context.md {{MMCG}}/templates/context.md
     cp agents/claude-md/mastermind-workflow.md {{MMCG}}/templates/workflow.md
@@ -160,14 +159,23 @@ outline FILE:
 recent SINCE="1h":
     {{MMCG}}/target/debug/mmcg --index /tmp/mmcg-mastermind.db query recent --since {{SINCE}}
 
-# End-to-end smoke: scratch dir → mmcg init → mmcg index → outline a file.
+# Exercise local onboarding and indexing in a disposable project.
 smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     smoke_dir="$(mktemp -d)"
     trap 'rm -rf "$smoke_dir"' EXIT
     mkdir -p "$smoke_dir/src"
-    cp {{MMCG}}/src/queries.rs "$smoke_dir/src/queries.rs"
-    {{MMCG}}/target/debug/mmcg init "$smoke_dir" --no-claude --no-global --no-seed-style
-    {{MMCG}}/target/debug/mmcg --index "$smoke_dir/.mastermind/mmcg.db" query outline src/queries.rs | head -20
-    echo "Smoke passed."
+    cp tests/ci-fixture/src/lib.py "$smoke_dir/src/lib.py"
+    git -C "$smoke_dir" -c core.hooksPath=/dev/null init --quiet --initial-branch=smoke
+    {{MMCG}}/target/debug/mmcg init "$smoke_dir" --client none --workflow off
+    {{MMCG}}/target/debug/mmcg --index "$smoke_dir/.mastermind/mmcg.db" query outline src/lib.py > "$smoke_dir/outline.json"
+    {{PY}} - "$smoke_dir/outline.json" <<'PY'
+    import json, sys
+    with open(sys.argv[1]) as stream:
+        outline = json.load(stream)
+    assert outline["file"] == "src/lib.py", outline
+    functions = {node["name"] for node in outline["nodes"][0]["children"] if node["kind"] == "function"}
+    assert functions == {"greet", "caller"}, outline
+    print("Smoke passed: greet and caller indexed.")
+    PY

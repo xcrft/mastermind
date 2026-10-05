@@ -19,9 +19,10 @@ mastermind doctor --workflow --client claude
 | `mastermind update --workflow-only --client claude --profile frontend` | Select the frontend skill bundle. Other profiles are `security` and `full` |
 | Restart Claude Code | Load the installed workflow |
 
-`init` also indexes code and documents and enables local hook capture. Semantic
-mining requires `--mining on --provider native`. Add `--profile-access on` to
-grant this project access to your profile. See [onboarding](../getting-started.md).
+First init also indexes the project, enables profile delivery and configures
+task mining in the current Claude agent. Restart Claude Code and review the
+definitions in `/hooks`. On Windows use `--mining off`, since native hooks
+require Unix. See [onboarding](../getting-started.md) for mode choices.
 
 ## Register MCP only
 
@@ -65,4 +66,4 @@ mastermind setup claude --scope project --root . --remove --write
 
 [Workflow](../workflow.md) covers handoff and `run-task --exec` with existing
 Claude authentication and permissions. [Persona hooks](../guides/persona-hooks.md)
-separately enables capture and profile delivery.
+covers source inspection, candidate review and optional separate analysis.

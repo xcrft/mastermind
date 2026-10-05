@@ -673,19 +673,6 @@ def _git_environment(source: dict[str, str] | None = None) -> dict[str, str]:
     }
 
 
-def _nonnegative_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return max(0, value)
-
-
-def _nonnegative_float(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0
-    result = float(value)
-    return result if math.isfinite(result) and result >= 0 else 0.0
-
-
 def telemetry_from_payload(payload: dict) -> dict[str, object]:
     issues: list[str] = []
 

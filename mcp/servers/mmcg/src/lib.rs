@@ -5,8 +5,8 @@
 //! SQLite database (`.mastermind/mmcg.db` by default). Exposes structural
 //! queries over MCP for AI agents.
 //!
-//! Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Rust, C#, Go,
-//! Java, PHP, C/C++. C/C++ is best-effort syntactic — see README Limitations.
+//! Supported languages: Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust,
+//! C#, Go, Java, PHP, C/C++. C/C++ is best-effort syntactic — see README Limitations.
 //! Repository-owned architecture policies consume the same bounded graph.
 
 pub mod acceptance;

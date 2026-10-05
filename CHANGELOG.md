@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Use the current task agent for preference proposals on first native client
+  setup. Capture runs locally and drafts require review. Separate background
+  analysis remains available through `--mining on`.
+
 ## [3.1.0] - 2026-09-28
 
 ### Fixed

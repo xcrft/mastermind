@@ -243,7 +243,7 @@ mastermind run-task "$TASK_SPEC" --exec \
 |---|---|
 | Iteration | New preflight with the original baseline |
 | Context | Task-bound packet offered on stdin |
-| Personal profile | Only through an existing `--profile-client` grant |
+| Personal profile | Configured audience or explicit `--profile-client`, with an existing read grant |
 | Record | `invocation.json` stores hashes and outcomes, no raw prompt |
 | Permissions | Native edit mode, no permission prompts or blanket Bash grant |
 | Native configuration | Authentication, MCP, hooks, and local rules inherited |

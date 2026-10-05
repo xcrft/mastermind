@@ -19,10 +19,10 @@ mastermind doctor --workflow --client codex
 | Update without `--profile` | Keep the selected profile |
 | Agent runtime | Codex uses portable skills, not Claude-native subagent files |
 
-`init` indexes code and documents and configures local capture. Restart Codex,
-trust the project and inspect `/hooks`. Semantic mining requires
-`--mining on --provider native`. On Windows select `--mining off` because native
-hooks and managed workers require Unix. See [onboarding](../getting-started.md).
+First init indexes the project, enables profile delivery and configures task
+mining in the current Codex agent. Restart Codex, trust the project and inspect
+`/hooks`. On Windows use `--mining off`, since native hooks require Unix.
+See [onboarding](../getting-started.md) for mode choices.
 
 ## Register MCP only
 
@@ -64,5 +64,5 @@ mastermind setup codex --scope user --remove --write
 | Doctor | Reads `[mcp_servers.mmcg]` in `~/.codex/config.toml` |
 
 Registration checks and server handshake are distinct.
-[Persona hooks](../guides/persona-hooks.md) requires separate capture and
-global-profile read grants.
+Init configures capture and profile read grants for this client and project.
+[Persona hooks](../guides/persona-hooks.md) covers source inspection and review.

@@ -60,6 +60,9 @@ continuation can select the spec's paths and workflow. The planning workflow
 retrieves `mmcg_profile` again when its known scope differs from that selection.
 The native task controller automatically uses the project's configured Claude
 profile audience for `run-task --exec`, with `--profile-client` as an override.
+That audience is retained as `state.profile_client` across review/completion
+resumes. Older native tasks recover it from a validated invocation receipt.
+Completion rechecks read access, so a saved audience cannot undo revocation.
 After task and native-client admission, it refreshes committed Git observations
 locally using the stored author selector, then supplies the executor's context packet and
 pins its receipt/revision before delivery. The manual auditor workflow can

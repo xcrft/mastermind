@@ -2,7 +2,6 @@
 
 import copy
 import hashlib
-import json
 import os
 import shutil
 import sqlite3

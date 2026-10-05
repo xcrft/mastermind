@@ -86,7 +86,7 @@ See the [context contract](reference/persona-context.md).
 | Native capture | Original events, identities, gaps and recorded profile/refiner influence | A user channel does not prove human authorship |
 | Refiner | Original-bound intake, typed route and revision | An advisory is not execution or new permission |
 | Task binding | Current session/intake/spec relation with compare-and-swap | Stale or conflicting revisions cannot replace the current relation |
-| Managed mining | Bounded worker attempts and durable checkpoints | Collection and extraction do not activate habits |
+| Mining | Local extraction and current-agent proposals, or optional separate worker attempts | Drafts and checkpoints do not activate habits |
 | Candidate review | Decision on exact evidence | Dependent observations cannot increase independent support |
 | Context delivery | Selected sources, audience grant and offered byte digests | Model use and benefit remain unknown |
 

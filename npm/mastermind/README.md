@@ -20,8 +20,9 @@ mastermind init
 
 The first run detects the active client, or installed Claude Code and Codex
 clients. It scaffolds and indexes the project, installs workflows, enables the
-profile and arms bounded native mining. Each client mines with its own login
-and captured task model. Use `--client none` for local indexing only.
+profile and uses `--mining task`. The current agent proposes preference drafts,
+saved locally after complete capture without a separate model request.
+Use `--client none` for local indexing only.
 Choices are saved in `.mastermind/setup.json`.
 
 | Command | Purpose |
@@ -35,9 +36,10 @@ Choices are saved in `.mastermind/setup.json`.
 
 Restart the selected client and review its generated definitions in `/hooks`.
 Registration does not establish client trust or a live connection. Use
-`--mining capture` for local learning or `--profile-access off` to disable profile
-delivery. Prompt refinement remains optional. Repeated `init` preserves miner
-budgets. Existing npm hooks use the package launcher after updates.
+`--mining capture` for collection without semantic analysis or
+`--profile-access off` to disable profile delivery. Added task context and tools
+consume the current client's usage. Drafts require review. Existing npm hooks
+use the package launcher after updates.
 
 | Platform | Support |
 |---|---|
@@ -54,7 +56,8 @@ for binary packages.
 
 | Guide | Covers |
 |---|---|
-| [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) | Mining modes, budgets, permissions, updates, and alternative installations |
+| [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) | Setup, mining modes, updates and alternative installations |
+| [Personal profile](https://github.com/xcrft/mastermind/blob/main/docs/guides/persona-hooks.md) | Capture, candidate review and optional separate analysis |
 | [Architecture](https://github.com/xcrft/mastermind/blob/main/docs/architecture.md) | Context layers and evidence boundaries |
 | [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) | Scope, checks, review, and completion |
 | [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md) | Native commands, tools, and language coverage |

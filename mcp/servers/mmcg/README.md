@@ -83,7 +83,7 @@ mmcg setup claude --scope user --write  # apply
 
 For direct stdio use, run `mmcg serve`. Structural MCP queries may refresh the
 managed index before reading it. Custom indexes require an explicit refresh.
-Other tools are read-only except the additive local scratchpad write.
+Other tools are read-only except local scratchpad writes and task-mining submissions.
 
 See [client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
 for Claude Code, Codex, Cursor, Continue and generic MCP clients.

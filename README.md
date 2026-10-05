@@ -18,6 +18,9 @@ evidence before completion.
 
 ## Quick start
 
+Current-task mining is on `main`, pending the next package release. Use the
+[source build](docs/getting-started.md#current-source-build) to try it now.
+
 Requires Node.js 24+. The [npm manifest](npm/mastermind/package.json) lists
 prebuilt binaries for macOS, Linux, and Windows. Run these commands inside your repository:
 
@@ -28,9 +31,10 @@ mastermind init
 
 The first run detects the active client, or the installed Claude Code and Codex
 clients. It creates project guidance, indexes code and documentation, connects
-the clients, and enables profile delivery and bounded native mining. Each
-client uses its own login and the model captured from its task. Use
-`--client none` for local indexing only. Saved choices survive repeated `init`.
+the clients, and enables profile delivery and `--mining task`. Preferences are
+proposed by the current agent and saved locally after complete capture. No
+separate model is launched. Use `--client none` for local indexing only.
+Saved choices survive repeated `init`.
 
 | Command | Result |
 |---|---|
@@ -65,9 +69,9 @@ mining choices, Windows support, and other installation paths.
 ## Give an agent useful context
 
 `init --client claude|codex|all` connects Claude Code, Codex, or both.
-On first setup, selected clients receive the personal profile and automatically
-mine complete sessions with their captured model. Git observations refresh at
-init and in the background. macOS and Linux support native hooks.
+Selected clients receive relevant Git observations and reviewed preferences
+through prompt hooks and MCP. Git observations refresh locally at init and task
+boundaries. macOS and Linux support native hooks.
 Other clients use [MCP setup](docs/README.md#start-here).
 
 | Context | Scope |
@@ -80,9 +84,8 @@ Other clients use [MCP setup](docs/README.md#start-here).
 | Task evidence | Results, blockers, and the reviewed revision |
 
 Profile access is scoped to the selected project and clients. Use
-`--profile-access off` to disable it, or `--mining capture` to keep learning local.
-The profile includes Git observations and reviewed preferences. Those
-preferences grant no action permissions. Context previews expose revisions
+`--profile-access off` to disable it, or `--mining capture` to collect without
+semantic analysis. Preferences grant no action permissions. Context previews expose revisions
 and omissions, not proof of model use. See [Architecture](docs/architecture.md)
 and [Persona hooks](docs/guides/persona-hooks.md).
 
@@ -110,9 +113,8 @@ Claude Code. Completion requires current evidence and resolved review.
 | Personal profile | Reviewed preferences remain advisory |
 | Task records | Local evidence does not independently establish correctness |
 | Native process policy | Uses client restrictions, not an OS sandbox |
-| Provider access | Client init enables bounded native semantic mining. `--mining capture` keeps it local. Refinement, drafting, execution, and review use their separate options and can send content to a provider |
-| Miner budgets | Repeated `init` preserves each run's counters, including stopped or exhausted runs. `miner start` explicitly starts a new run |
-| Prompt refiner | Optional `--refiner on` uses additional calls outside the miner's call budget |
+| Task mining | Uses the current agent's allowance for added context and tools. Drafts require review |
+| Separate model requests | Background mining, refinement, drafting, execution and review require their own options. See [provider contracts](docs/reference/persona.md#hook-processor-contract) |
 
 [Language coverage](docs/reference/mmcg.md#language-coverage) includes Python,
 TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.

@@ -23,7 +23,6 @@ use std::process::ExitCode;
 
 static BUILD_VERSION_MARKER: &str = concat!("MMCG_BUILD_VERSION=[", env!("CARGO_PKG_VERSION"), "]");
 
-/// Which parts of a Mastermind setup `uninstall` should remove.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum MapFormat {
@@ -108,6 +107,7 @@ impl From<FactAdapterFormat> for mmcg::fact_adapter::AdapterFormat {
     }
 }
 
+/// Which parts of a Mastermind setup `uninstall` should remove.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum UninstallScope {

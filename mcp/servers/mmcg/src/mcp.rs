@@ -166,9 +166,6 @@ enum RequestMetaError {
     Unsupported(String),
 }
 
-/// One MCP tool. `schema` returns the `tools/list` JSON entry; `handler` runs
-/// the call and returns the raw payload ([`handle_tools_call`] adds the content
-/// envelope).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolBehavior {
     ReadOnly,
@@ -176,6 +173,8 @@ enum ToolBehavior {
     AdditiveNonIdempotent,
 }
 
+/// `schema` supplies the public catalog entry. `handler` returns its payload
+/// before [`handle_tools_call`] adds the MCP envelope.
 struct ToolDef {
     name: &'static str,
     schema: fn() -> Value,
@@ -4436,61 +4435,84 @@ mod tests {
     }
 
     #[test]
-    fn tool_annotations_match_behavior_table() {
+    fn public_tool_catalog_preserves_names_schemas_and_annotations() {
+        let readers = [
+            "mmcg_tasks",
+            "mmcg_history",
+            "mmcg_docs",
+            "mmcg_project_profile",
+            "mmcg_facts",
+            "mmcg_team_map",
+            "mmcg_recent_changes",
+            "mmcg_status",
+            "mmcg_scratchpad_read",
+            "mmcg_change_class",
+            "mmcg_context",
+            "mmcg_profile",
+        ];
+        let refreshers = [
+            "mmcg_search",
+            "mmcg_callers",
+            "mmcg_callees",
+            "mmcg_impact",
+            "mmcg_symbols_in_file",
+            "mmcg_outline",
+            "mmcg_files",
+            "mmcg_imports",
+            "mmcg_imported_by",
+            "mmcg_unreferenced",
+            "mmcg_api_surface",
+            "mmcg_symbols_changed_since",
+            "mmcg_dependency_cycles",
+            "mmcg_centrality",
+            "mmcg_semantic",
+            "mmcg_map",
+            "mmcg_temporal",
+            "mmcg_change_impact",
+            "mmcg_brief",
+            "mmcg_test_impact",
+            "mmcg_concept",
+        ];
+        let additions = ["mmcg_scratchpad_append", "mmcg_mining_submit"];
+        let expected: std::collections::BTreeSet<_> = readers
+            .iter()
+            .chain(&refreshers)
+            .chain(&additions)
+            .copied()
+            .collect();
+
         for version in [
             ProtocolVersion::Legacy,
             ProtocolVersion::Current,
             ProtocolVersion::Stateless,
         ] {
-            assert!(tools_list(version)["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|tool| tool["inputSchema"]["additionalProperties"] == false));
-        }
-
-        let legacy = tools_list(ProtocolVersion::Legacy);
-        assert_eq!(legacy["tools"].as_array().unwrap().len(), 35);
-        assert!(legacy["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|tool| tool.get("annotations").is_none()));
-
-        let current = tools_list(ProtocolVersion::Current);
-        let tools = current["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 35);
-        let mut readers = 0;
-        let mut refreshers = 0;
-        for tool in tools {
-            let annotations = &tool["annotations"];
-            assert!(annotations.get("openWorldHint").is_none());
-            if tool["name"] == "mmcg_scratchpad_append" || tool["name"] == "mmcg_mining_submit" {
-                assert_eq!(
-                    annotations,
-                    &json!({
+            let catalog = tools_list(version);
+            let tools = catalog["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), expected.len());
+            assert_eq!(tools.len(), TOOLS.len());
+            let mut seen = std::collections::BTreeSet::new();
+            for (tool, registration) in tools.iter().zip(TOOLS) {
+                let name = tool["name"].as_str().unwrap();
+                assert!(expected.contains(name), "unexpected tool: {name}");
+                assert!(seen.insert(name), "duplicate tool: {name}");
+                assert_eq!(name, registration.name, "schema and dispatch disagree");
+                assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+                if version == ProtocolVersion::Legacy {
+                    assert!(tool.get("annotations").is_none());
+                    continue;
+                }
+                let annotations = if readers.contains(&name) {
+                    json!({ "readOnlyHint": true })
+                } else {
+                    json!({
                         "readOnlyHint": false,
                         "destructiveHint": false,
-                        "idempotentHint": false
+                        "idempotentHint": refreshers.contains(&name)
                     })
-                );
-            } else if tool_requires_fresh_index(tool["name"].as_str().unwrap()) {
-                assert_eq!(
-                    annotations,
-                    &json!({
-                        "readOnlyHint": false,
-                        "destructiveHint": false,
-                        "idempotentHint": true
-                    })
-                );
-                refreshers += 1;
-            } else {
-                assert_eq!(annotations, &json!({ "readOnlyHint": true }));
-                readers += 1;
+                };
+                assert_eq!(tool["annotations"], annotations, "{name}");
             }
         }
-        assert_eq!(readers, 12);
-        assert_eq!(refreshers, 21);
     }
 
     #[test]
@@ -6900,22 +6922,6 @@ mod checks {
         );
         assert_eq!(profile["count"], 0);
         assert_eq!(profile["claim_candidates_count"], 0);
-    }
-
-    #[test]
-    fn tools_list_covers_every_handler() {
-        let listed: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(listed.len(), 35, "expected 35 tools, got {}", listed.len());
-        for name in &listed {
-            assert!(
-                TOOLS.iter().any(|t| &t.name == name),
-                "tool '{name}' listed but has no entry in TOOLS"
-            );
-        }
-        let mut seen = std::collections::HashSet::new();
-        for t in TOOLS {
-            assert!(seen.insert(t.name), "duplicate tool name: {}", t.name);
-        }
     }
 
     #[test]

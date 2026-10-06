@@ -156,10 +156,18 @@ fn marker_entries(
                 // A different delivery can finish after this entry was listed
                 // or opened. A replacement is not the same as its absence.
                 root.verify()?;
-                if bounded_fs::inspect_absent_path(root, &path, ReadControl::default())?.is_some() {
+                if bounded_fs::inspect_absent_path_after_removal(root, &path)?.is_some() {
                     continue;
                 }
                 return Err(BoundedReadError::SnapshotChanged.into());
+            }
+            Err(BoundedReadError::Io(error))
+                if allow_disappeared && bounded_fs::is_delete_pending_error(&error) =>
+            {
+                if bounded_fs::inspect_absent_path_after_removal(root, &path)?.is_some() {
+                    continue;
+                }
+                return Err(BoundedReadError::Io(error).into());
             }
             Err(error) => return Err(error.into()),
         };
@@ -227,6 +235,7 @@ fn begin_at(directory: &Path, prefix: &str) -> Result<Fence> {
                 // Empty is the complete marker payload. It is already visible
                 // as pending if the process fails before either fsync finishes.
                 file.sync_all()?;
+                drop(file);
                 root.sync()?;
                 // Also persist freshly created .persona-capture/.mastermind
                 // directory entries. Existing ancestors are not modified.
@@ -483,6 +492,73 @@ mod tests {
             worker.join().unwrap();
         }
         assert_eq!(std::fs::read_dir(&f.directory).unwrap().count(), 0);
+        assert!(!pending_at(&f.directory, &key).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn admission_waits_for_pending_deletion_and_rejects_live_access_errors() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+            FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let f = Fixture::new();
+        let key = f.key("codex");
+        let deleted = begin_at(&f.directory, &key).unwrap();
+        let name = deleted.path.file_name().unwrap().to_os_string();
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(DELETE | FILE_GENERIC_READ)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&deleted.path)
+            .unwrap();
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: this owned handle grants DELETE. The legacy disposition
+        // deliberately keeps the name delete-pending until the handle closes.
+        assert_ne!(
+            unsafe {
+                SetFileInformationByHandle(
+                    handle.as_raw_handle(),
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&disposition).cast(),
+                    std::mem::size_of_val(&disposition) as u32,
+                )
+            },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        assert!(matches!(
+            bounded_fs::inspect_absent_path(&deleted.root, &deleted.path, ReadControl::default()),
+            Err(BoundedReadError::Io(error)) if bounded_fs::is_delete_pending_error(&error)
+        ));
+        assert!(marker_entries(&deleted.root, vec![name.clone()], false).is_err());
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(handle);
+        });
+        let admitted = marker_entries(&deleted.root, vec![name], true);
+        closer.join().unwrap();
+        assert!(admitted.unwrap().is_empty());
+        assert!(!deleted.current().unwrap());
+
+        let live = begin_at(&f.directory, &key).unwrap();
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&live.path)
+            .unwrap();
+        assert!(marker_entries(
+            &live.root,
+            vec![live.path.file_name().unwrap().to_os_string()],
+            true,
+        )
+        .is_err());
+        drop(handle);
+        assert!(live.current().unwrap());
+        live.clear().unwrap();
         assert!(!pending_at(&f.directory, &key).unwrap());
     }
 }

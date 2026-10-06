@@ -647,6 +647,48 @@ pub(crate) fn inspect_absent_path(
     Err(BoundedReadError::InvalidPath)
 }
 
+pub(crate) fn is_delete_pending_error(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING};
+        matches!(
+            error.raw_os_error(),
+            Some(code) if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_DELETE_PENDING as i32
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Windows can keep a deleted name inaccessible until the last reader closes
+/// its handle. An access error is never absence: wait briefly for a verified
+/// missing path, retaining all root, parent and no-follow checks on each pass.
+pub(crate) fn inspect_absent_path_after_removal(
+    root: &RootCapability,
+    path: &Path,
+) -> Result<Option<AbsentPath>, BoundedReadError> {
+    #[cfg(windows)]
+    let deadline = Some(Instant::now() + std::time::Duration::from_millis(500));
+    #[cfg(not(windows))]
+    let deadline = None;
+    let control = ReadControl {
+        deadline,
+        interrupted: None,
+    };
+    loop {
+        match inspect_absent_path(root, path, control) {
+            Err(BoundedReadError::Io(error)) if is_delete_pending_error(&error) => {
+                control.check()?;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+}
+
 pub(crate) fn create_regular_file_with_capability(
     root: &RootCapability,
     path: &Path,
@@ -1000,7 +1042,7 @@ pub(crate) fn remove_regular_file_expected_with_capability(
     parent.remove_file(&name).map_err(BoundedReadError::Io)?;
     sync_directory(&parent)?;
     root.verify()?;
-    match inspect_absent_path(root, path, ReadControl::default())? {
+    match inspect_absent_path_after_removal(root, path)? {
         Some(_) => Ok(()),
         None => Err(BoundedReadError::SnapshotChanged),
     }

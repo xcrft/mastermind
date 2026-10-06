@@ -4175,13 +4175,12 @@ esac
     fn native_normal_exit_cleans_descendant_holding_pipes_open() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let root = tmp("native-descendant-timeout");
-            let script = root.join("descendant");
-            fs::write(&script, "#!/bin/sh\nsleep 5 &\necho $!\nexit 0\n").unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
             let started = Instant::now();
-            let output = run_bounded(&script, &[]).unwrap();
+            let output = run_bounded(
+                Path::new("/bin/sh"),
+                &["-c".into(), "sleep 5 &\necho $!\nexit 0\n".into()],
+            )
+            .unwrap();
             let pid: u32 = String::from_utf8(output.stdout)
                 .unwrap()
                 .trim()
@@ -4199,7 +4198,6 @@ esac
                         .trim()
                         .starts_with('Z')
             );
-            fs::remove_dir_all(root).ok();
         }
     }
 
@@ -4207,28 +4205,29 @@ esac
     fn native_runner_bounds_output_and_kills_timeout() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let root = tmp("native-bounded");
-            let noisy = root.join("noisy");
-            fs::write(
-                &noisy,
-                "#!/bin/sh\nhead -c 70000 /dev/zero\nhead -c 70000 /dev/zero >&2\n",
+            // Execute the stable interpreter. A concurrent fork can retain a
+            // newly written script's writable descriptor until exec on Linux.
+            let output = run_bounded(
+                Path::new("/bin/sh"),
+                &[
+                    "-c".into(),
+                    "head -c 70000 /dev/zero\nhead -c 70000 /dev/zero >&2\n".into(),
+                ],
             )
             .unwrap();
-            fs::set_permissions(&noisy, fs::Permissions::from_mode(0o700)).unwrap();
-            let output = run_bounded(&noisy, &[]).unwrap();
             assert_eq!(output.stdout.len(), PROCESS_OUTPUT_MAX_BYTES);
             assert_eq!(output.stderr.len(), PROCESS_OUTPUT_MAX_BYTES);
             assert!(output.stdout_truncated && output.stderr_truncated);
 
-            let hanging = root.join("hanging");
-            fs::write(&hanging, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
-            fs::set_permissions(&hanging, fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(
-                run_bounded_with_timeout(&hanging, &[], Duration::from_millis(50)).unwrap_err(),
+                run_bounded_with_timeout(
+                    Path::new("/bin/sh"),
+                    &["-c".into(), "while :; do :; done\n".into()],
+                    Duration::from_millis(50),
+                )
+                .unwrap_err(),
                 "native_timeout"
             );
-            fs::remove_dir_all(root).ok();
         }
     }
 

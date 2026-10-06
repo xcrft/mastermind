@@ -58,7 +58,10 @@ mastermind miner hooks show '<capture-episode-id>'
 mastermind miner hooks draft '<draft-id>'
 ```
 
-`show` includes coverage gaps, original events, analysis receipts and draft IDs.
+`show` includes coverage gaps, retained user/assistant text, tool receipts,
+analysis receipts and draft IDs. Tool bodies are omitted; the bounded context
+keeps receipt summaries and a digest trace. Missing tool results still block
+mining.
 Read the full draft with `draft` before reviewing its meaning or source.
 A captured episode is an interaction unit. `Stop` ends a response, not
 necessarily the user's task.

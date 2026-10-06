@@ -38,6 +38,24 @@ pub(super) fn on_stop(db: &mut Journal, grant: &Grant, episode: &str) {
     // Sealing a ready proposal is cheap. Delayed transcript binding and Git
     // scans run outside the native hook's three-second deadline.
     let _ = db.finish_task_mining(episode);
+    spawn_finalizer(episode);
+}
+
+pub(super) fn on_source_update(db: &mut Journal, grant: &Grant, episode: &str) {
+    if !enabled(Path::new(&grant.project_root), &grant.client).unwrap_or(false) {
+        return;
+    }
+    // A matching tool result may arrive after Stop. Recheck the staged proposal
+    // locally; completed drafts never rebind to changed source automatically.
+    if db
+        .finish_task_mining(episode)
+        .is_ok_and(|result| result["status"] == "pending_model_binding")
+    {
+        spawn_finalizer(episode);
+    }
+}
+
+fn spawn_finalizer(episode: &str) {
     let result = std::env::current_exe().and_then(|exe| {
         Command::new(exe)
             .args(["miner", "hooks", "finish-task", "--episode", episode])

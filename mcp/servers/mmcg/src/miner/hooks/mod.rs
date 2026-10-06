@@ -19,7 +19,7 @@ mod worker;
 
 pub use refiner::Config as RefinerConfig;
 
-use super::{collection, curation, feedback, profile, store};
+use super::{collection, curation, profile, store};
 use crate::bounded_fs::BoundedReadError;
 use journal::{Draft, Incoming, Journal};
 use serde_json::{json, Value};
@@ -31,7 +31,7 @@ use std::path::Path;
 type Error = Box<dyn std::error::Error>;
 pub(super) const EXTRACTOR: &str = "persona-hooks-semantic-v1";
 // Native tool envelopes can be much larger than retained evidence. Parse a
-// bounded envelope, then keep MAX_TEXT and the incomplete-evidence gates.
+// bounded envelope, then retain user prose and tool receipts separately.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 const MAX_TEXT: usize = 16 * 1024;
 
@@ -455,6 +455,9 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     }
     if let Some(episode) = receipt["revised_episode"].as_str() {
         local::automatic(&mut db, &grant, episode);
+        if kind != "Stop" {
+            task_mining::on_source_update(&mut db, &grant, episode);
+        }
     }
     if local::drain(&mut db, &grant).is_err() {
         eprintln!("Mastermind: local candidate retry remains pending");
@@ -594,6 +597,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
     } else {
         None
     };
+    let digest = hash(v);
     let (actor, mut origin, mut text) = match kind {
         "UserPromptSubmit" => (
             "user",
@@ -611,20 +615,8 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
                 .unwrap_or("")
                 .to_owned(),
         ),
-        "PreToolUse" => (
-            "assistant",
-            "agent",
-            serde_json::to_string(
-                &json!({"tool_name":v.get("tool_name"),"tool_input":v.get("tool_input")}),
-            )?,
-        ),
-        "PostToolUse" | "PostToolUseFailure" => (
-            "tool",
-            "tool",
-            serde_json::to_string(
-                &json!({"tool_name":v.get("tool_name"),"tool_response":v.get("tool_response"),"error":v.get("error")}),
-            )?,
-        ),
+        "PreToolUse" => ("assistant", "agent", tool_receipt(v, &digest)?),
+        "PostToolUse" | "PostToolUseFailure" => ("tool", "tool", tool_receipt(v, &digest)?),
         _ => ("system", "client", String::new()),
     };
     if kind == "UserPromptSubmit"
@@ -647,7 +639,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
     if text.len() > MAX_TEXT {
         text.clear();
         gap = Some("oversized_event_content".into());
-    } else if feedback::looks_secret(&text) || crate::indexer::secret_like_documentation(&text) {
+    } else if semantic::secret_like(&text) {
         text.clear();
         gap = Some("redacted_event_content".into());
     }
@@ -667,8 +659,8 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
                     || tool_input.contains("mmcg context")
                     || tool_input.contains("mastermind context"))));
     let profile_exposure = profile_read.then(|| {
-        json!({"status":"possible_tool_exposure","tool":tool_name,
-        "native_event_digest":hash(v),"profile_revision":"unknown"})
+        json!({"status":"possible_tool_exposure","tool":retained_tool_name(v),
+        "native_event_digest":digest,"profile_revision":"unknown"})
     });
     let model = native::hook_model(v, kind)?;
     Ok(Incoming {
@@ -677,7 +669,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         native_session: session.into(),
         native_turn: turn,
         native_key,
-        digest: hash(v),
+        digest,
         kind: kind.into(),
         actor: actor.into(),
         origin: origin.into(),
@@ -690,6 +682,24 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
             && !forked,
         profile_exposure,
     })
+}
+
+fn retained_tool_name(value: &Value) -> Option<&str> {
+    value["tool_name"].as_str().filter(|name| {
+        name.len() <= 128
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+            && !semantic::secret_like(name)
+    })
+}
+
+fn tool_receipt(value: &Value, digest: &str) -> Result<String, Error> {
+    // Tool bodies are not personal evidence. Retain their identities without
+    // copying arbitrary output or credentials into the persona journal.
+    Ok(serde_json::to_string(&json!({"capture":"metadata_only",
+        "tool_name":retained_tool_name(value),"native_event_digest":digest,
+        "native_event_bytes":serde_json::to_vec(value)?.len()}))?)
 }
 
 pub fn episodes(root: &Path, limit: usize, after: Option<&str>) -> Result<(), Error> {
@@ -711,7 +721,7 @@ pub fn show(episode: &str) -> Result<(), Error> {
     let db = Journal::open(false)?;
     print(
         &json!({"episode":db.snapshot(episode)?,"capture":db.episode(episode)?,"drafts":db.draft_receipts(episode)?,"intake":db.intake_for_episode(episode)?,"task_mining":db.task_mining_receipt(episode)?,"analyses":db.analysis_receipts(episode)?,
-        "note":"User-channel text is unverified authorship. Stop is an observed boundary, not task completion. Tool output is not proof of a human preference."}),
+        "note":"User-channel text is unverified authorship. Stop is an observed boundary, not task completion. Tool receipts retain identities and digests, not bodies or proof of success. ToolTrace binds receipts omitted from the bounded context."}),
     )
 }
 

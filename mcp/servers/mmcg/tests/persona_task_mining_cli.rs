@@ -319,6 +319,149 @@ fn the_current_task_stages_and_seals_source_cited_drafts_without_inference() {
             .count(),
         1
     );
+    f.event("SessionEnd", "", json!({}));
+    let ended = f.success(&[
+        "miner",
+        "hooks",
+        "show",
+        shown["episode"]["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(ended["episode"]["revision"], shown["episode"]["revision"]);
+    let analysis = ended["analyses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|analysis| analysis["processor"]["engine"] == "current_task_agent")
+        .unwrap();
+    assert_eq!(analysis["current"], true);
+    let retained = f.success(&["miner", "hooks", "draft", draft["id"].as_str().unwrap()]);
+    assert_eq!(retained["current"], true);
+    assert_eq!(retained["draft"]["revision"], draft["revision"]);
+    assert_eq!(retained["draft"]["attested"], false);
+    // Older captures retained the empty closing event inside the episode.
+    // Reading that representation must preserve the original source binding.
+    let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    let end_id: String = db
+        .query_row(
+            "SELECT id FROM hook_event WHERE kind='SessionEnd'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy = ended["capture"].clone();
+    let influence = legacy["events"][0]["influence"].clone();
+    legacy["events"].as_array_mut().unwrap().push(json!({
+        "id":end_id,"kind":"SessionEnd","actor":"system","origin":"client","text":"",
+        "influence":influence
+    }));
+    db.execute(
+        "UPDATE hook_episode SET data=?1 WHERE id=?2",
+        rusqlite::params![legacy.to_string(), legacy["id"].as_str().unwrap()],
+    )
+    .unwrap();
+    let historical = f.success(&["miner", "hooks", "draft", draft["id"].as_str().unwrap()]);
+    assert_eq!(historical["current"], true);
+    assert_eq!(historical["draft"]["revision"], draft["revision"]);
+    f.no_inference();
+}
+
+#[test]
+fn long_task_capture_preserves_user_evidence_and_seals_after_a_late_tool_result() {
+    let f = Fixture::new();
+    let ticket = f.offer("one", PROMPT);
+    for number in 0..100 {
+        let id = format!("tool-{number}");
+        f.event(
+            "PreToolUse",
+            "one",
+            json!({"tool_use_id":id,"tool_name":"Bash","tool_input":{"command":"inspect"}}),
+        );
+        if number != 99 {
+            let body = if number == 0 {
+                "API_KEY=sk-synthetic-private-value".to_string() + &"x".repeat(350 * 1024)
+            } else {
+                "Inspected.".into()
+            };
+            f.event(
+                "PostToolUse",
+                "one",
+                json!({"tool_use_id":id,"tool_name":"Bash","tool_response":body}),
+            );
+        }
+    }
+    let staged = f.submit(&ticket, f.candidates(PROMPT), "codex");
+    assert!(!failed(&staged), "{staged}");
+    f.event("Stop", "one", json!({"last_assistant_message":"Reviewed."}));
+    let pending = f.episode();
+    assert_eq!(
+        pending["episode"]["coverage_gaps"],
+        json!(["missing_tool_result"])
+    );
+    assert!(pending["analyses"].as_array().unwrap().is_empty());
+    f.event(
+        "PostToolUse",
+        "one",
+        json!({"tool_use_id":"tool-99","tool_name":"Bash","tool_response":"Inspected."}),
+    );
+    let completed = f.episode();
+    assert!(completed["episode"]["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(completed["task_mining"]["status"], "completed");
+    let analysis = completed["analyses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|analysis| analysis["processor"]["engine"] == "current_task_agent")
+        .unwrap();
+    assert_eq!(analysis["current"], true);
+    assert_eq!(analysis["processor"]["model"], "gpt-task-model");
+    assert_eq!(analysis["processor"]["separate_model_invocations"], 0);
+    let events = completed["episode"]["events"].as_array().unwrap();
+    assert!(events.len() < 40, "{} retained events", events.len());
+    let original = events
+        .iter()
+        .find(|event| event["origin"] == "user_channel_unverified")
+        .unwrap();
+    assert_eq!(original["text"], PROMPT);
+    let trace = events
+        .iter()
+        .find(|event| event["kind"] == "ToolTrace")
+        .unwrap();
+    let trace: Value = serde_json::from_str(trace["text"].as_str().unwrap()).unwrap();
+    assert_eq!(trace["events"], 200);
+    assert_eq!(trace["receipts_retained"], 32);
+    assert!(!completed.to_string().contains("synthetic-private-value"));
+    let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM hook_event WHERE kind IN ('PreToolUse','PostToolUse')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 200);
+    let revision = completed["episode"]["revision"].clone();
+    f.event(
+        "PostToolUse",
+        "one",
+        json!({"tool_use_id":"tool-99","tool_name":"Bash","tool_response":"Inspected."}),
+    );
+    assert_eq!(f.episode()["episode"]["revision"], revision);
+    f.event("PreToolUse", "one", json!({"tool_use_id":"changed-source","tool_name":"Bash","tool_input":{"command":"inspect again"}}));
+    f.event("PostToolUse", "one", json!({"tool_use_id":"changed-source","tool_name":"Bash","tool_response":"Different source context."}));
+    let changed = f.episode();
+    assert_ne!(changed["episode"]["revision"], revision);
+    assert!(changed["episode"]["coverage_gaps"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(changed["analyses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|analysis| analysis["current"] == false));
     f.no_inference();
 }
 

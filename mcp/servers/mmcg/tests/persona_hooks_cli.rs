@@ -116,7 +116,7 @@ fn episode_capacity_automatically_archives_closed_sources_before_new_capture() {
 }
 
 #[test]
-fn local_candidates_follow_session_end_without_manual_replay() {
+fn session_end_preserves_completed_local_candidates() {
     let f = Fixture::new();
     assert!(f
         .run(&["miner", "access", "grant", "--client", "codex"])
@@ -139,7 +139,7 @@ fn local_candidates_follow_session_end_without_manual_replay() {
     let stopped = f.episode("one");
     f.event("ended", "", "SessionEnd", json!({}));
     let shown = f.success(&["miner", "hooks", "show", stopped["id"].as_str().unwrap()]);
-    assert_ne!(shown["episode"]["revision"], stopped["revision"]);
+    assert_eq!(shown["episode"]["revision"], stopped["revision"]);
     assert!(shown["episode"]["coverage_gaps"]
         .as_array()
         .unwrap()
@@ -149,7 +149,7 @@ fn local_candidates_follow_session_end_without_manual_replay() {
         .unwrap()
         .iter()
         .find(|draft| draft["episode_revision"] == shown["episode"]["revision"])
-        .expect("SessionEnd must reanalyze the final source revision");
+        .expect("SessionEnd must preserve the completed source revision");
     let draft = f.success(&["miner", "hooks", "draft", current["id"].as_str().unwrap()]);
     assert_eq!(
         draft["draft"]["content"]["behavior"],
@@ -373,7 +373,7 @@ fn local_hook_candidates_require_complete_capture_and_respect_delivery_opt_out()
 }
 
 #[test]
-fn large_tool_output_records_an_episode_gap_without_poisoning_future_capture() {
+fn large_tool_output_keeps_a_receipt_without_poisoning_capture() {
     let f = Fixture::new();
     f.capture("large-output", "before");
     f.event(
@@ -389,17 +389,31 @@ fn large_tool_output_records_an_episode_gap_without_poisoning_future_capture() {
         "PreToolUse",
         json!({"tool_use_id":"tool-one","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
     );
-    let output = f.native(json!({"session_id":"large-output","turn_id":"one","hook_event_name":"PostToolUse","tool_use_id":"tool-one","tool_name":"exec_command","tool_response":"x".repeat(350*1024)}));
+    let mut native = json!({"session_id":"large-output","turn_id":"one","hook_event_name":"PostToolUse","tool_use_id":"tool-one","tool_name":"exec_command","tool_response":"x".repeat(350*1024)});
+    let output = f.native(native.clone());
     assert!(output.status.success(), "{output:?}");
     let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
     assert_eq!(status["capture_pending"], false);
     assert_eq!(status["grant"]["gap"], "");
     let episode = f.episode("one");
-    assert!(episode["coverage_gaps"]
+    assert_eq!(episode["coverage_gaps"], json!(["no_stop_observed"]));
+    let result = episode["events"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|gap| gap == "oversized_event_content"));
+        .find(|event| event["kind"] == "PostToolUse")
+        .unwrap();
+    let receipt: Value = serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["capture"], "metadata_only");
+    native["cwd"] = json!(f.project.canonicalize().unwrap());
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut expected = String::new();
+    for byte in Sha256::digest(serde_json::to_vec(&native).unwrap()) {
+        write!(expected, "{byte:02x}").unwrap();
+    }
+    assert_eq!(receipt["native_event_digest"], expected);
+    assert!(!episode.to_string().contains(&"x".repeat(1024)));
     f.event(
         "large-output",
         "one",
@@ -424,8 +438,7 @@ fn large_tool_output_records_an_episode_gap_without_poisoning_future_capture() {
     assert!(f.episode("one")["coverage_gaps"]
         .as_array()
         .unwrap()
-        .iter()
-        .any(|gap| gap == "oversized_event_content"));
+        .is_empty());
     assert!(f.capture("fresh-session", "three")["coverage_gaps"]
         .as_array()
         .unwrap()
@@ -466,7 +479,7 @@ fn missing_next_prompt_text_marks_its_two_uses_without_poisoning_later_turns() {
 }
 
 #[test]
-fn redacted_late_tool_result_does_not_invalidate_the_next_episode() {
+fn private_late_tool_result_keeps_its_receipt_without_invalidating_the_next_episode() {
     let f = Fixture::new();
     f.event("s", "", "SessionStart", json!({"source":"startup"}));
     f.event("s", "one", "UserPromptSubmit", json!({"prompt":QUOTE}));
@@ -481,15 +494,9 @@ fn redacted_late_tool_result_does_not_invalidate_the_next_episode() {
     f.event("s", "two", "Stop", json!({"last_assistant_message":"Done"}));
     let clean = f.episode("two");
     f.event("s", "one", "PostToolUse", json!({"tool_use_id":"tool-one","tool_name":"exec_command","tool_response":"API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789"}));
-    let incomplete = f.episode("one");
-    assert!(incomplete["coverage_gaps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|gap| gap == "redacted_event_content"));
-    assert!(!incomplete
-        .to_string()
-        .contains("abcdefghijklmnopqrstuvwxyz"));
+    let completed = f.episode("one");
+    assert!(completed["coverage_gaps"].as_array().unwrap().is_empty());
+    assert!(!completed.to_string().contains("abcdefghijklmnopqrstuvwxyz"));
     assert_eq!(f.episode("two")["revision"], clean["revision"]);
     assert!(f.episode("two")["coverage_gaps"]
         .as_array()

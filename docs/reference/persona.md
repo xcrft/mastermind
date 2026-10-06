@@ -107,12 +107,13 @@ no drafts. `pipeline.next_actions` describes recovery for missing evidence.
 
 | Capture event | Admission and coverage |
 |---|---|
-| `SessionEnd` | Closes prompt admission until a fresh `SessionStart` |
+| `SessionEnd` | Closes prompt admission until a fresh `SessionStart`. An empty closing receipt after `Stop` preserves the episode's evidence revision |
 | Late `Stop` with turn ID | Closes only the matching turn, without replacing newer response context |
 | Unknown/reused turn ID or overlapping prompts without both IDs | Coverage gap rather than inferred attribution |
 | Empty current response | Clears earlier assistant context |
 | Repeated `SessionEnd` without event ID | Records replay ambiguity |
 | Lost retained text | Marks every episode using that event incomplete, including later context uses |
+| Tool body | Not retained. Native identity, digest and pairing remain recorded; a missing result still blocks evidence |
 | Ambiguous identity, unattributed loss, fork or delivery failure | Fences the session or capture grant |
 | Earlier capture versions | Remain historical with their original gaps. Upgrading cannot repair them |
 | `MMCG_INPUT_ORIGIN=controller` or miner recursion guard | Skips generated input before journal writes |
@@ -137,8 +138,9 @@ Influence is recorded before the current advisory. Profile/refiner offers and
 recognized MCP/profile-file reads affect later events. Every support and
 contradiction contributes to a draft's classification. Resume and recovery do
 not clear prior exposure. Detection covers supported delivery paths only and
-does not establish statistical independence. Session summaries retain the last
-32 exposures and an omission count. Older episode receipts remain intact.
+does not establish statistical independence. Session and episode summaries retain
+up to 32 exposures and an omission count. Committed context offers take priority
+over possible tool reads. Citation influence remains intact when summaries rotate.
 
 ## Mining in the current task
 
@@ -160,6 +162,7 @@ normal allowance.
 | Retry | Identical active submission is idempotent. Conflicting submission rejected |
 | Before `Stop` | Pending submission, no analysis or persisted semantic draft |
 | Complete `Stop` | Rechecks source, grants and mode, then seals unreviewed drafts |
+| Late paired result after `Stop` | Retries local sealing when capture becomes complete. Later source changes cannot automatically rebind a completed draft |
 | Delayed Claude model | Local finalizer can wait up to 4 seconds for transcript binding, outside the native hook deadline |
 | Finalizer | Local admission, sealing and authored Git refresh. No model call |
 | Inspection | `hooks show` exposes `task_mining`, analyses and draft IDs. Read full content with `hooks draft` |
@@ -173,8 +176,9 @@ client session is required to load an updated MCP catalog.
 
 With profile delivery enabled and an existing read grant, complete closed
 episodes also run the `persona-explicit-v2` detector. It shares the detector
-with transcript collection and invokes no model. `Stop`, later context,
-`SessionEnd` and late tool results queue changed episode revisions.
+with transcript collection and invokes no model. `Stop`, later context and late
+tool results queue changed episode revisions. Empty closing receipts preserve
+the completed revision, including when reading older retained episodes.
 
 | Local extraction | Contract |
 |---|---|
@@ -273,9 +277,10 @@ prompt identity and digest.
 | Capture or analysis resource | Bound |
 |---|---|
 | Native hook command | 3 seconds |
-| Native JSON / retained text per event | 4 MiB / 16 KiB. Unavailable retained content marks each episode that uses the event incomplete; an unattributed loss or envelope over 4 MiB fences the session/capture until recovery |
+| Native JSON / retained user and assistant text per event | 4 MiB / 16 KiB. Lost prose marks each episode that uses it incomplete; an unattributed loss or envelope over 4 MiB fences the session/capture until recovery |
+| Tool capture | Metadata only, first 32 receipts in the episode context. `ToolTrace` counts and hashes every observed tool event; individual native identities and digests remain in the journal |
 | Journal / active episode payloads | 64 MiB / 2,000, with [archive retention](#local-extraction-and-retention) |
-| Events / stored bytes per episode | 128 / 512 KiB |
+| Retained context events / stored bytes per episode | 128 / 512 KiB. Tool events beyond the first 32 update the trace without consuming context slots |
 | Processor request / stdout / stderr | 512 KiB / 64 KiB / 16 KiB |
 | Processor timeout | 1–120 seconds, default 60 |
 | Drafts / supports / contradictions | 8 drafts, at most 8 supports and 8 contradictions each |
@@ -288,7 +293,7 @@ prompt identity and digest.
 | `--follow` | Foreground only, journal polling about every 2 seconds, expired-lease checks every 30 seconds. Incompatible with `--after` |
 | Failure | Stop worker |
 | Interruption | Release unfinished lease for retry. Cannot retract a received provider request |
-| Contention, crash, unsupported input, redaction or missing lifecycle/tool event | Mark incomplete delivery and withhold evidence |
+| Contention, crash, unsupported input, lost user/assistant prose or missing lifecycle/tool event | Mark incomplete delivery and withhold evidence |
 | Recovery | New generation, no reconstruction of lost events |
 
 Native client contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),

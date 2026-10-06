@@ -22,6 +22,7 @@ mod task_mining;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
 const MAX_EVENTS: usize = 128;
+const MAX_TOOL_RECEIPTS: usize = 32;
 const MAX_EPISODES: i64 = 2000;
 const CAPTURE_VERSION: u32 = 3;
 const INSPECTION_ATTEMPTS: usize = 3;
@@ -182,6 +183,8 @@ pub(super) struct Episode {
     pub closed: bool,
     pub open_tools: Vec<String>,
     pub exposures: Vec<Value>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub exposure_summaries_omitted: u64,
     #[serde(default)]
     pub prior_exposure_summaries_omitted: u64,
 }
@@ -727,7 +730,7 @@ impl Journal {
                     // the preceding episode. Missing text affects both uses.
                     add_gap(&mut ep.gaps, gap);
                 }
-                push_event(&mut ep, correction);
+                push_event(&mut ep, correction)?;
                 save_episode(&tx, &ep)?;
                 revised_episode = Some(ep.id.clone());
             }
@@ -773,6 +776,7 @@ impl Journal {
                 closed: false,
                 open_tools: vec![],
                 exposures: session.exposures.clone(),
+                exposure_summaries_omitted: 0,
                 prior_exposure_summaries_omitted: session.exposure_summaries_omitted,
             };
             if !session.started {
@@ -840,7 +844,7 @@ impl Journal {
                 add_gap(&mut ep.gaps, gap);
             }
             if let Some(exposure) = incoming.profile_exposure {
-                ep.exposures.push(exposure);
+                push_episode_exposure(&mut ep, exposure);
             }
             if incoming.native_turn.is_some()
                 && ep.turn_id.is_some()
@@ -871,11 +875,11 @@ impl Journal {
             ) {
                 add_gap(&mut ep.gaps, "interrupted_or_compacted_turn");
             }
-            push_event(&mut ep, event);
+            push_event(&mut ep, event)?;
             save_episode(&tx, &ep)?;
             if ep.closed {
-                // SessionEnd and late tool/lifecycle events also change the
-                // evidence revision after Stop. Retry that final source.
+                // Late source changes retry local admission. An empty
+                // SessionEnd receipt preserves the completed source revision.
                 revised_episode = Some(ep.id.clone());
             }
         } else {
@@ -949,7 +953,7 @@ impl Journal {
             "selection":packet.get("selection"),
             "feedback":claims("feedback","key"),"habits":claims("habits","id")});
         push_exposure(&mut session, receipt.clone());
-        ep.exposures.push(receipt);
+        push_episode_exposure(&mut ep, receipt);
         session.influence.offer_profile();
         save_session(&tx, &session)?;
         save_episode(&tx, &ep)?;
@@ -1359,12 +1363,86 @@ fn add_gap(gaps: &mut Vec<String>, gap: &str) {
         gaps.push(gap.into());
     }
 }
-fn push_event(ep: &mut Episode, event: EventInput) {
+fn closing_receipt(event: &EventInput) -> bool {
+    event.kind == "SessionEnd"
+        && event.actor == "system"
+        && event.origin == "client"
+        && event.text.is_empty()
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolTrace {
+    events: u64,
+    receipts_retained: usize,
+    digest: String,
+}
+
+impl ToolTrace {
+    fn observe(&mut self, episode: &str, event: &EventInput) -> Result<(), Error> {
+        self.events = self
+            .events
+            .checked_add(1)
+            .ok_or("tool trace count overflow")?;
+        self.digest = hash(&json!(["hook-tool-trace-v1", episode, self.digest, event]));
+        Ok(())
+    }
+}
+
+fn tool_event(event: &EventInput) -> bool {
+    matches!(
+        event.kind.as_str(),
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+    )
+}
+
+fn push_event(ep: &mut Episode, event: EventInput) -> Result<(), Error> {
+    if ep.closed && closing_receipt(&event) {
+        // hook_event and hook_session retain the native lifecycle receipt.
+        return Ok(());
+    }
+    if tool_event(&event) {
+        let index = ep.events.iter().position(|event| event.kind == "ToolTrace");
+        let mut trace = if let Some(index) = index {
+            serde_json::from_str::<ToolTrace>(&ep.events[index].text)?
+        } else {
+            let mut trace = ToolTrace::default();
+            // A CLI update can occur during an existing capture. Bind its
+            // retained tools too, without removing any historical gap.
+            for previous in ep.events.iter().filter(|event| tool_event(event)) {
+                trace.observe(&ep.id, previous)?;
+                trace.receipts_retained += 1;
+            }
+            trace
+        };
+        trace.observe(&ep.id, &event)?;
+        if trace.receipts_retained < MAX_TOOL_RECEIPTS && ep.events.len() < MAX_EVENTS - 1 {
+            ep.events.push(event.clone());
+            trace.receipts_retained += 1;
+        }
+        let receipt = EventInput {
+            id: hash(&json!(["hook-tool-trace-v1", ep.id])),
+            kind: "ToolTrace".into(),
+            actor: "system".into(),
+            origin: "capture_receipt".into(),
+            text: serde_json::to_string(&trace)?,
+            influence: event.influence,
+        };
+        if let Some(index) = index {
+            ep.events[index] = receipt;
+        } else if ep.events.len() < MAX_EVENTS {
+            ep.events.push(receipt);
+        } else {
+            add_gap(&mut ep.gaps, "episode_event_limit");
+        }
+        return Ok(());
+    }
     if ep.events.len() >= MAX_EVENTS {
         add_gap(&mut ep.gaps, "episode_event_limit");
     } else {
         ep.events.push(event);
     }
+    Ok(())
 }
 fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
     let data: String = conn.query_row("SELECT data FROM hook_episode WHERE id=?1", [id], |r| {
@@ -1387,17 +1465,43 @@ fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
 }
 
 fn push_exposure(session: &mut Session, receipt: Value) {
-    if session.exposures.contains(&receipt) {
+    push_bounded_exposure(
+        &mut session.exposures,
+        &mut session.exposure_summaries_omitted,
+        receipt,
+    );
+}
+
+fn push_episode_exposure(episode: &mut Episode, receipt: Value) {
+    push_bounded_exposure(
+        &mut episode.exposures,
+        &mut episode.exposure_summaries_omitted,
+        receipt,
+    );
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn push_bounded_exposure(exposures: &mut Vec<Value>, omitted: &mut u64, receipt: Value) {
+    if exposures.contains(&receipt) {
         return;
     }
-    // Event-level influence and each episode's delivery receipt remain durable.
-    // A bounded session summary must not turn normal repeated delivery into a
-    // capture gap or erase the fact that later input has prior exposure.
-    if session.exposures.len() >= 32 {
-        session.exposures.remove(0);
-        session.exposure_summaries_omitted = session.exposure_summaries_omitted.saturating_add(1);
+    // Citation influence and tool digests remain durable when receipt summaries
+    // rotate. Rotation cannot erase exposure or create a capture gap.
+    if exposures.len() >= 32 {
+        *omitted = omitted.saturating_add(1);
+        // Repeated possible reads must not erase a committed context offer.
+        let possible = exposures
+            .iter()
+            .position(|old| old["status"] == "possible_tool_exposure");
+        if possible.is_none() && receipt["status"] == "possible_tool_exposure" {
+            return;
+        }
+        exposures.remove(possible.unwrap_or(0));
     }
-    session.exposures.push(receipt);
+    exposures.push(receipt);
 }
 
 fn profile_delivery_disabled(conn: &Connection, client: &str, root: &Path) -> Result<bool, Error> {
@@ -1448,7 +1552,7 @@ fn read_grant(conn: &Connection, client: &str, root: &Path) -> Result<Option<Gra
 }
 
 fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
-    let ep = load_episode(conn, id)?;
+    let mut ep = load_episode(conn, id)?;
     let session: Session = serde_json::from_str(&conn.query_row(
         "SELECT data FROM hook_session WHERE id=?1",
         [&ep.session],
@@ -1478,6 +1582,11 @@ fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {
     }
     gaps.sort();
     gaps.dedup();
+    if ep.closed {
+        // Also project previously retained closing receipts out of the evidence
+        // source. Meaningful late events, gaps and grants remain revision-bound.
+        ep.events.retain(|event| !closing_receipt(event));
+    }
     let revision = hash(&json!([
         EXTRACTOR,
         super::semantic::PROSE_VERSION,
@@ -1876,6 +1985,78 @@ mod tests {
             );
             assert!(db.episode(episode).unwrap().exposures.is_empty());
         }
+    }
+
+    #[test]
+    fn repeated_profile_reads_preserve_offers_and_citation_influence_in_bounded_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        let grant = db
+            .configure("codex", root.path(), true, Some("reader"), false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s","hook_event_name":"SessionStart","source":"startup"}),
+        );
+        let prompt = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s","turn_id":"one","hook_event_name":"UserPromptSubmit","prompt":"I prefer short reviews for simple changes."}),
+        );
+        let id = prompt["episode"].as_str().unwrap();
+        db.expose(&grant, id, &json!({"profile_revision":"delivered-view"}))
+            .unwrap();
+        for number in 0..42 {
+            let tool = format!("profile-{number}");
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s","turn_id":"one","hook_event_name":"PreToolUse","tool_use_id":tool,"tool_name":"mcp__mmcg__mmcg_profile","tool_input":{}}),
+            );
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s","turn_id":"one","hook_event_name":"PostToolUse","tool_use_id":tool,"tool_name":"mcp__mmcg__mmcg_profile","tool_response":"unretained output"}),
+            );
+        }
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s","turn_id":"one","hook_event_name":"Stop"}),
+        );
+        let episode = db.episode(id).unwrap();
+        assert_eq!(episode.exposures.len(), 32);
+        assert_eq!(episode.exposure_summaries_omitted, 53);
+        assert!(episode
+            .exposures
+            .iter()
+            .any(|exposure| exposure["status"] == "offered"
+                && exposure["profile_revision"] == "delivered-view"));
+        let input = snapshot_at(&db.conn, id).unwrap();
+        assert!(input.coverage_gaps.is_empty());
+        assert!(input.profile_influenced);
+        let original = input
+            .events
+            .iter()
+            .find(|event| event.origin == "user_channel_unverified")
+            .unwrap();
+        assert_eq!(original.influence, Influence::fresh());
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s","turn_id":"two","hook_event_name":"UserPromptSubmit","prompt":"I prefer short reviews for simple changes."}),
+        );
+        let later = snapshot_at(&db.conn, next["episode"].as_str().unwrap()).unwrap();
+        assert!(
+            later
+                .events
+                .iter()
+                .find(|event| event.origin == "user_channel_unverified")
+                .unwrap()
+                .influence
+                .prior_profile_context
+        );
     }
 
     #[test]

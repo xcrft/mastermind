@@ -659,7 +659,7 @@ fn prompt_refinement_uses_the_same_native_client_and_model() {
 }
 
 #[test]
-fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget() {
+fn native_sessions_mine_automatically_and_resume_preserves_the_spent_budget() {
     let f = Fixture::new();
     f.automatic(1);
     let mut prior_run = Value::Null;
@@ -698,7 +698,10 @@ fn native_session_automatically_mines_and_only_a_new_session_renews_its_budget()
         );
         f.event("codex", session, "one", "Stop", json!({}));
         let terminal = f.terminal();
-        assert_eq!(terminal["status"], "budget_exhausted");
+        assert_eq!(
+            terminal["status"], "budget_exhausted",
+            "{session}: {terminal}"
+        );
         assert_eq!(terminal["run"]["attempts"], 1);
         assert_eq!(terminal["run"]["completed"], 1, "{session}: {terminal}");
         let calls = f.calls();

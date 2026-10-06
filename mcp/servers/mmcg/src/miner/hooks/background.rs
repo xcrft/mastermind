@@ -508,6 +508,19 @@ pub fn status(client: &str, root: &Path) -> Result<Value, Error> {
 }
 
 fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
+    status_with_owner(store, id, || store.owner())
+}
+
+fn status_with_owner(
+    store: &Store,
+    id: &str,
+    observe_owner: impl FnOnce() -> Result<Option<bounded_fs::StableFileLock>, Error>,
+) -> Result<Value, Error> {
+    // A finishing worker publishes its terminal record before releasing this
+    // lock. Observe ownership first and retain an available probe through the
+    // record reads, so an earlier `running` record cannot become `interrupted`.
+    let owner = observe_owner()?;
+    let held = owner.is_none();
     let config = store
         .read::<Config>("config.json")?
         .ok_or("worker_configuration_missing")?;
@@ -517,7 +530,7 @@ fn status_at(store: &Store, id: &str) -> Result<Value, Error> {
         .ok_or("worker_state_missing")?;
     validate_state(&state.value, &config.value)?;
     // Do not retain an available-lock probe during heartbeat/stop record I/O.
-    let held = store.owner()?.is_none();
+    drop(owner);
     let pulse = store.read::<Pulse>("heartbeat.json")?;
     let pulse = pulse
         .map(|record| record.value)
@@ -1678,6 +1691,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_observes_a_worker_finishing_during_the_owner_probe() {
+        let f = Fixture::new();
+        f.change_state(|state| state.status = "running".into());
+        let worker_owner = f.store.owner().unwrap().unwrap();
+        // Finish at the exact liveness observation, after any earlier state
+        // read. This is a committed terminal record followed by lease release.
+        let report = status_with_owner(&f.store, &f.id, || {
+            f.change_state(|state| {
+                state.status = "budget_exhausted".into();
+                state.reason = Some("worker_call_budget_exhausted".into());
+                state.attempts = 2;
+                state.completed = 1;
+            });
+            drop(worker_owner);
+            f.store.owner()
+        })
+        .unwrap();
+        assert_eq!(report["owner"], "available");
+        assert_eq!(report["status"], "budget_exhausted");
+        assert_eq!(report["run"]["status"], "budget_exhausted");
+        assert_eq!(report["run"]["run_id"], f.run_id);
+        assert_eq!(report["run"]["attempts"], 2);
+        assert_eq!(report["run"]["completed"], 1);
+        assert_eq!(report["run"]["reason"], "worker_call_budget_exhausted");
+        assert!(f.store.owner().unwrap().is_some());
     }
 
     #[test]

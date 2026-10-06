@@ -217,6 +217,7 @@ pub(super) struct Incoming {
     pub forked: bool,
     pub fresh_start: bool,
     pub profile_exposure: Option<Value>,
+    pub stop_hook_active: bool,
 }
 
 impl Journal {
@@ -660,10 +661,24 @@ impl Journal {
                 session.previous_assistant = None;
             }
             save_session(&tx, &session)?;
+            let continuation = if incoming.kind == "Stop" && !conflict {
+                match &episode {
+                    Some(id)
+                        if session.started
+                            && session.active.as_ref() == Some(id)
+                            && !load_episode(&tx, id)?.closed =>
+                    {
+                        task_mining::replay_stop(&tx, id, &event_id)?
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             finish(&tx, grant)?;
             tx.commit()?;
             return Ok(
-                json!({"status":if conflict {"conflict"} else {"duplicate"},"event_id":event_id,"episode":episode}),
+                json!({"status":if conflict {"conflict"} else {"duplicate"},"event_id":event_id,"episode":episode,"continuation":continuation}),
             );
         }
         if incoming.forked {
@@ -690,7 +705,9 @@ impl Journal {
             session.influence.offer_profile();
             push_exposure(&mut session, exposure.clone());
         }
-        let event = EventInput {
+        let continuation_prompt =
+            task_mining::continuation_prompt(&tx, &session, &incoming, &event_id)?;
+        let mut event = EventInput {
             influence: session.influence,
             id: event_id.clone(),
             kind: incoming.kind.clone(),
@@ -698,6 +715,11 @@ impl Journal {
             origin: incoming.origin,
             text: incoming.text,
         };
+        if continuation_prompt {
+            event.kind = "MiningContinuation".into();
+            event.actor = "system".into();
+            event.origin = "automation_or_agent".into();
+        }
         if incoming.kind == "SessionStart" {
             if !session.started {
                 session.active = None;
@@ -707,7 +729,8 @@ impl Journal {
         }
         let mut target = session.active.clone();
         let mut revised_episode = None;
-        if incoming.kind == "UserPromptSubmit" {
+        let mut continuation = None;
+        if incoming.kind == "UserPromptSubmit" && !continuation_prompt {
             if let Some(turn) = &incoming.native_turn {
                 if !episodes_for_turn(&tx, &sid, turn)?.is_empty() {
                     add_gap(&mut session.gaps, "ambiguous_turn_identity");
@@ -816,8 +839,29 @@ impl Journal {
         }
         if let Some(id) = &target {
             let mut ep = load_episode(&tx, id)?;
+            if continuation_prompt {
+                // Codex gives a Stop continuation another native turn id. It
+                // remains the original episode, with no new human citation.
+                ep.turn_id = incoming.native_turn.clone();
+            }
+            if incoming.kind == "Stop" {
+                continuation = task_mining::check_stop(
+                    &tx,
+                    &ep,
+                    &session,
+                    &event_id,
+                    incoming.stop_hook_active,
+                    incoming.gap.is_some(),
+                )?;
+                if continuation.is_some() {
+                    // Keep the attempted assistant response as context, but
+                    // do not close or analyze a turn that is being continued.
+                    event.kind = "MiningCheckpoint".into();
+                }
+            }
             if !ep.closed
                 && incoming.kind == "Stop"
+                && continuation.is_none()
                 && incoming
                     .model_binding
                     .as_ref()
@@ -864,7 +908,7 @@ impl Journal {
                     }
                     _ => add_gap(&mut ep.gaps, "unpaired_tool_result"),
                 }
-            } else if incoming.kind == "Stop" {
+            } else if incoming.kind == "Stop" && continuation.is_none() {
                 ep.closed = true;
                 if session.started && session.active.as_ref() == Some(id) {
                     session.previous_assistant = (!event.text.is_empty()).then(|| event.clone());
@@ -905,7 +949,7 @@ impl Journal {
         tx.commit()?;
         Ok(
             json!({"status":"recorded","event_id":event_id,"episode":target,
-            "revised_episode":revised_episode}),
+            "revised_episode":revised_episode,"continuation":continuation,"continuation_prompt":continuation_prompt}),
         )
     }
 

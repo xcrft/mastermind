@@ -534,3 +534,245 @@ fn quoted_material_and_incomplete_stops_never_become_task_analysis() {
     }
     f.no_inference();
 }
+
+#[test]
+fn stop_requires_a_result_and_keeps_the_original_source_in_both_clients() {
+    for client in ["codex", "claude"] {
+        let f = Fixture::for_client(client);
+        let ticket = f.offer("one", PROMPT);
+        let stop = json!({"last_assistant_message":"Reviewed.","stop_hook_active":false});
+        let checkpoint = f.event("Stop", "one", stop.clone());
+        assert_eq!(checkpoint["decision"], "block");
+        let reason = checkpoint["reason"].as_str().unwrap();
+        assert!(reason.contains(&ticket));
+        assert_eq!(f.event("Stop", "one", stop), checkpoint);
+        let pending = f.episode();
+        assert_eq!(pending["capture"]["closed"], false);
+        assert_eq!(pending["task_mining"]["continuation_requested"], true);
+        assert!(pending["drafts"].as_array().unwrap().is_empty());
+
+        // Codex re-enters UserPromptSubmit with the hook's reason. This is system
+        // continuation, not another human statement or another mining ticket.
+        let turn = if client == "codex" {
+            assert_eq!(
+                f.event("UserPromptSubmit", "continued", json!({"prompt":reason})),
+                json!({})
+            );
+            "continued"
+        } else {
+            "one"
+        };
+        let bound = f.episode();
+        assert_eq!(bound["episode"]["id"], pending["episode"]["id"]);
+        let events = bound["episode"]["events"].as_array().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["actor"] == "user")
+                .count(),
+            1
+        );
+        assert!(events
+            .iter()
+            .any(|event| event["kind"] == "MiningCheckpoint"
+                && event["actor"] == "assistant"
+                && event["text"] == "Reviewed."));
+        if client == "codex" {
+            assert!(events
+                .iter()
+                .any(|event| event["kind"] == "MiningContinuation"
+                    && event["origin"] == "automation_or_agent"));
+        }
+        let generated = "Keep mining metadata out of the user-facing answer.";
+        assert!(reason.contains(generated));
+        assert!(failed(&f.submit(&ticket, f.candidates(generated), client)));
+
+        f.event("PreToolUse", turn, json!({"tool_use_id":"mine","tool_name":"mcp__mmcg__mmcg_mining_submit","tool_input":{"ticket_id":ticket}}));
+        assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), client)));
+        f.event(
+            "PostToolUse",
+            turn,
+            json!({"tool_use_id":"mine","tool_name":"mcp__mmcg__mmcg_mining_submit"}),
+        );
+        assert_eq!(
+        f.event(
+            "Stop",
+            turn,
+            json!({"last_assistant_message":"Reviewed.","stop_hook_active":true,"model":format!("{client}-task-model")})
+        ),
+        json!({})
+    );
+        let completed = f.episode();
+        assert!(completed["episode"]["coverage_gaps"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(completed["task_mining"]["status"], "completed");
+        assert_eq!(completed["task_mining"]["result"], "candidates");
+        assert_eq!(completed["task_mining"]["candidate_count"], 1);
+        let id = completed["drafts"][0]["id"].as_str().unwrap();
+        let draft = f.success(&["miner", "hooks", "draft", id]);
+        assert_eq!(draft["draft"]["content"]["supports"][0]["quote"], PROMPT);
+        assert_eq!(draft["draft"]["attested"], false);
+        assert_eq!(draft["current"], true);
+        assert_eq!(draft["draft"]["processor"]["source_client"], client);
+        assert_eq!(
+            draft["draft"]["processor"]["model"],
+            format!("{client}-task-model")
+        );
+        let list = f.success(&["miner", "hooks", "episodes"]);
+        assert_eq!(list["episodes"].as_array().unwrap().len(), 1);
+        let status = f.success(&["miner", "hooks", "status", "--client", client]);
+        assert_eq!(
+            status["readiness"]["mining"]["outcomes"]["with_candidates"],
+            1
+        );
+        assert_eq!(status["readiness"]["mining"]["outcomes"]["unreported"], 0);
+        f.no_inference();
+    }
+}
+
+#[test]
+fn empty_submission_is_an_auditable_no_signal_result_without_continuation() {
+    let f = Fixture::new();
+    let ticket = f.offer("one", "Inspect src/api.rs for a state bug.");
+    assert!(!failed(&f.submit(&ticket, json!([]), "codex")));
+    assert_eq!(
+        f.event(
+            "Stop",
+            "one",
+            json!({"last_assistant_message":"Inspected."})
+        ),
+        json!({})
+    );
+    let completed = f.episode();
+    assert_eq!(completed["task_mining"]["result"], "no_signal");
+    assert_eq!(completed["task_mining"]["candidate_count"], 0);
+    assert_eq!(completed["task_mining"]["continuation_requested"], false);
+    assert!(completed["drafts"].as_array().unwrap().is_empty());
+    assert!(completed["analyses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|analysis| analysis["current"] == true
+            && analysis["processor"]["engine"] == "current_task_agent"));
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(status["readiness"]["mining"]["outcomes"]["no_signal"], 1);
+    // Old completed tickets cleared their draft list without storing its
+    // count. Reading them must not invent an empty model result.
+    let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    db.execute(
+        "UPDATE hook_task_mining SET data=json_remove(data,'$.candidate_count') WHERE id=?1",
+        [&ticket],
+    )
+    .unwrap();
+    let legacy = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(
+        legacy["readiness"]["mining"]["outcomes"]["legacy_completed"],
+        1
+    );
+    assert_eq!(legacy["readiness"]["mining"]["outcomes"]["no_signal"], 0);
+    f.no_inference();
+}
+
+#[test]
+fn the_stop_retry_is_bounded_and_missing_submission_is_never_no_signal() {
+    for client in ["codex", "claude"] {
+        let f = Fixture::for_client(client);
+        let ticket = f.offer("one", PROMPT);
+        let first = f.event(
+            "Stop",
+            "one",
+            json!({"last_assistant_message":"Reviewed.","stop_hook_active":false}),
+        );
+        assert_eq!(first["decision"], "block", "{client}");
+        // Claude continues without a new UserPromptSubmit and can retain the
+        // same turn identity. Native stop_hook_active prevents another retry.
+        let turn = if client == "codex" {
+            f.event(
+                "UserPromptSubmit",
+                "continued",
+                json!({"prompt":first["reason"]}),
+            );
+            "continued"
+        } else {
+            "one"
+        };
+        let last = json!({"last_assistant_message":"Reviewed again.","stop_hook_active":client == "claude"});
+        assert_eq!(f.event("Stop", turn, last.clone()), json!({}));
+        assert_eq!(f.event("Stop", turn, last), json!({}));
+        let skipped = f.episode();
+        assert_eq!(skipped["task_mining"]["status"], "skipped");
+        assert_eq!(
+            skipped["task_mining"]["reason"],
+            "submission_missing_after_retry"
+        );
+        assert!(skipped["task_mining"]["result"].is_null());
+        assert!(skipped["episode"]["coverage_gaps"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(!skipped["analyses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|analysis| analysis["processor"]["engine"] == "current_task_agent"));
+        assert!(failed(&f.submit(&ticket, f.candidates(PROMPT), client)));
+        let status = f.success(&["miner", "hooks", "status", "--client", client]);
+        assert_eq!(status["readiness"]["mining"]["outcomes"]["skipped"], 1);
+        assert_eq!(status["readiness"]["mining"]["outcomes"]["no_signal"], 0);
+        assert!(status["readiness"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning == "task_mining_has_missing_reports"));
+        f.no_inference();
+    }
+}
+
+#[test]
+fn stop_never_requests_mining_from_incomplete_or_revoked_capture() {
+    // A gap first observed in this Stop has not yet been saved in the session
+    // snapshot. The guard must also check the in-flight capture state.
+    let fork = Fixture::new();
+    let fork_ticket = fork.offer("one", PROMPT);
+    assert_eq!(
+        fork.event(
+            "Stop",
+            "one",
+            json!({"parent_session_id":"parent","last_assistant_message":"Reviewed."})
+        ),
+        json!({})
+    );
+    assert_eq!(
+        fork.episode()["task_mining"]["reason"],
+        "capture_incomplete"
+    );
+    assert!(failed(&fork.submit(&fork_ticket, json!([]), "codex")));
+    fork.no_inference();
+
+    let f = Fixture::new();
+    let ticket = f.offer("one", PROMPT);
+    f.event("PreCompact", "one", json!({}));
+    assert_eq!(
+        f.event("Stop", "one", json!({"last_assistant_message":"Reviewed."})),
+        json!({})
+    );
+    let skipped = f.episode();
+    assert_eq!(skipped["task_mining"]["status"], "skipped");
+    assert_eq!(skipped["task_mining"]["reason"], "capture_incomplete");
+    assert!(failed(&f.submit(&ticket, json!([]), "codex")));
+    let next = f.offer("two", PROMPT);
+    let mut settings = mmcg::onboarding::load(&f.root).unwrap().unwrap();
+    settings.mining = mmcg::onboarding::Mining::Capture;
+    mmcg::onboarding::Session::begin(&f.root)
+        .unwrap()
+        .save(&settings)
+        .unwrap();
+    assert_eq!(
+        f.event("Stop", "two", json!({"last_assistant_message":"Reviewed."})),
+        json!({})
+    );
+    assert!(failed(&f.submit(&next, json!([]), "codex")));
+    f.no_inference();
+}

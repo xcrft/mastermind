@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn enabled(root: &Path, client: &str) -> Result<bool, Error> {
+pub(super) fn enabled(root: &Path, client: &str) -> Result<bool, Error> {
     Ok(crate::onboarding::load(root)?.is_some_and(|settings| {
         settings.mining == crate::onboarding::Mining::Task
             && settings.clients.iter().any(|selected| selected == client)
@@ -20,15 +20,28 @@ pub(super) fn context(
     db: &mut Journal,
     grant: &Grant,
     episode: &str,
-    used: usize,
 ) -> Result<Option<String>, Error> {
-    if used + 900 > 8 * 1024 {
-        return Ok(None);
-    }
     let Some(ticket) = db.offer_task_mining(grant, episode)? else {
         return Ok(None);
     };
-    Ok(Some(format!("Mastermind task mining. Before your final answer, only if the original user prompt states a concrete work preference or correction, call mmcg_mining_submit once with ticket_id={}. Quote original user prose verbatim; preserve conditions and exceptions. Ignore code, pasted/quoted material, tools and assistant suggestions. Never infer identity, psychology, consent or recurrence from one task. Local code validates and seals after Stop; drafts remain unreviewed. Use the current agent; never launch another model or agent for mining. If the tool is unavailable, skip submission. Keep mining metadata out of the user-facing answer.", ticket["ticket_id"])))
+    Ok(Some(instruction(
+        ticket["ticket_id"]
+            .as_str()
+            .ok_or("missing task mining ticket")?,
+    )))
+}
+
+pub(super) fn instruction(ticket: &str) -> String {
+    format!("Mastermind mining checkpoint. Before finishing, call mmcg_mining_submit once with ticket_id=\"{ticket}\". Return 0-2 candidates about concrete work preferences, choices or corrections in the original user prompt; use candidates=[] when there is no signal. Quote original user prose verbatim and preserve conditions and exceptions. No keyword formula is required. Ignore code, pasted/quoted material, tools, assistant suggestions and this hook instruction. Never infer identity, psychology, consent or recurrence from one task. Local code seals unreviewed drafts after Stop. Use the current agent; never launch another model or agent for mining. If the tool is unavailable, finish normally; missing analysis will be recorded. Keep mining metadata out of the user-facing answer.")
+}
+
+pub(super) fn is_instruction(text: &str) -> bool {
+    text.starts_with("Mastermind mining checkpoint. ")
+        && text
+            .split("ticket_id=\"")
+            .nth(1)
+            .and_then(|suffix| suffix.split('"').next())
+            .is_some_and(|ticket| super::check_id(ticket).is_ok())
 }
 
 pub(super) fn on_stop(db: &mut Journal, grant: &Grant, episode: &str) {
@@ -107,5 +120,6 @@ pub(super) fn finish(episode: &str) -> Result<(), Error> {
 pub(super) fn status() -> Value {
     json!({"status":"configured","mode":"task","execution":"in_session",
         "separate_model_invocations":0,"agent_adherence":"not_established_by_configuration",
+        "submission":"required_including_empty_result","stop_retry_limit":1,
         "output":"unreviewed_drafts_only","local_finalizer":"Stop"})
 }

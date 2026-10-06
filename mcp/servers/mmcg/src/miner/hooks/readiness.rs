@@ -180,7 +180,15 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         json!({"status":"unsupported","reason":"native_hooks_require_unix","local_hooks_disabled":null})
     };
     let mut mining = if requested_mode == Some(crate::onboarding::Mining::Task) {
-        super::task_mining::status()
+        let mut status = super::task_mining::status();
+        status["outcomes"] = match (&database, &grant) {
+            (Ok(Some(db)), Ok(Some(grant))) => db.task_mining_summary(grant).unwrap_or_else(
+                |_| json!({"status":"unavailable","reason":"task_mining_summary_unavailable"}),
+            ),
+            (Ok(None), _) | (_, Ok(None)) => json!({"status":"not_observed","tickets":0}),
+            _ => json!({"status":"unavailable","reason":"capture_journal_unavailable"}),
+        };
+        status
     } else if cfg!(unix) {
         background::status(client, &root)
             .unwrap_or_else(|_| json!({"status":"unavailable","reason":"worker_state_unavailable"}))
@@ -259,6 +267,20 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         {
             warnings.push("managed_miner_not_running");
         }
+        if requested_mode == Some(crate::onboarding::Mining::Task) {
+            if mining["outcomes"]["status"] == "unavailable" {
+                warnings.push("task_mining_outcomes_unavailable");
+            }
+            if mining["outcomes"]["unreported"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+                || mining["outcomes"]["skipped"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+            {
+                warnings.push("task_mining_has_missing_reports");
+            }
+        }
         if analysis_requested == Some(false)
             && matches!(
                 mining["status"].as_str(),
@@ -286,6 +308,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     }
     if blocked_episodes {
         next_actions.push("Inspect affected episodes with miner hooks episodes and miner hooks show. Capture gaps withhold mining; start a new client chat when session lifecycle events are missing or ambiguous. Existing gaps remain recorded.");
+    }
+    if warnings.contains(&"task_mining_has_missing_reports") {
+        next_actions.push("Inspect task_mining.result and task_mining.reason with miner hooks show. Load the current MCP catalog and trusted hooks in a new chat; old missing reports cannot be counted as no-signal analysis.");
     }
     let pipeline = json!({
         "requested_mode":requested_mode,"analysis_requested":analysis_requested,

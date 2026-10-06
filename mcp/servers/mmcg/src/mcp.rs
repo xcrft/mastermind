@@ -3748,7 +3748,7 @@ fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError
 
 fn schema_mining_submit() -> Value {
     json!({"name":"mmcg_mining_submit",
-        "description":"Stage at most two source-cited working-preference candidates from the current native task. Requires the ticket supplied by its UserPromptSubmit hook and task mining enabled for this server's root and configured MMCG_PROFILE_CLIENT. Checks original user prose locally, then seals only after a complete Stop. Unverified authorship; no habit acceptance, profile publication or model invocation. Skip if no concrete signal exists.",
+        "description":"Report mining for the current native task: at most two source-cited work preferences, choices or corrections, or candidates=[] when there is no concrete signal. Requires the ticket supplied by its UserPromptSubmit hook and task mining enabled for this server's root and configured MMCG_PROFILE_CLIENT. Checks original user prose locally, then seals only after a complete Stop. Unverified authorship; no habit acceptance, profile publication or model invocation.",
         "inputSchema":{"type":"object","additionalProperties":false,"required":["ticket_id","candidates"],
             "properties":{"ticket_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},
                 "candidates":{"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,

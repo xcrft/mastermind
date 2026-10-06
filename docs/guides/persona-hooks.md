@@ -9,8 +9,9 @@ mastermind status --json
 
 On first setup, Mastermind selects the active or installed native clients,
 enables profile delivery and uses `--mining task`. Hooks capture interactions
-locally. The current agent can propose preferences from the original prompt,
-and local code saves the drafts after a complete `Stop`. No separate model is
+locally. The current agent reports work preferences, choices or corrections
+from the original prompt, and local code saves drafts after a complete `Stop`.
+An empty report records that it found no signal. No separate model is
 launched. Extra context and tool use still consume the current client's usage.
 Drafts require review before they become active rules.
 
@@ -40,7 +41,7 @@ Use `--client claude` for Claude Code. Its definitions live in
 | Capture | Grant for this client and canonical project root |
 | Session | `SessionStart` in the current capture generation |
 | Local analysis | Processed episode revisions and pending retries |
-| Task mining | Saved mode and staged/completed submissions |
+| Task mining | Saved mode, staged/completed reports, empty results and skipped or unreported analysis |
 | Profile delivery | Recorded offers, including withheld or omitted context |
 
 `status` reads these observations without starting a process or approving a
@@ -73,10 +74,12 @@ Two automatic paths can create drafts:
 | Local detector | Exact explicit statements, processed without a model when profile delivery is enabled |
 | Current task agent | Up to two candidates submitted through `mmcg_mining_submit`, sealed after complete capture |
 
-The task agent may skip submission when the prompt contains no concrete work
-preference or the tool is unavailable. There is no forced continuation or
-fallback model. For example, “short reviews only for simple changes” must retain
-the condition, not become a general rule about every review.
+The task agent submits an empty list when it finds no concrete signal. If it
+omits the report, `Stop` requests one continuation from the same agent. An
+unavailable tool or another missing report ends normally and is recorded as
+skipped analysis. The generated continuation is system input, not personal
+evidence. For example, “short reviews only for simple changes” must retain the
+condition, not become a general rule about every review.
 
 Quotes must match eligible original user prose. Code, pasted material,
 quotations, assistant suggestions and tool output cannot supply positive

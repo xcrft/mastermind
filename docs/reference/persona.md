@@ -145,11 +145,14 @@ over possible tool reads. Citation influence remains intact when summaries rotat
 ## Mining in the current task
 
 `--mining task` uses the current native agent instead of launching a processor.
-`UserPromptSubmit` offers a ticket and a short optional instruction. The agent
-may call [`mmcg_mining_submit`](mmcg.md#mcp-tools) before its final answer, or skip
-it when no concrete preference exists. There is no forced continuation or
-provider fallback. Extra context, reasoning and tool calls use the client's
-normal allowance.
+`UserPromptSubmit` offers a ticket and asks the agent to report through
+[`mmcg_mining_submit`](mmcg.md#mcp-tools) before finishing. Concrete work
+preferences, choices and corrections can become candidates; `candidates=[]`
+records that the agent found no signal. If the report is missing, `Stop` requests
+one continuation from the same agent. A second missing report is recorded as
+skipped analysis, never an empty successful result. There is no provider
+fallback. Extra context, reasoning, tool calls and the continuation use the
+client's normal allowance.
 
 | Task submission | Contract |
 |---|---|
@@ -160,17 +163,28 @@ normal allowance.
 | Client and model metadata | From native capture, never caller-supplied. Proposer identity remains unverified |
 | Admission | Rejects stale/foreign tickets, changed sources, ineligible quotations and incomplete capture |
 | Retry | Identical active submission is idempotent. Conflicting submission rejected |
+| Missing report | One `Stop` continuation while capture is complete. `stop_hook_active` and the persisted checkpoint prevent a loop |
+| Continued capture | The first stop is a `MiningCheckpoint`, not a closed response. Codex's generated prompt is `MiningContinuation` in the original episode, with origin `automation_or_agent`; it cannot support a personal claim |
 | Before `Stop` | Pending submission, no analysis or persisted semantic draft |
 | Complete `Stop` | Rechecks source, grants and mode, then seals unreviewed drafts |
+| Empty report | Completed analysis receipt with client/model binding and result `no_signal`, without a draft |
+| Unavailable tool or incomplete capture | Finishes normally, retaining a skip reason when a ticket was offered. Missing events cannot be reconstructed |
 | Late paired result after `Stop` | Retries local sealing when capture becomes complete. Later source changes cannot automatically rebind a completed draft |
 | Delayed Claude model | Local finalizer can wait up to 4 seconds for transcript binding, outside the native hook deadline |
 | Finalizer | Local admission, sealing and authored Git refresh. No model call |
-| Inspection | `hooks show` exposes `task_mining`, analyses and draft IDs. Read full content with `hooks draft` |
+| Inspection | `hooks show` exposes `task_mining`, its result/skip reason, analyses and draft IDs. `hooks status` counts reports for retained active episodes in this capture generation, including empty results, skipped analysis and old unreported closed or inactive tickets. Read full content with `hooks draft` |
 | Mode change | Explicit `init --mining task` stops the managed miner. Repeated init preserves saved choices |
 
 An offered instruction does not prove agent adherence, interpretation quality
 or usefulness. Sealing neither attests authorship nor activates a rule. A new
 client session is required to load an updated MCP catalog.
+Old completed tickets without a saved candidate count are `legacy_completed`;
+their cleared submission list cannot establish a `no_signal` result.
+
+Continuation follows the native [Codex Stop protocol](https://learn.chatgpt.com/docs/hooks#stop)
+and [Claude Stop protocol](https://code.claude.com/docs/en/hooks#stop-decision-control).
+These checks cannot make a client run untrusted hooks or supply an unavailable
+MCP tool.
 
 ## Local extraction and retention
 

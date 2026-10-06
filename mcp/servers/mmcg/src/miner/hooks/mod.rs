@@ -437,7 +437,10 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
             );
         }
     }
-    if kind == "Stop" && matches!(receipt["status"].as_str(), Some("recorded" | "duplicate")) {
+    if kind == "Stop"
+        && receipt["continuation"].is_null()
+        && matches!(receipt["status"].as_str(), Some("recorded" | "duplicate"))
+    {
         if let Some(episode) = receipt["episode"].as_str() {
             local::automatic(&mut db, &grant, episode);
             if receipt["status"] == "recorded" {
@@ -463,7 +466,17 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         eprintln!("Mastermind: local candidate retry remains pending");
     }
     let mut contexts = Vec::new();
-    if kind == "UserPromptSubmit" && receipt["status"] == "recorded" {
+    if kind == "UserPromptSubmit"
+        && receipt["status"] == "recorded"
+        && receipt["continuation_prompt"] != true
+    {
+        if let Some(episode) = receipt["episode"].as_str() {
+            match task_mining::context(&mut db, &grant, episode) {
+                Ok(Some(context)) => contexts.push(context),
+                Ok(None) => {}
+                Err(_) => eprintln!("Mastermind: task mining context withheld"),
+            }
+        }
         if let (Some(episode), Some(event_id), Some(original)) = (
             receipt["episode"].as_str(),
             receipt["event_id"].as_str(),
@@ -490,19 +503,12 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
                             .response
                             .as_ref()
                             .ok_or("offered intake has no response")?,
+                        contexts.iter().map(String::len).sum::<usize>() + 2 * contexts.len(),
                     )?);
                 } else if intake.status == "degraded" {
                     contexts.push(format!("Mastermind refiner status (advisory metadata): {}. The original request remains authoritative. No workflow handoff was produced.",
                         json!({"intake_id":intake.input.id,"status":intake.status,"reason":intake.reason})));
                 }
-            }
-        }
-        if let Some(episode) = receipt["episode"].as_str() {
-            let used = contexts.iter().map(String::len).sum::<usize>() + 2 * contexts.len();
-            match task_mining::context(&mut db, &grant, episode, used) {
-                Ok(Some(context)) => contexts.push(context),
-                Ok(None) => {}
-                Err(_) => eprintln!("Mastermind: task mining context withheld"),
             }
         }
         if let (Some(reader), Some(episode)) =
@@ -521,7 +527,9 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     }
     // Successful native output is intentionally only the client hook protocol.
     // A receipt on stdout would be injected into some clients' model context.
-    let output = if contexts.is_empty() {
+    let output = if !receipt["continuation"].is_null() {
+        receipt["continuation"].clone()
+    } else if contexts.is_empty() {
         json!({})
     } else {
         json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":contexts.join("\n\n")}})
@@ -576,6 +584,11 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
     if !supported.contains(&kind) {
         return Err("unsupported hook event".into());
     }
+    let stop_hook_active = match v.get("stop_hook_active") {
+        None => false,
+        Some(Value::Bool(active)) => *active,
+        _ => return Err("invalid stop hook state".into()),
+    };
     let turn = ["turn_id", "prompt_id"]
         .into_iter()
         .find(|key| v.get(*key).is_some_and(|value| !value.is_null()))
@@ -593,7 +606,13 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
     } else if let Some(tool) = &tool {
         Some(format!("{kind}:tool:{tool}"))
     } else if matches!(kind, "UserPromptSubmit" | "Stop") {
-        turn.as_ref().map(|id| format!("{kind}:turn:{id}"))
+        turn.as_ref().map(|id| {
+            if kind == "Stop" && stop_hook_active {
+                format!("{kind}:continued:turn:{id}")
+            } else {
+                format!("{kind}:turn:{id}")
+            }
+        })
     } else {
         None
     };
@@ -620,14 +639,15 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
         _ => ("system", "client", String::new()),
     };
     if kind == "UserPromptSubmit"
-        && ([
-            "agent_id",
-            "parent_session_id",
-            "parent_thread_id",
-            "forked_from_id",
-        ]
-        .iter()
-        .any(|key| v.get(key).is_some_and(|v| !v.is_null()))
+        && (task_mining::is_instruction(&text)
+            || [
+                "agent_id",
+                "parent_session_id",
+                "parent_thread_id",
+                "forked_from_id",
+            ]
+            .iter()
+            .any(|key| v.get(key).is_some_and(|v| !v.is_null()))
             || v.get("is_automated").and_then(Value::as_bool) == Some(true)
             || v.get("prompt_origin")
                 .and_then(Value::as_str)
@@ -681,6 +701,7 @@ fn normalize(v: &Value) -> Result<Incoming, Error> {
             && v.get("source").and_then(Value::as_str) == Some("startup")
             && !forked,
         profile_exposure,
+        stop_hook_active,
     })
 }
 

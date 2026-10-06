@@ -422,10 +422,16 @@ impl Journal {
             return Ok(json!({"status":"not_configured","eligibility":"capture_metadata_only"}));
         };
         let episodes = {
-            let mut statement = tx.prepare("SELECT id,json_extract(data,'$.generation') FROM hook_episode WHERE json_type(data,'$.archive') IS NULL AND json_extract(data,'$.client')=?1 AND json_extract(data,'$.project_root')=?2 LIMIT ?3")?;
+            let mut statement = tx.prepare("SELECT e.id,json_extract(e.data,'$.generation'),coalesce(json_extract(s.data,'$.started') AND json_extract(s.data,'$.active')=e.id,0) FROM hook_episode e LEFT JOIN hook_session s ON s.id=json_extract(e.data,'$.session') WHERE json_type(e.data,'$.archive') IS NULL AND json_extract(e.data,'$.client')=?1 AND json_extract(e.data,'$.project_root')=?2 LIMIT ?3")?;
             let rows = statement.query_map(
                 params![client, root.to_string_lossy(), MAX_EPISODES + 1],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
@@ -434,9 +440,10 @@ impl Journal {
         }
         let mut current = 0;
         let mut complete = 0;
+        let mut blocked = 0;
         let mut historical = 0;
         let mut gaps = BTreeMap::<String, u64>::new();
-        for (id, generation) in episodes {
+        for (id, generation, active) in episodes {
             if generation != grant.generation {
                 historical += 1;
                 continue;
@@ -453,6 +460,11 @@ impl Journal {
             reasons.sort();
             reasons.dedup();
             complete += usize::from(reasons.is_empty());
+            let awaiting_stop = active && reasons.iter().any(|reason| reason == "no_stop_observed");
+            blocked += usize::from(reasons.iter().any(|reason| {
+                !awaiting_stop
+                    || !matches!(reason.as_str(), "no_stop_observed" | "missing_tool_result")
+            }));
             for reason in reasons {
                 *gaps.entry(reason).or_default() += 1;
             }
@@ -460,7 +472,8 @@ impl Journal {
         let mut summary = json!({
             "status":"available","eligibility":"capture_metadata_only",
             "current":{"generation":grant.generation,"episodes":current,
-                "complete_episodes":complete,"incomplete_episodes":current-complete,"coverage_gaps":gaps},
+                "complete_episodes":complete,"incomplete_episodes":current-complete,
+                "blocked_episodes":blocked,"coverage_gaps":gaps},
             "historical":{"episodes":historical},
             "meaning":"Complete capture metadata is not proof of human authorship, semantic truth or an accepted personal habit."
         });

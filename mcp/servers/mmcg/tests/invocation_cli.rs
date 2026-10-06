@@ -26,9 +26,11 @@ set -eu
 mode=$(/bin/cat "$HARNESS/mode")
 case "${1-}" in
   --version)
+    if test "$mode" = version_probe_exit; then printf 'PRIVATE_PROBE_OUTPUT\n'; printf 'PRIVATE_PROBE_STDERR\n' >&2; exit 71; fi
     if test "$mode" = old_version; then printf '2.1.100 (Claude Code)\n'; else printf '2.1.267 (Claude Code)\n'; fi
     exit 0 ;;
   --help)
+    if test "$mode" = help_probe_exit; then printf 'PRIVATE_PROBE_OUTPUT\n'; printf 'PRIVATE_PROBE_STDERR\n' >&2; exit 71; fi
     if test "$mode" = auto_hidden_dependency && test -f "$HARNESS/calls"; then
       printf 'changed during second preparation\n' > hidden-input.txt
     fi
@@ -989,7 +991,12 @@ fn strict_controller_selection_overrides_frontmatter_workflow() {
 
 #[test]
 fn unsupported_runtime_refuses_before_model_spawn_and_retains_pending_replacement() {
-    for mode in ["old_version", "missing_capability"] {
+    for mode in [
+        "old_version",
+        "missing_capability",
+        "version_probe_exit",
+        "help_probe_exit",
+    ] {
         let fixture = Fixture::new(mode);
         let output = fixture.execute(&[]);
         assert!(!output.status.success(), "{output:?}");
@@ -1000,6 +1007,24 @@ fn unsupported_runtime_refuses_before_model_spawn_and_retains_pending_replacemen
             "not_prepared"
         );
         assert_eq!(fixture.state()["invocation_required"], true);
+        if matches!(mode, "version_probe_exit" | "help_probe_exit") {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let arg = if mode == "version_probe_exit" {
+                "--version"
+            } else {
+                "--help"
+            };
+            assert!(stderr.contains(&format!("Native runtime probe {arg} failed: invocation_native_exit_failed (exit Some(71), signal None)")), "{stderr}");
+            assert_eq!(
+                fixture.receipt()["reason"],
+                "invocation_runtime_probe_failed"
+            );
+            for private in ["PRIVATE_PROBE_OUTPUT", "PRIVATE_PROBE_STDERR"] {
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(private));
+                assert!(!stderr.contains(private), "{stderr}");
+                assert!(!fixture.receipt().to_string().contains(private));
+            }
+        }
     }
 }
 

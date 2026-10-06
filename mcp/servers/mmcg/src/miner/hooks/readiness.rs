@@ -216,6 +216,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         Some(false)
     };
     let mut warnings = Vec::new();
+    let blocked_episodes = evidence["current"]["blocked_episodes"]
+        .as_u64()
+        .is_some_and(|count| count > 0);
     if settings.is_err() {
         warnings.push("setup_settings_unavailable");
     }
@@ -267,6 +270,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         if evidence["status"] == "unavailable" {
             warnings.push("capture_evidence_summary_unavailable");
         }
+        if blocked_episodes {
+            warnings.push("capture_has_incomplete_episodes");
+        }
     }
     let mut next_actions = Vec::new();
     if native["status"] == "missing_or_stale" {
@@ -277,6 +283,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     }
     if capture["status"] == "incomplete" {
         next_actions.push("Inspect capture delivery gaps before using miner hooks recover; recovery does not restore missing events.");
+    }
+    if blocked_episodes {
+        next_actions.push("Inspect affected episodes with miner hooks episodes and miner hooks show. Capture gaps withhold mining; start a new client chat when session lifecycle events are missing or ambiguous. Existing gaps remain recorded.");
     }
     let pipeline = json!({
         "requested_mode":requested_mode,"analysis_requested":analysis_requested,

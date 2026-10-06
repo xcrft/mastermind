@@ -166,6 +166,7 @@ fn evidence_summary_separates_clients_generations_and_incomplete_episodes() {
     assert_eq!(evidence["current"]["episodes"], 3);
     assert_eq!(evidence["current"]["complete_episodes"], 1);
     assert_eq!(evidence["current"]["incomplete_episodes"], 2);
+    assert_eq!(evidence["current"]["blocked_episodes"], 1);
     assert_eq!(
         evidence["current"]["coverage_gaps"]["missing_session_start"],
         1
@@ -210,6 +211,67 @@ fn legacy_capture_gaps_are_retained_without_reinterpreting_old_sources() {
     );
     assert_eq!(report["activation"]["status"], "not_observed");
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn observed_activation_does_not_hide_incomplete_capture() {
+    let f = Fixture::new();
+    f.setup("codex");
+    f.session_start("codex", "complete");
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"complete","turn_id":"one","prompt":"Inspect the API."}));
+    f.event("codex", json!({"hook_event_name":"PreToolUse","session_id":"complete","turn_id":"one","tool_use_id":"inspect","tool_name":"Bash","tool_input":{"command":"git status"}}));
+    let pending = f.report("codex");
+    assert_eq!(pending["evidence"]["current"]["blocked_episodes"], 0);
+    assert_eq!(
+        pending["evidence"]["current"]["coverage_gaps"]["missing_tool_result"],
+        1
+    );
+    assert!(!pending["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "capture_has_incomplete_episodes"));
+    f.event("codex", json!({"hook_event_name":"PostToolUse","session_id":"complete","turn_id":"one","tool_use_id":"inspect","tool_name":"Bash","tool_response":{"exit_code":0}}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"Stop","session_id":"complete","turn_id":"one"}),
+    );
+    assert_eq!(f.doctor("codex")["status"], "ok");
+    f.event(
+        "codex",
+        json!({"hook_event_name":"SessionEnd","session_id":"complete"}),
+    );
+    f.session_start("codex", "ended-without-stop");
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"ended-without-stop","turn_id":"unfinished","prompt":"Inspect the tests."}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"SessionEnd","session_id":"ended-without-stop"}),
+    );
+    f.event("codex", json!({"hook_event_name":"UserPromptSubmit","session_id":"missing-start","turn_id":"two","prompt":"Check the callers."}));
+    f.event(
+        "codex",
+        json!({"hook_event_name":"Stop","session_id":"missing-start","turn_id":"two"}),
+    );
+    let path = f.home.join(".mastermind/persona-events.db");
+    let before = fs::read(&path).unwrap();
+    let report = f.report("codex");
+    assert_eq!(report["activation"]["status"], "session_start_observed");
+    assert_eq!(report["evidence"]["current"]["complete_episodes"], 1);
+    assert_eq!(report["evidence"]["current"]["incomplete_episodes"], 2);
+    assert_eq!(report["evidence"]["current"]["blocked_episodes"], 2);
+    assert!(report["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "capture_has_incomplete_episodes"));
+    assert!(report["pipeline"]["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action.as_str().unwrap().contains("miner hooks show")));
+    assert_eq!(f.doctor("codex")["status"], "warn");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(!f.home.join(".mastermind/style.db").exists());
 }
 
 #[test]

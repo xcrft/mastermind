@@ -102,6 +102,10 @@ a model received or used them.
 mastermind update
 ```
 
+If you already upgraded with npm, run `mastermind update --workflow-only` once
+to refresh the installed workflow bundles. Project hooks keep using the package
+launcher, so each repository does not need another `init`.
+
 | Mode or condition | Behavior |
 |---|---|
 | Proven global or project npm installation | Update in that same scope, then run the new workflow installer and verify the native binary version and workflow files |

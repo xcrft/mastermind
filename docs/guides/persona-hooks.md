@@ -47,6 +47,8 @@ Use `--client claude` for Claude Code. Its definitions live in
 claim. Event counts describe capture, not extraction accuracy. A profile offer
 does not establish that the model received or used it. The exact states and
 failure behavior are in the [capture contract](../reference/persona.md#native-capture).
+Readiness reports blocked episodes separately from turns awaiting `Stop` or tool
+results, and points to the affected capture when earlier activation was observed.
 
 ## Inspect candidates
 

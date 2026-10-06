@@ -1463,6 +1463,15 @@ fn probe(executable: &Executable, root: &Path, role: NativeRole) -> Result<Strin
             },
         );
         if result.status != Status::Passed {
+            eprintln!(
+                "Native runtime probe {arg} failed: {} (exit {:?}, signal {:?})",
+                result
+                    .reason
+                    .as_deref()
+                    .unwrap_or("invocation_probe_failed"),
+                result.exit_code,
+                result.signal,
+            );
             return Err("invocation_runtime_probe_failed");
         }
         outputs.push(String::from_utf8(bytes).map_err(|_| "invocation_runtime_unsupported")?);

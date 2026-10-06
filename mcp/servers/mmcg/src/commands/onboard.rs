@@ -273,8 +273,31 @@ fn workflow(root: &Path, client: &str, write: bool) -> Result<Value, Error> {
     if result.stdout_truncated || result.stderr_truncated {
         return Err("workflow output exceeded its bound".into());
     }
-    let detail: Value = serde_json::from_slice(&result.stdout)
+    let mut detail: Value = serde_json::from_slice(&result.stdout)
         .map_err(|_| "workflow command did not return JSON")?;
+    if !write {
+        let clients = detail["clients"]
+            .as_array()
+            .filter(|clients| clients.len() == 1 && clients[0]["client"] == client)
+            .ok_or("workflow doctor did not report the selected client")?;
+        let parity = clients[0]["parity"]
+            .as_bool()
+            .ok_or("workflow doctor did not report bundle parity")?;
+        if detail["schema_version"] != 1 || result.success != parity {
+            return Err("workflow doctor returned an inconsistent report".into());
+        }
+        detail["status"] = json!(if parity {
+            "configured"
+        } else {
+            "missing_or_stale"
+        });
+        if !parity {
+            detail["next_action"] = json!(format!(
+                "mastermind update --workflow-only --client {client}"
+            ));
+        }
+        return Ok(detail);
+    }
     if !result.success {
         return Err(format!("workflow reconciliation failed: {detail}").into());
     }
@@ -573,9 +596,10 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
         }
         for client in observed["clients"].as_array().into_iter().flatten() {
             println!(
-                "  {}: MCP {}, capture {}, session {}, miner {}",
+                "  {}: MCP {}, workflow {}, capture {}, session {}, miner {}",
                 client["client"].as_str().unwrap_or(""),
                 client["mcp"]["status"].as_str().unwrap_or("unknown"),
+                client["workflow"]["status"].as_str().unwrap_or("unknown"),
                 client["hooks"]["capture"]["status"]
                     .as_str()
                     .unwrap_or("unknown"),
@@ -586,6 +610,9 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
                     .as_str()
                     .unwrap_or("unknown")
             );
+            if let Some(action) = client["workflow"]["next_action"].as_str() {
+                println!("    Next: {action}");
+            }
             if client["hooks"]["activation"]["status"] == "not_observed" {
                 if let Some(activation) =
                     client["hooks"]["native_registration"]["client_activation"].as_str()

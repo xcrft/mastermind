@@ -187,6 +187,24 @@ test("one npm init installs workflows, mines in the task and delivers the profil
   assertCurrentIndex(status.project.index);
   assert.equal(fs.readFileSync(callsPath, "utf8"), calls);
   assert.deepEqual(keep.map((file) => fs.readFileSync(file)), before);
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "0.0.0" }));
+  const oldManifest = fs.readFileSync(manifestPath);
+  const outdated = mastermind(["status", "--json"], { FIXTURE_FORBID_NATIVE: "1" });
+  assert.equal(outdated.clients[0].workflow.status, "missing_or_stale");
+  assert.equal(outdated.clients[0].workflow.clients[0].installed_version, "0.0.0");
+  assert.equal(outdated.clients[0].workflow.clients[0].parity, false);
+  assert.equal(outdated.clients[0].workflow.next_action, "mastermind update --workflow-only --client codex");
+  const outdatedText = run(process.execPath, [launcher, "status"], { FIXTURE_FORBID_NATIVE: "1" }).stdout;
+  assert.ok(outdatedText.includes("workflow missing_or_stale"), outdatedText);
+  assert.ok(outdatedText.includes("mastermind update --workflow-only --client codex"), outdatedText);
+  assert.deepEqual(fs.readFileSync(manifestPath), oldManifest);
+  assert.equal(fs.readFileSync(callsPath, "utf8"), calls);
+  mastermind(["update", "--workflow-only", "--json"]);
+  const currentWorkflow = mastermind(["status", "--json"], { FIXTURE_FORBID_NATIVE: "1" }).clients[0].workflow;
+  assert.equal(currentWorkflow.status, "configured");
+  assert.equal(currentWorkflow.clients[0].installed_version, pkg.version);
+  assert.equal(currentWorkflow.clients[0].parity, true);
+  assert.equal(currentWorkflow.next_action, undefined);
   const hooks = JSON.parse(fs.readFileSync(path.join(root, ".codex", "hooks.json"), "utf8"));
   assert.ok(hooks.hooks.SessionStart[0].hooks[0].command.includes(launcher));
   // Package replacement must reach existing hooks without another init.

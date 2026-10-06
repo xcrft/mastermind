@@ -1,6 +1,6 @@
 # Getting started
 
-Current-task mining requires Mastermind 3.2.0 or newer. For local development,
+Current-task mining requires Mastermind 3.2.1 or newer. For local development,
 use a [source build](#current-source-build).
 
 Run these commands inside your repository:

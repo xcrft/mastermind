@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-10-06
+
+### Changed
+
+- Require a result for each task-mining ticket, including empty results. Ask the
+  current task agent for one continuation when a submission is missing.
+- Distinguish missing reports, explicit no-signal results and legacy completions
+  in hook diagnostics, and reserve prompt context for mining.
+
+### Fixed
+
+- Keep mining continuations in the original episode and exclude their generated
+  prompts from personal evidence.
+- Preserve completed source bindings across empty session-end receipts and late
+  tool results.
+- Bound large native tool payloads and retained traces without dropping valid capture.
+- Report doctor failures and failed native runtime probes correctly.
+- Fix concurrent capture-marker deletion on Windows, stale worker status during
+  completion and unstable native-script tests on Linux.
+
 ## [3.2.0] - 2026-10-05
 
 ### Changed
@@ -48,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.1...HEAD
+[3.2.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.1
 [3.2.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.0
 [3.1.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.1.0
 [3.0.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.0.1

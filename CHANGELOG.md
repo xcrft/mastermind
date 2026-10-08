@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-10-08
+
 ### Added
 
 - `mastermind init --profile-budget <256-8000>` to set the project's default
@@ -104,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.2...HEAD
+[3.2.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.2
 [3.2.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.1
 [3.2.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.0
 [3.1.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.1.0

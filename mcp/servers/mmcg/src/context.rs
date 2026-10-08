@@ -183,10 +183,11 @@ pub fn validate_delivery(
         // not the global store revision or the advisory draft review queue.
         let client = profile_client.ok_or("invocation_profile_audience_missing")?;
         let repo = crate::miner::profile::RepoContext::for_root(root);
+        // Fixed ceiling: only status, profile_revision and source_verification are compared, and none depend on the budget.
         let person = crate::miner::profile::view(
             &options.paths,
             repo.as_ref(),
-            2_000,
+            crate::onboarding::MAX_PROFILE_BUDGET_TOKENS,
             Some((root, client)),
             Some(options.role.as_str()),
             options.workflow.as_deref(),
@@ -327,41 +328,9 @@ pub fn build(
     }
     let work = crate::workflow_status::task_overview(root, 20);
     let work_status = work["status"].as_str().unwrap_or("unavailable").to_owned();
-    // Check personal sources and audience access after all other layer I/O,
-    // including the separately granted review queue. A revoked queue read
-    // cannot leave an earlier personal payload in the returned preview.
-    let person = match profile_client {
-        None => omitted("not_enabled", "profile_audience_not_configured"),
-        Some(client) => {
-            let queue = crate::miner::hooks::review_queue(root, client);
-            let repo = crate::miner::profile::RepoContext::for_root(root);
-            match crate::miner::profile::view(
-                &options.paths,
-                repo.as_ref(),
-                2_000,
-                Some((root, client)),
-                Some(options.role.as_str()),
-                options.workflow.as_deref(),
-            ) {
-                Ok(mut data) => {
-                    if matches!(
-                        data["status"].as_str(),
-                        Some("ok" | "insufficient_evidence")
-                    ) {
-                        data["review_queue"] = queue;
-                    }
-                    let status = data["status"].as_str().unwrap_or("unavailable").to_owned();
-                    layer(&status, data)?
-                }
-                Err(_) => omitted("unavailable", "profile_read_failed"),
-            }
-        }
-    };
 
-    capability
-        .verify()
-        .map_err(|_| ContextError::RootUnavailable)?;
-    let packet = json!({
+    let not_enabled = omitted("not_enabled", "profile_audience_not_configured");
+    let mut packet = json!({
         "schema_version":1,
         "kind":"context_preview",
         "repository_content_untrusted":true,
@@ -371,7 +340,7 @@ pub fn build(
         "permission_effect":"none",
         "consistency":"independent_layer_snapshots",
         "layers":{
-            "person":person, "project":project, "documentation":documentation,
+            "person":not_enabled.clone(), "project":project, "documentation":documentation,
             "code":code, "work":layer(&work_status, work)?,
         },
         "budget":{
@@ -392,7 +361,156 @@ pub fn build(
             "Size units estimate UTF-8 JSON bytes, not model-specific tokens. MCP framing is additional.",
         ],
     });
+    // Check personal sources and audience access after all other layer I/O,
+    // including the separately granted review queue. A revoked queue read
+    // cannot leave an earlier personal payload in the returned preview.
+    let non_person_tokens = non_person_budget_tokens(&packet)?;
+    let repo = crate::miner::profile::RepoContext::for_root(root);
+    let queue = profile_client.map(|client| crate::miner::hooks::review_queue(root, client));
+    let person_layer = |budget_tokens: usize| -> Result<Value, ContextError> {
+        let Some(client) = profile_client else {
+            return Ok(not_enabled.clone());
+        };
+        let view = |budget_tokens: usize| {
+            crate::miner::profile::view(
+                &options.paths,
+                repo.as_ref(),
+                budget_tokens,
+                Some((root, client)),
+                Some(options.role.as_str()),
+                options.workflow.as_deref(),
+            )
+        };
+        match view(budget_tokens) {
+            Ok(mut data) => {
+                if matches!(
+                    data["status"].as_str(),
+                    Some("ok" | "insufficient_evidence")
+                ) {
+                    data["review_queue"] = queue.clone().unwrap_or(Value::Null);
+                }
+                let status = data["status"].as_str().unwrap_or("unavailable").to_owned();
+                layer(&status, data)
+            }
+            // A budget below the view's metadata is a shortfall, not a read failure.
+            Err(_) => match view(crate::onboarding::MAX_PROFILE_BUDGET_TOKENS) {
+                Ok(data) => {
+                    let status = data["status"].as_str().unwrap_or("unavailable").to_owned();
+                    let mut dropped = layer(&status, data)?;
+                    dropped["data"] = Value::Null;
+                    dropped["omitted_reason"] = json!("context_budget");
+                    Ok(dropped)
+                }
+                Err(_) => Ok(omitted("unavailable", "profile_read_failed")),
+            },
+        }
+    };
+    let initial_budget = profile_client.map_or(0, |_| {
+        person_budget(root, options.budget_tokens, non_person_tokens)
+    });
+    fit_person_layer(
+        &mut packet,
+        options.budget_tokens,
+        initial_budget,
+        person_layer,
+    )?;
+    // Re-check the root after all layer I/O, including the person reads.
+    capability
+        .verify()
+        .map_err(|_| ContextError::RootUnavailable)?;
     bound_packet(packet, options.budget_tokens)
+}
+
+/// Fits the person layer into `budget`. On overflow it rebuilds once from the view's own
+/// payload size (not `initial`, not the wrapped layer), so the retry really drops cards.
+/// Overflow ignores documentation, which `bound_packet` drops before person.
+fn fit_person_layer(
+    packet: &mut Value,
+    budget: u32,
+    initial: usize,
+    mut view: impl FnMut(usize) -> Result<Value, ContextError>,
+) -> Result<(), ContextError> {
+    let person = view(initial)?;
+    let view_tokens = view_payload_tokens(&person);
+    packet["layers"]["person"] = person;
+    stabilize_budget(packet)?;
+    let probe_estimated = non_person_budget_tokens(packet)?;
+    let has_data = !packet["layers"]["person"]["data"].is_null();
+    if has_data && probe_estimated > u64::from(budget) {
+        let overflow = probe_estimated - u64::from(budget);
+        let reduced = shrink_person_budget(view_tokens, overflow);
+        // A failed retry keeps the first view; `bound_packet` decides.
+        if reduced >= crate::onboarding::MIN_PROFILE_BUDGET_TOKENS {
+            if let Ok(retried) = view(reduced) {
+                packet["layers"]["person"] = retried;
+                stabilize_budget(packet)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The view's own payload size: `data` without the `review_queue` its budget does not bound.
+fn view_payload_tokens(person: &Value) -> u64 {
+    let mut data = person["data"].clone();
+    if let Some(map) = data.as_object_mut() {
+        map.remove("review_queue");
+    }
+    serde_json::to_vec(&data)
+        .map(|bytes| bytes.len().div_ceil(4) as u64)
+        .unwrap_or(u64::MAX)
+}
+
+/// Drops a layer for budget exactly as `bound_packet` does, so the probe measures the real cost.
+fn drop_layer_for_budget(packet: &mut Value, name: &str) {
+    packet["layers"][name]["data"] = Value::Null;
+    packet["layers"][name]["omitted_reason"] = json!("context_budget");
+}
+
+/// Rebuilds the top-level `omitted` list from every layer's `omitted_reason`.
+fn recompute_omitted(packet: &mut Value) -> Result<(), ContextError> {
+    let omissions: Vec<Value> = packet["layers"]
+        .as_object()
+        .ok_or(ContextError::Serialization)?
+        .iter()
+        .filter_map(|(name, value)| {
+            value["omitted_reason"]
+                .as_str()
+                .map(|reason| json!({"layer":name,"reason":reason}))
+        })
+        .collect();
+    packet["omitted"] = json!(omissions);
+    Ok(())
+}
+
+/// Packet size with documentation dropped as `bound_packet` would drop it, before person:
+/// documentation must not take person's share. Does not mutate `packet`.
+fn non_person_budget_tokens(packet: &Value) -> Result<u64, ContextError> {
+    let mut probe = packet.clone();
+    if !probe["layers"]["documentation"]["data"].is_null() {
+        drop_layer_for_budget(&mut probe, "documentation");
+    }
+    recompute_omitted(&mut probe)?;
+    stabilize_budget(&mut probe)?;
+    Ok(probe["budget"]["estimated_tokens"]
+        .as_u64()
+        .unwrap_or(u64::MAX))
+}
+
+/// `min(project budget, context budget left by everything except person)`.
+fn person_budget(root: &Path, requested: u32, non_person_tokens: u64) -> usize {
+    let project_budget = crate::onboarding::profile_budget_tokens(root) as u64;
+    let remaining = u64::from(requested).saturating_sub(non_person_tokens);
+    project_budget.min(remaining) as usize
+}
+
+/// The wrapper can grow a few bytes as the payload shrinks.
+const PERSON_SHRINK_SLACK_TOKENS: u64 = 16;
+
+/// Retry budget: the previous view's own size minus overflow and slack.
+/// Shrinking the given budget instead can return the same cards.
+fn shrink_person_budget(view_tokens: u64, overflow: u64) -> usize {
+    view_tokens.saturating_sub(overflow + PERSON_SHRINK_SLACK_TOKENS) as usize
 }
 
 fn bound_packet(mut packet: Value, budget: u32) -> Result<Value, ContextError> {
@@ -410,20 +528,9 @@ fn bound_packet(mut packet: Value, budget: u32) -> Result<Value, ContextError> {
         if packet["layers"][name]["data"].is_null() {
             continue;
         }
-        packet["layers"][name]["data"] = Value::Null;
-        packet["layers"][name]["omitted_reason"] = json!("context_budget");
+        drop_layer_for_budget(&mut packet, name);
     }
-    let omissions: Vec<Value> = packet["layers"]
-        .as_object()
-        .ok_or(ContextError::Serialization)?
-        .iter()
-        .filter_map(|(name, value)| {
-            value["omitted_reason"]
-                .as_str()
-                .map(|reason| json!({"layer":name,"reason":reason}))
-        })
-        .collect();
-    packet["omitted"] = json!(omissions);
+    recompute_omitted(&mut packet)?;
     stabilize_budget(&mut packet)?;
     // Omission metadata can add bytes at the boundary. Repeat admission on the
     // complete packet, retaining only fixed-size metadata when necessary.
@@ -436,12 +543,8 @@ fn bound_packet(mut packet: Value, budget: u32) -> Result<Value, ContextError> {
             break;
         }
         if !packet["layers"][name]["data"].is_null() {
-            packet["layers"][name]["data"] = Value::Null;
-            packet["layers"][name]["omitted_reason"] = json!("context_budget");
-            packet["omitted"]
-                .as_array_mut()
-                .ok_or(ContextError::Serialization)?
-                .push(json!({"layer":name,"reason":"context_budget"}));
+            drop_layer_for_budget(&mut packet, name);
+            recompute_omitted(&mut packet)?;
             stabilize_budget(&mut packet)?;
         }
     }
@@ -481,6 +584,282 @@ fn stabilize_budget(packet: &mut Value) -> Result<(), ContextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shrink_person_budget_subtracts_overflow_plus_slack_from_the_views_own_size() {
+        assert_eq!(
+            shrink_person_budget(2000, 100),
+            2000 - 100 - PERSON_SHRINK_SLACK_TOKENS as usize
+        );
+        // Saturates instead of underflowing when the overflow exceeds the view's size.
+        assert_eq!(shrink_person_budget(50, 1000), 0);
+    }
+
+    #[test]
+    fn shrink_person_budget_shrinks_even_when_the_given_budget_had_slack() {
+        // Regression: shrinking a 2327 budget by 4 still held the same 2212-token view.
+        let view_tokens = 2212;
+        let overflow = 4;
+        let reduced = shrink_person_budget(view_tokens, overflow);
+        assert!(
+            reduced < view_tokens as usize,
+            "the next budget must be strictly below what the view already used"
+        );
+        assert_eq!(reduced, 2212 - 4 - PERSON_SHRINK_SLACK_TOKENS as usize);
+    }
+
+    #[test]
+    fn person_budget_is_the_smaller_of_project_budget_and_remaining_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // No setup.json: fails soft to the 4000-token default project budget.
+        assert_eq!(person_budget(&root, 16_000, 500), 4000);
+        // The remaining context budget is the smaller side.
+        assert_eq!(person_budget(&root, 2_000, 1_800), 200);
+        // Already over budget before the person layer: saturates at zero.
+        assert_eq!(person_budget(&root, 1_000, 5_000), 0);
+    }
+
+    #[test]
+    fn non_person_budget_tokens_excludes_documentation_regardless_of_its_payload() {
+        let base = json!({
+            "budget": {"requested_tokens":0, "estimated_tokens":0, "serialized_bytes":0, "estimator":"ceil_utf8_bytes_div4"},
+            "layers": {
+                "person": Value::Null,
+                "project": {"status":"ok", "data": {"some":"project data"}},
+                "code": {"status":"ok", "data": {"some":"code data"}},
+                "work": {"status":"ok", "data": {"some":"work data"}},
+            },
+        });
+        // Both scenarios carry real documentation, as `run-task --exec` always sends a query.
+        let mut small_payload = base.clone();
+        small_payload["layers"]["documentation"] =
+            layer("ok", json!({"observed": Vec::<String>::new()})).unwrap();
+
+        let mut large_payload = base;
+        large_payload["layers"]["documentation"] =
+            layer("ok", json!({"observed": vec!["a document section"; 50]})).unwrap();
+
+        assert_eq!(
+            non_person_budget_tokens(&small_payload).unwrap(),
+            non_person_budget_tokens(&large_payload).unwrap(),
+            "a documentation payload must not change the person budget; \
+             bound_packet drops documentation before person"
+        );
+    }
+
+    // Fake view shaped like `person_layer`: fixed skeleton, ~105-token cards popped to fit,
+    // then a `review_queue` that the view budget does not bound.
+    const FAKE_SKELETON_TOKENS: usize = 434;
+    const FAKE_CARD_TOKENS: usize = 105;
+    const FAKE_POOL_CARDS: usize = 17;
+    const FAKE_REVIEW_QUEUE_TOKENS: usize = 43;
+    const FAKE_NON_PERSON_TOKENS: u64 = 900;
+
+    fn fake_view(budget_tokens: usize) -> Result<Value, ContextError> {
+        let skeleton = "s".repeat(FAKE_SKELETON_TOKENS * 4);
+        let mut cards = vec!["x".repeat(FAKE_CARD_TOKENS * 4); FAKE_POOL_CARDS];
+        let mut data = loop {
+            let data = json!({"status": "ok", "skeleton": skeleton, "cards": cards});
+            let bytes = serde_json::to_vec(&data)
+                .map(|bytes| bytes.len())
+                .unwrap_or(usize::MAX);
+            if bytes.div_ceil(4) <= budget_tokens || cards.is_empty() {
+                break data;
+            }
+            cards.pop();
+        };
+        data["review_queue"] = json!("q".repeat(FAKE_REVIEW_QUEUE_TOKENS * 4));
+        layer("ok", data)
+    }
+
+    fn fake_packet(budget: u32) -> Value {
+        json!({
+            "budget": {
+                "requested_tokens": budget,
+                "estimated_tokens": 0,
+                "serialized_bytes": 0,
+                "estimator": "ceil_utf8_bytes_div4",
+            },
+            "layers": {
+                "person": Value::Null,
+                "filler": "x".repeat((FAKE_NON_PERSON_TOKENS * 4) as usize),
+            },
+        })
+    }
+
+    /// Builds a packet the way `fit_person_layer` would with a single,
+    /// un-shrunk call, for the two pre-fix comparisons below.
+    fn fake_packet_with_person(budget: u32, person_budget_tokens: usize) -> Value {
+        let mut packet = fake_packet(budget);
+        packet["layers"]["person"] = fake_view(person_budget_tokens).unwrap();
+        stabilize_budget(&mut packet).unwrap();
+        packet
+    }
+
+    #[test]
+    fn fit_person_layer_shrinks_to_the_views_own_size_across_a_budget_range() {
+        let mut previous_cards = 0usize;
+        for budget in [2000u32, 2500, 3000, 3050, 3100, 3200, 3300, 3400, 4000] {
+            let initial = (budget as u64).saturating_sub(FAKE_NON_PERSON_TOKENS) as usize;
+            let mut packet = fake_packet(budget);
+            fit_person_layer(&mut packet, budget, initial, fake_view).unwrap();
+            let estimated = packet["budget"]["estimated_tokens"].as_u64().unwrap();
+            assert!(
+                estimated <= budget as u64,
+                "budget {budget}: {estimated} tokens over"
+            );
+            assert!(
+                !packet["layers"]["person"]["data"].is_null(),
+                "budget {budget}: person data dropped whole"
+            );
+            let cards = packet["layers"]["person"]["data"]["cards"]
+                .as_array()
+                .unwrap()
+                .len();
+            assert!(
+                cards >= previous_cards,
+                "budget {budget}: card count decreased ({cards} < {previous_cards})"
+            );
+            previous_cards = cards;
+        }
+    }
+
+    #[test]
+    fn fit_person_layer_fixes_the_shrink_from_initial_and_whole_layer_regressions() {
+        // Tuned to overflow on the first call; both pre-fix formulas stay over budget.
+        let budget = 3220u32;
+        let initial = (budget as u64).saturating_sub(FAKE_NON_PERSON_TOKENS) as usize;
+
+        let packet = fake_packet_with_person(budget, initial);
+        let estimated = packet["budget"]["estimated_tokens"].as_u64().unwrap();
+        assert!(
+            estimated > budget as u64,
+            "fixture must reproduce an overflow to exercise the shrink"
+        );
+        let overflow = estimated - budget as u64;
+
+        // Pre-fix #1: shrink from `initial`.
+        let old_reduced = initial.saturating_sub((overflow + PERSON_SHRINK_SLACK_TOKENS) as usize);
+        let old_packet = fake_packet_with_person(budget, old_reduced);
+        let old_estimated = old_packet["budget"]["estimated_tokens"].as_u64().unwrap();
+        assert!(
+            old_estimated > budget as u64,
+            "shrinking from `initial` must still be over budget at {budget}"
+        );
+
+        // Pre-fix #2: shrink from the whole wrapped layer.
+        let whole_layer_tokens = serde_json::to_vec(&packet["layers"]["person"])
+            .unwrap()
+            .len()
+            .div_ceil(4) as u64;
+        let whole_layer_reduced =
+            (whole_layer_tokens).saturating_sub(overflow + PERSON_SHRINK_SLACK_TOKENS) as usize;
+        let whole_layer_packet = fake_packet_with_person(budget, whole_layer_reduced);
+        let whole_layer_estimated = whole_layer_packet["budget"]["estimated_tokens"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            whole_layer_estimated > budget as u64,
+            "shrinking from the whole wrapped layer must still be over budget at {budget}"
+        );
+
+        // The fix: shrink from the view's own payload.
+        let mut fixed_packet = fake_packet(budget);
+        fit_person_layer(&mut fixed_packet, budget, initial, fake_view).unwrap();
+        let fixed_estimated = fixed_packet["budget"]["estimated_tokens"].as_u64().unwrap();
+        assert!(
+            fixed_estimated <= budget as u64,
+            "fit_person_layer (shrink from the view's own payload) must fit at {budget}"
+        );
+    }
+
+    #[test]
+    fn fit_person_layer_keeps_the_first_view_when_a_shrink_retry_errors() {
+        // The view errors below its metadata floor; the retry budget is tuned to land there.
+        let budget = 3220u32;
+        let initial = (budget as u64).saturating_sub(FAKE_NON_PERSON_TOKENS) as usize;
+        let first = fake_view(initial).unwrap();
+        let mut packet = fake_packet(budget);
+        packet["layers"]["person"] = first.clone();
+        stabilize_budget(&mut packet).unwrap();
+        let estimated = packet["budget"]["estimated_tokens"].as_u64().unwrap();
+        assert!(
+            estimated > budget as u64,
+            "fixture must reproduce an overflow to exercise the shrink"
+        );
+        let overflow = estimated - budget as u64;
+        let reduced = shrink_person_budget(view_payload_tokens(&first), overflow);
+        assert!(
+            reduced >= crate::onboarding::MIN_PROFILE_BUDGET_TOKENS,
+            "fixture must still attempt a retry"
+        );
+        let erroring_view = |budget_tokens: usize| -> Result<Value, ContextError> {
+            if budget_tokens <= reduced {
+                return Err(ContextError::BudgetTooSmall);
+            }
+            fake_view(budget_tokens)
+        };
+
+        let mut test_packet = fake_packet(budget);
+        fit_person_layer(&mut test_packet, budget, initial, erroring_view).unwrap();
+        assert_eq!(
+            test_packet["layers"]["person"], first,
+            "a failed shrink retry must keep the first view unchanged, leaving \
+             the decision to bound_packet's own whole-layer drop"
+        );
+    }
+
+    #[test]
+    fn fit_person_layer_does_not_shrink_person_to_make_room_for_documentation() {
+        // Documentation is dropped before person, so it must not change the card count;
+        // a fine sweep catches the boundary that a single sampled budget missed.
+        let documentation_payload =
+            || layer("ok", json!({"observed": vec!["a document section"; 50]})).unwrap();
+        let person_cards = |bounded: &Value| {
+            bounded["layers"]["person"]["data"]["cards"]
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+
+        for budget in (2000u32..=4500).step_by(5) {
+            let initial = (budget as u64).saturating_sub(FAKE_NON_PERSON_TOKENS) as usize;
+
+            let mut without_documentation = fake_packet(budget);
+            fit_person_layer(&mut without_documentation, budget, initial, fake_view).unwrap();
+            let without_documentation = bound_packet(without_documentation, budget).unwrap();
+            let without_documentation_estimated = without_documentation["budget"]
+                ["estimated_tokens"]
+                .as_u64()
+                .unwrap();
+            assert!(
+                without_documentation_estimated <= budget as u64,
+                "budget {budget}: no-documentation packet over budget"
+            );
+            let without_documentation_cards = person_cards(&without_documentation);
+
+            let mut with_documentation = fake_packet(budget);
+            with_documentation["layers"]["documentation"] = documentation_payload();
+            fit_person_layer(&mut with_documentation, budget, initial, fake_view).unwrap();
+            let with_documentation = bound_packet(with_documentation, budget).unwrap();
+            let with_documentation_estimated = with_documentation["budget"]["estimated_tokens"]
+                .as_u64()
+                .unwrap();
+            assert!(
+                with_documentation_estimated <= budget as u64,
+                "budget {budget}: with-documentation packet over budget"
+            );
+            let with_documentation_cards = person_cards(&with_documentation);
+
+            if without_documentation_cards >= 1 {
+                assert!(
+                    with_documentation_cards >= 1,
+                    "budget {budget}: person dropped whole with documentation present \
+                     ({without_documentation_cards} card(s) without it)"
+                );
+            }
+        }
+    }
 
     #[test]
     fn multilingual_task_title_search_cannot_exceed_selection_limits() {

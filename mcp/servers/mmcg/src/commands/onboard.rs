@@ -29,6 +29,10 @@ pub struct Options {
     /// Maximum wall time per client run in seconds, including idle time.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400))]
     max_runtime: Option<u64>,
+    /// Tokens mmcg_profile, the prompt hook and the context person layer may
+    /// spend by default when the caller does not pass an explicit budget.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(256..=8000))]
+    profile_budget: Option<u64>,
     /// Allow selected clients to read the personal profile. Enabled on first client setup.
     #[arg(long, value_parser = ["on", "off"])]
     profile_access: Option<String>,
@@ -142,6 +146,9 @@ fn selection(
     }
     if let Some(value) = options.max_runtime {
         settings.max_runtime = value;
+    }
+    if let Some(value) = options.profile_budget {
+        settings.profile_budget_tokens = value as usize;
     }
     if let Some(value) = &options.profile_access {
         settings.profile_access = value == "on";

@@ -62,6 +62,9 @@ const MAX_STYLE_PROFILE_SIZE: u64 = crate::indexer::MAX_HISTORY_ARTIFACT_SIZE;
 const PROFILE_LOCK_FILE: &str = ".style-profile.lock";
 const PROFILE_WRITE_ATTEMPTS: usize = 3;
 const MAX_HABITS_TO_REVALIDATE: usize = 64;
+/// Eligible, ranked feedback rows verified (and ever delivered) per view. A
+/// larger budget still cannot deliver more than this many cards.
+const MAX_FEEDBACK_TO_REVALIDATE: usize = 64;
 const DEEP_PROMPT_LIMIT: usize = 24 * 1024;
 const DEEP_OUTPUT_LIMIT: usize = 64 * 1024;
 const DEEP_COMMIT_FIELD_LIMIT: usize = 160;
@@ -2659,7 +2662,9 @@ fn extract_interpreted(text: &str) -> Option<String> {
     (!section.is_empty()).then(|| section.to_string())
 }
 
-/// List length in the agent view; a larger budget does not widen it.
+/// List length in the agent view for associations, range, conventions and
+/// habits; a larger budget does not widen it. Feedback is ranked and trimmed
+/// to the budget instead, see [`MAX_FEEDBACK_TO_REVALIDATE`].
 const VIEW_TOP: usize = 12;
 
 /// The repository a profile view is for: the name range areas use, and the
@@ -2728,6 +2733,98 @@ fn view_at(
         workflow,
         &mut verifier,
     )
+}
+
+/// Large enough that no real profile ever gets trimmed; used to measure the
+/// full ranked, eligible, 64-capped and source-verified feedback set.
+const DELIVERY_PROBE_BUDGET_TOKENS: usize = 1_000_000;
+
+/// The five whole lists the real trimming loop drops before touching any
+/// feedback card. Shared with the loop in `view_at_with_verifier`.
+const WHOLE_LISTS_DROPPED_BEFORE_FEEDBACK: [&str; 5] =
+    ["associations", "range", "workflow", "conventions", "habits"];
+
+/// Whole-profile feedback delivery summary for `doctor`. Reuses `view`'s
+/// selection, ranking and serialization: an unbounded call finds every rule
+/// that ranking, the 64-cap and source verification would ever deliver
+/// (`deliverable`, out of the larger pre-cap `eligible` count), and the
+/// smallest budget that delivers all of them (`tokens_needed`, measured after
+/// dropping the same five lists the real trimming loop drops first). A second
+/// call at the configured budget finds how many actually fit (`fitting`).
+/// `None` when `client` has no reader grant.
+pub fn delivery_summary(
+    root: &Path,
+    client: &str,
+    budget_tokens: usize,
+) -> Result<Option<DeliverySummary>, Box<dyn std::error::Error>> {
+    let db_path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
+    let mut verify = super::feedback::QuoteSourceVerifier::new();
+    delivery_summary_at(&db_path, root, client, budget_tokens, &mut verify)
+}
+
+fn delivery_summary_at(
+    db_path: &Path,
+    root: &Path,
+    client: &str,
+    budget_tokens: usize,
+    verify: &mut dyn QuoteVerifier,
+) -> Result<Option<DeliverySummary>, Box<dyn std::error::Error>> {
+    let repo = RepoContext::for_root(root);
+    let mut full = view_at_with_verifier(
+        db_path,
+        &[],
+        repo.as_ref(),
+        DELIVERY_PROBE_BUDGET_TOKENS,
+        Some((root, client)),
+        None,
+        None,
+        verify,
+    )?;
+    if full["status"] == "access_denied" {
+        return Ok(None);
+    }
+    let eligible = full["feedback_total"].as_u64().unwrap_or(0) as usize;
+    let deliverable = full["feedback"].as_array().map_or(0, Vec::len);
+    for key in WHOLE_LISTS_DROPPED_BEFORE_FEEDBACK {
+        full[key] = serde_json::json!([]);
+    }
+    full["omitted"] = serde_json::json!(WHOLE_LISTS_DROPPED_BEFORE_FEEDBACK);
+    let tokens_needed = serde_json::to_string(&full)?.len().div_ceil(4);
+    let fitting = if budget_tokens >= tokens_needed {
+        deliverable
+    } else {
+        view_at_with_verifier(
+            db_path,
+            &[],
+            repo.as_ref(),
+            budget_tokens,
+            Some((root, client)),
+            None,
+            None,
+            verify,
+        )?["feedback"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    Ok(Some(DeliverySummary {
+        eligible,
+        deliverable,
+        fitting,
+        tokens_needed,
+    }))
+}
+
+/// See [`delivery_summary`].
+pub struct DeliverySummary {
+    /// Active, not-superseded rows before the 64-cap or source verification.
+    pub eligible: usize,
+    /// Rows ranking, the cap and source verification would ever deliver —
+    /// `doctor`'s "M".
+    pub deliverable: usize,
+    /// Rows that fit the configured budget — `doctor`'s "N".
+    pub fitting: usize,
+    /// The smallest budget that delivers all `deliverable` rows.
+    pub tokens_needed: usize,
 }
 
 pub(super) trait QuoteVerifier {
@@ -2923,7 +3020,7 @@ fn mark_unavailable_claims(
             continue;
         }
         checked += 1;
-        if checked > 64 {
+        if checked > MAX_FEEDBACK_TO_REVALIDATE {
             entry.status = "stale".into();
             complete = false;
             continue;
@@ -3002,6 +3099,8 @@ fn view_at_with_verifier(
         .filter_map(|name| language_code(name))
         .collect();
 
+    // Cell: `select` is called again below, so it cannot hold a mutable borrow of this count.
+    let feedback_total = std::cell::Cell::new(0usize);
     // Scope is a retrieval boundary, including the source I/O budget. Never
     // open another project's or role's transcripts just to discard its claim.
     let select = |agg: &mut store::Aggregate| {
@@ -3014,8 +3113,14 @@ fn view_at_with_verifier(
                 paths,
                 role,
                 workflow,
-            )
+            ) && entry.status == "active"
+                && entry.superseded_by.is_none()
         });
+        // Most important first: cap slots and verification quota go to rows
+        // that could actually be delivered, never to ineligible ones.
+        agg.feedback.sort_by(feedback_priority);
+        feedback_total.set(agg.feedback.len());
+        agg.feedback.truncate(MAX_FEEDBACK_TO_REVALIDATE);
         agg.habits
             .retain(|habit| habit_applies(habit, repo, role, workflow));
     };
@@ -3059,8 +3164,9 @@ fn view_at_with_verifier(
     let feedback: Vec<Value> = agg
         .feedback
         .iter()
+        // `select` already ranked, capped and filtered to eligible rows;
+        // re-check status because source verification above can still stale one.
         .filter(|entry| entry.status == "active")
-        .take(VIEW_TOP)
         .map(|entry| {
             json!({
                 "key": entry.key,
@@ -3153,6 +3259,7 @@ fn view_at_with_verifier(
             "semantic_accuracy": "unknown",
         },
         "feedback": feedback,
+        "feedback_total": feedback_total.get(),
         "habits": habits,
         "source_verification": if source_verification_complete { "complete" } else { "incomplete" },
         "source_verification_scope": "selected_claims",
@@ -3165,19 +3272,32 @@ fn view_at_with_verifier(
     });
     // Over budget, the least specific lists go first and are named as omitted.
     let mut omitted = Vec::new();
-    for key in [
-        "associations",
-        "range",
-        "workflow",
-        "conventions",
-        "habits",
-        "feedback",
-    ] {
+    for key in ["associations", "range", "workflow", "conventions", "habits"] {
         if serde_json::to_string(&packet)?.len().div_ceil(4) <= budget_tokens {
             break;
         }
         packet[key] = json!([]);
         omitted.push(key);
+        packet["omitted"] = json!(omitted);
+    }
+    // Still over budget: drop feedback cards one at a time from the least
+    // important end instead of the whole list at once.
+    let mut feedback_dropped = false;
+    while serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
+        let Some(list) = packet["feedback"].as_array_mut() else {
+            break;
+        };
+        if list.pop().is_none() {
+            break;
+        }
+        feedback_dropped = true;
+    }
+    if feedback_dropped
+        && packet["feedback"]
+            .as_array()
+            .is_some_and(|list| list.is_empty())
+    {
+        omitted.push("feedback");
         packet["omitted"] = json!(omitted);
     }
     if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
@@ -3239,6 +3359,30 @@ fn language_code(language: &str) -> Option<&'static str> {
         "Python" => Some("py"),
         _ => None,
     }
+}
+
+/// Delivery priority of a feedback scope kind: most broadly applicable first.
+/// `repo` and `project` name the same tier — both identify "this project".
+fn scope_rank(scope: &str) -> u8 {
+    match scope.split_once(':') {
+        None => 0,
+        Some(("path", _)) => 1,
+        Some(("language", _)) => 2,
+        Some(("repo", _)) | Some(("project", _)) => 3,
+        Some(("role", _)) => 4,
+        Some(("workflow", _)) => 5,
+        _ => 6,
+    }
+}
+
+/// Delivery order for ranked feedback: broadest scope kind first, then the
+/// newest stored `last_at` within one scope kind, then `key` as a final,
+/// deterministic tiebreak.
+fn feedback_priority(a: &store::Feedback, b: &store::Feedback) -> std::cmp::Ordering {
+    scope_rank(&a.scope)
+        .cmp(&scope_rank(&b.scope))
+        .then_with(|| b.last_at.cmp(&a.last_at))
+        .then_with(|| a.key.cmp(&b.key))
 }
 
 /// Whether stated feedback applies to the change: global always; a language
@@ -5729,12 +5873,13 @@ diff --git a/src/a.rs b/src/a.rs
         assert_eq!(
             stated,
             [
-                "Deploys are run by the author",
                 "Keep commits small and focused",
                 "Prefer typed errors in library code",
+                "Deploys are run by the author",
                 "Use the shared http client",
             ],
-            "another project's feedback does not apply, even with a shared suffix"
+            "ranked global, language, then repo/project (tied, broken by key); \
+             another project's feedback does not apply, even with a shared suffix"
         );
         assert!(
             packet["feedback"][0].get("quote").is_none(),
@@ -5796,6 +5941,345 @@ diff --git a/src/a.rs b/src/a.rs
                 .unwrap()
                 .contains(&serde_json::json!("selection")));
         }
+    }
+
+    struct AlwaysCurrent;
+    impl QuoteVerifier for AlwaysCurrent {
+        fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+            true
+        }
+        fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+            true
+        }
+    }
+
+    /// Accept `statement` under `scope` and return its reviewed key.
+    fn accept_feedback(db: &mut store::ProfileStore, statement: &str, scope: &str) -> String {
+        store::fixture_preference(db, statement, scope);
+        let entry = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.statement == statement)
+            .unwrap();
+        db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+            .unwrap();
+        entry.key
+    }
+
+    #[test]
+    fn feedback_delivers_a_ranked_prefix_instead_of_all_or_nothing() {
+        // Regression: today, 12 realistic accepted cards at a 1500-token
+        // budget are dropped whole, returning no feedback at all.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for i in 0..12 {
+            accept_feedback(
+                &mut db,
+                &format!(
+                    "Accepted preference {i} with enough realistic prose to resemble a \
+                     reviewed card used for budget measurement in this regression test"
+                ),
+                "global",
+            );
+        }
+        drop(db);
+        let packet = view_at_with_verifier(
+            &path,
+            &[],
+            None,
+            1500,
+            Some((&root, "test")),
+            None,
+            None,
+            &mut AlwaysCurrent,
+        )
+        .unwrap();
+        let feedback = packet["feedback"].as_array().unwrap();
+        assert!(
+            !feedback.is_empty(),
+            "a longest-fitting prefix must survive"
+        );
+        assert!(!packet["omitted"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("feedback")));
+        assert_eq!(packet["feedback_total"], 12);
+    }
+
+    #[test]
+    fn feedback_nothing_fits_omits_the_whole_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        accept_feedback(
+            &mut db,
+            "A single accepted preference long enough that even one card alone \
+             cannot fit inside a minimal profile budget",
+            "global",
+        );
+        drop(db);
+        let packet = view_at_with_verifier(
+            &path,
+            &[],
+            None,
+            256,
+            Some((&root, "test")),
+            None,
+            None,
+            &mut AlwaysCurrent,
+        )
+        .unwrap();
+        assert_eq!(packet["feedback"], serde_json::json!([]));
+        assert!(packet["omitted"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("feedback")));
+    }
+
+    #[test]
+    fn feedback_priority_orders_scope_then_recency_then_key() {
+        fn row(key: &str, scope: &str, last_at: &str) -> store::Feedback {
+            store::Feedback {
+                key: key.into(),
+                statement: String::new(),
+                category: String::new(),
+                scope: scope.into(),
+                quote: String::new(),
+                first_at: last_at.into(),
+                last_at: last_at.into(),
+                sources: 0,
+                status: "active".into(),
+                evidence_revision: String::new(),
+                accepted_revision: None,
+                relations_revision: String::new(),
+                superseded_by: None,
+            }
+        }
+        let mut rows = [
+            row("b", "workflow:verified", "2026-01-15"),
+            row("a", "role:executor", "2026-01-15"),
+            row("z", "repo:fixture", "2026-01-15"),
+            row("y", "language:rust", "2026-01-15"),
+            row("x", "path:src", "2026-01-15"),
+            row("newer", "global", "2026-02-01"),
+            row("older", "global", "2026-01-01"),
+        ];
+        rows.sort_by(feedback_priority);
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["newer", "older", "x", "y", "z", "a", "b"],
+            "global, path, language, repo/project, role, workflow; newest last_at first"
+        );
+
+        let mut tie = [
+            row("b-key", "repo:fixture", "2026-01-01"),
+            row("a-key", "project:fixture", "2026-01-01"),
+        ];
+        tie.sort_by(feedback_priority);
+        assert_eq!(
+            tie.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            ["a-key", "b-key"],
+            "repo and project share one tier; ties break by key"
+        );
+    }
+
+    #[test]
+    fn feedback_view_ranks_by_scope_kind_with_key_as_the_tiebreak() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for (statement, scope) in [
+            ("Global rule", "global"),
+            ("Path rule", "path:src"),
+            ("Language rule", "language:rust"),
+            ("Repo rule", "repo:fixture"),
+            ("Role rule", "role:executor"),
+            ("Workflow rule", "workflow:verified"),
+        ] {
+            accept_feedback(&mut db, statement, scope);
+        }
+        drop(db);
+        let repo = RepoContext {
+            label: "fixture".into(),
+            slug: "fixture".into(),
+            persona_project_id: "fixture".into(),
+        };
+        let packet = view_at_with_verifier(
+            &path,
+            &["src/lib.rs".into()],
+            Some(&repo),
+            100_000,
+            Some((&root, "test")),
+            Some("executor"),
+            Some("verified"),
+            &mut AlwaysCurrent,
+        )
+        .unwrap();
+        let stated: Vec<&str> = packet["feedback"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["statement"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                "Global rule",
+                "Path rule",
+                "Language rule",
+                "Repo rule",
+                "Role rule",
+                "Workflow rule",
+            ]
+        );
+    }
+
+    #[test]
+    fn feedback_cap_and_eligibility_spend_slots_only_on_eligible_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for i in 0..20 {
+            accept_feedback(&mut db, &format!("Small rule {i}"), "global");
+        }
+        drop(db);
+        let packet = view_at_with_verifier(
+            &path,
+            &[],
+            None,
+            100_000,
+            Some((&root, "test")),
+            None,
+            None,
+            &mut AlwaysCurrent,
+        )
+        .unwrap();
+        assert_eq!(packet["feedback_total"], 20);
+        assert_eq!(packet["feedback"].as_array().unwrap().len(), 20);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for i in 0..70 {
+            accept_feedback(&mut db, &format!("Eligible rule {i}"), "global");
+        }
+        // Unaccepted: proposed but never reviewed, must not take a slot.
+        store::fixture_preference(&mut db, "Never reviewed rule", "global");
+        // Superseded: one of the 70 is replaced; the retired row drops out and
+        // its replacement takes its place, so the eligible count stays 70.
+        let old_key = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.statement == "Eligible rule 0")
+            .unwrap()
+            .key;
+        store::fixture_preference(&mut db, "Replacement rule", "global");
+        let new_entry = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.statement == "Replacement rule")
+            .unwrap();
+        let old_entry = db
+            .feedback()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.key == old_key)
+            .unwrap();
+        db.supersede_feedback(
+            &old_entry.key,
+            &new_entry.key,
+            &old_entry.review_revision(),
+            &new_entry.review_revision(),
+        )
+        .unwrap();
+        drop(db);
+        let packet = view_at_with_verifier(
+            &path,
+            &[],
+            None,
+            100_000,
+            Some((&root, "test")),
+            None,
+            None,
+            &mut AlwaysCurrent,
+        )
+        .unwrap();
+        assert_eq!(
+            packet["feedback_total"], 70,
+            "unaccepted and superseded rows are not eligible"
+        );
+        assert_eq!(packet["feedback"].as_array().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn delivery_summary_reports_eligible_deliverable_fitting_and_tokens_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for i in 0..12 {
+            accept_feedback(
+                &mut db,
+                &format!(
+                    "Accepted preference {i} with enough realistic prose to resemble a \
+                     reviewed card used for budget measurement in this regression test"
+                ),
+                "global",
+            );
+        }
+        drop(db);
+        let small = delivery_summary_at(&path, &root, "test", 1500, &mut AlwaysCurrent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(small.eligible, 12);
+        assert_eq!(small.deliverable, 12, "all 12 are verifiable and uncapped");
+        assert!(
+            small.fitting < small.deliverable,
+            "1500 tokens cannot fit all 12"
+        );
+        assert!(small.tokens_needed > 1500);
+
+        let generous = delivery_summary_at(
+            &path,
+            &root,
+            "test",
+            small.tokens_needed,
+            &mut AlwaysCurrent,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            generous.fitting, generous.deliverable,
+            "the reported tokens_needed must fit every deliverable rule"
+        );
+
+        assert!(
+            delivery_summary_at(&path, &root, "unconfigured", 4000, &mut AlwaysCurrent)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -5942,6 +6426,27 @@ diff --git a/src/a.rs b/src/a.rs
                             "project:other",
                         );
                     }
+                    "accept" => {
+                        store::fixture_preference(
+                            &mut self.writer,
+                            "Newly accepted preference",
+                            "global",
+                        );
+                        let new_entry = self
+                            .writer
+                            .feedback()
+                            .unwrap()
+                            .into_iter()
+                            .find(|entry| entry.statement == "Newly accepted preference")
+                            .unwrap();
+                        self.writer
+                            .review_feedback(
+                                &new_entry.key,
+                                "active",
+                                Some(&new_entry.review_revision()),
+                            )
+                            .unwrap();
+                    }
                     _ => unreachable!(),
                 }
                 true
@@ -5954,6 +6459,8 @@ diff --git a/src/a.rs b/src/a.rs
             ("revoke", "access_denied"),
             ("reject", "source_changed"),
             ("unrelated", "ok"),
+            // A rule accepted between selection and re-check changes the selection revision.
+            ("accept", "source_changed"),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().canonicalize().unwrap();

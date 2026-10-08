@@ -71,6 +71,7 @@ mmcg miner access revoke . --client claude
 | Selection | Project, paths/languages, role and workflow filters run before selected claim source reads |
 | Private fields | Quotes and local source paths withheld |
 | Missing access or absent store | `access_denied`, no store creation |
+| Delivery budget | `init --profile-budget <256-8000>` (default 4000) sets the `.mastermind/setup.json` key `profile_budget_tokens`, read by `mmcg_profile`, the prompt hook and the context person layer when no explicit `budget_tokens` is given. Written only while it differs from the default; older binaries reject the unknown key once it is written |
 
 See [MCP arguments and result fields](mmcg.md#mcp-tools).
 

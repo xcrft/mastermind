@@ -116,7 +116,12 @@ Installed role instructions can also retrieve components separately:
 | Code | `mmcg_brief` with role, baseline and `budget_tokens: 2000` | Revision, structural/history tokens, precision and omissions |
 | Project | `mmcg_project_profile` with query or `top: 2` | Citations, freshness, candidate/review status |
 | Documentation | `mmcg_docs` with query and `top: 2` | Paths, line spans, coverage, freshness and retrieval limits |
-| Person | `mmcg_profile` with paths, role, workflow and `budget_tokens: 1500` | Claim/review IDs, store/view revisions, source verification and omissions |
+| Person | `mmcg_profile` with paths, role, workflow; `budget_tokens` defaults to the project's configured profile budget (`mastermind init --profile-budget`, default 4000) and an explicit value overrides it | Claim/review IDs, store/view revisions, source verification and omissions |
+
+Feedback is ranked (global, path, language, repo/project, role, workflow;
+newest first within a tier) and trimmed one rule at a time from the least
+important end instead of dropped whole. `feedback_total` reports the eligible
+count before that trim.
 
 | Handoff step | Rule |
 |---|---|

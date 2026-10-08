@@ -10,6 +10,19 @@ use std::path::{Path, PathBuf};
 
 type Error = Box<dyn std::error::Error>;
 const MAX_BYTES: u64 = 16 * 1024;
+/// Default `mmcg_profile` / hook / context-person delivery budget, in effect
+/// whenever a project has not set `profile_budget_tokens`.
+pub const DEFAULT_PROFILE_BUDGET_TOKENS: usize = 4000;
+pub const MIN_PROFILE_BUDGET_TOKENS: usize = 256;
+pub const MAX_PROFILE_BUDGET_TOKENS: usize = 8000;
+
+fn default_profile_budget_tokens() -> usize {
+    DEFAULT_PROFILE_BUDGET_TOKENS
+}
+
+fn is_default_profile_budget_tokens(value: &usize) -> bool {
+    *value == DEFAULT_PROFILE_BUDGET_TOKENS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +49,13 @@ pub struct Settings {
     pub refiner: bool,
     pub profile_access: bool,
     pub workflow: bool,
+    /// Tokens `mmcg_profile`, the prompt hook, and the context person layer
+    /// may spend when the caller does not pass an explicit budget.
+    #[serde(
+        default = "default_profile_budget_tokens",
+        skip_serializing_if = "is_default_profile_budget_tokens"
+    )]
+    pub profile_budget_tokens: usize,
 }
 
 impl Settings {
@@ -52,6 +72,7 @@ impl Settings {
             refiner: false,
             profile_access: false,
             workflow: true,
+            profile_budget_tokens: DEFAULT_PROFILE_BUDGET_TOKENS,
         }
     }
 
@@ -81,6 +102,14 @@ impl Settings {
         }
         if !(1..=10_000).contains(&self.max_calls) || !(1..=86_400).contains(&self.max_runtime) {
             return Err("mining budget must be 1-10000 calls and 1-86400 seconds".into());
+        }
+        if !(MIN_PROFILE_BUDGET_TOKENS..=MAX_PROFILE_BUDGET_TOKENS)
+            .contains(&self.profile_budget_tokens)
+        {
+            return Err(format!(
+                "profile budget must be {MIN_PROFILE_BUDGET_TOKENS}-{MAX_PROFILE_BUDGET_TOKENS} tokens"
+            )
+            .into());
         }
         if self
             .provider
@@ -135,6 +164,18 @@ fn read_at(
 pub fn load(root: &Path) -> Result<Option<Settings>, Error> {
     let capability = RootCapability::open(root)?;
     Ok(read_at(&capability, root)?.map(|(settings, _)| settings))
+}
+
+/// Project profile-delivery budget, fail-soft: a missing or unreadable
+/// `setup.json` must never block profile delivery, so any load error reads as
+/// the default rather than propagating.
+pub fn profile_budget_tokens(root: &Path) -> usize {
+    load(root)
+        .ok()
+        .flatten()
+        .map_or(DEFAULT_PROFILE_BUDGET_TOKENS, |settings| {
+            settings.profile_budget_tokens
+        })
 }
 
 pub fn profile_access(root: &Path, client: &str) -> Result<bool, Error> {
@@ -251,5 +292,50 @@ mod tests {
         assert!(Session::begin(&root).is_err());
         assert!(load(&root).is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn profile_budget_falls_back_to_the_default_on_a_missing_or_unreadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        assert_eq!(profile_budget_tokens(&root), DEFAULT_PROFILE_BUDGET_TOKENS);
+
+        std::fs::create_dir(root.join(".mastermind")).unwrap();
+        std::fs::write(root.join(".mastermind/setup.json"), b"not json").unwrap();
+        assert!(load(&root).is_err());
+        assert_eq!(profile_budget_tokens(&root), DEFAULT_PROFILE_BUDGET_TOKENS);
+    }
+
+    #[test]
+    fn old_setup_file_without_the_profile_budget_key_loads_as_the_default_and_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".mastermind")).unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "project_root": root,
+            "clients": [],
+            "mining": "off",
+            "provider": null,
+            "max_calls": 64,
+            "max_runtime": 3600,
+            "refiner": false,
+            "profile_access": false,
+            "workflow": true,
+        });
+        std::fs::write(
+            root.join(".mastermind/setup.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let settings = load(&root).unwrap().unwrap();
+        assert_eq!(
+            settings.profile_budget_tokens,
+            DEFAULT_PROFILE_BUDGET_TOKENS
+        );
+        assert_eq!(profile_budget_tokens(&root), DEFAULT_PROFILE_BUDGET_TOKENS);
+        assert!(!serde_json::to_string(&settings)
+            .unwrap()
+            .contains("profile_budget_tokens"));
     }
 }

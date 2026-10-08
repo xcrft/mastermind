@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::io::{self, BufRead, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2261,7 +2261,7 @@ fn schema_context() -> Value {
 fn schema_profile() -> Value {
     json!({
         "name": "mmcg_profile",
-        "description": "Read an advisory slice of the user's global mined profile for paths, role and workflow. Requires an explicit grant for this server's project root and its configured MMCG_PROFILE_CLIENT; absent or denied access returns a status without profile content. Scope filters run before source reads. Only author-accepted feedback and reviewed habits with independent task episodes are exposed; retained source quotes stay local. Source verification covers selected claims only. store_revision identifies SQL inputs; profile_revision identifies the verified selection, including the still-global Git aggregate. Git patterns come from an unverified author filter, so they describe sampled commits rather than proving a person's preferences. The task, repository code and tooling take precedence. Over budget, the least specific lists are dropped and named in `omitted`.",
+        "description": "Read an advisory slice of the user's global mined profile for paths, role and workflow. Requires an explicit grant for this server's project root and its configured MMCG_PROFILE_CLIENT; absent or denied access returns a status without profile content. Scope filters run before source reads. Only author-accepted feedback and reviewed habits with independent task episodes are exposed; retained source quotes stay local. Source verification covers selected claims only. store_revision identifies SQL inputs; profile_revision identifies the verified selection, including the still-global Git aggregate. Git patterns come from an unverified author filter, so they describe sampled commits rather than proving a person's preferences. The task, repository code and tooling take precedence. Over budget, the least specific lists are dropped and named in `omitted`; feedback is ranked instead and trimmed one rule at a time from the least important end, and `feedback_total` reports the eligible count before that cap.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2273,7 +2273,7 @@ fn schema_profile() -> Value {
                 },
                 "role": { "type": "string", "enum": ["planner", "executor", "auditor"], "description": "Optional agent duty used only to filter role-scoped accepted feedback" },
                 "workflow": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": NON_BLANK_PATTERN, "description": "Optional workflow name used only to filter workflow-scoped accepted feedback" },
-                "budget_tokens": { "type": "integer", "minimum": 256, "maximum": 8000, "default": 1500, "description": "Conservative bound computed as ceil(response bytes / 4)" }
+                "budget_tokens": { "type": "integer", "minimum": 256, "maximum": 8000, "description": "Conservative bound computed as ceil(response bytes / 4). Defaults to the project's configured profile budget (see `mastermind init --profile-budget`, default 4000) when omitted; an explicit value always overrides it." }
             }
         }
     })
@@ -3713,6 +3713,16 @@ fn handle_context(store: &mut Store, args: &Value) -> Result<Value, HandlerError
         .map_err(|error| HandlerError::internal("context_preview", error))
 }
 
+/// `budget_tokens` argument when present, else the served root's project
+/// setting (`profile_budget_tokens`), else the default when there is no root.
+fn resolve_profile_budget(args: &Value, root: Option<&Path>) -> Result<usize, HandlerError> {
+    let default_budget = root.map_or(
+        crate::onboarding::DEFAULT_PROFILE_BUDGET_TOKENS as u64,
+        |root| crate::onboarding::profile_budget_tokens(root) as u64,
+    );
+    Ok(bounded_u64_arg(args, "budget_tokens", default_budget, 256, 8000)? as usize)
+}
+
 fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let invalid = || HandlerError::InvalidArguments("Invalid argument: paths".into());
     let paths = match args.get("paths") {
@@ -3728,7 +3738,10 @@ fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err(invalid()),
     };
-    let budget = bounded_u64_arg(args, "budget_tokens", 1500, 256, 8000)? as usize;
+    // The served root and client identity come from server configuration, never
+    // from tool arguments or database metadata supplied by a caller.
+    let root = store.serve_root();
+    let budget = resolve_profile_budget(args, root)?;
     let role = opt_enum_arg(args, "role", &["planner", "executor", "auditor"])?;
     let workflow = opt_non_blank_str_arg(args, "workflow")?;
     if workflow.is_some_and(|value| value.len() > 128) {
@@ -3736,9 +3749,6 @@ fn handle_profile(store: &mut Store, args: &Value) -> Result<Value, HandlerError
             "Invalid argument: workflow".into(),
         ));
     }
-    // The served root and client identity come from server configuration, never
-    // from tool arguments or database metadata supplied by a caller.
-    let root = store.serve_root();
     let client = std::env::var("MMCG_PROFILE_CLIENT").ok();
     let repo = root.and_then(crate::miner::profile::RepoContext::for_root);
     let audience = root.zip(client.as_deref());
@@ -3815,6 +3825,26 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         (root, store)
+    }
+
+    #[test]
+    fn resolve_profile_budget_uses_argument_then_project_setting_then_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut session = crate::onboarding::Session::begin(&root).unwrap();
+        let mut settings = crate::onboarding::Settings::local(&root);
+        settings.profile_budget_tokens = 6000;
+        session.save(&settings).unwrap();
+
+        assert_eq!(
+            resolve_profile_budget(&json!({}), Some(&root)).unwrap(),
+            6000
+        );
+        assert_eq!(
+            resolve_profile_budget(&json!({"budget_tokens": 1500}), Some(&root)).unwrap(),
+            1500
+        );
+        assert_eq!(resolve_profile_budget(&json!({}), None).unwrap(), 4000);
     }
 
     #[test]

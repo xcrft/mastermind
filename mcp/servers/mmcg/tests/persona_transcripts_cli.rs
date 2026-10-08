@@ -2569,8 +2569,10 @@ fn collector_rejects_oversized_metadata_relative_cwd_and_hidden_provenance_chang
             vec![record]
         };
         fs::write(&path, jsonl(&records)).unwrap();
-        assert!(
-            !f.collect(&[&path], false).status.success(),
+        let succeeds = mutation >= 3;
+        assert_eq!(
+            f.collect(&[&path], false).status.success(),
+            succeeds,
             "mutation {mutation}"
         );
         assert_eq!(f.inbox()["candidates"][0]["candidate"], old);
@@ -2798,9 +2800,22 @@ fn transferred_evidence_keeps_strict_claude_checks_through_review_and_refresh() 
     assert_eq!(retry["proposal"]["repeated"], true);
 
     let (path, original) = &originals[0];
-    let changed = format!(
+    let moved_elsewhere = format!(
         "{original}{}\n",
-        json!({"type":"assistant", "cwd":f.home,
+        json!({"type":"assistant", "cwd":"/nonexistent-mastermind-elsewhere",
+        "message":{"content":"x".repeat(70000)}})
+    );
+    fs::write(path, &moved_elsewhere).unwrap();
+    let observed_elsewhere = f.observe_in_fixture_terminal("1");
+    assert!(
+        observed_elsewhere.status.success(),
+        "{observed_elsewhere:?}"
+    );
+    assert!(f.profile_from_mcp().to_string().contains(BEHAVIOR));
+
+    let changed = format!(
+        "{moved_elsewhere}{}\n",
+        json!({"type":"assistant", "sessionId":"other-session", "cwd":f.home,
         "message":{"content":"x".repeat(70000)}})
     );
     fs::write(path, changed).unwrap();
@@ -2833,4 +2848,110 @@ fn transferred_evidence_keeps_strict_claude_checks_through_review_and_refresh() 
     assert!(!f.style().contains(BEHAVIOR));
     assert!(f.observe_in_fixture_terminal("1").status.success());
     assert!(f.style().contains(BEHAVIOR));
+}
+
+#[test]
+#[cfg(unix)]
+fn claude_human_turns_admit_project_tree_claude_folder_and_temp_but_skip_elsewhere_and_escapes() {
+    let f = Fixture::new();
+    let project_root = f.project.canonicalize().unwrap();
+    let folder = f
+        .home
+        .join(".claude/projects")
+        .join(claude_project_slug(&project_root));
+    fs::create_dir_all(&folder).unwrap();
+    let sub = project_root.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let worktree_gone = project_root.join(".claude/worktrees/gone");
+    let temp_root = std::env::temp_dir().canonicalize().unwrap();
+    let scratch = temp_root
+        .join(format!("mastermind-scratch-{}", std::process::id()))
+        .join("scratchpad");
+    let memory = folder.join("memory");
+    let elsewhere = PathBuf::from("/nonexistent-mastermind-elsewhere");
+    let escape = project_root.join("..").join("escape");
+    let session = "turns-session";
+    let human = |cwd: &Path, quote: &str| {
+        json!({"type":"user", "sessionId":session, "cwd":cwd,
+            "origin":{"kind":"human"}, "message":{"content":quote}})
+    };
+    let quote1 = "I prefer the project root turn's answer.";
+    let quote3 = "I prefer the subdirectory turn's answer.";
+    let quote4 = "I prefer the worktree turn's answer.";
+    let quote5 = "I prefer the scratchpad turn's answer.";
+    let quote6 = "I prefer the memory folder turn's answer.";
+    let quote7 = "I prefer the elsewhere turn's answer.";
+    let quote8 = "I prefer the escaped turn's answer.";
+    let mut records = vec![
+        human(&project_root, quote1),
+        json!({"type":"assistant", "sessionId":session, "cwd":&elsewhere,
+            "message":{"content":"agent note"}}),
+        json!({"type":"attachment", "sessionId":session, "cwd":&sub,
+            "attachment":{"origin":{"kind":"agent"}, "prompt":"attachment note"}}),
+        json!({"type":"user", "sessionId":session, "cwd":&elsewhere,
+            "toolUseResult":{"ok":true}, "message":{"content":"tool output"}}),
+        human(&sub, quote3),
+        human(&worktree_gone, quote4),
+        human(&scratch, quote5),
+        human(&memory, quote6),
+        human(&elsewhere, quote7),
+        human(&escape, quote8),
+    ];
+    let path = folder.join("session.jsonl");
+    fs::write(&path, jsonl(&records)).unwrap();
+    assert!(f.collect(&[&path], false).status.success());
+
+    let candidates = f.inbox()["candidates"].as_array().unwrap().clone();
+    let quotes: std::collections::BTreeSet<String> = candidates
+        .iter()
+        .map(|item| item["candidate"]["quote"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        quotes,
+        [quote1, quote3, quote4, quote5, quote6]
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert!(!quotes.contains(quote7));
+    assert!(!quotes.contains(quote8));
+
+    let worktree_candidate = candidates
+        .iter()
+        .find(|item| item["candidate"]["quote"] == quote4)
+        .unwrap()["candidate"]
+        .clone();
+    let statement = "Keeps worktree feedback bound to the project";
+    let proposed = f.propose_preference(&worktree_candidate, statement, Some("global"));
+    assert!(proposed.status.success(), "{proposed:?}");
+    let entry = ProfileStore::open_read_only(&f.db_path())
+        .unwrap()
+        .feedback()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.statement == statement)
+        .unwrap();
+    assert!(f
+        .in_fixture_terminal(&[
+            "miner",
+            "feedback",
+            "accept",
+            &entry.key,
+            "--revision",
+            &entry.review_revision()
+        ])
+        .status
+        .success());
+    assert!(f.style().contains(statement));
+
+    for _ in 0..2 {
+        records.push(
+            json!({"type":"assistant", "sessionId":session, "cwd":&elsewhere,
+            "message":{"content":"later agent note"}}),
+        );
+    }
+    fs::write(&path, jsonl(&records)).unwrap();
+    assert!(f.profile_from_mcp()["feedback"]
+        .to_string()
+        .contains(statement));
 }

@@ -2869,7 +2869,7 @@ fn claude_human_turns_admit_project_tree_claude_folder_and_temp_but_skip_elsewhe
         .join("scratchpad");
     let memory = folder.join("memory");
     let elsewhere = PathBuf::from("/nonexistent-mastermind-elsewhere");
-    let escape = project_root.join("..").join("escape");
+    let escape = sub.join("..");
     let session = "turns-session";
     let human = |cwd: &Path, quote: &str| {
         json!({"type":"user", "sessionId":session, "cwd":cwd,

@@ -427,6 +427,7 @@ Supported source layouts:
 | Transcript condition | Admission or binding |
 |---|---|
 | Codex user text | Aligned `response_item` user message with `user.text` content |
+| Claude human `cwd` | Resolve directory aliases through the nearest existing parent when the recorded directory is missing. Skip paths containing `..` |
 | Claude agent or tool record | May run anywhere; its `cwd` never rejects the transcript |
 | Unknown attribution schema, fork, conflicting context or a Codex project change (`turn_context` cwd) | Unsupported |
 | Compaction, attachment, pasted/service content, tool output or subagent message | Cannot supply personal quotes |

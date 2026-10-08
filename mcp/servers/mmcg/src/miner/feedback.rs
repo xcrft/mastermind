@@ -590,9 +590,18 @@ fn admitted_cwd(cwd: Option<&str>, roots: &[PathBuf]) -> bool {
     let Some(cwd) = cwd.map(Path::new) else {
         return false;
     };
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    !cwd.components().any(|part| part == Component::ParentDir)
-        && roots.iter().any(|root| cwd.starts_with(root))
+    if cwd.components().any(|part| part == Component::ParentDir) {
+        return false;
+    }
+    // A deleted directory can still have an existing parent reached through an alias.
+    let cwd = cwd
+        .ancestors()
+        .find_map(|ancestor| {
+            let canonical = ancestor.canonicalize().ok()?;
+            Some(canonical.join(cwd.strip_prefix(ancestor).ok()?))
+        })
+        .unwrap_or_else(|| cwd.to_path_buf());
+    roots.iter().any(|root| cwd.starts_with(root))
 }
 
 impl SessionTranscript {

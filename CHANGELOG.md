@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Git pipe completion shares the operation's deadline and cancellation checks,
+  avoiding false timeouts when pipe workers are scheduled after Git exits.
+- Benchmark supervision keeps the child leader's PID reserved until process
+  group cleanup and handles macOS zombie-only groups, avoiding signals to a
+  recycled group and lost trial results.
+- npm publication waits longer for accepted native archives to become public.
+  Recovery dispatches from the immutable release tag while using the current
+  publication helper from `main`.
+
 ## [3.2.3] - 2026-10-08
 
 ### Fixed

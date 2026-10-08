@@ -6,6 +6,7 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,24 @@ class ProcessResult:
     returncode: int | None = None
     stop_reason: str | None = None
     elapsed_seconds: float = 0.0
+
+
+def _has_exited(process: subprocess.Popen) -> bool:
+    # Keep the leader's PID reserved until its process group has been cleaned up.
+    status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    return status is not None and status.si_pid == process.pid
+
+
+def _group_has_live_members(pgid: int) -> bool:
+    states = subprocess.run(
+        ["/bin/ps", "-axo", "pgid=,stat="], check=True,
+        capture_output=True, text=True, timeout=5,
+    )
+    for line in states.stdout.splitlines():
+        group, state = line.split()
+        if int(group) == pgid and not state.startswith("Z"):
+            return True
+    return False
 
 
 def run_bounded(
@@ -37,8 +56,9 @@ def run_bounded(
     kill every descendant even if the adapter itself receives SIGKILL.
     Such callers must run under that outer supervisor; local cleanup kills only
     the direct child. on_stdout may request early termination with a reason.
+    POSIX waitid with WNOWAIT keeps the leader's identity reserved until cleanup.
     """
-    if os.name != "posix":
+    if os.name != "posix" or not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
         return ProcessResult(stop_reason="unsupported_platform")
     started = time.monotonic()
     try:
@@ -66,8 +86,8 @@ def run_bounded(
             selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
         else:
             process.stdin.close()
-        while selector.get_map() or process.poll() is None:
-            if process.poll() is not None:
+        while selector.get_map() or not _has_exited(process):
+            if _has_exited(process):
                 exited_at = exited_at or time.monotonic()
                 # A descendant may still hold the exited process's pipes open.
                 # Drain briefly, then let the finally block kill the owned
@@ -115,15 +135,25 @@ def run_bounded(
         # must not leave a tool server running into the next condition.
         try:
             if start_new_session:
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except PermissionError:
+                    # Darwin excludes zombies when signalling a group, so a
+                    # zombie-only group yields EPERM. Keep real denials visible.
+                    if (sys.platform != "darwin" or not _has_exited(process)
+                            or _group_has_live_members(process.pid)):
+                        raise
             else:
                 process.kill()
         except ProcessLookupError:
             pass
-        process.wait()
-        selector.close()
-        for stream in streams:
-            stream.close()
+        finally:
+            try:
+                process.wait(timeout=5)
+            finally:
+                selector.close()
+                for stream in streams:
+                    stream.close()
     return ProcessResult(
         stdout=bytes(output["stdout"]), stderr=bytes(output["stderr"]),
         returncode=process.returncode, stop_reason=reason,

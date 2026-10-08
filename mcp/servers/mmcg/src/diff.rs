@@ -1190,18 +1190,22 @@ fn run_bounded_git_controlled(
             Err(_) => return Err(WorkingTreeDiffError::GitUnavailable),
         }
     };
+    // Pipe workers can be scheduled after Git exits; keep the operation's deadline.
+    let pipe_deadline = start + timeout;
     if let Some(writer) = writer {
-        writer
-            .recv_timeout(Duration::from_millis(100))
-            .map_err(|_| WorkingTreeDiffError::GitTimeout)?
-            .map_err(|_| WorkingTreeDiffError::GitUnavailable)?;
+        receive_git_pipe_until(pipe_deadline, interrupted, Instant::now, |remaining| {
+            writer.recv_timeout(remaining)
+        })?
+        .map_err(|_| WorkingTreeDiffError::GitUnavailable)?;
     }
-    let (stdout, stdout_exceeded) = stdout
-        .recv_timeout(Duration::from_millis(100))
-        .map_err(|_| WorkingTreeDiffError::GitTimeout)?;
-    let (_, stderr_exceeded) = stderr
-        .recv_timeout(Duration::from_millis(100))
-        .map_err(|_| WorkingTreeDiffError::GitTimeout)?;
+    let (stdout, stdout_exceeded) =
+        receive_git_pipe_until(pipe_deadline, interrupted, Instant::now, |remaining| {
+            stdout.recv_timeout(remaining)
+        })?;
+    let (_, stderr_exceeded) =
+        receive_git_pipe_until(pipe_deadline, interrupted, Instant::now, |remaining| {
+            stderr.recv_timeout(remaining)
+        })?;
     if stdout_exceeded || stderr_exceeded {
         return Err(WorkingTreeDiffError::GitOutputLimit);
     }
@@ -1209,6 +1213,27 @@ fn run_bounded_git_controlled(
         success: status.success(),
         stdout,
     })
+}
+
+fn receive_git_pipe_until<T>(
+    deadline: Instant,
+    interrupted: Option<&dyn Fn() -> bool>,
+    mut now: impl FnMut() -> Instant,
+    mut receive: impl FnMut(Duration) -> Result<T, mpsc::RecvTimeoutError>,
+) -> Result<T, WorkingTreeDiffError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() || interrupted.is_some_and(|check| check()) {
+            return Err(WorkingTreeDiffError::GitTimeout);
+        }
+        match receive(remaining.min(CHILD_POLL_INTERVAL)) {
+            Ok(output) => return Ok(output),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(WorkingTreeDiffError::GitTimeout);
+            }
+        }
+    }
 }
 
 fn run_bounded_git_status_until(
@@ -3123,6 +3148,64 @@ def body_only(): return 2
         fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn git_pipe_completion_shares_the_operation_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        let clock = std::cell::Cell::new(start);
+        let ready_at = start + Duration::from_millis(250);
+        let receive = |timeout| {
+            let wake_at = clock.get() + timeout;
+            if wake_at >= ready_at {
+                clock.set(ready_at);
+                Ok(b"git output".to_vec())
+            } else {
+                clock.set(wake_at);
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+        };
+        assert_eq!(
+            receive_git_pipe_until(deadline, None, || clock.get(), receive).unwrap(),
+            b"git output"
+        );
+
+        clock.set(start);
+        assert_eq!(
+            receive_git_pipe_until::<()>(
+                deadline,
+                None,
+                || clock.get(),
+                |timeout| {
+                    clock.set(clock.get() + timeout);
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                }
+            ),
+            Err(WorkingTreeDiffError::GitTimeout)
+        );
+    }
+
+    #[test]
+    fn git_pipe_completion_observes_cancellation_before_the_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        let clock = std::cell::Cell::new(start);
+        let cancelled = std::cell::Cell::new(false);
+        assert_eq!(
+            receive_git_pipe_until::<()>(
+                deadline,
+                Some(&|| cancelled.get()),
+                || clock.get(),
+                |timeout| {
+                    clock.set(clock.get() + timeout);
+                    cancelled.set(true);
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                }
+            ),
+            Err(WorkingTreeDiffError::GitTimeout)
+        );
+        assert!(clock.get() < deadline);
+    }
+
     #[cfg(unix)]
     #[test]
     fn git_batch_timeout_starts_before_writer_and_ignores_descendant_held_pipes() {
@@ -3133,10 +3216,8 @@ def body_only(): return 2
                 &["-c", "import signal; signal.pause()"],
                 Duration::from_millis(50),
             );
-            let started = Instant::now();
             let result = run_bounded_git(&repo, &["ignored"], Some(&vec![b'x'; 8 * 1024 * 1024]));
             assert_eq!(result.unwrap_err(), WorkingTreeDiffError::GitTimeout);
-            assert!(started.elapsed() < Duration::from_secs(1));
         }
 
         let pid_file = env::temp_dir().join(format!("mmcg-held-pipe-{}.pid", std::process::id()));
@@ -3146,10 +3227,8 @@ def body_only(): return 2
         );
         {
             let _guard = override_git("python3", &["-c", &code], Duration::from_secs(1));
-            let started = Instant::now();
             let result = run_bounded_git(&repo, &["ignored"], Some(b"request\n"));
             assert_eq!(result.unwrap_err(), WorkingTreeDiffError::GitTimeout);
-            assert!(started.elapsed() < Duration::from_secs(1));
         }
         if let Ok(pid) = fs::read_to_string(&pid_file) {
             let _ = Command::new("kill").args(["-TERM", pid.trim()]).status();

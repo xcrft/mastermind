@@ -46,7 +46,7 @@ jobs:
         run: python scripts/test_document_graph.py -v
 
       - name: Run audit workflow security fixtures
-        run: python scripts/test_audit_workflow_security.py
+        run: python -m unittest discover -s tests -t .
 
   audit-action-self-test:
     name: Docker Action self-consumer

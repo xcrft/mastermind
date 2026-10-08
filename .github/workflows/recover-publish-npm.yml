@@ -1,5 +1,6 @@
 # Resume an interrupted npm release from the tarballs assembled by its original
 # tag workflow. This never rebuilds or moves the immutable release tag.
+# Dispatch from the release tag to satisfy npm-prod's tag deployment policy.
 name: Recover npm publication
 
 on:
@@ -36,6 +37,7 @@ jobs:
       # without moving or rebuilding the release tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           fetch-depth: 0
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +52,10 @@ jobs:
         working-directory: release
         run: |
           set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" || {
+            echo "::error::dispatch recovery from the same release tag" >&2
+            exit 1
+          }
           ROOT_VERSION=$(node -p "require('./npm/mastermind/package.json').version")
           CARGO_VERSION=$(awk -F'"' '/^version *=/ {print $2; exit}' mcp/servers/mmcg/Cargo.toml)
           test "$RELEASE_TAG" = "npm-v$ROOT_VERSION" || {

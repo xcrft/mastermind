@@ -20,12 +20,12 @@ from unittest import mock
 
 import yaml
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 import validate as validator
 from validate import audit_pr_contract_errors, audit_publication_contract_errors
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / "docs/examples/mastermind-audit-publish.yml"
 PR_WORKFLOW_PATH = ROOT / "docs/examples/mastermind-audit-pr.yml"
 
@@ -884,9 +884,13 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             step for step in publish["steps"] if "actions/checkout@" in step.get("uses", "")
         ]
         self.assertEqual(len(checkouts), 2)
-        self.assertNotIn("ref", checkouts[0].get("with", {}))
+        self.assertEqual(checkouts[0]["with"]["ref"], "main")
         self.assertEqual(checkouts[1]["with"]["ref"], "${{ inputs.release_tag }}")
         self.assertEqual(checkouts[1]["with"]["path"], "release")
+        verify = next(
+            step for step in publish["steps"] if step.get("name") == "Verify immutable tag and version"
+        )
+        self.assertIn('test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"', verify["run"])
         download = next(
             step for step in publish["steps"] if step.get("name") == "Download original verified tarballs"
         )

@@ -58,9 +58,14 @@ The pinned history must be available locally. The checker never fetches it.
 
 ## Prepare an experiment
 
-Requires Python 3.10+, Git and POSIX. Use an output directory outside the source
-repository and trusted, already installed adapter and mmcg executables. The
-harness does not build, download or select an alternative binary.
+Requires Python 3.10+, Git and a POSIX host with `waitid` and `WNOWAIT`. Use an
+output directory outside the source repository and trusted, already installed
+adapter and mmcg executables. The harness does not build, download or select an
+alternative binary.
+
+Process supervision keeps the leader's PID reserved until group cleanup. On
+macOS, `/bin/ps` distinguishes a completed group from a live group when
+`killpg` reports `EPERM`; a live group's cleanup failure remains an error.
 
 Create a local configuration with actual identities:
 

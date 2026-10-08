@@ -119,7 +119,7 @@ npm-smoke-native:
 
 # Test audit publication, document snapshots, and eval harnesses without a model or build.
 eval-harness:
-    {{PY}} scripts/test_audit_workflow_security.py
+    {{PY}} -m unittest discover -s tests -t .
     {{PY}} scripts/test_document_graph.py
     {{PY}} -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py evals/test_benchmark_review.py evals/test_persona_replay.py evals/test_control_loop.py evals/test_hook_intake.py
 

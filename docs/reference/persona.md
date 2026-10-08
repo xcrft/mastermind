@@ -421,13 +421,14 @@ Supported source layouts:
 
 | Client | Source and attribution requirements |
 |---|---|
-| Claude Code | A selected JSONL file under `~/.claude/projects/<project>/`, explicit human origin, a valid `sessionId`, and absolute `cwd` matching the supplied project root |
+| Claude Code | A selected JSONL file under `~/.claude/projects/<project>/`, explicit human origin, a valid `sessionId`, an absolute `cwd` on every record, and a cited human turn's `cwd` inside the project root, the project's Claude folder, or the system temp directory |
 | Codex | An explicit path under `CODEX_HOME` (default `~/.codex`), in `sessions/YYYY/MM/DD/rollout-*.jsonl` or `archived_sessions/rollout-*.jsonl`, one initial `session_meta` with `source=cli\|vscode`, `thread_source=user`, matching `turn_context`, and canonical project `cwd` |
 
 | Transcript condition | Admission or binding |
 |---|---|
 | Codex user text | Aligned `response_item` user message with `user.text` content |
-| Unknown attribution schema, fork, conflicting context or project change | Unsupported |
+| Claude agent or tool record | May run anywhere; its `cwd` never rejects the transcript |
+| Unknown attribution schema, fork, conflicting context or a Codex project change (`turn_context` cwd) | Unsupported |
 | Compaction, attachment, pasted/service content, tool output or subagent message | Cannot supply personal quotes |
 | Quote | Bound to exact source line, segment and digest. Codex also binds session and turn context |
 | Copy or archive | Retains one source identity |

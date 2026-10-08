@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const MAX_TRANSCRIPT_SIZE: u64 = 256 * 1024 * 1024;
@@ -468,14 +468,24 @@ pub(super) fn collection_transcript(
             {
                 return Err("Claude transcript does not match the supplied project root".into());
             }
+            let roots: Vec<PathBuf> = [
+                Some(project_root.to_path_buf()),
+                transcript.path.parent().map(Path::to_path_buf),
+                std::env::temp_dir().canonicalize().ok(),
+                Path::new("/tmp").canonicalize().ok(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             let mut session = None;
             let mut project_bound = false;
             for (index, line) in text.lines().enumerate() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                // Identity and cwd apply even to oversized uncited records.
-                // Other fields (including tool output) are skipped by serde.
+                // Identity, absolute cwd and project binding apply even to
+                // oversized uncited records. Other fields (including tool
+                // output) are skipped by serde.
                 let metadata: CollectionClaudeMetadata =
                     serde_json::from_str(line).map_err(|_| "invalid Claude JSONL record")?;
                 if let Some(id) = metadata.session_id.as_deref() {
@@ -489,10 +499,10 @@ pub(super) fn collection_transcript(
                     if !Path::new(cwd).is_absolute() {
                         return Err("Claude collection requires an absolute cwd".into());
                     }
-                    if Path::new(cwd).canonicalize()?.as_path() != project_root {
-                        return Err("Claude transcript changes project cwd".into());
-                    }
-                    project_bound = true;
+                    project_bound = project_bound
+                        || Path::new(cwd)
+                            .canonicalize()
+                            .is_ok_and(|cwd| cwd == project_root);
                 }
                 if line.len() > MAX_EVIDENCE_RECORD_SIZE {
                     continue;
@@ -527,7 +537,7 @@ pub(super) fn collection_transcript(
                 let Some(mut turn) = human_turns(line).into_iter().next() else {
                     continue;
                 };
-                if turn.cwd.as_deref() != Some(project_root) || turn.session_id.is_none() {
+                if !admitted_cwd(metadata.cwd.as_deref(), &roots) || turn.session_id.is_none() {
                     continue;
                 }
                 turn.line_no = index + 1;
@@ -574,6 +584,15 @@ pub(super) fn collection_transcript(
         turns,
         record_sizes,
     })
+}
+
+fn admitted_cwd(cwd: Option<&str>, roots: &[PathBuf]) -> bool {
+    let Some(cwd) = cwd.map(Path::new) else {
+        return false;
+    };
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    !cwd.components().any(|part| part == Component::ParentDir)
+        && roots.iter().any(|root| cwd.starts_with(root))
 }
 
 impl SessionTranscript {

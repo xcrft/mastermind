@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude transcript collection no longer rejects a whole session because an
+  assistant, attachment or tool-result record carries a different `cwd`
+  (another directory, a worktree, a deleted folder). Only a cited human
+  turn's `cwd` is checked, and it now counts inside the project tree, the
+  project's Claude folder or the system temp directory, including after that
+  directory is deleted.
+- `mastermind doctor` no longer reports a false "subagent MCP scoping"
+  diagnostic for the `mmcg` registration `mastermind setup` itself writes,
+  whose `env` is exactly `{"MMCG_PROFILE_CLIENT": <client id>}`.
+
 ## [3.2.2] - 2026-10-08
 
 ### Added

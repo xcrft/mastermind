@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-10-08
+
 ### Fixed
 
 - Claude transcript collection no longer rejects a whole session because an
@@ -15,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's `cwd` is checked, and it now counts inside the project tree, the
   project's Claude folder or the system temp directory, including after that
   directory is deleted.
+- Resolve directory aliases for missing Claude memory and scratchpad paths,
+  including macOS `/var` and `/private/var`. Skip recorded paths containing `..`
+  even when the directory exists.
 - `mastermind doctor` no longer reports a false "subagent MCP scoping"
   diagnostic for the `mmcg` registration `mastermind setup` itself writes,
   whose `env` is exactly `{"MMCG_PROFILE_CLIENT": <client id>}`.
@@ -118,7 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.2...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.3...HEAD
+[3.2.3]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.3
 [3.2.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.2
 [3.2.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.1
 [3.2.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.0

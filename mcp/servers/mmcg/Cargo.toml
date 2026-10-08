@@ -1,6 +1,6 @@
 [package]
 name = "mmcg"
-version = "3.2.2"
+version = "3.2.3"
 edition = "2021"
 rust-version = "1.96"
 build = "build.rs"

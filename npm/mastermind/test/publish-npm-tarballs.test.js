@@ -148,11 +148,11 @@ test("a partial npm release resumes, verifies existing bytes, and publishes root
   }
 });
 
-test("an accepted package is given time to become visible before the next publish", () => {
+test("the default verification window tolerates extended processing before the next publish", () => {
   const delayed = "@scope/platform-a@1.2.3";
-  const f = fixture({ visibilityDelays: { [delayed]: 2 } });
+  const f = fixture({ visibilityDelays: { [delayed]: 61 } });
   try {
-    const result = f.run({ NPM_PUBLISH_VERIFY_ATTEMPTS: "3" });
+    const result = f.run({ NPM_PUBLISH_VERIFY_ATTEMPTS: "" });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /platform-a@1\.2\.3 published with matching integrity/);
     assert.deepEqual(f.state().events.map(({ spec }) => spec), [
@@ -160,6 +160,19 @@ test("an accepted package is given time to become visible before the next publis
       "@scope/platform-b@1.2.3",
       "@scope/root@1.2.3",
     ]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("an accepted package that stays unavailable stops publication before the root", () => {
+  const delayed = "@scope/platform-a@1.2.3";
+  const f = fixture({ visibilityDelays: { [delayed]: 3 } });
+  try {
+    const result = f.run({ NPM_PUBLISH_VERIFY_ATTEMPTS: "3" });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stderr, /was accepted but did not become visible after 3 checks/);
+    assert.deepEqual(f.state().events.map(({ spec }) => spec), [delayed]);
   } finally {
     f.cleanup();
   }

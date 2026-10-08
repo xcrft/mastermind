@@ -66,6 +66,39 @@ scripts/configure-github-protections.sh \
   --reviewer another-maintainer --prevent-self-review --apply
 ```
 
+## npm publication and recovery
+
+`publish-npm-tarballs.sh` publishes verified platform tarballs before the root
+package. It requires Node.js, npm, registry credentials and the packed artifacts
+from the release workflow. Existing versions must have the same SHA-512
+integrity as the original tarballs. A successful upload is followed by public
+registry checks before the next package is published.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `NPM_PUBLISH_VERIFY_ATTEMPTS` | `180` | Maximum integrity lookups after an accepted upload |
+| `NPM_PUBLISH_VERIFY_DELAY_SECONDS` | `5` | Delay between unavailable-version lookups |
+
+The default allows about fifteen minutes of registry processing per package.
+An exhausted window fails the job and leaves later packages unpublished. It
+does not repeat the accepted upload or bypass integrity checks.
+
+To recover a partial release, first wait for any accepted package reported by
+the failed job to appear in npm. Then run the recovery workflow from `main`
+using the failed tag run's ID and its immutable release tag. Set
+`source_run_id` and `release_tag` to those values:
+
+```bash
+gh workflow run recover-publish-npm.yml --ref main \
+  -f release_tag="$release_tag" -f source_run_id="$source_run_id"
+```
+
+The workflow requires an eligible `npm-prod` reviewer and the original
+`npm-tarballs` artifact. It verifies existing versions, publishes only missing
+packages and runs the public npm installation smoke. Keep the original tag and
+tarballs intact. If the artifact has expired or a registry integrity differs,
+stop recovery and investigate the source release.
+
 ## Package smoke tests
 
 Release workflows check candidate tarballs before publication and public

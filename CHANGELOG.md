@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Git pipe completion shares the operation's deadline and cancellation checks,
+  avoiding false timeouts when pipe workers are scheduled after Git exits.
+- Benchmark supervision keeps the child leader's PID reserved until process
+  group cleanup and handles macOS zombie-only groups, avoiding signals to a
+  recycled group and lost trial results.
+- npm publication waits longer for accepted native archives to become public.
+  Recovery dispatches from the immutable release tag while using the current
+  publication helper from `main`.
+
+## [3.2.3] - 2026-10-08
+
+### Fixed
+
+- Claude transcript collection no longer rejects a whole session because an
+  assistant, attachment or tool-result record carries a different `cwd`
+  (another directory, a worktree, a deleted folder). Only a cited human
+  turn's `cwd` is checked, and it now counts inside the project tree, the
+  project's Claude folder or the system temp directory, including after that
+  directory is deleted.
+- Resolve directory aliases for missing Claude memory and scratchpad paths,
+  including macOS `/var` and `/private/var`. Skip recorded paths containing `..`
+  even when the directory exists.
+- `mastermind doctor` no longer reports a false "subagent MCP scoping"
+  diagnostic for the `mmcg` registration `mastermind setup` itself writes,
+  whose `env` is exactly `{"MMCG_PROFILE_CLIENT": <client id>}`.
+
+## [3.2.2] - 2026-10-08
+
+### Added
+
+- `mastermind init --profile-budget <256-8000>` to set the project's default
+  `mmcg_profile` delivery budget, saved in `.mastermind/setup.json` as
+  `profile_budget_tokens` (default 4000) and omitted while it equals the
+  default. Older binaries reject the key once it is written.
+- `mastermind doctor` "profile budget" check: warns when the configured
+  budget cannot deliver every eligible, source-verified rule of the
+  whole-profile selection, with how many rules fit in ranked order, the
+  tokens the full ranked set needs, the shortfall and an
+  `init --profile-budget` hint.
+
+### Changed
+
+- Rank eligible feedback (active, not superseded) by scope — global, path,
+  language, repo/project, role, workflow, newest stored `last_at` first
+  within a tier — instead of alphabetical key order. The old fixed 12-item
+  display cap is gone; the existing 64-rule source-verification limit now
+  applies to eligible rules after ranking, instead of to whatever alphabetical
+  key order selected first.
+- Raise the default profile delivery budget and derive it from the project
+  setting everywhere: `mmcg_profile`, the `UserPromptSubmit` hook (bounded by
+  its 8 KiB context budget) and the `mmcg_context` / `run-task --exec` person
+  layer (sized to the context budget left after the other layers).
+- No shipped agent or skill instruction passes a fixed `budget_tokens` to
+  `mmcg_profile` anymore; the project's configured budget applies.
+
+### Fixed
+
+- Deliver accepted preference rules again at the default budget: over
+  budget, feedback is now trimmed one rule at a time from the least
+  important end instead of the whole list being dropped, and `feedback_total`
+  reports the eligible count before any cap. The old fixed 12-item cap on
+  feedback (applied in alphabetical key order) no longer silently hides
+  accepted rules beyond the 12th key.
+
 ## [3.2.1] - 2026-10-06
 
 ### Changed
@@ -68,7 +134,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.3...HEAD
+[3.2.3]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.3
+[3.2.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.2
 [3.2.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.1
 [3.2.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.0
 [3.1.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.1.0

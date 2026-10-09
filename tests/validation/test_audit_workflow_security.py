@@ -882,9 +882,13 @@ class RepositoryDeliveryContractTests(unittest.TestCase):
             step for step in publish["steps"] if "actions/checkout@" in step.get("uses", "")
         ]
         self.assertEqual(len(checkouts), 2)
-        self.assertNotIn("ref", checkouts[0].get("with", {}))
+        self.assertEqual(checkouts[0]["with"]["ref"], "main")
         self.assertEqual(checkouts[1]["with"]["ref"], "${{ inputs.release_tag }}")
         self.assertEqual(checkouts[1]["with"]["path"], "release")
+        verify = next(
+            step for step in publish["steps"] if step.get("name") == "Verify immutable tag and version"
+        )
+        self.assertIn('test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"', verify["run"])
         download = next(
             step for step in publish["steps"] if step.get("name") == "Download original verified tarballs"
         )

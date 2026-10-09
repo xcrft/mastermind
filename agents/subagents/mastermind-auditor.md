@@ -48,7 +48,8 @@ from correctness findings; profile delivery does not establish either outcome.
 
 Compose four separate components: the code brief, relevant
 `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
-`mmcg_profile` (`budget_tokens: 1500`). Keep each component's freshness,
+`mmcg_profile` (no `budget_tokens`; the project's configured profile budget
+applies). Keep each component's freshness,
 revisions, citations and caveats. Before handoff, serialize the combined JSON,
 including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
 This is a size estimate, not a model tokenizer guarantee. If oversized, narrow

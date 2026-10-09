@@ -145,6 +145,10 @@ Requires Python 3.10+, Git and POSIX with `waitid(WNOWAIT)`; on macOS use Python
 repository and trusted, already installed adapter and mmcg executables. The
 harness does not build, download or select an alternative binary.
 
+Process supervision keeps the leader's PID reserved until group cleanup. On
+macOS, `/bin/ps` checks whether an `EPERM` group contains only zombies; a live
+or unobservable group remains a cleanup failure.
+
 Create a local configuration with actual identities:
 
 ```json

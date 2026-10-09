@@ -1,0 +1,194 @@
+{
+  "checked_tree_without_this_report": "072f11e7b8fe297b813eec16f11743b01020b077",
+  "checks": {
+    "clippy": {
+      "command": "cargo clippy --manifest-path mcp/servers/mmcg/Cargo.toml --locked --all-targets -- -D warnings",
+      "status": "passed"
+    },
+    "frozen_corpus": {
+      "cases": 4,
+      "command": "python3 -m evals.benchmark.corpus --source-repo .",
+      "sha256": "e71919ff2ff88a0b8d4daf75b999c15bc3695b7b8fcf1bb40b543ad5d1925ac9",
+      "source_current_required": false
+    },
+    "native_all": {
+      "command": "cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked --all -- --test-threads=4",
+      "failed": 0,
+      "ignored": 1,
+      "ignored_basis": "child fixture entrypoint invoked by the fake native client",
+      "passed": 1846,
+      "status": "passed",
+      "targets": 34
+    },
+    "native_formatting": {
+      "command": "cargo fmt --manifest-path mcp/servers/mmcg/Cargo.toml --check",
+      "status": "passed"
+    },
+    "npm_contracts": {
+      "command": "npm test --prefix npm/mastermind",
+      "failed": 0,
+      "passed": 54,
+      "skipped": 1,
+      "skipped_basis": "native onboarding requires an explicit built binary"
+    },
+    "npm_native_onboarding": {
+      "command": "MMCG_TEST_BINARY=<built-native-binary> node --test npm/mastermind/test/onboarding.test.js",
+      "failed": 0,
+      "passed": 1,
+      "runtime": "built mmcg 3.2.3; synthetic native-client fixture",
+      "skipped": 0
+    },
+    "privacy": {
+      "original_reports_published": false,
+      "private_worktree_unchanged": true,
+      "source_reports_unchanged": true,
+      "style_unchanged": true
+    },
+    "protected_main_fixes": {
+      ".github/workflows/recover-publish-npm.yml": true,
+      "mcp/servers/mmcg/src/diff.rs": true,
+      "mcp/servers/mmcg/src/miner/feedback.rs": true,
+      "mcp/servers/mmcg/src/miner/hooks/profile_context.rs": true,
+      "scripts/publish-npm-tarballs.sh": true
+    },
+    "python_unittest": {
+      "command": "python3 -m unittest discover -s tests -t .",
+      "status": "passed",
+      "tests": 396
+    },
+    "validator": {
+      "artifacts": 40,
+      "command": "python3 scripts/validate.py",
+      "errors": 0,
+      "warnings": 0
+    }
+  },
+  "ci_on_result_commit": null,
+  "claude_assignments": {
+    "auditor": {
+      "effort": "high",
+      "model_alias": "opus",
+      "served_model": null,
+      "sha256": "64687d6c9b3eb97d052bb3ebc9038651658d6479add2a2162edb7c67bab263a9",
+      "version": "0.8.0"
+    },
+    "investigator": {
+      "effort": "high",
+      "model_alias": "opus",
+      "served_model": null,
+      "sha256": "b9e94f211a5b8ba9c7d1d99081c2e8e07524aee7d70b18d6f2edff1b3012ddbe",
+      "version": "0.3.0"
+    },
+    "researcher": {
+      "effort": "medium",
+      "model_alias": "sonnet",
+      "served_model": null,
+      "sha256": "36f9f3c203e064dbc8650fc3e3d60bbe5372f4eb2469306ee90548c9ddcf05fc",
+      "version": "0.5.0"
+    },
+    "task-executor": {
+      "effort": "high",
+      "model_alias": "sonnet",
+      "served_model": null,
+      "sha256": "92bf12313a2090a70299c8166681366b91c7cf8527cbb19b8057a704da947544",
+      "version": "0.6.0"
+    }
+  },
+  "comparison_accepted": false,
+  "date": "2026-10-09",
+  "integration_boundaries": [
+    "Preserve incoming feedback scope, recency ranking and verification cap",
+    "Measure actual whole-card admission for doctor, including reviewed habits",
+    "Keep whole-list omission distinct from partial missing-entry counts",
+    "Retain configured profile budget in executor and auditor calls",
+    "Keep subprocess group identity reserved until cleanup; Darwin permission handling requires verified zombies",
+    "Keep workflow security and process cleanup tests in their owning packages"
+  ],
+  "kind": "mastermind-main-integration-validation",
+  "log_sha256": {
+    "clippy.log": "64ee7844d52c0648d3713ecebeb5f8749211a5772d72ef0c8d17144f0a9a8176",
+    "corpus.log": "5e8febeeae66825c544d93f2c0ddf0484ce732d1ac7de4384e7c2aef7865e178",
+    "merge-boundaries.log": "6fc2af2b98310111fe94ec4906db6a34355437ef21b5bf06b8d82d3746ccbf4e",
+    "native-all-tests.log": "b25731bec49afb53a34aa093a2fc63c30530d131ef7bcd6c83c36926d074184c",
+    "native-format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "npm-onboarding-native.log": "34805711209697e56deb0aa1e0bddb581a42e9dfd6cc91c121d6e88c222f3da1",
+    "npm-tests.log": "0b0574b462501dd0a153145a810d6209f53d080154d01b2bf6ecadb606d5c736",
+    "profile-merge-all-claims.log": "a2269eaeb4f6372bd788b5d2d392edd54ad4e443038075c753241e4791bd4639",
+    "profile-merge-compatible.log": "cc906acc4e02952ef63d99d9d2fae292d851e93154c0df873313ab3697b668c5",
+    "profile-merge-final.log": "fd3b81da607e2962cb2075f9fae9b7059548e6697446f26870184b3814d57f47",
+    "profile-merge-reviewed-habits.log": "6cecefba846e0c9afc98d2f3ea1874a22e40fa3b743f36ebc105021dc31b4eea",
+    "profile-merge.log": "fc29d21a6b605fc8e7d441cb9e6944c5fc7f6258331c8c0909766aac12813f3f",
+    "python-tests.log": "c13ff460460b1e60ec3788648c5ea1777f7173a9e99f5ed26ec04f2fd64a4c41",
+    "validate-final.log": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9",
+    "validate.log": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9"
+  },
+  "mining_accuracy": null,
+  "parents": {
+    "incoming_main": "0a1c783dc88591d312d2539aeacede26e4971e9b",
+    "pending_work": "9a33c356227089509885c3b210c681fc203e96b9"
+  },
+  "profile_merge_attempts": [
+    {
+      "failed": 2,
+      "log": "profile-merge.log",
+      "passed": 73,
+      "sha256": "fc29d21a6b605fc8e7d441cb9e6944c5fc7f6258331c8c0909766aac12813f3f",
+      "status": "FAILED"
+    },
+    {
+      "failed": 1,
+      "log": "profile-merge-final.log",
+      "passed": 74,
+      "sha256": "fd3b81da607e2962cb2075f9fae9b7059548e6697446f26870184b3814d57f47",
+      "status": "FAILED"
+    },
+    {
+      "failed": 1,
+      "log": "profile-merge-compatible.log",
+      "passed": 74,
+      "sha256": "cc906acc4e02952ef63d99d9d2fae292d851e93154c0df873313ab3697b668c5",
+      "status": "FAILED"
+    },
+    {
+      "failed": 1,
+      "log": "profile-merge-reviewed-habits.log",
+      "passed": 74,
+      "sha256": "6cecefba846e0c9afc98d2f3ea1874a22e40fa3b743f36ebc105021dc31b4eea",
+      "status": "FAILED"
+    },
+    {
+      "failed": 0,
+      "log": "profile-merge-all-claims.log",
+      "passed": 75,
+      "sha256": "a2269eaeb4f6372bd788b5d2d392edd54ad4e443038075c753241e4791bd4639",
+      "status": "ok"
+    }
+  ],
+  "real_chat_hook_activation": null,
+  "schema_version": 1,
+  "semantic_quality": null,
+  "source_sha256": {
+    ".github/workflows/recover-publish-npm.yml": "2c16d8865164ce037787ca7d7dc7fc948f5f1460ca6bfb2295218baed8061ed6",
+    ".github/workflows/validate.yml": "7e1b2c658eb8463e414513d5c0187da6b9d5b38c2e88a953625ae31a2216539c",
+    "docs/reference/mmcg.md": "bebf98707a66b6e7eadcece60309efd341b09e543c1ec2ce85533d5418b38663",
+    "docs/reference/persona.md": "09110b631b363687175f03d7726aac84c6383c3f1fcb219f35fed00ea11610fd",
+    "evals/persona/delivery.py": "aa45b9f4697033fe149c40980508dc1f57f4d74b1f70c0fb48344f670254c0c6",
+    "evals/shared/process.py": "a68118dc9622e42057941ede8c50e0d81de1429307335e2d2cc7a057d2f94ed4",
+    "mcp/servers/mmcg/src/context.rs": "9da783e6a3c2dff10d750493da8699f4866c660120b5d8537ca4243b465a81a9",
+    "mcp/servers/mmcg/src/diff.rs": "83fc82e35209fdfd5109c3b4e7a749766442915a7cacc0db440c7330ded07aad",
+    "mcp/servers/mmcg/src/doctor.rs": "c740b0b7ae18394069a68a851d2e1a1632a25b913c991a4e8fcf2cc0c4263103",
+    "mcp/servers/mmcg/src/fts.rs": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1",
+    "mcp/servers/mmcg/src/mcp.rs": "8e37d924e3f2ea9ed08723d8cf97105c8c55c6258ab072cae52cd73e2e06bcf5",
+    "mcp/servers/mmcg/src/miner/feedback.rs": "fa84ca2cc4b822c44f1a9cb91e674507ba9bfd186df3719b316a371598e18651",
+    "mcp/servers/mmcg/src/miner/hooks/profile_context.rs": "e9b7be71ac2ba02ba3a73fa8d7ec9e99e0ed52095d6399372d86b8188a63a1f8",
+    "mcp/servers/mmcg/src/miner/profile.rs": "c4a239b38d5466d4148ee61d7471e5bf6bd460ebb4d8adba1e66c81e0a4cfecc",
+    "mcp/servers/mmcg/src/onboarding.rs": "7e7bcfe35a811af07f2fce5f41894609cefe7ad4b2ccda4027dc4006effe165e",
+    "mcp/servers/mmcg/tests/persona_transcripts_cli.rs": "7359e1e9da1b05d648e837556f1d4db7420ac07cc2e274f7e51384d03ca9e7bd",
+    "mcp/servers/mmcg/tests/profile_budget_cli.rs": "2d2f76c4f87ee8bf6403799f916cabbf0f8928deba1a4f57161e72d22fe7dc1c",
+    "npm/mastermind/package.json": "10413fd13b6bd8315bba88f9a7f9583e286895da5b47d77c7febc67808a6497b",
+    "scripts/publish-npm-tarballs.sh": "4417bb6ad70b1554f7982fc69b327ba996e24d2dca0abb6546965c95d2da2741",
+    "tests/evals/persona/test_delivery.py": "513f32cfe21eedb7ff7a6be96325fc48d438aa12d8d5549e80236a2f0daedee3",
+    "tests/evals/shared/test_process.py": "ab1ce6f519b823138bb3465b555f1bc80db5ca120e010cbb2e9ff7f0c623b136",
+    "tests/validation/test_audit_workflow_security.py": "80af3dba439d91fd3c1bc4c1578fdaafaecfd6ae28c255424008d63b5cbc3b3b"
+  }
+}

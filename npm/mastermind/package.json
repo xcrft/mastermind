@@ -1,6 +1,6 @@
 {
   "name": "@xcraftmind/mastermind",
-  "version": "3.2.1",
+  "version": "3.2.3",
   "description": "Local-first repository context for coding agents: codegraph, cited project knowledge, change impact, and evidence-backed workflows.",
   "license": "MIT",
   "author": "xcraftmind",
@@ -43,12 +43,12 @@
     "mastermind"
   ],
   "optionalDependencies": {
-    "@xcraftmind/mmcg-darwin-arm64": "3.2.1",
-    "@xcraftmind/mmcg-darwin-x64": "3.2.1",
-    "@xcraftmind/mmcg-linux-x64-gnu": "3.2.1",
-    "@xcraftmind/mmcg-linux-arm64-gnu": "3.2.1",
-    "@xcraftmind/mmcg-linux-x64-musl": "3.2.1",
-    "@xcraftmind/mmcg-linux-arm64-musl": "3.2.1",
-    "@xcraftmind/mmcg-win32-x64-msvc": "3.2.1"
+    "@xcraftmind/mmcg-darwin-arm64": "3.2.3",
+    "@xcraftmind/mmcg-darwin-x64": "3.2.3",
+    "@xcraftmind/mmcg-linux-x64-gnu": "3.2.3",
+    "@xcraftmind/mmcg-linux-arm64-gnu": "3.2.3",
+    "@xcraftmind/mmcg-linux-x64-musl": "3.2.3",
+    "@xcraftmind/mmcg-linux-arm64-musl": "3.2.3",
+    "@xcraftmind/mmcg-win32-x64-msvc": "3.2.3"
   }
 }

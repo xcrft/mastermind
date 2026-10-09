@@ -82,7 +82,7 @@ pub(super) fn deliver(
         omitted("native_context_budget");
         return Ok(None);
     };
-    let budget = (available / 4).min(1500);
+    let budget = (available / 4).min(crate::onboarding::profile_budget_tokens(root));
     if budget < 256 {
         omitted("native_context_budget");
         return Ok(None);

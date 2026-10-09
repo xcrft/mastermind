@@ -94,6 +94,28 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "spawn_error")
         self.assertIsNone(result.returncode)
 
+    def test_group_cleanup_keeps_the_leaders_identity_until_reaping(self):
+        killpg = os.killpg
+        identities = []
+
+        def kill_owned_group(pid, sig):
+            status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertIsNotNone(status)
+            self.assertEqual(status.si_pid, pid)
+            identities.append(pid)
+            killpg(pid, sig)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(process.os, "killpg", side_effect=kill_owned_group):
+            result = run_bounded([sys.executable, "-c", "print('completed', flush=True)"],
+                cwd=Path(directory), env={}, timeout=30)
+        self.assertEqual(result.stdout, b"completed\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNone(result.stop_reason)
+        self.assertTrue(identities)
+        with self.assertRaises(ChildProcessError):
+            os.waitid(os.P_PID, identities[0], os.WEXITED | os.WNOHANG | os.WNOWAIT)
+
     def test_exited_leader_is_unreaped_and_quiescent_permission_error_preserves_output(self):
         observed = []
 
@@ -104,7 +126,9 @@ class ProcessTests(unittest.TestCase):
             observed.append(pid)
             raise PermissionError("zombie group")
 
-        with tempfile.TemporaryDirectory() as directory, patch.object(process.os, "killpg", side_effect=refuse_zombie_group):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(process.sys, "platform", "darwin"), \
+                patch.object(process.os, "killpg", side_effect=refuse_zombie_group):
             result = run_bounded([sys.executable, "-c", "print('retained output')"],
                 cwd=Path(directory), env={}, timeout=30)
         self.assertEqual(len(observed), 1)
@@ -113,7 +137,7 @@ class ProcessTests(unittest.TestCase):
         self.assertIsNone(result.stop_reason)
 
     def test_unverified_group_cleanup_cannot_be_reported_as_success(self):
-        for mode in ("missing", "live"):
+        for mode in ("missing", "live", "non_darwin_zombie"):
             with self.subTest(mode=mode):
                 group = []
 
@@ -122,10 +146,12 @@ class ProcessTests(unittest.TestCase):
                     raise PermissionError("denied")
 
                 def observation(*args, **kwargs):
-                    body = "" if mode == "missing" else f"{group[0]} R\n"
+                    state = "Z" if mode == "non_darwin_zombie" else "R"
+                    body = "" if mode == "missing" else f"{group[0]} {state}\n"
                     return subprocess.CompletedProcess(args, 0, stdout=body, stderr="")
 
                 with tempfile.TemporaryDirectory() as directory, \
+                        patch.object(process.sys, "platform", "linux" if mode == "non_darwin_zombie" else "darwin"), \
                         patch.object(process.os, "killpg", side_effect=refused), \
                         patch.object(process.subprocess, "run", side_effect=observation):
                     result = run_bounded([sys.executable, "-c", "print('retained output')"],

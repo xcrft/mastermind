@@ -38,6 +38,18 @@ documentation. New checks belong in `validate.py` and report `Issue` values with
 `error` or `warning` level. Fix newly detected repository violations in the same
 change.
 
+## Python harness checks
+
+Run workflow contracts and process ownership checks from the repository root:
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
+`tests/scripts/` covers release and audit workflow contracts. `tests/evals/`
+covers benchmark process supervision. Run `just eval-harness` for these checks,
+document snapshots and the complete deterministic eval harness suite.
+
 ## Document evidence
 
 ```sh
@@ -71,6 +83,50 @@ disabled by default. Enable it with a distinct eligible reviewer:
 scripts/configure-github-protections.sh \
   --reviewer another-maintainer --prevent-self-review --apply
 ```
+
+## npm publication and recovery
+
+`publish-npm-tarballs.sh` publishes verified platform tarballs before the root
+package. It requires Node.js, npm, registry credentials and the packed artifacts
+from the release workflow. Existing versions must have the same SHA-512
+integrity as the original tarballs. A successful upload is followed by public
+registry checks before the next package is published.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `NPM_PUBLISH_VERIFY_ATTEMPTS` | `180` | Maximum integrity lookups after an accepted upload |
+| `NPM_PUBLISH_VERIFY_DELAY_SECONDS` | `5` | Delay between unavailable-version lookups |
+
+The default allows about fifteen minutes of registry processing per package.
+An exhausted window fails the job and leaves later packages unpublished. It
+does not repeat the accepted upload or bypass integrity checks.
+
+To recover a partial release, first wait for any accepted package reported by
+the failed job to appear in npm. Then dispatch the recovery workflow from the
+release tag so that it satisfies `npm-prod`'s tag deployment policy. It checks
+out the current helper from `main`. Set `source_run_id` to the failed tag run's
+ID and `release_tag` to its immutable tag:
+
+```bash
+gh workflow run recover-publish-npm.yml --ref "$release_tag" \
+  -f release_tag="$release_tag" -f source_run_id="$source_run_id"
+```
+
+The workflow requires an eligible `npm-prod` reviewer and the original
+`npm-tarballs` artifact. It verifies existing versions, publishes only missing
+packages and runs the public npm installation smoke. Keep the original tag and
+tarballs intact. If the artifact has expired or a registry integrity differs,
+stop recovery and investigate the source release.
+
+For older tags whose recovery workflow does not yet check out the helper from
+`main`, rerun only the failed tag jobs after accepted packages become visible:
+
+```bash
+gh run rerun "$source_run_id" --failed
+```
+
+This reuses the successful assembly job's original tarballs without rebuilding
+the platform binaries.
 
 ## Package smoke tests
 

@@ -71,8 +71,20 @@ mmcg miner access revoke . --client claude
 | Selection | Project, paths/languages, role and workflow filters run before selected claim source reads |
 | Private fields | Quotes and local source paths withheld |
 | Missing access or absent store | `access_denied`, no store creation |
+| Delivery budget | `init --profile-budget <256-8000>` (default 4000) sets the `.mastermind/setup.json` key `profile_budget_tokens`, read by `mmcg_profile`, the prompt hook and the context person layer when no explicit `budget_tokens` is given. Written only while it differs from the default; older binaries reject the unknown key once it is written |
 
 See [MCP arguments and result fields](mmcg.md#mcp-tools).
+
+### Profile delivery
+
+| Result field or choice | Contract |
+|---|---|
+| Feedback order | Global, path, language, repo/project, role, workflow; newest `last_at` first within each tier, then the stable key |
+| Claim admission | Alternate reviewed feedback and habits, then Git diagnostics. Admit whole entries; skip an oversized entry without cutting its conditions or exceptions |
+| `feedback_total` | Eligible feedback before the 64-rule source-verification cap and response-budget admission |
+| `omitted` | Lists with no delivered entries, plus omitted metadata fields. A partial list is not wholly omitted |
+| `omitted_counts` | Number of entries withheld from each selected list. This optional detail can itself be omitted at the minimum budget |
+| `doctor` budget advice | Counts actual feedback delivery. Recommends a sufficient byte-based budget for all verified feedback and habits, excluding Git diagnostics; this is an estimate, not measured model token usage |
 
 ## Native capture
 
@@ -420,13 +432,15 @@ Supported source layouts:
 
 | Client | Source and attribution requirements |
 |---|---|
-| Claude Code | A selected JSONL file under `~/.claude/projects/<project>/`, explicit human origin, a valid `sessionId`, and absolute `cwd` matching the supplied project root |
+| Claude Code | A selected JSONL file under `~/.claude/projects/<project>/`, explicit human origin, a valid `sessionId`, an absolute `cwd` on every record, and a cited human turn's `cwd` inside the project root, the project's Claude folder, or the system temp directory |
 | Codex | An explicit path under `CODEX_HOME` (default `~/.codex`), in `sessions/YYYY/MM/DD/rollout-*.jsonl` or `archived_sessions/rollout-*.jsonl`, one initial `session_meta` with `source=cli\|vscode`, `thread_source=user`, matching `turn_context`, and canonical project `cwd` |
 
 | Transcript condition | Admission or binding |
 |---|---|
 | Codex user text | Aligned `response_item` user message with `user.text` content |
-| Unknown attribution schema, fork, conflicting context or project change | Unsupported |
+| Claude human `cwd` | Resolve directory aliases through the nearest existing parent when the recorded directory is missing. Skip paths containing `..` |
+| Claude agent or tool record | May run anywhere; its `cwd` never rejects the transcript |
+| Unknown attribution schema, fork, conflicting context or a Codex project change (`turn_context` cwd) | Unsupported |
 | Compaction, attachment, pasted/service content, tool output or subagent message | Cannot supply personal quotes |
 | Quote | Bound to exact source line, segment and digest. Codex also binds session and turn context |
 | Copy or archive | Retains one source identity |

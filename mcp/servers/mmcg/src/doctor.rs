@@ -21,8 +21,9 @@
 //! | 11 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
 //! | 12 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
 //! | 13 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
-//! | 14 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
-//! | 15 | `Codex hook readiness` | the same independent boundaries for Codex |
+//! | 14 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
+//! | 15 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
+//! | 16 | `Codex hook readiness` | the same independent boundaries for Codex |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -254,6 +255,7 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_workflow_mcp_contract(workflow_audit.as_ref()),
         check_workflow_runtime_contract(workflow_audit.as_ref()),
         check_style_profile(root),
+        check_profile_budget(root),
         hook_readiness_check(
             "claude",
             crate::miner::hooks::readiness::report("claude", root),
@@ -376,6 +378,103 @@ fn check_style_profile(root: &Path) -> Check {
             message: format!("{new_commits} new commits since last mined ({mined_through})"),
             hint: Some(STYLE_REFRESH_HINT.into()),
         },
+    }
+}
+
+const PROFILE_BUDGET_CHECK_NAME: &str = "profile budget";
+
+/// Warn when the configured profile budget cannot deliver every eligible,
+/// source-verified rule of the whole-profile selection (no paths, role or
+/// workflow) for the first configured reader. Ok when every rule fits, or
+/// when no profile store, grant or reader is configured at all.
+fn check_profile_budget(root: &Path) -> Check {
+    let not_configured = || Check {
+        name: PROFILE_BUDGET_CHECK_NAME,
+        status: Status::Ok,
+        message: "not configured — no profile store, grant or reader".into(),
+        hint: None,
+    };
+    let budget = crate::onboarding::profile_budget_tokens(root);
+    let reader = ["claude", "codex"]
+        .into_iter()
+        .find_map(|client| crate::miner::hooks::configured_profile_client(root, client).ok()?);
+    let Some(reader) = reader else {
+        return not_configured();
+    };
+    match crate::miner::profile::delivery_summary(root, &reader, budget) {
+        Ok(Some(summary)) => profile_budget_check(&summary, budget),
+        Ok(None) => not_configured(),
+        Err(error) => Check {
+            name: PROFILE_BUDGET_CHECK_NAME,
+            status: Status::Warn,
+            message: format!("could not be measured — {error}"),
+            hint: None,
+        },
+    }
+}
+
+/// Pure message/status/hint logic for the "profile budget" check, taking only
+/// the already-measured summary and the configured budget.
+/// Mirrors `miner::profile::MAX_FEEDBACK_TO_REVALIDATE`: eligible rows beyond
+/// this rank are never attempted for verification, independent of budget.
+const FEEDBACK_VERIFICATION_LIMIT: usize = 64;
+
+fn profile_budget_check(summary: &crate::miner::profile::DeliverySummary, budget: usize) -> Check {
+    let scope_note = " (whole profile; path-, role- and workflow-scoped rules excluded)";
+    let over_cap = summary.eligible.saturating_sub(FEEDBACK_VERIFICATION_LIMIT);
+    let attempted = summary.eligible.min(FEEDBACK_VERIFICATION_LIMIT);
+    let unverified = attempted.saturating_sub(summary.deliverable);
+    let mut shortfall_notes = String::new();
+    if over_cap > 0 {
+        shortfall_notes.push_str(&format!(
+            " ({over_cap} beyond the {FEEDBACK_VERIFICATION_LIMIT}-rule verification limit)"
+        ));
+    }
+    if unverified > 0 {
+        shortfall_notes.push_str(&format!(
+            " ({unverified} accepted rule(s) could not be source-verified)"
+        ));
+    }
+    if summary.fitting >= summary.eligible {
+        return Check {
+            name: PROFILE_BUDGET_CHECK_NAME,
+            status: Status::Ok,
+            message: format!(
+                "{} of {} rules fit the {budget}-token profile budget{scope_note}{shortfall_notes}",
+                summary.fitting, summary.eligible
+            ),
+            hint: None,
+        };
+    }
+    // Hint only when the budget is the limit; it cannot recover capped or unverified rules.
+    let budget_limited = summary.fitting < summary.deliverable;
+    let (needed_note, hint) = if budget_limited {
+        let needed = if summary.tokens_needed > 8000 {
+            "more than 8000".to_string()
+        } else {
+            summary.tokens_needed.to_string()
+        };
+        (
+            format!(
+                "; {needed} tokens cover the full ranked set and reviewed habits ({} above budget)",
+                summary.tokens_needed.saturating_sub(budget)
+            ),
+            Some(format!(
+                "mastermind init --profile-budget {}",
+                summary.tokens_needed.clamp(256, 8000)
+            )),
+        )
+    } else {
+        (String::new(), None)
+    };
+    Check {
+        name: PROFILE_BUDGET_CHECK_NAME,
+        status: Status::Warn,
+        message: format!(
+            "{} of {} rules fit the {budget}-token profile budget{scope_note}{shortfall_notes}{needed_note}",
+            summary.fitting, summary.eligible
+        ),
+        hint,
     }
 }
 
@@ -1408,6 +1507,101 @@ mod tests {
         assert!(initialized.get("id").is_none());
         assert_eq!(tools_list["method"], "tools/list");
         assert_eq!(tools_list["id"], 2);
+    }
+
+    fn delivery_summary(
+        eligible: usize,
+        deliverable: usize,
+        fitting: usize,
+        tokens_needed: usize,
+    ) -> crate::miner::profile::DeliverySummary {
+        crate::miner::profile::DeliverySummary {
+            eligible,
+            deliverable,
+            fitting,
+            tokens_needed,
+        }
+    }
+
+    #[test]
+    fn profile_budget_check_is_ok_when_everything_fits() {
+        let check = profile_budget_check(&delivery_summary(12, 12, 12, 1200), 4000);
+        assert_eq!(check.status, Status::Ok);
+        assert_eq!(
+            check.message,
+            "12 of 12 rules fit the 4000-token profile budget \
+             (whole profile; path-, role- and workflow-scoped rules excluded)"
+        );
+        assert!(check.hint.is_none());
+    }
+
+    #[test]
+    fn profile_budget_check_warns_with_needed_tokens_shortfall_and_hint() {
+        let check = profile_budget_check(&delivery_summary(12, 12, 4, 1800), 1500);
+        assert_eq!(check.status, Status::Warn);
+        assert_eq!(
+            check.message,
+            "4 of 12 rules fit the 1500-token profile budget \
+             (whole profile; path-, role- and workflow-scoped rules excluded); \
+             1800 tokens cover the full ranked set and reviewed habits (300 above budget)"
+        );
+        assert_eq!(
+            check.hint.as_deref(),
+            Some("mastermind init --profile-budget 1800")
+        );
+    }
+
+    #[test]
+    fn profile_budget_check_reports_over_8000_and_clamps_the_hint() {
+        let check = profile_budget_check(&delivery_summary(64, 64, 10, 12_000), 4000);
+        assert!(check.message.contains("more than 8000 tokens"));
+        assert_eq!(
+            check.hint.as_deref(),
+            Some("mastermind init --profile-budget 8000")
+        );
+    }
+
+    #[test]
+    fn profile_budget_check_notes_rules_that_could_not_be_source_verified() {
+        // 12 of 15 verify: warn without the budget hint, since the budget is not the limit.
+        let not_budget_limited = profile_budget_check(&delivery_summary(15, 12, 12, 1200), 4000);
+        assert_eq!(not_budget_limited.status, Status::Warn);
+        assert!(not_budget_limited
+            .message
+            .contains("3 accepted rule(s) could not be source-verified"));
+        assert!(not_budget_limited.hint.is_none());
+
+        let budget_limited = profile_budget_check(&delivery_summary(15, 12, 4, 1800), 1500);
+        assert_eq!(budget_limited.status, Status::Warn);
+        assert!(budget_limited
+            .message
+            .contains("3 accepted rule(s) could not be source-verified"));
+        assert!(budget_limited.hint.is_some());
+    }
+
+    #[test]
+    fn profile_budget_check_reports_the_64_rule_cap_separately_from_verification() {
+        // 70 eligible, 64 verified: only the cap note applies, not "source-verified".
+        let check = profile_budget_check(&delivery_summary(70, 64, 64, 6500), 4000);
+        assert_eq!(check.status, Status::Warn);
+        assert!(check
+            .message
+            .contains("6 beyond the 64-rule verification limit"));
+        assert!(!check.message.contains("source-verified"));
+        assert!(
+            check.hint.is_none(),
+            "the cap cannot be fixed by raising the budget"
+        );
+    }
+
+    #[test]
+    fn profile_budget_check_is_ok_and_not_configured_without_a_grant() {
+        // A fresh root has no settings or grant, so the check reads as not configured.
+        let root = tmp();
+        let check = check_profile_budget(&root);
+        assert_eq!(check.status, Status::Ok);
+        assert!(check.message.contains("not configured"));
+        assert!(check.hint.is_none());
     }
 
     #[test]

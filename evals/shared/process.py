@@ -9,6 +9,7 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import time
 
 
@@ -28,8 +29,8 @@ def _exited(pid):
 
 def _group_quiescent(pgid):
     try:
-        result = subprocess.run(["ps", "-axo", "pgid=,stat="], env={"PATH": os.defpath},
-            capture_output=True, text=True, timeout=1, check=True)
+        result = subprocess.run(["/bin/ps", "-axo", "pgid=,stat="], env={"PATH": os.defpath},
+            capture_output=True, text=True, timeout=5, check=True)
         rows = [line.split() for line in result.stdout.splitlines()]
         if any(len(row) != 2 for row in rows):
             return False
@@ -55,6 +56,7 @@ def run_bounded(
     kill every descendant even if the adapter itself receives SIGKILL.
     Such callers must run under that outer supervisor; local cleanup kills only
     the direct child. on_stdout may request early termination with a reason.
+    POSIX waitid with WNOWAIT keeps the leader's identity reserved until cleanup.
     """
     if os.name != "posix" or not all(hasattr(os, name) for name in ("waitid", "WNOWAIT")):
         return ProcessResult(stop_reason="unsupported_platform")
@@ -143,7 +145,8 @@ def run_bounded(
         except PermissionError:
             # Darwin reports EPERM for a group containing only zombies. Any
             # live or unobservable member remains a cleanup failure.
-            if not start_new_session or not _exited(process.pid) or not _group_quiescent(process.pid):
+            if (sys.platform != "darwin" or not start_new_session
+                    or not _exited(process.pid) or not _group_quiescent(process.pid)):
                 reason = "cleanup_error"
                 try:
                     os.kill(process.pid, signal.SIGKILL)

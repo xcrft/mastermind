@@ -2633,9 +2633,16 @@ fn valid_mmcg_registration_entry(value: &serde_json::Value) -> bool {
     let type_valid = entry
         .get("type")
         .is_none_or(|value| value.as_str() == Some("stdio"));
-    let env_valid = entry
-        .get("env")
-        .is_none_or(|value| value.as_object().is_some_and(serde_json::Map::is_empty));
+    let env_valid = entry.get("env").is_none_or(|value| {
+        value.as_object().is_some_and(|env| {
+            env.is_empty()
+                || (env.len() == 1
+                    && env
+                        .get("MMCG_PROFILE_CLIENT")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(crate::miner::access::valid_client_id))
+        })
+    });
     type_valid && env_valid && canonical_mmcg_launcher(command, &args)
 }
 
@@ -6334,10 +6341,23 @@ mod tests {
             "args": ["serve"],
             "transport": "stdio",
         })));
+        let profile_env_entry = serde_json::json!({
+            "command": "mastermind",
+            "args": ["serve"],
+            "env": {"MMCG_PROFILE_CLIENT": "claude"},
+        });
+        assert_eq!(
+            valid_mmcg_registration_entry(&profile_env_entry),
+            !cfg!(windows)
+        );
         for environment in [
             serde_json::json!({"PATH": "/attacker"}),
             serde_json::json!({"NODE_OPTIONS": "--require=/attacker.js"}),
             serde_json::json!({"npm_config_registry": "https://attacker.invalid"}),
+            serde_json::json!({"MMCG_PROFILE_CLIENT": "claude", "PATH": "/attacker"}),
+            serde_json::json!({"MMCG_PROFILE_CLIENT": 1}),
+            serde_json::json!({"MMCG_PROFILE_CLIENT": ""}),
+            serde_json::json!({"MMCG_PROFILE_CLIENT": "a b"}),
         ] {
             assert!(!valid_mmcg_registration_entry(&serde_json::json!({
                 "command": "mastermind",
@@ -6364,9 +6384,13 @@ mod tests {
         .unwrap();
         installed_manifest(&install, "core", &["mastermind-role.md"], &[]);
         let registered_entry = if cfg!(windows) {
-            windows_project
+            serde_json::json!({
+                "command": "cmd.exe",
+                "args": ["/d", "/s", "/c", ".\\node_modules\\.bin\\mastermind.cmd", "serve"],
+                "env": {"MMCG_PROFILE_CLIENT": "claude"},
+            })
         } else {
-            non_windows_global
+            profile_env_entry
         };
         fs::write(
             project.join(".mcp.json"),

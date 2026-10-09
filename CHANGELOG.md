@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.4] - 2026-10-09
+
+### Added
+
+- Batch exact-name lookup in `mmcg_search`: query up to eight distinct names
+  from one index snapshot, retaining each query's counts and truncation metadata.
+
+### Changed
+
+- Deliver reviewed feedback and habits before Git diagnostics. Admit whole
+  claims without cutting their conditions or exceptions, report partial-list
+  omissions and include reviewed habits in `doctor`'s profile-budget advice.
+- Use Sonnet for bounded workflow research and Opus for cause investigation.
+  Executor and auditor instructions preserve relevant preference conditions
+  and check their application against the actual change.
+- Organize deterministic eval harnesses by responsibility and use module
+  commands. Benchmark accounting retains failed trials, unknown measurements,
+  source coverage and stage-specific usage separately.
+
 ### Fixed
 
+- Accept plain hyphenated terms in documentation, history, task and project
+  context searches while preserving explicit FTS operators.
 - Git pipe completion shares the operation's deadline and cancellation checks,
   avoiding false timeouts when pipe workers are scheduled after Git exits.
 - Benchmark supervision keeps the child leader's PID reserved until process
@@ -134,7 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.3...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.2.4...HEAD
+[3.2.4]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.4
 [3.2.3]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.3
 [3.2.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.2
 [3.2.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.2.1

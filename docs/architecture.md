@@ -122,6 +122,6 @@ proof chain. Schemas are in the [reference](reference/mmcg.md).
 | Semantic acceptance | Revision-bound criterion judgments | Judgment truth and reviewer independence need outcome evaluation |
 | Completion | Finite guard model and selected real CLI regressions | Full Rust refinement and concurrent-transition proof remain open |
 
-The [control-loop evaluation](../evals/control-loop.md) defines the theorem and
+The [control-loop evaluation](../evals/control/README.md) defines the theorem and
 assumptions. The [scorecard](../evals/scorecard.md) records measured control,
 indexing and model results, with unmeasured outcomes marked explicitly.

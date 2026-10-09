@@ -1,0 +1,100 @@
+{
+  "kind": "mastermind-public-report-projection",
+  "schema_version": 1,
+  "original_report_sha256": "8ec2ea940bfe2dd71acef7c301617ed28975a4ce530e36efc98613a253f83e63",
+  "redacted_fields": [
+    "checks.mutations.0.source_path",
+    "checks.mutations.1.source_path",
+    "checks.mutations.2.source_path"
+  ],
+  "canonical_review_input": false,
+  "report": {
+    "checks": {
+      "focused_suite": {
+        "log_sha256": "515cb38e2a5af5e92b59540c596974c69be48e5442ee9fb9e7c0b99e40560389",
+        "passed": true,
+        "seconds": 62.469,
+        "tests": 10
+      },
+      "mutations": [
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 1,
+          "mutant_sha256": "90a15d057eb0d84a723f276c36e18fec0eab70cd38a51478ea96a1948bce858f",
+          "mutation": "missing-source-binding",
+          "original_sha256": "1bc60429edd873a5711eed75f97205ccf49d08672e05216f632b82b2ee726ebd",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/retrieval_analysis.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_retrieval_analysis.RetrievalAnalysisTests.test_invalid_range_counts_and_changed_source_binding_are_rejected"
+        },
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 1,
+          "mutant_sha256": "53593e484001ef9924cfdb4b3479029de8c2db95551c3f14a29d788d21ef846f",
+          "mutation": "unknown-ranges-as-complete",
+          "original_sha256": "1bc60429edd873a5711eed75f97205ccf49d08672e05216f632b82b2ee726ebd",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/retrieval_analysis.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_retrieval_analysis.RetrievalAnalysisTests.test_failed_and_incomplete_reads_keep_partial_counts_without_claiming_complete_ranges"
+        },
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 9,
+          "mutant_sha256": "7ab3a4b0f6a1fc1f730cc334fb70dd001b9592c125d5b36340a0d6d02db46c96",
+          "mutation": "missing-campaign-matrix",
+          "original_sha256": "f3dd1e63a91987ca47fe59bb05658c01548b35e9c76d4b5a2acc8d5eb2fc54dd",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/campaign.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_campaign.CampaignTests.test_campaign_matrix_cannot_omit_conditions_or_relabel_the_bound_batches"
+        }
+      ],
+      "python_full_suite": {
+        "log_sha256": "1f7ad882d4996b97efe528d894a14f3153fa511038661e07290b803568a688f9",
+        "passed": true,
+        "seconds": 371.747,
+        "tests": 383
+      },
+      "validator": {
+        "artifacts": 40,
+        "errors": 0,
+        "log_sha256": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9",
+        "warnings": 0
+      }
+    },
+    "kind": "mastermind-retrieval-accounting-validation",
+    "model_calls": 0,
+    "product_benefit_qualified": false,
+    "quality_uplift": null,
+    "retained_initial_failures": [
+      {
+        "cause": "generic fixture adapters do not retain native adapter diagnostics; changed the test producer to the frozen Codex stream adapter",
+        "check": "python_full_suite",
+        "failures": 1,
+        "log_sha256": "6daf950ccb81ceef4b825df03db9aa9bf8ef089daff4c8c2abdd975eaba858fc",
+        "tests": 382
+      },
+      {
+        "cause": "subTest suppressed the expected-raise assertion before an out-of-scope exception lookup; moved code assertions inside subTest and reran the unchanged production mutation",
+        "check": "matrix_guard_mutation",
+        "detected_as_clean_assertion_failure": false,
+        "log_sha256": "0e3642139aed1d62619bdb39d7de75eaa558f95715dbd39cd3a21f0f9cf5db98"
+      }
+    ],
+    "schema_version": 1,
+    "scope": "deterministic bound accounting and denominator validation; not model answer quality",
+    "source_files": {
+      "evals/OPTIMIZATION.md": "920bb545063d215012534b5fe3505de4afaab6fd36c55412d697c7390c37565e",
+      "evals/benchmark/README.md": "8ba3e57f3c546fb1f8cf4d1ca11f13927902fb8741ffcbca90e5e4c74628f232",
+      "evals/benchmark/campaign.py": "f3dd1e63a91987ca47fe59bb05658c01548b35e9c76d4b5a2acc8d5eb2fc54dd",
+      "evals/benchmark/retrieval_analysis.py": "1bc60429edd873a5711eed75f97205ccf49d08672e05216f632b82b2ee726ebd",
+      "tests/evals/benchmark/test_campaign.py": "c0788366219614ef00bb3ebbeb5763bf75f0d91614f381f62664a15b85bbee72",
+      "tests/evals/benchmark/test_retrieval_analysis.py": "0cc729ef6f58bb9790644453fde73b428bbd39e7b7c08e7d3bca612a3ab7dd47"
+    }
+  }
+}

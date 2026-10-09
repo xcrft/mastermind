@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.7.5
+  version: 0.8.0
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---
@@ -39,6 +39,12 @@ audit verdict, acceptance criteria or proof requirements. Denied/unavailable
 access or an empty selection means no personal context; do not fall back to
 `style.md` or inbox candidates. Retrieve an auditor slice even if the executor
 handed over its own profile view.
+
+Inspect any profile checklist in the executor report against the actual diff;
+self-reported application is not evidence. Preserve conditions and justified
+exceptions. When a missed engineering rule also violates the task's contract,
+report the concrete defect and source. Keep style-only differences separate
+from correctness findings; profile delivery does not establish either outcome.
 
 Compose four separate components: the code brief, relevant
 `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and

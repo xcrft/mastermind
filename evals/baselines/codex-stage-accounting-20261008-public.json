@@ -1,0 +1,102 @@
+{
+  "kind": "mastermind-public-report-projection",
+  "schema_version": 1,
+  "original_report_sha256": "3e3b52ac752a85c45ec2a67c568c948f471f7e46165b3115c9def82ec84ee8f4",
+  "redacted_fields": [
+    "mutations.0.source_path",
+    "mutations.1.source_path",
+    "mutations.2.source_path",
+    "mutations.3.source_path"
+  ],
+  "canonical_review_input": false,
+  "report": {
+    "documentation_snapshot": "Final instruction documents and product measurements; Python runtime and tests remain byte-identical to the successful 386-test check.",
+    "focused_suite": {
+      "log_sha256": "c92273d619d4783550b05210bfd64b831e4e46ade655b3e057e0865116d08e68",
+      "passed": true,
+      "tests": 11
+    },
+    "full_suite": {
+      "log_sha256": "078d284d1a33b4d46cf8fbf42701be753a0e9008210fec233e6fa84ca115a085",
+      "passed": true,
+      "seconds": 374.031,
+      "tests": 386
+    },
+    "kind": "mastermind-codex-stage-accounting-validation",
+    "model_calls": 0,
+    "mutations": [
+      {
+        "detected": true,
+        "errors": 0,
+        "failures": 1,
+        "mutant_sha256": "4d6048389228db7a5f8a3808c8529fde9d3622432655d25167c4f69d38f7eaab",
+        "mutation": "double-count-overlap",
+        "original_sha256": "8415afc664e780ad3bab04767fa73bceb29fb39c972588fe0ccd42ac6d849e56",
+        "production_bytes_unchanged": true,
+        "source_path": "evals/benchmark/adapters/codex_metrics.py",
+        "tests_run": 1,
+        "unchanged_test": "tests.evals.benchmark.test_codex_metrics.CodexMetricsTests.test_overlapping_calls_count_wall_intervals_once_and_ignore_duplicate_completion"
+      },
+      {
+        "detected": true,
+        "errors": 0,
+        "failures": 1,
+        "mutant_sha256": "139eb48405102d247c386f78a46eb108825591fb5b5f2b5b1a61dd36953c0a3a",
+        "mutation": "unknown-time-as-complete",
+        "original_sha256": "8415afc664e780ad3bab04767fa73bceb29fb39c972588fe0ccd42ac6d849e56",
+        "production_bytes_unchanged": true,
+        "source_path": "evals/benchmark/adapters/codex_metrics.py",
+        "tests_run": 1,
+        "unchanged_test": "tests.evals.benchmark.test_codex_metrics.CodexMetricsTests.test_missing_start_pending_invalid_clock_and_identity_preserve_unknown_time"
+      },
+      {
+        "detected": true,
+        "errors": 0,
+        "failures": 1,
+        "mutant_sha256": "9c37e5a78a43d7595c9b4fbea8d53488e9dd986a4eb81a4158deaada818edb33",
+        "mutation": "unbounded-reasoning-subset",
+        "original_sha256": "8415afc664e780ad3bab04767fa73bceb29fb39c972588fe0ccd42ac6d849e56",
+        "production_bytes_unchanged": true,
+        "source_path": "evals/benchmark/adapters/codex_metrics.py",
+        "tests_run": 1,
+        "unchanged_test": "tests.evals.benchmark.test_codex_metrics.CodexMetricsTests.test_reasoning_is_an_optional_subset_of_output_and_never_imputed"
+      },
+      {
+        "detected": true,
+        "errors": 0,
+        "failures": 2,
+        "mutant_sha256": "537fe7f399656d1c06cbcaad3c9283bb8667530554fbc484bdd989699e88e354",
+        "mutation": "ignored-raw-stream-digest",
+        "original_sha256": "5b9d7ac7d611d2c5f52d145268696b72c6026589819223c0d5572bc928f4e0f0",
+        "production_bytes_unchanged": true,
+        "source_path": "evals/benchmark/review.py",
+        "tests_run": 1,
+        "unchanged_test": "tests.evals.benchmark.test_codex.CodexTests.test_frozen_subscription_runtime_and_cache_accounting"
+      }
+    ],
+    "product_benefit_qualified": false,
+    "retained_initial_failures": [
+      "A test edit had an invalid f-string brace; corrected before successful execution.",
+      "Fixture config omits default trace_bytes; changed the assertion to use validated limits. The first full run retained two fixture errors."
+    ],
+    "schema_version": 1,
+    "semantic_quality": "unmeasured_by_these_checks",
+    "source_files": {
+      "evals/OPTIMIZATION.md": "2d008dfeb91ee90ef433a605ae5b1e1bd3d8f27b4865eccc048f2b489c6d2478",
+      "evals/PRODUCT.md": "db80ef19f968cb536c7439ce4f4c3ae6e2f1158d7e456a5122b65531cea34628",
+      "evals/benchmark/README.md": "5eea753e7fc08c8e75d3c2e3e2befdbd2ad4110ec81390e4458bb73682c6c7b4",
+      "evals/benchmark/adapters/codex.py": "a3b1ae70dc93b9dabe7052a151b5d3c7057ce8448ab7c55a0d5828cca50ec846",
+      "evals/benchmark/adapters/codex_metrics.py": "8415afc664e780ad3bab04767fa73bceb29fb39c972588fe0ccd42ac6d849e56",
+      "evals/benchmark/review.py": "5b9d7ac7d611d2c5f52d145268696b72c6026589819223c0d5572bc928f4e0f0",
+      "tests/evals/benchmark/test_codex.py": "22a35509b941cefc24819c0bf97a5247b706f8ba3a188f3abc1ea71fc26cc9a8",
+      "tests/evals/benchmark/test_codex_metrics.py": "511a20d79ab3cf65c9144b271c8d2bdb9eec0c6a24ccebe00618cc792ca6d539"
+    },
+    "successful_test_bytes_rechecked": true,
+    "validator": {
+      "artifacts": 40,
+      "errors": 0,
+      "log_sha256": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9",
+      "warnings": 0
+    }
+  }
+}

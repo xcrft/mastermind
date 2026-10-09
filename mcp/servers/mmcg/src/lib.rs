@@ -29,6 +29,7 @@ pub mod fact_signature;
 pub mod facts;
 mod find_checks;
 pub mod fingerprint;
+mod fts;
 pub mod hex;
 pub mod history_disposition;
 pub mod indexer;

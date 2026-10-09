@@ -7065,6 +7065,8 @@ impl Store {
         query: &str,
         top: u32,
     ) -> SqlResult<Vec<DocumentSectionHit>> {
+        let normalized = crate::fts::query(query.trim());
+        let query = normalized.as_ref();
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -7097,6 +7099,8 @@ impl Store {
         query: &str,
         top: u32,
     ) -> SqlResult<(u32, Vec<DocumentSectionHit>)> {
+        let normalized = crate::fts::query(query.trim());
+        let query = normalized.as_ref();
         if query.trim().is_empty() {
             return Ok((0, Vec::new()));
         }
@@ -7136,6 +7140,8 @@ impl Store {
             let (unsafe_omitted, observed) = safe_project_context_sections(rows, top)?;
             return Ok((indexed_sections, indexed_sections, unsafe_omitted, observed));
         };
+        let normalized = crate::fts::query(query);
+        let query = normalized.as_ref();
         let total: u32 = self.conn.query_row(
             "SELECT COUNT(*) FROM document_section_fts \
              WHERE document_section_fts MATCH ?1 AND path = 'CONTEXT.md'",
@@ -7202,6 +7208,8 @@ impl Store {
             let rows = stmt.query_map(params![top], row)?;
             return Ok((total, rows.collect::<SqlResult<_>>()?));
         };
+        let normalized = crate::fts::query(query);
+        let query = normalized.as_ref();
         let total = self.conn.query_row(
             "SELECT COUNT(*) FROM project_claim c \
              JOIN project_evidence e ON e.id = c.evidence_id \
@@ -7314,7 +7322,8 @@ impl Store {
         kind: Option<&str>,
         top: u32,
     ) -> SqlResult<Vec<ProjectHistoryHit>> {
-        let trimmed = query.trim();
+        let normalized = crate::fts::query(query.trim());
+        let trimmed = normalized.as_ref();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
@@ -7370,7 +7379,8 @@ impl Store {
         kind: Option<&str>,
         top: u32,
     ) -> SqlResult<CountedProjectHistoryHits> {
-        let trimmed = query.trim();
+        let normalized = crate::fts::query(query.trim());
+        let trimmed = normalized.as_ref();
         if trimmed.is_empty() {
             return Ok((0, Vec::new()));
         }
@@ -9486,6 +9496,63 @@ mod tests {
             .unwrap()
             .is_empty());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn hyphenated_search_retains_counts_filters_and_context_candidates() {
+        let path = tmp_db("hyphenated_search_projections");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .replace_project_history(&[
+                ProjectHistoryEntry {
+                    path: "CONTEXT.md".into(),
+                    kind: "context".into(),
+                    title: "Context".into(),
+                    body: "## Decision log\n### Loading\n- **Decision:** Cold-load reserves memory.\n- **Status:** active\n".into(),
+                },
+                ProjectHistoryEntry {
+                    path: ".mastermind/tasks/001-loading/spec.md".into(),
+                    kind: "task".into(),
+                    title: "Loading".into(),
+                    body: "Cold-load must respect admission.".into(),
+                },
+                ProjectHistoryEntry {
+                    path: "docs/loading.md".into(),
+                    kind: "documentation".into(),
+                    title: "Loading".into(),
+                    body: "Cold-load uses the shared loader.".into(),
+                },
+            ])
+            .unwrap();
+        let (document_total, documents) = store
+            .search_document_sections_bounded("cold-load", 1)
+            .unwrap();
+        assert_eq!(document_total, 3);
+        assert_eq!(documents.len(), 1);
+        let (history_total, history) = store
+            .search_project_history_bounded("cold-load", None, 1)
+            .unwrap();
+        assert_eq!(history_total, 2);
+        assert_eq!(history.len(), 1);
+        let tasks = store
+            .search_project_history("cold-load", Some("task"), 10)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].path, ".mastermind/tasks/001-loading/spec.md");
+        let (_, context_total, unsafe_omitted, sections) = store
+            .project_context_sections(Some("cold-load"), 1)
+            .unwrap();
+        assert_eq!(context_total, 1);
+        assert_eq!(unsafe_omitted, 0);
+        assert_eq!(sections.len(), 1);
+        let (claim_total, claims) = store
+            .project_claim_candidates(Some("cold-load"), 1)
+            .unwrap();
+        assert_eq!(claim_total, 1);
+        assert_eq!(claims[0].statement, "Cold-load reserves memory.");
+        assert_eq!(claims[0].review_status, "unknown");
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

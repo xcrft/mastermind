@@ -1890,17 +1890,18 @@ const NON_BLANK_PATTERN: &str = r"\S";
 fn schema_search() -> Value {
     json!({
         "name": "mmcg_search",
-        "description": "Find symbols (functions, classes, methods, structs, traits, etc.) by exact name. Returns location, kind, signature, and any decorators/attributes. Pass `language` to filter by `python`/`typescript`/`tsx`/`javascript`/`rust`/`csharp` — defends against name collisions in monorepos. C# `partial class` declarations with the same namespace identity are collapsed into one hit with a `locations` array by default; pass `collapse_partials: false` to see every declaration.",
+        "description": "Find symbols by exact name. Pass either `name` or up to 8 distinct `names` to locate several known symbols in one call. A batch returns ordered `queries`, each retaining collisions, coverage, precision and truncation; filters apply to all names. Batch `top` defaults to 10 and accepts at most 25 hits per name. Single-name output is unchanged. C# partial declarations are collapsed by namespace identity with all observed locations by default; use collapse_partials=false for raw declarations. Results are syntactic candidates, not compiler-resolved identities.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Symbol name (exact match)" },
+                "names": { "type": "array", "minItems": 1, "maxItems": queries::SEARCH_BATCH_MAX_NAMES, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": NON_BLANK_PATTERN }, "description": "Exact names in response order; mutually exclusive with name" },
                 "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Optional kind filter (function, class, method, struct, enum, trait, interface, record, property, etc.)" },
                 "language": { "type": "string", "enum": LANGUAGES, "description": "Optional language filter" },
                 "collapse_partials": { "type": "boolean", "default": true, "description": "When true (default), C# `partial class Foo` declarations across N files return one hit with a `locations` array of all N declarations. Set false to see each declaration as a separate row." },
-                "top": { "type": "integer", "minimum": 1, "maximum": queries::SEARCH_MAX_TOP, "default": queries::SEARCH_DEFAULT_TOP, "description": "Maximum effective symbol hits to return" }
+                "top": { "type": "integer", "minimum": 1, "maximum": queries::SEARCH_MAX_TOP, "description": "Maximum hits per query: name defaults to 100 (max 200); names defaults to 10 (max 25)" }
             },
-            "required": ["name"]
+            "oneOf": [{ "required": ["name"] }, { "required": ["names"], "properties": { "top": { "maximum": queries::SEARCH_BATCH_MAX_TOP, "default": queries::SEARCH_BATCH_DEFAULT_TOP } } }]
         }
     })
 }
@@ -2496,21 +2497,65 @@ fn schema_change_class() -> Value {
 }
 
 fn handle_search(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let name = non_blank_str_arg(args, "name")?;
+    let names = search_batch_names(args)?;
+    let name = if names.is_none() {
+        Some(non_blank_str_arg(args, "name")?)
+    } else {
+        None
+    };
     let kind = opt_non_blank_str_arg(args, "kind")?;
     let language = opt_enum_arg(args, "language", &LANGUAGES)?;
     let collapse = opt_bool_arg(args, "collapse_partials")?.unwrap_or(true);
     let top = bounded_u64_arg(
         args,
         "top",
-        u64::from(queries::SEARCH_DEFAULT_TOP),
+        u64::from(if names.is_some() {
+            queries::SEARCH_BATCH_DEFAULT_TOP
+        } else {
+            queries::SEARCH_DEFAULT_TOP
+        }),
         1,
-        u64::from(queries::SEARCH_MAX_TOP),
+        u64::from(if names.is_some() {
+            queries::SEARCH_BATCH_MAX_TOP
+        } else {
+            queries::SEARCH_MAX_TOP
+        }),
     )? as u32;
     ensure_fresh_index(store)?;
-    let r = queries::search_bounded(store, name, kind, language, collapse, top)
+    if let Some(names) = names {
+        let r = queries::search_batch_bounded(store, &names, kind, language, collapse, top)
+            .map_err(|error| match error {
+                queries::SearchBatchError::SnapshotChanged => HandlerError::SnapshotChanged,
+                queries::SearchBatchError::Query(error) => {
+                    HandlerError::internal("search_query", error)
+                }
+            })?;
+        return serde_json::to_value(r)
+            .map_err(|error| HandlerError::internal("serialize_response", error));
+    }
+    let r = queries::search_bounded(store, name.unwrap(), kind, language, collapse, top)
         .map_err(|error| HandlerError::internal("search_query", error))?;
     serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
+}
+
+fn search_batch_names(args: &Value) -> Result<Option<Vec<&str>>, HandlerError> {
+    let Some(value) = args.get("names") else {
+        return Ok(None);
+    };
+    let invalid = || HandlerError::InvalidArguments("Invalid argument: names".into());
+    let values = value
+        .as_array()
+        .filter(|values| !values.is_empty() && values.len() <= queries::SEARCH_BATCH_MAX_NAMES)
+        .filter(|_| args.get("name").is_none())
+        .ok_or_else(invalid)?;
+    let names = values
+        .iter()
+        .map(|value| value.as_str().ok_or_else(invalid))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !queries::valid_search_batch_names(&names) {
+        return Err(invalid());
+    }
+    Ok(Some(names))
 }
 
 fn handle_callers(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
@@ -3815,6 +3860,86 @@ mod tests {
             .index_all(&mut store, true)
             .unwrap();
         (root, store)
+    }
+
+    #[test]
+    fn search_batch_preserves_each_bounded_query_and_missing_name() {
+        let (root, mut store) = fresh_test_store();
+        std::fs::write(
+            root.path().join("first.rs"),
+            "fn run() {}\nfn helper() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("second.rs"), "fn run() {}\n").unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let names = ["run", "helper", "missing"];
+        let batch = handle_tools_call(ProtocolVersion::Current, &mut store,
+            &json!({"name":"mmcg_search", "arguments":{"names": names, "top":1, "language":"rust"}})).unwrap();
+        assert_eq!(batch["isError"], false);
+        let payload = unwrap_content(&batch);
+        assert_eq!(payload, batch["structuredContent"]);
+        assert_eq!(payload["query_count"], 3);
+        assert_eq!(payload["truncated"], true);
+        for (index, name) in names.iter().enumerate() {
+            let single = handle_tools_call(ProtocolVersion::Current, &mut store,
+                &json!({"name":"mmcg_search", "arguments":{"name":name, "top":1, "language":"rust"}})).unwrap();
+            assert_eq!(payload["queries"][index], unwrap_content(&single));
+        }
+        assert_eq!(payload["queries"][0]["total"], 2);
+        assert_eq!(payload["queries"][0]["truncation_reason"], "top");
+        assert_eq!(payload["queries"][2]["total"], 0);
+        assert_eq!(payload["queries"][2]["truncated"], false);
+        let default = handle_search(&mut store, &json!({"names":["helper"]})).unwrap();
+        assert_eq!(
+            default["queries"][0]["row_limit"],
+            queries::SEARCH_BATCH_DEFAULT_TOP
+        );
+        // A completed batch releases its read snapshot for subsequent indexing.
+        std::fs::write(root.path().join("first.rs"), "fn replacement() {}\n").unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let updated =
+            handle_search(&mut store, &json!({"names":["helper", "replacement"]})).unwrap();
+        assert_eq!(updated["queries"][0]["total"], 0);
+        assert_eq!(updated["queries"][1]["total"], 1);
+    }
+
+    #[test]
+    fn search_batch_rejects_invalid_selectors_before_refresh() {
+        let (root, mut store) = fresh_test_store();
+        std::fs::write(root.path().join("new.rs"), "fn unindexed() {}\n").unwrap();
+        for args in [
+            json!({"names":null}),
+            json!({"names":[]}),
+            json!({"names":["run", 7]}),
+            json!({"names":[" "]}),
+            json!({"names":["run\n"]}),
+            json!({"names":["run", "run"]}),
+            json!({"names":["a", "b", "c", "d", "e", "f", "g", "h", "i"]}),
+            json!({"name":"run", "names":["run"]}),
+            json!({"names":["x".repeat(1025)]}),
+            json!({"names":["run"], "top":26}),
+            json!({"names":["run"], "top":true}),
+        ] {
+            let result = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({"name":"mmcg_search", "arguments":args}),
+            )
+            .unwrap();
+            assert_eq!(result["isError"], true, "{args}");
+            assert!(unwrap_content(&result)["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Invalid argument:"));
+        }
+        assert!(store
+            .search_symbols("unindexed", None, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -6627,6 +6752,48 @@ mod checks {
                 Err(HandlerError::InvalidArguments(message))
                     if message == "Invalid argument: file"
             ));
+        }
+    }
+
+    #[test]
+    fn docs_tool_accepts_hyphenated_terms_and_preserves_fts_operators() {
+        let (_root, mut store) = fresh_test_store();
+        store
+            .replace_project_history(&[
+                crate::store::ProjectHistoryEntry {
+                    path: "docs/cold.md".into(),
+                    kind: "documentation".into(),
+                    title: "Cold".into(),
+                    body: "# Cold\n\nCold-load admission reserves memory.\n".into(),
+                },
+                crate::store::ProjectHistoryEntry {
+                    path: "docs/warm.md".into(),
+                    kind: "documentation".into(),
+                    title: "Warm".into(),
+                    body: "# Warm\n\nWarm admission reuses memory.\n".into(),
+                },
+            ])
+            .unwrap();
+        for (query, count) in [
+            ("cold-load", 1),
+            ("cold-load OR warm", 2),
+            ("cold-load NOT warm", 1),
+            ("\"cold-load\"", 1),
+            ("cold-lo*", 1),
+            ("(cold-load OR warm) NOT reserves", 1),
+            ("warm OR body:cold-load", 2),
+            ("body:NEAR(cold-load memory, 10)", 1),
+            ("\"cold \"\"load\"\"\"", 1),
+        ] {
+            let result = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({"name":"mmcg_docs","arguments":{"query":query}}),
+            )
+            .unwrap();
+            let response = unwrap_content(&result);
+            assert_eq!(response["count"], count, "{query}: {response}");
+            assert_eq!(response["query"], query);
         }
     }
 

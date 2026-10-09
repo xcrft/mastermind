@@ -1,0 +1,100 @@
+{
+  "kind": "mastermind-profile-delivery-harness-validation",
+  "schema_version": 1,
+  "date": "2026-10-09",
+  "source_sha256": {
+    "mcp/servers/mmcg/src/lib.rs": "7e8b9045354b79eaeb32c5df7f65437d4f408919cd9f3568ebc39c98b3abb0c0",
+    "mcp/servers/mmcg/src/fts.rs": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1",
+    "mcp/servers/mmcg/src/store.rs": "b03adf54701f442ad18650304cf870c403a2dd13af714f6efb9ce4dc8016bdc8",
+    "mcp/servers/mmcg/src/mcp.rs": "ece86843d48b58549fc5fa2e34b0291b2bb95376f576785edbc412180c75021f",
+    "mcp/servers/mmcg/src/miner/profile.rs": "a88d6f8dafe83b634af484a057c020a79711f398e160241becfedd59998936af",
+    "agents/subagents/mastermind-task-executor.md": "47b607bca295e6dd257954c11171338029bb128a1ce038b013ea20ce06a2565e",
+    "agents/subagents/mastermind-auditor.md": "3c529ad629319568d5ccba1787b26b4eb44b6de9b5a35f2b36df91465b96090d",
+    "docs/reference/mmcg.md": "107cd0b51ba2c6a12f881a9d1fe165a0a62ba3442414b13851032479649d33db",
+    "evals/persona/delivery.py": "aa45b9f4697033fe149c40980508dc1f57f4d74b1f70c0fb48344f670254c0c6",
+    "evals/persona/README.md": "277592eef8f3a2eb959d91b9a64dc99f6063c81f8795b71e1a0bbb77437cf053",
+    "tests/evals/persona/test_delivery.py": "513f32cfe21eedb7ff7a6be96325fc48d438aa12d8d5549e80236a2f0daedee3",
+    "evals/README.md": "421c2808f9405b2f52e00258e5b787353c0d2f8672e40f89b27273511146b593"
+  },
+  "checks": {
+    "python_unittest": {
+      "command": "python3 -m unittest discover -s tests -t .",
+      "tests": 395,
+      "status": "passed"
+    },
+    "native_lib": {
+      "command": "cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --locked --lib",
+      "tests": 1347,
+      "status": "passed"
+    },
+    "documentation": {
+      "command": "python3 scripts/validate.py",
+      "artifacts": 40,
+      "errors": 0,
+      "warnings": 0
+    },
+    "formatting": {
+      "scope": "changed native implementation files",
+      "status": "passed"
+    },
+    "diff_whitespace": {
+      "scope": "current worktree",
+      "status": "passed"
+    }
+  },
+  "log_sha256": {
+    "python-tests.log": "fb4e92e344400a3dd0f2fd80b84f89c7d0a50610488b2c907148d9857c90ac9c",
+    "validation.log": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9",
+    "docs-regression-before.log": "189f2429635eb24f3fa8a71f605b44ada760478108933a58f5c9c350fd177a00",
+    "docs-regression-after.log": "f6df1f7eba104af03e925fdbeaff7ed01da51e8c6d57870bde047397e801a7bc",
+    "native-lib-tests-complete.log": "9a4e70e84e5d7c2d359afde14baeca1061c1f96f23a35f143e6acdd7fff71118"
+  },
+  "fts_regressions": {
+    "before_fix": "mcp docs cold-load failed with Internal documents_query",
+    "after_fix": "actual MCP/SQLite retrieval passes plain terms, quoted/escaped phrases, Boolean/group/column/NEAR/prefix grammar",
+    "projection_boundaries": "document/history count and page consistency, history kind filtering, queried project context and candidate review status",
+    "native_test_names": [
+      "mcp::tests::docs_tool_accepts_hyphenated_terms_and_preserves_fts_operators",
+      "store::tests::hyphenated_search_retains_counts_filters_and_context_candidates"
+    ]
+  },
+  "delivery_guard_mutations": [
+    {
+      "name": "infer_adherence_from_delivery",
+      "tests_run": 2,
+      "failures": 1,
+      "errors": 0,
+      "detected": true
+    },
+    {
+      "name": "ignore_statement_conditions",
+      "tests_run": 2,
+      "failures": 1,
+      "errors": 0,
+      "detected": true
+    },
+    {
+      "name": "expose_rules_after_denial",
+      "tests_run": 2,
+      "failures": 1,
+      "errors": 0,
+      "detected": true
+    },
+    {
+      "name": "overwrite_previous_inspection",
+      "tests_run": 2,
+      "failures": 1,
+      "errors": 0,
+      "detected": true
+    }
+  ],
+  "profile_scope_regression": {
+    "change": "scope membership assertion no longer depends on separately tested relevance order",
+    "runtime_profile_implementation_changed": false
+  },
+  "semantic_quality": null,
+  "model_application": null,
+  "native_hook_activation": null,
+  "mining_accuracy": null,
+  "comparison_accepted": false
+}

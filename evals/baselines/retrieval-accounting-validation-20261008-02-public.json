@@ -1,0 +1,108 @@
+{
+  "kind": "mastermind-public-report-projection",
+  "schema_version": 1,
+  "original_report_sha256": "fb170b78f9ef1863a7167df502a399518de957c799d845942a50cfed731cd1ef",
+  "redacted_fields": [
+    "checks.mutations.0.source_path",
+    "checks.mutations.1.source_path",
+    "checks.mutations.2.source_path"
+  ],
+  "canonical_review_input": false,
+  "report": {
+    "checks": {
+      "focused_suite": {
+        "log_sha256": "515cb38e2a5af5e92b59540c596974c69be48e5442ee9fb9e7c0b99e40560389",
+        "passed": true,
+        "seconds": 62.469,
+        "tests": 10
+      },
+      "mutations": [
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 1,
+          "mutant_sha256": "641e1fbb63cbca2bf0b1406e4b273d72f17f5f269af83fd6c177bbf7f5bdc875",
+          "mutation": "missing-source-binding",
+          "original_sha256": "d8eafcc920d9b598d27fa1f5533715a295f150cc37451e9781f2154705338553",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/retrieval_analysis.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_retrieval_analysis.RetrievalAnalysisTests.test_invalid_range_counts_and_changed_source_binding_are_rejected"
+        },
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 1,
+          "mutant_sha256": "1daaa6184b046b308e1f3eb1920e8bedb3c06a8e94d7bf13fa2ab6ab2a60365d",
+          "mutation": "unknown-ranges-as-complete",
+          "original_sha256": "d8eafcc920d9b598d27fa1f5533715a295f150cc37451e9781f2154705338553",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/retrieval_analysis.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_retrieval_analysis.RetrievalAnalysisTests.test_failed_and_incomplete_reads_keep_partial_counts_without_claiming_complete_ranges"
+        },
+        {
+          "detected": true,
+          "errors": 0,
+          "failures": 9,
+          "mutant_sha256": "7ab3a4b0f6a1fc1f730cc334fb70dd001b9592c125d5b36340a0d6d02db46c96",
+          "mutation": "missing-campaign-matrix",
+          "original_sha256": "f3dd1e63a91987ca47fe59bb05658c01548b35e9c76d4b5a2acc8d5eb2fc54dd",
+          "production_bytes_unchanged": true,
+          "source_path": "evals/benchmark/campaign.py",
+          "tests_run": 1,
+          "unchanged_test": "tests.evals.benchmark.test_campaign.CampaignTests.test_campaign_matrix_cannot_omit_conditions_or_relabel_the_bound_batches"
+        }
+      ],
+      "python_full_suite": {
+        "log_sha256": "c1960c73d63c5ab98538e9c9545254740f16f42bfb22feadf1886373c820f9f6",
+        "passed": true,
+        "seconds": 369.014,
+        "tests": 383
+      },
+      "read_contract_suite": {
+        "log_sha256": "921b9c608e426846e983c3b06a54697e82ac6d0bb72ba596ee18d8de05820e82",
+        "passed": true,
+        "seconds": 9.541,
+        "tests": 11
+      },
+      "validator": {
+        "artifacts": 40,
+        "errors": 0,
+        "log_sha256": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9",
+        "warnings": 0
+      }
+    },
+    "kind": "mastermind-retrieval-accounting-validation",
+    "model_calls": 0,
+    "product_benefit_qualified": false,
+    "quality_uplift": null,
+    "retained_initial_failures": [
+      {
+        "cause": "generic fixture adapters do not retain native adapter diagnostics; changed the test producer to the frozen Codex stream adapter",
+        "check": "python_full_suite",
+        "failures": 1,
+        "log_sha256": "6daf950ccb81ceef4b825df03db9aa9bf8ef089daff4c8c2abdd975eaba858fc",
+        "tests": 382
+      },
+      {
+        "cause": "subTest suppressed the expected-raise assertion before an out-of-scope exception lookup; moved code assertions inside subTest and reran the unchanged production mutation",
+        "check": "matrix_guard_mutation",
+        "detected_as_clean_assertion_failure": false,
+        "log_sha256": "0e3642139aed1d62619bdb39d7de75eaa558f95715dbd39cd3a21f0f9cf5db98"
+      }
+    ],
+    "schema_version": 1,
+    "scope": "deterministic bound accounting and denominator validation; not model answer quality",
+    "shared_contract": "Read observers and campaign validation import the broker-owned READ_LINE_LIMIT; frozen experiment bundles retain their original equivalent limit.",
+    "source_files": {
+      "evals/OPTIMIZATION.md": "920bb545063d215012534b5fe3505de4afaab6fd36c55412d697c7390c37565e",
+      "evals/benchmark/README.md": "8ba3e57f3c546fb1f8cf4d1ca11f13927902fb8741ffcbca90e5e4c74628f232",
+      "evals/benchmark/campaign.py": "f3dd1e63a91987ca47fe59bb05658c01548b35e9c76d4b5a2acc8d5eb2fc54dd",
+      "evals/benchmark/retrieval.py": "b256293bbc3a6549a5d26f21a5025415ce0b6880bf8d937994d2d062e4c4c900",
+      "evals/benchmark/retrieval_analysis.py": "d8eafcc920d9b598d27fa1f5533715a295f150cc37451e9781f2154705338553",
+      "tests/evals/benchmark/test_campaign.py": "c0788366219614ef00bb3ebbeb5763bf75f0d91614f381f62664a15b85bbee72",
+      "tests/evals/benchmark/test_retrieval_analysis.py": "6812b4b1f53c4ac3748d5544520a43d7c20b1a23ceb737f01e3fb16eaf5d36d8"
+    }
+  }
+}

@@ -1,6 +1,8 @@
 # Indexing benchmark
 
-Production indexer and SQLite store, synthetic Rust corpus, no model calls.
+Measure the production indexer and SQLite store without model calls. Compare
+cached processing with a forced full reparse of the same source, then check the
+resulting symbols, calls and references for equivalence.
 
 ## Reproduce
 
@@ -16,61 +18,73 @@ MMCG_BENCH_CHANGED_FILES=1000 \
   just benchmark-index
 ```
 
-The command prints JSON with inputs, timings, sampled peak RSS and file counts.
-Keep every run, including failures.
+Retain stdout, stderr and exit status for every run, including failures. Compile
+once before repeated measurements; compilation is outside the timed phases.
 
-## Recorded result
-
-| Parameter | Recorded value |
-|---|---|
-| Date | 2026-09-27 |
-| Implementation revision | `101bed7bdb9912abaf9f6c612f02f252d459038e` |
-| Build | Optimized Cargo bench, Rust 1.97.1 |
-| Machine | Apple M3 Pro, 12 physical cores, 36 GiB RAM |
-| OS | macOS 26.5.2 arm64 |
-| Corpus | 1,000 files × 20 functions, 100 changed files |
-| Repetitions | 3 sequential runs × 3 phases |
+| Input | Default |
+|---|---:|
+| `MMCG_BENCH_FILES` | 1,000 Rust files |
+| `MMCG_BENCH_SYMBOLS_PER_FILE` | 20 functions per file |
+| `MMCG_BENCH_CHANGED_FILES` | 100 files, one new function each |
 | Parse batch | 64 files |
-| Raw observations | [index-20260927.json](../evals/baselines/index-20260927.json) |
+| Fixture | Each function after the first calls the previous function in its file |
 
-| Phase | Indexed / skipped | Run 1 | Run 2 | Run 3 | Median | Min–max | Median peak RSS |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Cold | 1,000 / 0 | 1,837 ms | 1,320 ms | 1,319 ms | **1,320 ms** | 1,319–1,837 ms | 28.2 MiB |
-| Warm unchanged | 0 / 1,000 | 341 ms | 233 ms | 230 ms | **233 ms** | 230–341 ms | 28.3 MiB |
-| Incremental | 100 / 900 | 753 ms | 577 ms | 550 ms | **577 ms** | 550–753 ms | 30.1 MiB |
+## Phase and correctness contract
 
-All **9/9 phases** reported the expected file counts and **0 failed files**.
-These are measurements of the recorded implementation, not release thresholds.
+| Phase | Processing | Expected indexed / unchanged |
+|---|---|---:|
+| `cold` | New store, all source | 1,000 / 0 |
+| `warm` | Unchanged source, cache enabled | 0 / 1,000 |
+| `warm_full` | Same unchanged source, force full parsing | 1,000 / 0 |
+| `incremental` | 100 changed files, cache enabled | 100 / 900 |
+| `incremental_full` | Same changed source, force full parsing | 1,000 / 0 |
 
-## Timing contract
+Schema 2 emits all five phases and `warm_equivalent` / `incremental_equivalent`.
+Outside the timers, the benchmark checks function counts and every fixture call
+chain against its expected target and line. It hashes sorted symbol attributes,
+parent identities, calls and references after both cached and full processing.
+Volatile SQLite row IDs are excluded. A mismatch fails the process.
 
-```mermaid
-flowchart LR
-    F[Generate corpus] --> C[Time cold index]
-    C --> W[Time unchanged scan]
-    W --> E[Edit 100 files]
-    E --> I[Time incremental index]
-```
-
-| Included in phase time | Excluded from phase time |
+| Included in phase time | Excluded |
 |---|---|
-| File discovery and change detection | Compilation |
+| Discovery and change detection | Compilation |
 | Production parsing and bounded batches | Fixture generation and edits |
-| SQLite writes through the normal single writer | Temporary store creation |
+| SQLite writes through the normal writer | Temporary store creation |
+| Indexing all files when forced | Correctness queries and hashing |
 
-RSS is sampled every 2 ms. Shorter peaks can be missed.
+RSS is sampled every 2 ms; shorter peaks can be missed. Reported RSS includes
+memory retained from earlier phases, so it is not isolated per-phase allocation.
 
-## Interpretation
+## Current retained measurement
 
-| Question | What this run establishes |
-|---|---|
-| Local indexing cost | Cold, unchanged and changed-file latency and memory on the stated machine |
-| Variance | Observed range over 3 runs with uncontrolled background desktop load |
-| Regression or improvement | Unmeasured, no matched older-revision run |
-| Model quality, tokens or cost | Unmeasured, no inference calls |
-| Mixed languages, generated files, remote storage | Outside this corpus |
-| SCIP, imported analysis, Lens rendering | Outside the measured phases |
+[index-20261007.json](../evals/baselines/index-20261007.json) retains three
+sequential runs, benchmark/binary digests, platform and a dirty-worktree marker
+at starting revision `86b46d4`. All 15 phases reported zero failed files and
+all six equivalence checks passed.
 
-Compare tools only with the same corpus, ignore policy, extraction contract,
-storage mode and correctness checks. Other measurement directions are in the
-[evaluation scorecard](../evals/scorecard.md).
+| Phase | Run 1 | Run 2 | Run 3 | Median | Median peak RSS |
+|---|---:|---:|---:|---:|---:|
+| Cold | 1,949 ms | 1,753 ms | 1,722 ms | 1,753 ms | 33.31 MiB |
+| Warm cached | 264 ms | 262 ms | 260 ms | 262 ms | 33.38 MiB |
+| Warm full | 3,891 ms | 3,747 ms | 4,129 ms | 3,891 ms | 35.92 MiB |
+| Incremental cached | 623 ms | 616 ms | 673 ms | 623 ms | 36.00 MiB |
+| Incremental full | 3,638 ms | 3,738 ms | 4,481 ms | 3,738 ms | 36.25 MiB |
+
+Compute each paired saving as `1 - cached_ms / full_ms`, then take the median
+over the three runs:
+
+| Same-source comparison | Median latency saving | Observed range |
+|---|---:|---:|
+| Warm cached vs forced full | 93.22% | 93.01–93.70% |
+| Incremental cached vs forced full | 83.52% | 82.88–84.98% |
+
+These figures measure avoided reprocessing on this fixture. Cached processing
+runs before forced processing in a fixed order, with uncontrolled desktop load.
+There is no randomized timing experiment or population confidence interval.
+Neither comparison measures LLM tokens, task success, mixed-language projects,
+SCIP imports or Lens rendering.
+
+Schema 1 used constant-only functions and three phases. Its
+[retained report](../evals/baselines/index-20260927.json) describes that older
+corpus; do not interpret the schema 2 timings as a version regression against it.
+Other feature measurements and gaps are in the [scorecard](../evals/scorecard.md).

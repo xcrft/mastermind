@@ -1,52 +1,47 @@
 {
   "task_id": "callees-definition-boundaries-01",
-  "source_revision": "f220777fd1fbd0ad03ec9a4f8ed2f52b2464e890",
+  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
-      "claim": "The public MCP schema exposes name, file, line, language and edge_kind. The handler requires a supplied file to be a nonempty string and a supplied line to be a positive u32 accompanied by file. It checks index freshness before forwarding the arguments to queries::callees.",
+      "claim": "The public MCP schema exposes name, file, declaration-start line, language, edge_kind and top. The handler validates selectors, checks freshness and passes a bounded row limit to queries::callees.",
       "anchors": [
-        "mcp/servers/mmcg/src/mcp.rs:223-226",
-        "mcp/servers/mmcg/src/mcp.rs:1686-1702",
-        "mcp/servers/mmcg/src/mcp.rs:2191-2222"
+        "mcp/servers/mmcg/src/mcp.rs:1925-1943",
+        "mcp/servers/mmcg/src/mcp.rs:2533-2572"
       ]
     },
     {
-      "claim": "Candidate selection starts with exact-name definitions, optionally filtered by language. name_collision counts these definitions before file/line selectors. File and declaration-start line are equality filters, not substring or containing-range searches. Selectors must leave exactly one definition; file alone need not distinguish declarations within one file.",
+      "claim": "Candidate selection counts exact-name definitions in the language scope before file/line selectors. File and declaration-start line are equality filters. match_status depends on candidate_total, not the length of a truncated candidate list; exactly one total candidate is needed to select a source.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:4892-4908",
-        "mcp/servers/mmcg/src/queries.rs:2973-2985"
+        "mcp/servers/mmcg/src/queries.rs:4567-4614"
       ]
     },
     {
-      "claim": "Zero remaining candidates produces not_found, one produces matched, and several produce ambiguous. Only the unique matched definition supplies an ID for the outgoing-edge query. Ambiguous/not_found return no selected definition and no callees; matched can also have an empty callee list. Ambiguity and not_found are successful query-layer outcomes and can be returned with isError=false when the response fits MCP result limits. An oversized payload or envelope instead produces a tool error. isError=false and count=0 alone do not establish that a definition has no dependencies.",
+      "claim": "Ambiguous and not_found return no selected source and no outgoing edges. The response reports candidate_total/count/truncation and outgoing total/count/truncation separately. An empty returned list or isError=false alone does not prove dependency absence.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:2980-3006",
-        "mcp/servers/mmcg/src/mcp.rs:1281-1285",
-        "mcp/servers/mmcg/src/mcp.rs:1557-1585",
-        "mcp/servers/mmcg/src/mcp.rs:1590-1609"
+        "mcp/servers/mmcg/src/queries.rs:4604-4655",
+        "mcp/servers/mmcg/src/queries.rs:247-254"
       ]
     },
     {
-      "claim": "For the selected source definition, Store::callees_of returns DISTINCT pairs of stored to_name and edge line, filtered by from_id and edge kind, with calls as the default. It does not join target definitions or use to_id, to_type or target_kind to identify an outgoing target. The returned line is edges.line, not a target declaration line, and count measures returned name/line pairs rather than resolved target definitions or runtime invocations.",
+      "claim": "Outgoing edges are distinct stored target-name/edge-line pairs for the selected source ID, with calls as default. This does not resolve exact target declarations or count runtime invocations.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:4982-4998",
-        "mcp/servers/mmcg/src/queries.rs:2985-3006"
+        "mcp/servers/mmcg/src/store.rs:5576-5591",
+        "mcp/servers/mmcg/src/queries.rs:4610-4655"
       ]
     },
     {
-      "claim": "Selecting one source definition does not upgrade target resolution. edge_precision is derived from that definition's file extension; for .rs it reports medium confidence, syntactic extraction and target_resolution=name_based_candidates. The declared limitations include unresolved trait-object/function-pointer dispatch and unexpanded macros. calls and references are separate filters, references do not prove invocation, and empty results do not prove complete dependency absence.",
+      "claim": "Selecting the source definition does not upgrade syntactic target resolution. Rust precision remains name-based; references do not prove invocation and query truncation is separate from extraction completeness.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:81-114",
-        "mcp/servers/mmcg/src/queries.rs:200-236",
-        "mcp/servers/mmcg/src/queries.rs:2985-3006"
+        "mcp/servers/mmcg/src/queries.rs:136-147",
+        "mcp/servers/mmcg/src/queries.rs:231-277"
       ]
     }
   ],
   "expected_unknowns": [
     "Without concrete indexed declarations and edges, the actual candidates, selected definition and outgoing entries for a particular request remain unknown.",
     "This result does not establish which implementation executes at runtime or complete dependency coverage. The extraction implementations and compiler/runtime evidence are outside the source allowlist.",
-    "No execution was performed. The presence of regression tests in these files does not establish their runtime outcome, CI status or installed-binary behavior."
+    "No compilation or tests of the researched implementation were performed. Available graph tools may support source navigation, but do not validate the requested duplicate-declaration scenario or establish CI or installed-binary conformance."
   ],
   "materially_false_claims": [
     "The tool silently selects the first same-named declaration or merges their outgoing edges when the remaining candidates are ambiguous.",
@@ -57,16 +52,13 @@
     "callees[].line identifies the target declaration, or count is the number of resolved target definitions.",
     "resolution=syntactic or match_status=matched establishes compiler/type resolution.",
     "The default calls filter includes references, or a references edge proves invocation.",
-    "This research run executed runtime tests or graph queries, or confirmed CI or installed-binary behavior."
+    "Source inspection or navigation queries validate runtime tests, the requested duplicate-declaration scenario, CI or installed-binary conformance."
   ],
   "reviewer_notes": [
-    "A separate read-only agent reviewed the claims and anchors against the exact pinned Git objects; the coordinator independently checked the MCP, query and storage boundaries. This is agent source review, not runtime evidence, human sign-off or a model-quality measurement.",
-    "The public surface in scope is MCP. CLI dispatch, explain, incoming callers, transitive impact and optional SCIP resolution are not required conclusions.",
-    "The key distinguishes selecting the source declaration from resolving outgoing targets. Store::callees_of does not apply the compatibility predicates used by other graph queries.",
-    "The argument claim describes the advertised schema and the handler's explicit file/line checks; it does not claim that every schema constraint is generically enforced at runtime.",
-    "A supplied file and start line can still leave several candidates if multiple declarations share both values. The implementation then remains ambiguous.",
-    "A source-grounded description of a regression test's assertions is valid evidence of the test contract; it must not be described as an observed passing test.",
-    "A second independent source review identified the MCP result-size boundary. Query success must not be generalized into unconditional MCP delivery success; both payload and full envelope are bounded."
+    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
+    "Graph-navigation wording was clarified after preparation of the unbounded campaign. Exposed read-only graph tools are allowed; their use is not semantic validation of the researched scenario. Archived keys and assessments remain unchanged.",
+    "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."
   ],
   "review_dimensions": [
     "claim_to_source_support",
@@ -75,5 +67,27 @@
     "appropriate_unknowns"
   ],
   "decision_quality": "not_applicable_to_facts_only_research_task",
-  "automatic_quality_score": null
+  "automatic_quality_score": null,
+  "acceptance_criteria": [
+    {
+      "id": "selection",
+      "request_excerpt": "when multiple Rust declarations share the requested name",
+      "criterion": "Explain exact source-definition selection and ambiguity, including how file and declaration-start line selectors change the result."
+    },
+    {
+      "id": "trace",
+      "request_excerpt": "Trace the request through the MCP, query and storage implementation",
+      "criterion": "Trace request validation to candidate selection and outgoing edge retrieval with source citations."
+    },
+    {
+      "id": "conclusion",
+      "request_excerpt": "what a caller can conclude from the returned result",
+      "criterion": "Explain returned counts/truncation and syntactic target-resolution limits without treating an empty result as complete runtime dependency evidence."
+    },
+    {
+      "id": "output_contract",
+      "request_excerpt": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code.",
+      "criterion": "Use at most five source-grounded findings with path:line citations, distinguish observations/inferences/unknowns, and avoid claiming execution of the researched code."
+    }
+  ]
 }

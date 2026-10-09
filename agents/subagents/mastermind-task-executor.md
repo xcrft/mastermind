@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.5.7
+  version: 0.6.0
   authors: [mastermind]
   tags: [workflow, delegation]
 ---
@@ -53,6 +53,18 @@ claims, continue without personal context. Do not substitute `style.md`,
 legacy notes or inbox candidates. Code-shape observations and Range are
 diagnostic evidence; commit voice is fallback-only when repository policy is
 silent.
+
+For changes to locking, state ownership, resource lifetime, cancellation or
+evidence handling, select at most five returned claims relevant to that boundary
+before editing. Apply ordinary preferences without a separate checklist.
+Turn the selected claims' complete conditions and exceptions into a short checklist;
+retain each claim ID and review revision. Prioritize affected engineering
+boundaries over cosmetic preferences. Do not restate the entire profile.
+Before reporting completion, inspect the actual diff against this checklist.
+In the report prose, record each selected claim as applied, conflicting,
+not applicable or not checked, with a code/test location or the exact reason.
+An unexplained exception stays not checked. Task and repository requirements
+take precedence; a personal preference never grants an action or proves a fix.
 
 Compose four separate components: the code brief, relevant
 `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and

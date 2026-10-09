@@ -1,0 +1,49 @@
+{
+  "corpus_sha256": "bfb7b85f3a3ce2d6d165e01b3d0b922da955775ee4e9f82ef485c20ebee05627",
+  "labels": {
+    "independence": "not_verified",
+    "labeler": "implementation-author"
+  },
+  "mining": {
+    "cases": 60,
+    "excluded_inputs": 1,
+    "failed_case_ids": [
+      "synthetic-030",
+      "synthetic-031",
+      "synthetic-032"
+    ],
+    "false_negative": 3,
+    "false_positive": 0,
+    "held_out_cases": 0,
+    "meaning": "Exact complete source-span agreement with supplied labels, not proof of authorship or habit truth.",
+    "precision": 1.0,
+    "recall": 0.9117647058823529,
+    "sessions": 60,
+    "true_positive": 31
+  },
+  "model": false,
+  "processor": {
+    "contract": "hook-explicit-v2",
+    "detector": "persona-explicit-v2",
+    "engine": "local_explicit",
+    "max_drafts": 8,
+    "max_lines": 128,
+    "max_statement_chars": 200,
+    "model": false
+  },
+  "provenance": "synthetic",
+  "publication": false,
+  "schema": 1,
+  "task_benefit": {
+    "causal_effect": "not_established",
+    "meaning": "Supplied paired outcomes. Runtime conditions and reviewer independence are not verified.",
+    "pairs": 0,
+    "profile_minus_baseline": {
+      "correctness": null,
+      "iterations": null,
+      "user_corrections": null,
+      "wall_ms": null
+    },
+    "status": "unmeasured"
+  }
+}

@@ -1,50 +1,44 @@
 {
   "task_id": "reference-removal-evidence-01",
-  "source_revision": "f220777fd1fbd0ad03ec9a4f8ed2f52b2464e890",
+  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
-      "claim": "Recognized, unshadowed callables in supported Rust value positions produce references edges. For a known, unshadowed function name leaf, the value initializer in let callback = leaf is one supported example. Ordinary call expressions outside macro-body reparsing produce calls edges. The store preserves the emitted kind and target metadata and inserts target to_id as NULL rather than resolving it during this commit.",
+      "claim": "One supported, recognized and unshadowed Rust function-value form produces references edges, preserving its source symbol, target name/path/kind and usage line. Supported examples include a known function leaf in a let initializer or a function-valued return; the answer may trace either form. The store preserves the emitted kind and target metadata and inserts target to_id as NULL rather than resolving it during persistence.",
       "anchors": [
-        "mcp/servers/mmcg/src/indexer/rust_lang.rs:292-299",
-        "mcp/servers/mmcg/src/indexer/rust_lang.rs:332-339",
-        "mcp/servers/mmcg/src/indexer/rust_lang.rs:361-393",
-        "mcp/servers/mmcg/src/indexer/rust_lang.rs:623-667",
-        "mcp/servers/mmcg/src/indexer/rust_lang.rs:706-725",
-        "mcp/servers/mmcg/src/store.rs:4450-4467"
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:340-401",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:682-726",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:765-784",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs:1358-1398",
+        "mcp/servers/mmcg/src/store.rs:4885-4902"
       ]
     },
     {
-      "claim": "callers defaults to calls and explicitly selecting references chooses that edge kind instead. It returns distinct source symbols, not one result per call site. A matching reference alone need not produce a default callers result. The response preserves edge_kind, name_collision and precision notes.",
+      "claim": "callers defaults to calls; explicitly selecting references changes that filter. It returns distinct source symbols with exact total/count/truncation, not one entry per call site. A reference alone need not appear in default callers.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:4957-4979",
-        "mcp/servers/mmcg/src/queries.rs:2943-2962"
+        "mcp/servers/mmcg/src/queries.rs:4530-4565",
+        "mcp/servers/mmcg/src/store.rs:5509-5547"
       ]
     },
     {
-      "claim": "unreferenced excludes symbols with compatible incoming edges across edge kinds, including references, imports and inheritance, rather than testing only default callers. It also applies kind/language filters and excludes module rows, constants when kind is unspecified, and selected test/framework name and decorator patterns. Thus a function can have no default callers yet be absent from unreferenced.",
+      "claim": "unreferenced considers compatible incoming edges across kinds, including references, then applies kind/language and conventional entry-point/test/framework exclusions. A function with no default callers can therefore be absent from unreferenced.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:480-517",
-        "mcp/servers/mmcg/src/store.rs:518-548",
-        "mcp/servers/mmcg/src/store.rs:5360-5375",
-        "mcp/servers/mmcg/src/queries.rs:3201-3221"
+        "mcp/servers/mmcg/src/store.rs:479-535",
+        "mcp/servers/mmcg/src/queries.rs:4966-5000"
       ]
     },
     {
-      "claim": "Target matching uses the leaf name or recorded type/namespace prefix with syntactic target-class compatibility, not compiler-resolved identity. Same-name definitions can be pooled as candidates. Syntactic extraction and recorded source paths do not establish receiver-type or runtime dispatch resolution.",
+      "claim": "Matching uses stored names or type prefixes and syntactic target-kind compatibility. Same-name definitions can be pooled. These queries do not establish compiler-resolved receiver identity or runtime dispatch.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:467-495",
-        "mcp/servers/mmcg/src/store.rs:2041-2053",
-        "mcp/servers/mmcg/src/store.rs:4957-4974",
-        "mcp/servers/mmcg/src/queries.rs:80-114"
+        "mcp/servers/mmcg/src/store.rs:479-497",
+        "mcp/servers/mmcg/src/store.rs:5509-5527",
+        "mcp/servers/mmcg/src/queries.rs:231-255"
       ]
     },
     {
-      "claim": "A reference does not prove invocation, and zero callers or an unreferenced candidate does not prove dead code or safe removal. The query response and documented storage limitations preserve uncertainty about missing dependencies, external entry points and runtime registration. Query completeness is separate from extraction completeness.",
+      "claim": "References do not prove invocation. Zero callers and unreferenced candidates do not prove safe removal: external entry points, generated edges and runtime registration may be missing. Query completeness is separate from extraction completeness.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:215-236",
-        "mcp/servers/mmcg/src/queries.rs:3201-3221",
-        "mcp/servers/mmcg/src/store.rs:5346-5357"
+        "mcp/servers/mmcg/src/queries.rs:247-277"
       ]
     }
   ],
@@ -64,12 +58,10 @@
     "This research run executed and validated the researched extraction, queries or tests."
   ],
   "reviewer_notes": [
-    "A separate read-only agent reviewed the claims and anchors against the exact pinned Git objects; the coordinator independently checked the extraction, storage and response contracts. This is agent source review, not runtime evidence, human sign-off or a model-quality measurement.",
-    "Require one bounded supported Rust example, not claims that every function-value expression or every language is handled. Other source-supported value forms are equally acceptable; the example in the key is not mandatory wording.",
-    "callers and unreferenced responses do not themselves expose a truncated field here; the generic precision note must not be described as an observed truncated=false result.",
-    "The to_id statement concerns Store::commit_file's insertion path. It does not assert that unrelated index enrichment can never store resolved targets.",
-    "A source-grounded description of test assertions is valid evidence of the test contract, not an observed passing test. The task asks for evidence boundaries, not approval to remove actual code.",
-    "A second independent source review removed the portable research instruction from the source allowlist. The same evidence boundaries are supported by query and storage source, so the baseline need not receive the treatment instruction."
+    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
+    "Task alignment was corrected after the frozen 2026-10-07 experiment: any supported function-value form satisfies the producer requirement. The unrelated ordinary-call producer clause was removed. Archived results retain their original key and unknown outcome; they are not regraded against this corrected key.",
+    "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."
   ],
   "review_dimensions": [
     "claim_to_source_support",
@@ -78,5 +70,27 @@
     "appropriate_unknowns"
   ],
   "decision_quality": "not_applicable_to_facts_only_research_task",
-  "automatic_quality_score": null
+  "automatic_quality_score": null,
+  "acceptance_criteria": [
+    {
+      "id": "producer",
+      "request_excerpt": "Use one supported Rust function-value form as the producer example",
+      "criterion": "Trace one supported function-value reference from extraction to storage using a concrete source-grounded example."
+    },
+    {
+      "id": "queries",
+      "request_excerpt": "Compare the default callers query with an explicit edge_kind=references query",
+      "criterion": "Explain matching and edge-kind filtering in callers and unreferenced."
+    },
+    {
+      "id": "removal",
+      "request_excerpt": "reviewing a function for removal",
+      "criterion": "Give a removal-review conclusion consistent with stored reference evidence, query completeness and compiler/runtime unknowns."
+    },
+    {
+      "id": "output_contract",
+      "request_excerpt": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code.",
+      "criterion": "Use at most five source-grounded findings with path:line citations, distinguish observations/inferences/unknowns, and avoid claiming execution of the researched code."
+    }
+  ]
 }

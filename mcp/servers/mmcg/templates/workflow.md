@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.1.4
+  version: 2.2.0
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -137,6 +137,14 @@ Browser observations stay report evidence: they do not certify visual fidelity
 and do not replace declared verification commands.
 
 ### Role routing
+
+In Claude, use the shipped role's model and effort unless the user overrides
+them. In other clients, keep the user's selected model; Claude aliases do not
+select a model there.
+Route by the required outcome and inspected risk, not by how short the request
+looks. Do not run every role for every task. Each handoff carries supported facts,
+citations, remaining obligations and the exact evidence gap; the controller
+keeps the original request open until those obligations are resolved.
 
 - Researcher: bounded batches of repository facts.
 - Investigator: bugs whose cause is not known.

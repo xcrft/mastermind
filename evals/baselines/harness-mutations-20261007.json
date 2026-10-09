@@ -1,0 +1,90 @@
+{
+  "kind": "mastermind-harness-mutation-sensitivity",
+  "schema_version": 1,
+  "mutations": [
+    {
+      "name": "codex-cache-accounting",
+      "source": "evals/benchmark/adapters/codex.py",
+      "source_sha256": "b4538498be01d5ed8f82c71b576f31e45671ae698f88a51e5645eb0758a270de",
+      "mutant_sha256": "ebb931ff8903d06d50e1f18b8dfb95b38037c8063ece96d3e134b968a342c39f",
+      "test": "tests.evals.benchmark.test_codex.CodexTests.test_frozen_subscription_runtime_and_cache_accounting",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "native-runtime-freeze",
+      "source": "evals/benchmark/campaign.py",
+      "source_sha256": "5789cdd8ce61212207980c0a9323de61adf0086af98e37105b2d389e33fbdca0",
+      "mutant_sha256": "602bd6371c37ba68589b8ce93b908b05a235bb33e2bece60b9adf3952d303091",
+      "test": "tests.evals.benchmark.test_campaign.CampaignTests.test_every_case_runs_once_and_failed_attempts_remain_in_comparison",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "unknown-resource-preservation",
+      "source": "evals/benchmark/efficiency.py",
+      "source_sha256": "2dd0fe75a30720e35d5917f3d4d7b046ad815145bd828cc2064a35bc59e595d8",
+      "mutant_sha256": "8645a5550cc9ec121f16a22046ce4a5503c3c24fef2c4d61a1720e58795db2c8",
+      "test": "tests.evals.benchmark.test_efficiency.EfficiencyTests.test_failures_unknown_resources_and_quality_losses_cannot_improve_claim",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "failed-attempt-resource-accounting",
+      "source": "evals/benchmark/efficiency.py",
+      "source_sha256": "2dd0fe75a30720e35d5917f3d4d7b046ad815145bd828cc2064a35bc59e595d8",
+      "mutant_sha256": "e45359d10094095a1d3d3a08183866d55d0a6c27263a0d4bbfb2ad5bc4f461dd",
+      "test": "tests.evals.benchmark.test_efficiency.EfficiencyTests.test_failures_unknown_resources_and_quality_losses_cannot_improve_claim",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "current-git-source-check",
+      "source": "evals/benchmark/corpus.py",
+      "source_sha256": "527fb752ca49048bc1a27c5be2e7d3b273c720e02c81108a084ee0e83127f1f9",
+      "mutant_sha256": "ad7a4c098f489e435f2d5e7d49261cbbc0711cdcda3683504ca89836139867f7",
+      "test": "tests.evals.benchmark.test_corpus.CorpusTests.test_current_check_allows_unrelated_commits_but_rejects_source_drift_even_if_worktree_is_restored",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "campaign-export-binding",
+      "source": "evals/benchmark/campaign.py",
+      "source_sha256": "5789cdd8ce61212207980c0a9323de61adf0086af98e37105b2d389e33fbdca0",
+      "mutant_sha256": "3aa6a6d7bca068cb2d7e307812499cc6dfa9461d24c807854063e637677d9fb8",
+      "test": "tests.evals.benchmark.test_campaign.CampaignTests.test_same_named_case_from_another_batch_cannot_replace_planned_export",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "unreaped-leader-ownership",
+      "source": "evals/shared/process.py",
+      "source_sha256": "5baf4f6c1f628e961f540f94544c462773280f2b807a73decea14c3eb43f72df",
+      "mutant_sha256": "ba8d2c4155e5ee4ca407581913905dca7ee0a34d8c32a7de75d74688c46bd0ba",
+      "test": "tests.evals.shared.test_process.ProcessTests.test_exited_leader_is_unreaped_and_quiescent_permission_error_preserves_output",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    },
+    {
+      "name": "unknown-group-cleanup",
+      "source": "evals/shared/process.py",
+      "source_sha256": "5baf4f6c1f628e961f540f94544c462773280f2b807a73decea14c3eb43f72df",
+      "mutant_sha256": "72bdb40eb8f7c509803bff5c3f812a2701ee2515115a2f6ff36ba14a9a05f32d",
+      "test": "tests.evals.shared.test_process.ProcessTests.test_unverified_group_cleanup_cannot_be_reported_as_success",
+      "baseline_exit": 0,
+      "mutant_exit": 1,
+      "detected": true
+    }
+  ],
+  "detected": 8,
+  "total": 8,
+  "scope": "selected_behavioral_guards_not_mutation_coverage",
+  "inference_calls": 0
+}

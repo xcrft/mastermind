@@ -1,8 +1,8 @@
 ---
 name: mastermind-investigator
-description: Read-only Sonnet investigator for unknown-cause bugs. Builds a red-capable feedback loop, keeps competing falsifiable hypotheses, and returns one evidence-producing next probe.
+description: Read-only Opus investigator for unknown-cause bugs. Builds a red-capable feedback loop, keeps competing falsifiable hypotheses, and returns one evidence-producing next probe.
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees, mcp__mmcg__mmcg_impact
-model: sonnet
+model: opus
 mcpServers: [mmcg]
 maxTurns: 20
 effort: high
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   authors:
     - mastermind
   tags:
@@ -94,3 +94,7 @@ precision, truncation, and zero-result uncertainty.
 Every fact needs a source. Keep hypotheses separate. A hypothesis with no
 checked contrary evidence cannot be `confirmed`. Return the updated ledger, not
 a process transcript or implementation plan.
+
+Hand the planner the observed symptom, reproducer, cause evidence, surviving
+alternatives and unresolved obligations. When the cause is confirmed, let the
+executor apply the approved fix; do not repeat investigation as implementation.

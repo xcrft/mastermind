@@ -36,17 +36,11 @@ jobs:
       - name: Run validator
         run: python scripts/validate.py
 
-      - name: Test eval harness
-        run: python -m unittest evals/test_runner.py evals/test_evidence.py evals/test_benchmark.py evals/test_claude_adapter.py evals/test_benchmark_corpus.py evals/test_benchmark_review.py evals/test_persona_replay.py evals/test_control_loop.py evals/test_hook_intake.py
+      - name: Test deterministic harnesses
+        run: python -m unittest discover -s tests -t .
 
       - name: Check research calibration corpus
-        run: python -m evals.benchmark_corpus --source-repo .
-
-      - name: Test document evidence snapshots
-        run: python scripts/test_document_graph.py -v
-
-      - name: Run audit workflow security fixtures
-        run: python scripts/test_audit_workflow_security.py
+        run: python -m evals.benchmark.corpus --source-repo .
 
   audit-action-self-test:
     name: Docker Action self-consumer

@@ -1,27 +1,34 @@
 {
   "task_id": "task-phase-continuity-01",
   "status": "calibration_key_source_reviewed",
-  "source_revision": "ad17b1aad3dcf13bb97c8731f93efc4761b01fd8",
+  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
   "required_knowns": [
     {
-      "claim": "Pre-flight verifies the parsed spec, then persists approved state, its spec hash and the captured HEAD baseline.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1277-1291", "mcp/servers/mmcg/src/run_task.rs:1303-1340"]
+      "claim": "Pre-flight reads and parses the current bounded spec, validates it, and saves approved state with a captured baseline and a SHA-256 spec hash.",
+      "anchors": [
+        "mcp/servers/mmcg/src/run_task.rs:1193-1205",
+        "mcp/servers/mmcg/src/run_task.rs:2765-2785",
+        "mcp/servers/mmcg/src/run_task.rs:2870-2940"
+      ]
     },
     {
-      "claim": "Explicit post-flight resumes with stored state but parses the current spec and audits it against the saved baseline. A spec-hash mismatch only prints a warning; it neither blocks nor requires renewed pre-flight verification.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1059-1067", "mcp/servers/mmcg/src/run_task.rs:1407-1428", "mcp/servers/mmcg/src/run_task.rs:1485-1491"]
+      "claim": "Explicit post-flight first attempts to save audit_required and clear old held/history evidence. It binds the current spec, executor report and implementation before comparing the current spec with the saved approval hash.",
+      "anchors": [
+        "mcp/servers/mmcg/src/run_task.rs:2980-3031"
+      ]
     },
     {
-      "claim": "The edited contract controls audit scope. Widening touches can remove an UnexpectedFile finding without renewed pre-flight approval. It does not guarantee Held.",
-      "anchors": ["mcp/servers/mmcg/src/audit_spec.rs:294-319", "mcp/servers/mmcg/src/audit_spec.rs:417-430"]
+      "claim": "A changed spec stops post-flight with PostBroken before opening the index or running the audit. The controller attempts to save held with next_step=run_preflight and clears held/history/semantic snapshots. It preserves the prior baseline and options by cloning the previous state. A failed save does not turn this into success.",
+      "anchors": [
+        "mcp/servers/mmcg/src/run_task.rs:1215-1227",
+        "mcp/servers/mmcg/src/run_task.rs:3032-3054"
+      ]
     },
     {
-      "claim": "Post-flight first persists audit_required and clears previous evidence snapshots. A completed audit attempts to write audit.md and can yield Held, Drift or Broken. Drift/Broken defer release notes and, if history refresh and state persistence succeed, record drift/broken with planner_review. Earlier infrastructure failures can return PostBroken without saving status=broken.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1385-1393", "mcp/servers/mmcg/src/run_task.rs:1428-1459", "mcp/servers/mmcg/src/run_task.rs:1498-1533", "mcp/servers/mmcg/src/run_task.rs:1656-1687"]
-    },
-    {
-      "claim": "On the would-be Held path, post-flight stability checks cover changes during that phase. A successful Held path can write release/history artifacts. Its saved final state is history_review_required or learned depending on a review bound to the current history snapshot; Held does not itself complete semantic review.",
-      "anchors": ["mcp/servers/mmcg/src/run_task.rs:1539-1547", "mcp/servers/mmcg/src/run_task.rs:1571-1597", "mcp/servers/mmcg/src/run_task.rs:1598-1619", "mcp/servers/mmcg/src/run_task.rs:1635-1654"]
+      "claim": "The edited contract does not become approved audit scope through post-flight alone. A new pre-flight is required, so widening touches cannot bypass the saved approval through this path. A schema-valid executor report does not establish factual correctness.",
+      "anchors": [
+        "mcp/servers/mmcg/src/run_task.rs:3032-3054"
+      ]
     }
   ],
   "expected_unknowns": [
@@ -29,20 +36,42 @@
     "Architecture-policy acceptance is outside the source allowlist."
   ],
   "materially_false_claims": [
-    "Spec drift necessarily blocks post-flight or automatically reruns verify_spec.",
-    "Every edited spec reaches Held, or Held automatically means semantic learning is complete.",
-    "The during-post snapshot comparison proves continuity with the pre-flight spec.",
-    "Pre-flight spec_hash uses SHA-256 at this revision.",
-    "Every PostBroken necessarily saves status=broken or writes audit.md.",
-    "A schema-valid executor report establishes that its factual claims are true.",
-    "Runtime tests or CI validated the described scenario."
+    "A changed spec only prints a warning and post-flight continues auditing its widened scope.",
+    "Post-flight automatically approves the changed contract or reruns pre-flight.",
+    "The new approval hash uses DefaultHasher rather than SHA-256.",
+    "PostBroken guarantees status=broken or a written audit.md.",
+    "A schema-valid executor report proves factual correctness.",
+    "Source inspection executed tests or established CI results."
   ],
   "reviewer_notes": [
-    "The historical hash_text uses DefaultHasher at mcp/servers/mmcg/src/run_task.rs:655-658.",
-    "A separate read-only agent checked the key against the exact source revision; the coordinator verified the outcome and persistence corrections. This is source review, not a runtime experiment, human sign-off or model-quality measurement.",
-    "The report is parsed separately from auditing its claims at mcp/servers/mmcg/src/run_task.rs:1463-1491 and mcp/servers/mmcg/src/audit_spec.rs:424-429. Index availability does not guarantee successful identity validation or refresh."
+    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
+    "Legacy hash compatibility is optional context for this successful current-pre-flight task. The earlier frozen 2026-10-07 campaign required that clause; retain its original key and uncertainty rather than regrading archived answers.",
+    "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."
   ],
-  "review_dimensions": ["claim_to_source_support", "critical_evidence_coverage", "material_false_conclusions", "appropriate_unknowns"],
+  "review_dimensions": [
+    "claim_to_source_support",
+    "critical_evidence_coverage",
+    "material_false_conclusions",
+    "appropriate_unknowns"
+  ],
   "decision_quality": "not_applicable_to_facts_only_research_task",
-  "automatic_quality_score": null
+  "automatic_quality_score": null,
+  "acceptance_criteria": [
+    {
+      "id": "inputs",
+      "request_excerpt": "Which stored and current inputs determine what is checked",
+      "criterion": "Explain saved task identity, the live contract comparison and the executor-report boundary for the edited-spec scenario."
+    },
+    {
+      "id": "outcomes",
+      "request_excerpt": "what outcomes, state changes and artifacts can follow",
+      "criterion": "Trace the permitted rejection or postflight outcomes and state/artifact effects without claiming the report itself proves success."
+    },
+    {
+      "id": "output_contract",
+      "request_excerpt": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code.",
+      "criterion": "Use at most five source-grounded findings with path:line citations, distinguish observations/inferences/unknowns, and avoid claiming execution of the researched code."
+    }
+  ]
 }

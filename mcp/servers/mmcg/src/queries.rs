@@ -88,6 +88,40 @@ pub const SEARCH_DEFAULT_TOP: u32 = 100;
 pub const SEARCH_MAX_TOP: u32 = 200;
 pub const SEARCH_RAW_WORK_LIMIT: u32 = 500;
 
+pub const SEARCH_BATCH_MAX_NAMES: usize = 8;
+pub const SEARCH_BATCH_DEFAULT_TOP: u32 = 10;
+pub const SEARCH_BATCH_MAX_TOP: u32 = 25;
+
+#[derive(Debug, Serialize)]
+pub struct SearchBatchResponse {
+    pub query_count: usize,
+    pub truncated: bool,
+    pub queries: Vec<SearchResponse>,
+}
+
+#[derive(Debug)]
+pub enum SearchBatchError {
+    Query(rusqlite::Error),
+    SnapshotChanged,
+}
+
+impl From<rusqlite::Error> for SearchBatchError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Query(error)
+    }
+}
+
+pub fn valid_search_batch_names(names: &[&str]) -> bool {
+    !names.is_empty()
+        && names.len() <= SEARCH_BATCH_MAX_NAMES
+        && names.iter().enumerate().all(|(index, name)| {
+            !name.trim().is_empty()
+                && name.len() <= 1024
+                && !name.chars().any(char::is_control)
+                && !names[..index].contains(name)
+        })
+}
+
 #[derive(Debug, Serialize)]
 pub struct CallersResponse {
     pub target: String,
@@ -500,6 +534,53 @@ pub fn search_bounded(
         collapse_partials,
         Some(top.max(1)),
     )
+}
+
+pub fn search_batch_bounded(
+    store: &Store,
+    names: &[&str],
+    kind: Option<&str>,
+    language: Option<&str>,
+    collapse_partials: bool,
+    top: u32,
+) -> Result<SearchBatchResponse, SearchBatchError> {
+    search_batch_using(store, names, kind, language, collapse_partials, top, |_| {})
+}
+
+fn search_batch_using(
+    store: &Store,
+    names: &[&str],
+    kind: Option<&str>,
+    language: Option<&str>,
+    collapse_partials: bool,
+    top: u32,
+    mut after_query: impl FnMut(usize),
+) -> Result<SearchBatchResponse, SearchBatchError> {
+    if !valid_search_batch_names(names) || !(1..=SEARCH_BATCH_MAX_TOP).contains(&top) {
+        return Err(rusqlite::Error::InvalidParameterName("search batch bounds".into()).into());
+    }
+    // One index snapshot prevents names in a batch from observing different writes.
+    let version = store.data_version()?;
+    let snapshot = StoreReadSnapshot::begin(store)?;
+    let queries = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let query = search_bounded(store, name, kind, language, collapse_partials, top)?;
+            after_query(index);
+            Ok(query)
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    snapshot.finish()?;
+    store.ensure_source_snapshot_current()?;
+    if version != store.data_version()? {
+        return Err(SearchBatchError::SnapshotChanged);
+    }
+    Ok(SearchBatchResponse {
+        query_count: queries.len(),
+        truncated: queries.iter().any(|query| query.truncated),
+        queries,
+    })
 }
 
 fn search_with_limit(
@@ -6288,6 +6369,51 @@ mod tests {
         p.push(format!("mmcg-queries-{}-{}.db", std::process::id(), name));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn search_batch_uses_one_snapshot_and_rejects_an_update_between_names() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("sample.rs"),
+            "fn first() {}\nfn later() {}\n",
+        )
+        .unwrap();
+        let database = root.path().join("mmcg.db");
+        let mut store = Store::open(&database).unwrap();
+        crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, true)
+            .unwrap();
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        let result = search_batch_using(
+            &store,
+            &["first", "later"],
+            None,
+            None,
+            false,
+            10,
+            |index| {
+                if index == 0 {
+                    writer
+                        .execute("DELETE FROM symbols WHERE name = 'later'", [])
+                        .unwrap();
+                    // The writer has committed, but every read within this batch still sees its starting snapshot.
+                    assert_eq!(
+                        search_bounded(&store, "later", None, None, false, 10)
+                            .unwrap()
+                            .total,
+                        Some(1)
+                    );
+                }
+            },
+        );
+        assert!(matches!(result, Err(SearchBatchError::SnapshotChanged)));
+        assert_eq!(
+            search_bounded(&store, "later", None, None, false, 10)
+                .unwrap()
+                .total,
+            Some(0)
+        );
     }
 
     #[test]

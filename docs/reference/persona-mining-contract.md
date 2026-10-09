@@ -113,7 +113,7 @@ not establish. See [NIST's Wilson interval description](https://www.itl.nist.gov
 
 | Replay input or operation | Contract |
 |---|---|
-| `evals/persona_replay.py` | Actual binary under isolated profile homes, no model or network request |
+| `evals/persona/replay.py` | Actual binary under isolated profile homes, no model or network request |
 | Frozen history | All local commit refs and HEAD, including unmerged histories |
 | Binary | Private pinned copy with SHA-256 digests |
 | Historical classifier | Anchor tree supplies tooling/classification context |
@@ -121,12 +121,12 @@ not establish. See [NIST's Wilson interval description](https://www.itl.nist.gov
 | Coauthor trailers | Reported as attribution limits, not assigned the primary author's diff |
 
 ```bash
-python3 evals/persona_replay.py \
+python3 -m evals.persona \
   --repo /path/to/local/repo --anchor origin/main \
   --binary mcp/servers/mmcg/target/debug/mmcg \
   --output .mastermind/research/persona-replay/baseline
 
-python3 evals/persona_replay.py \
+python3 -m evals.persona \
   --repo /path/to/local/repo \
   --binary mcp/servers/mmcg/target/debug/mmcg \
   --manifest .mastermind/research/persona-replay/baseline/manifest.json \

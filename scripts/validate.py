@@ -276,9 +276,13 @@ def collect_wikilinks() -> dict[Path, set[str]]:
 
 
 def _is_excluded(path: Path) -> bool:
-    parts = path.parts
-    # Build artifacts and version control
-    if any(part in {".git", "target", "node_modules", "__pycache__"} for part in parts):
+    try:
+        rel = path.relative_to(REPO_ROOT)
+    except ValueError:
+        return False
+    parts = rel.parts
+    # Build artifacts, local state and version control inside this repository.
+    if any(part in {".git", ".mastermind", "target", "node_modules", "__pycache__"} for part in parts):
         return True
 
     # Templates show example references, not real ones
@@ -287,10 +291,6 @@ def _is_excluded(path: Path) -> bool:
 
     # Top-level `docs/` shows `[[slug]]` syntax as illustration, not as references
     # research/ is not part of the artifact tree (stray notes from past sessions)
-    try:
-        rel = path.relative_to(REPO_ROOT)
-    except ValueError:
-        return False
     rel_parts = rel.parts
     if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "evals"}:
         return True
@@ -1220,7 +1220,7 @@ def validate_eval_fixture_clues() -> list[Issue]:
 
 def validate_workflow_eval_contract() -> list[Issue]:
     """Keep planner/executor and product-skill regression coverage loadable."""
-    path = REPO_ROOT / "evals/workflow.jsonl"
+    path = REPO_ROOT / "evals/behavior/cases/workflow.jsonl"
     issues: list[Issue] = []
     required_artifacts = {
         path.relative_to(REPO_ROOT).as_posix()
@@ -1335,7 +1335,7 @@ def validate_workflow_eval_contract() -> list[Issue]:
         if extra:
             details.append(f"not allowlisted {', '.join(sorted(extra))}")
         issues.append(Issue(path, "error", f"workflow eval artifact set drifted: {'; '.join(details)}"))
-    runner_path = REPO_ROOT / "evals/runner.py"
+    runner_path = REPO_ROOT / "evals/behavior/runner.py"
     try:
         runner = runner_path.read_text(encoding="utf-8")
     except OSError as error:

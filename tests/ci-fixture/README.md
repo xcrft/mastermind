@@ -14,4 +14,4 @@ symbol lookup and Git subprocesses on each configured platform. A separate CI
 step checks `init` and the JSON doctor handshake.
 
 Keep `src/lib.py` and `spec.md` small. Rich behavioral cases belong in
-[`evals/fixtures`](../../evals/README.md), where the expected contract is explicit.
+[`evals/behavior/fixtures`](../../evals/README.md), where the expected contract is explicit.

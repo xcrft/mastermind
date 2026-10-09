@@ -1,7 +1,7 @@
 {
   "id": "reference-removal-evidence-01",
   "kind": "research",
-  "revision": "f220777fd1fbd0ad03ec9a4f8ed2f52b2464e890",
+  "revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
   "source_allowlist": [
     "mcp/servers/mmcg/src/indexer/rust_lang.rs",
     "mcp/servers/mmcg/src/store.rs",

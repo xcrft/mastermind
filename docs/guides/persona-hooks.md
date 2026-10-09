@@ -95,7 +95,7 @@ mastermind miner hooks mine-local --project-root . --limit 16
 
 Use the returned `next_after` as `--after` to continue that pass. Replay makes
 no provider call and cannot reconstruct missing events. For extraction metrics,
-run `mastermind miner hooks evaluate-local --input evals/persona-local.json`.
+run `mastermind miner hooks evaluate-local --input evals/persona/local.json`.
 See [quality and evaluation](../reference/persona-quality.md).
 
 ## Review authorship and the habit

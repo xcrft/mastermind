@@ -53,6 +53,12 @@ cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --lib --locked \
 | CLI fixtures | Separately check attribution, provenance, source drift and review boundaries |
 | Accuracy claim | Candidate detection on this synthetic set only, not human attribution, recurrence, persona usefulness or semantic habit precision |
 
+The [current replay](../../evals/baselines/persona-detector-20261007.json) retains
+source hashes and the V1/V2 comparison: 10/32 vs 29/32 detected signals, 0/26
+false positives for either detector. Recall changes from 31.25% to 90.625% on
+these implementation-authored examples. This is a detector regression result,
+not independent accuracy on user histories.
+
 ## Qualitative mining and review
 
 | Claim component | Evidence required |
@@ -81,13 +87,18 @@ cargo test --manifest-path mcp/servers/mmcg/Cargo.toml --lib --locked \
 Run the source-span evaluation without a model:
 
 ```bash
-mastermind miner hooks evaluate-local --input evals/persona-local.json
+mastermind miner hooks evaluate-local --input evals/persona/local.json
 ```
 
 The supplied regression corpus has the 58 detector cases plus two multiline
 hook cases. Its labels come from the implementation author. The adapter's
 200-character behavior limit can omit detector signals allowed by the
 300-character transcript contract. Those omissions stay in the recall denominator.
+The [current local-hook replay](../../evals/baselines/persona-local-20261007.json)
+records 31 true positives, 0 false positives and 3 misses across 60 cases:
+precision 100%, recall 91.18%, held-out cases 0 and task-benefit pairs 0.
+The 58-case detector comparison and 60-case hook replay have different input
+contracts and denominators.
 
 A selected-history corpus uses this schema:
 

@@ -2659,7 +2659,7 @@ fn extract_interpreted(text: &str) -> Option<String> {
     (!section.is_empty()).then(|| section.to_string())
 }
 
-/// List length in the agent view; a larger budget does not widen it.
+/// Diagnostic associations remain bounded independently of claim retrieval.
 const VIEW_TOP: usize = 12;
 
 /// The repository a profile view is for: the name range areas use, and the
@@ -3016,8 +3016,15 @@ fn view_at_with_verifier(
                 workflow,
             )
         });
+        agg.feedback.sort_by_key(|entry| entry.scope == "global");
         agg.habits
             .retain(|habit| habit_applies(habit, repo, role, workflow));
+        agg.habits.sort_by_key(|habit| {
+            (
+                habit.role.is_empty() && habit.workflow.is_empty(),
+                habit.scope == "global",
+            )
+        });
     };
     select(&mut agg);
     let selected_store_revision = agg.profile_revision();
@@ -3045,7 +3052,6 @@ fn view_at_with_verifier(
             }
             _ => true,
         })
-        .take(VIEW_TOP)
         .map(|rule| {
             json!({
                 "statement": rule.statement,
@@ -3060,7 +3066,6 @@ fn view_at_with_verifier(
         .feedback
         .iter()
         .filter(|entry| entry.status == "active")
-        .take(VIEW_TOP)
         .map(|entry| {
             json!({
                 "key": entry.key,
@@ -3085,7 +3090,6 @@ fn view_at_with_verifier(
                 && habit.limitations == 0
                 && (habit.scope.starts_with("project:") || habit.repositories >= 2)
         })
-        .take(VIEW_TOP)
         .map(|habit| {
             json!({
                 "id": habit.id,
@@ -3125,7 +3129,7 @@ fn view_at_with_verifier(
     } else {
         "ok"
     };
-    let mut packet = json!({
+    let packet = json!({
         "schema_version": 2,
         "status": status,
         "selection": { "paths": paths, "role": role, "workflow": workflow },
@@ -3163,48 +3167,7 @@ fn view_at_with_verifier(
         "omitted": [],
         "precision_notes": notes,
     });
-    // Over budget, the least specific lists go first and are named as omitted.
-    let mut omitted = Vec::new();
-    for key in [
-        "associations",
-        "range",
-        "workflow",
-        "conventions",
-        "habits",
-        "feedback",
-    ] {
-        if serde_json::to_string(&packet)?.len().div_ceil(4) <= budget_tokens {
-            break;
-        }
-        packet[key] = json!([]);
-        omitted.push(key);
-        packet["omitted"] = json!(omitted);
-    }
-    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
-        packet["omitted"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!("precision_notes"));
-        while serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens
-            && packet["precision_notes"]
-                .as_array()
-                .is_some_and(|notes| notes.len() > 1)
-        {
-            packet["precision_notes"].as_array_mut().unwrap().pop();
-        }
-    }
-    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
-        // JSON escaping can make a valid 128-character workflow much larger
-        // than 128 bytes. Its exact value remains bound by profile_revision.
-        packet["selection"] = Value::Null;
-        packet["omitted"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!("selection"));
-    }
-    if serde_json::to_string(&packet)?.len().div_ceil(4) > budget_tokens {
-        return Err("profile response metadata exceeds the requested budget".into());
-    }
+    let packet = bound_view(packet, budget_tokens)?;
     // Source verification can perform slow filesystem reads. A dismissed
     // selected claim or revoked grant cannot authorize the assembled response.
     // Unrelated scoped claims do not invalidate this selection.
@@ -3215,6 +3178,103 @@ fn view_at_with_verifier(
     }
     if current.profile_revision() != selected_store_revision {
         return Ok(json!({"schema_version":2,"status":"source_changed","precision_notes":notes}));
+    }
+    Ok(packet)
+}
+
+fn bound_view(
+    mut packet: serde_json::Value,
+    budget_tokens: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use serde_json::{json, Value};
+    let fits = |packet: &Value| -> Result<bool, serde_json::Error> {
+        Ok(serde_json::to_vec(packet)?.len().div_ceil(4) <= budget_tokens)
+    };
+    if fits(&packet)? {
+        return Ok(packet);
+    }
+    let keys = [
+        "feedback",
+        "habits",
+        "conventions",
+        "workflow",
+        "range",
+        "associations",
+    ];
+    let lists: Vec<Vec<Value>> = keys
+        .iter()
+        .map(|key| {
+            let items = std::mem::replace(&mut packet[*key], json!([]));
+            items.as_array().unwrap().clone()
+        })
+        .collect();
+    packet["omitted_counts"] = json!({});
+    for (key, items) in keys.iter().zip(&lists) {
+        if !items.is_empty() {
+            packet["omitted"].as_array_mut().unwrap().push(json!(key));
+            packet["omitted_counts"][*key] = json!(items.len());
+        }
+    }
+    // The machine-readable evidence basis stays intact. Repeated prose must
+    // not displace reviewed advice under the same response budget.
+    if packet["precision_notes"].as_array().unwrap().len() > 1 {
+        packet["precision_notes"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        packet["omitted"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("precision_notes"));
+    }
+    if !fits(&packet)? {
+        // Escaping can make even a bounded workflow or path selection large.
+        // Its exact value remains bound by profile_revision.
+        packet["selection"] = Value::Null;
+        packet["omitted"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("selection"));
+    }
+    if !fits(&packet)? {
+        return Err("profile response metadata exceeds the requested budget".into());
+    }
+    let mut admit = |index: usize, item: &Value| -> Result<(), serde_json::Error> {
+        let key = keys[index];
+        packet[key].as_array_mut().unwrap().push(item.clone());
+        let remaining = lists[index].len() - packet[key].as_array().unwrap().len();
+        packet["omitted_counts"][key] = json!(remaining);
+        if !fits(&packet)? {
+            packet[key].as_array_mut().unwrap().pop();
+            packet["omitted_counts"][key] = json!(remaining + 1);
+        }
+        Ok(())
+    };
+    // Give both reviewed claim types a turn before admitting diagnostics.
+    // Skip an oversized entry whole so it cannot hide a later fitting claim.
+    for position in 0..lists[0].len().max(lists[1].len()) {
+        for (index, items) in lists.iter().enumerate().take(2) {
+            if let Some(item) = items.get(position) {
+                admit(index, item)?;
+            }
+        }
+    }
+    for (index, items) in lists.iter().enumerate().skip(2) {
+        for item in items {
+            admit(index, item)?;
+        }
+    }
+    for key in keys {
+        if packet["omitted_counts"][key] == 0 {
+            packet["omitted_counts"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            packet["omitted"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|item| item != key);
+        }
     }
     Ok(packet)
 }
@@ -5720,12 +5780,13 @@ diff --git a/src/a.rs b/src/a.rs
             None,
         )
         .unwrap();
-        let stated: Vec<&str> = packet["feedback"]
+        let mut stated: Vec<&str> = packet["feedback"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["statement"].as_str().unwrap())
             .collect();
+        stated.sort_unstable();
         assert_eq!(
             stated,
             [
@@ -5795,6 +5856,105 @@ diff --git a/src/a.rs b/src/a.rs
                 .as_array()
                 .unwrap()
                 .contains(&serde_json::json!("selection")));
+        }
+    }
+
+    #[test]
+    fn agent_view_keeps_whole_claims_under_budget_and_has_no_twelve_claim_cap() {
+        struct Current;
+        impl QuoteVerifier for Current {
+            fn current_observation(&mut self, _: &store::CollectedCandidate) -> bool {
+                true
+            }
+            fn current(&mut self, _: &str, _: usize, _: &str, _: &str, _: &str) -> bool {
+                true
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("style.db");
+        let mut db = store::ProfileStore::open(&path).unwrap();
+        db.set_reader_grant(root.to_str().unwrap(), "test", true)
+            .unwrap();
+        for index in 0..20 {
+            let statement = format!(
+                "Preference {index:02}: {}",
+                "Keep the contract explicit. ".repeat(5)
+            );
+            store::fixture_preference(&mut db, &statement, "global");
+            let entry = db
+                .feedback()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.statement == statement)
+                .unwrap();
+            db.review_feedback(&entry.key, "active", Some(&entry.review_revision()))
+                .unwrap();
+            let habit = store::fixture_habit(
+                &mut db,
+                &format!(
+                    "Habit {index:02}: {}",
+                    "Checks the declared contract. ".repeat(4)
+                ),
+            );
+            db.review_habit(habit.id, "observed", Some(&habit.review_revision()))
+                .unwrap()
+                .unwrap();
+        }
+        let expected_feedback = db.feedback().unwrap();
+        let expected_habits = db.habits().unwrap();
+        drop(db);
+        let repo = RepoContext {
+            label: "fixture".into(),
+            slug: "fixture".into(),
+            persona_project_id: "fixture".into(),
+        };
+        for budget in [1500, 8000] {
+            let packet = view_at_with_verifier(
+                &path,
+                &[],
+                Some(&repo),
+                budget,
+                Some((&root, "test")),
+                Some("executor"),
+                Some("strict"),
+                &mut Current,
+            )
+            .unwrap();
+            assert!(serde_json::to_vec(&packet).unwrap().len() <= budget * 4);
+            assert_eq!(packet["source_verification"], "complete");
+            let feedback = packet["feedback"].as_array().unwrap();
+            let habits = packet["habits"].as_array().unwrap();
+            assert!(
+                !feedback.is_empty(),
+                "fitting preferences disappeared at budget {budget}"
+            );
+            assert!(
+                !habits.is_empty(),
+                "fitting habits disappeared at budget {budget}"
+            );
+            for entry in feedback {
+                let original = expected_feedback
+                    .iter()
+                    .find(|original| entry["key"] == original.key)
+                    .unwrap();
+                assert_eq!(entry["statement"], original.statement);
+                assert_eq!(entry["review_revision"], original.review_revision());
+            }
+            for entry in habits {
+                let original = expected_habits
+                    .iter()
+                    .find(|original| entry["id"] == original.id)
+                    .unwrap();
+                assert_eq!(entry["behavior"], original.behavior);
+                assert_eq!(entry["exception"], original.exception);
+                assert_eq!(entry["review_revision"], original.review_revision());
+            }
+            if budget == 8000 {
+                assert_eq!(feedback.len(), 20);
+                assert_eq!(habits.len(), 20);
+            }
         }
     }
 

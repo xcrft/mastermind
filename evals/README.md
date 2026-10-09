@@ -1,107 +1,56 @@
 # Evaluation
 
-Use deterministic checks for protocol behavior and model-backed trials for
-answer quality. Every published result identifies its source, inputs and runtime.
+Run commands from the repository root. Deterministic checks test the harness;
+model-backed trials measure answers under an explicit experiment configuration.
 
-## Choose a check
+Product objectives, the current baseline and audit/fix acceptance rules are in
+[Product success measures](PRODUCT.md).
+Use [role calibration](ROLE_CALIBRATION.md) to compare role instructions,
+reasoning settings and the complete routed workflow separately.
 
-| Question | Evaluation | Result |
+## Choose a package
+
+| Package | Purpose | Instructions |
 |---|---|---|
-| Can an iteration complete without required evidence? | [Control loop](control-loop.md) | Finite guard model and selected production CLI regressions |
-| Do hook intake and profile boundaries hold? | [Control loop](control-loop.md#connection-to-the-implementation) | Fixture checks for binding, influence, worker lifecycle, readiness and private UI metadata |
-| Does the prompt refiner preserve intent? | [Hook intake runner](control-loop.md#refiner-protocol-and-model-evaluation) | Production parser plus retained processor outputs, semantic quality needs independent review |
-| Are persona measurements reproducible? | [Persona replay](../docs/reference/persona-mining-contract.md) | Frozen Git attribution, measured diff accounting and cache consistency |
-| Does local extraction preserve complete statements? | `mmcg miner hooks evaluate-local --input evals/persona-local.json` | Exact-span precision/recall on supplied labels, source digest and paired outcome seam |
-| Does a shipped role follow its instructions? | `runner.py` | Focused model-backed behavioral cases |
-| Does retrieval improve a research answer? | [Research benchmark](benchmark/README.md) | Matched conditions, retained answers and offline assessments |
-| What does indexing cost? | [Index benchmark](../docs/benchmarks.md) | Cold, unchanged and incremental time and memory |
-| What has actually been measured? | [Scorecard](scorecard.md) | Current deterministic evidence and dated historical observations |
+| `behavior` | Shipped role and workflow assertions, fixture-backed reviews | [Run behavioral suites](behavior/README.md) |
+| `benchmark` | Matched research trials, blinded review and paired outcome/cost analysis | [Prepare and run](benchmark/README.md), [review](benchmark/REVIEW.md) |
+| `control` | Completion guards, finite model and selected production CLI regressions | [Run the control checks](control/README.md) |
+| `intake` | Prompt-refiner protocol and retained processor outputs | [Run intake evaluations](intake/README.md) |
+| `persona` | Git attribution, mining replay and local extraction labels | [Replay contract](../docs/reference/persona-mining-contract.md) |
+| `shared` | Bounded subprocess supervision used across the packages | [Test instructions](../tests/README.md) |
 
-Run deterministic checks without a model:
-
-```sh
-just eval-harness
-python3 -m evals.control_loop --output .mastermind/research/control-loop/run-01
-python3 -m evals.benchmark_corpus --source-repo .
-```
-
-Run the control-loop command after sources stop changing. It requires Rust, Git
-and Node on POSIX, runs real CLI tests and one aggregate Lens DOM/static suite.
-The Python harness tests use fixtures. Neither command calls a model.
-
-## Behavioral suites
-
-| Suite | Cases | Target | Main observation |
-|---|---|---|---|
-| `critic` | [critic.jsonl](critic.jsonl) | Design review | Final `## Verdict` and explicit uncertainty |
-| `researcher` | [researcher.jsonl](researcher.jsonl) | Code and document research | Source citations, graph use and limits |
-| `auditor` | [auditor.jsonl](auditor.jsonl) | Postflight review | Held, Drift or Broken in the structured YAML verdict |
-| `intake` | [intake.jsonl](intake.jsonl) | Goal refinement | Refine, pass through or ask |
-| `workflow` | [workflow.jsonl](workflow.jsonl) | Portable workflow skills | Required behavior in a focused scenario |
-
-[Hook intake cases](hook-intake.jsonl) use the separate `evals.hook_intake` runner:
-
-```sh
-python3 -m evals.hook_intake --binary /absolute/path/to/mmcg \
-  --processor /absolute/path/to/protocol-processor \
-  --output /private/new-report-directory
-```
-
-It invokes the production parser with task admission disabled and retains every
-attempt. The processor is explicit, labels stay hidden from it, and failed
-attempts stay in the denominator. See the [bounds and output contract](control-loop.md#refiner-protocol-and-model-evaluation).
-No model-quality result is published for this corpus. Rust's
-`persona_hooks_refiner_cli` checks protocol and lifecycle with deterministic
-processors.
-
-| Hook corpus | Cases |
-|---|---:|
-| Activate Mastermind | 10 |
-| Continue an explicitly bound task | 7 |
-| Ordinary request, including quoted instructions and negation | 15 |
-| Unclear reference or missing task binding | 8 |
-| Total | 40 |
-
-The corpus covers Russian, English, mixed Russian/English, Spanish, French,
-German and Chinese. Fake-processor routing tests establish protocol behavior,
-not multilingual classification accuracy or preservation of meaning. A model
-benchmark still needs independently reviewed labels, held-out cases and retained
-outputs for every attempted case.
-
-[Fixture READMEs](fixtures/) describe the planted changes. Model-backed researcher
-and auditor runs need a matching `mmcg` binary. The runner uses deterministic
-grading, without an LLM judge.
-
-Model-backed runs require an authenticated Claude CLI. They consume inference
-usage and are run explicitly, outside ordinary CI:
-
-```sh
-# Run repository gates, then all behavioral suites.
-bash evals/run-verified.sh --model sonnet
-
-# Run one suite and retain the complete report.
-python3 evals/runner.py --suite critic --model opus \
-  --report /tmp/mastermind-critic.json
-
-# Compare with a matching baseline.
-python3 evals/runner.py --suite critic --model opus \
-  --report /tmp/mastermind-critic-current.json \
-  --baseline-report evals/baselines/critic-opus-pre-lean.json
-```
-
-Use `--case ID` for diagnosis, `--keep-fixtures` to inspect a temporary corpus,
-and `--verbose-failures` for detailed assertion failures. A targeted rerun does
-not replace the result of a complete suite.
-
-| Runner contract | Enforcement |
+| Location | Contents |
 |---|---|
-| Prompt-only suites | Empty tool set and a fresh temporary directory |
-| Researcher/auditor suites | Shipped agent, disposable Git fixture, index and live MCP server |
-| Identity | Frozen model, CLI, harness, role, case, source and tool identities |
-| Claimed verification | Exact command plus observed successful result |
-| Failure accounting | Missing evidence, denials, transport errors and incomplete telemetry fail the case |
-| Execution bounds | Per-case wall time and output caps, process-group cleanup |
-| Host boundary | Managed client policies still apply, no OS sandbox or reviewer independence claim |
+| `evals/<package>/` | Runtime logic and package-owned corpora/fixtures |
+| `tests/evals/<package>/` | Deterministic behavioral and integration tests |
+| `tests/evals/support/` | Shared disposable fixtures, independent of test classes |
+| `tests/validation/` | Repository, publication and document-evidence checks |
+| `evals/baselines/` | Retained measurements with their original source bindings |
+
+Reports with `kind: mastermind-public-report-projection` retain the original
+report's SHA-256 and list fields whose local paths were redacted. Their `report`
+contains the published measurements; the original remains private. A projection
+is not a canonical input for review admission or runtime verification.
+
+## Run checks
+
+| Goal | Command |
+|---|---|
+| All Python harness and repository tests | `just eval-harness` |
+| The same tests without just | `python3 -m unittest discover -s tests -t .` |
+| One package | `python3 -m unittest discover -s tests/evals/benchmark -t .` |
+| Validate research source/key bindings | `python3 -m evals.benchmark.corpus --source-repo .` |
+| Require current research source bytes | `python3 -m evals.benchmark.corpus --source-repo . --require-current` |
+| Model-only completion checks | `python3 -m evals.control --model-only --output /tmp/new-control-report` |
+| Full control/CLI integration | `python3 -m evals.control --output /tmp/new-control-report` |
+| Local extraction labels | `mmcg miner hooks evaluate-local --input evals/persona/local.json` |
+| Index latency and memory | `just benchmark-index` |
+
+The Python tests use disposable fixtures and make no model calls. Full control
+integration needs Rust, Git and Node on POSIX. Run it against stable sources.
+Model-backed behavioral runs use [the verified runner](behavior/README.md) and
+consume inference usage. Retained outcomes and measurement limits live in the
+[scorecard](scorecard.md).
 
 ## Measurement contract
 
@@ -120,6 +69,33 @@ Do not calculate a savings percentage when the baseline is zero, missing or
 incomparable. A reduction is useful only when the required quality and control
 criteria still hold. Repeated matched runs are needed to estimate variance.
 
+For useful-work efficiency, also record accepted outcomes `S` across all planned
+attempts. Resource per success is `C / S`; yield is `S / C`. Compare yield only
+when outcomes are resolved and resources are complete. Zero baseline successes
+make a relative yield gain undefined. Failures still contribute their observed
+resource use.
+
+## Match the experiment to a feature
+
+Use [persona delivery inspection](persona/README.md) to retain selected rule IDs,
+text differences, revisions and omissions separately from model application.
+
+| Feature | Matched comparison | Existing measurement boundary |
+|---|---|---|
+| Research instructions | `source` vs `portable` on the same source/key | Static skill instructions, not native prompt refinement |
+| Code graph retrieval | `portable` vs `portable_mmcg` | Adds graph tools; semantic review still required |
+| Combined research flow | `source` vs `portable_mmcg` | Four published calibration tasks, not representative user work |
+| Prompt refinement | Raw task vs frozen refined task under the original outcome key | Harness supports explicit arms; generation, native delivery and end-to-end benefit need separate runs |
+| Personal profile | Same task with/without a frozen applicable profile, plus a shuffled-profile control | Profile mining and task benefit remain separate; no qualified benefit sample yet |
+| Completion guards | All obligations enabled vs each omitted guard | Finite-model safety and sampled CLI conformance, not semantic task quality |
+| Incremental index | Cached vs forced-full index of identical source | Latency plus symbol/call/reference equivalence, no inference |
+| Local style detector | V1 vs V2 on the same labeled examples | Synthetic candidate/span accuracy, not real habit precision |
+| Project/document context | Relevant context vs none, with stale and irrelevant controls | Freshness checks exist; relevance and accepted-task benefit need a controlled corpus |
+
+Use [the campaign commands](benchmark/README.md#run-the-whole-corpus) to run every
+research case under one configuration. Model/runtime switches require a new
+campaign. The [scorecard](scorecard.md) records current results and gaps.
+
 | Comparison rule | Reason |
 |---|---|
 | Retain raw cases and recompute aggregates | Prevent selective result reporting |
@@ -133,44 +109,3 @@ criteria still hold. Repeated matched runs are needed to estimate variance.
 Research reviews retain claim support, required-known coverage, unknown handling
 and reviewer disagreement. Causal uplift and automatic semantic scores remain
 unmeasured.
-
-## Add or change a case
-
-1. Put one falsifiable behavior in a JSONL case and explain it in `why`.
-2. Use a source fixture for tool behavior and an explicit positive oracle.
-3. Keep expected answers out of source files shown to the model.
-4. Prefer structured outputs, observed results and exact citation anchors.
-5. Validate the harness, then run the affected case and the complete suite.
-
-| Case field | Use |
-|---|---|
-| `expect.verdict` | Final critic or auditor decision |
-| `expect.contains` / `contains_any` | Required signals or equivalent wording |
-| `expect.not_contains` | Forbidden affirmative claim, accounting for denials |
-| `expect.citations` | Source anchor matching one fixture line |
-| `expect.code_comments` | Comment limits for generated code |
-
-Auditor variants provide a complete after-tree under `fixtures/<name>/changes/`.
-Missing baseline files are deleted. `staged_paths` leaves selected changes staged
-and others unstaged or untracked for a pre-commit audit.
-
-The loader rejects unknown fields, contradictory expectations, invalid budgets,
-unavailable tools and ambiguous citation anchors. Auditor verdicts come from
-the canonical YAML block. Source citations must name valid bounded locations.
-Citation validity does not prove that a conclusion follows from the source.
-
-Phrase assertions can fail on a correct paraphrase or pass on shallow wording.
-A forbidden phrase can also occur inside a denial. Diagnose those failures
-against the intended contract. Do not widen a case merely to admit the answer
-that just failed. Long-task adherence and semantic accuracy need separate
-outcome evaluations.
-
-## Auditor ablation
-
-```sh
-python3 evals/ablation.py --with-mastermind
-```
-
-This compares a neutral Git reviewer with the shipped auditor on the same
-fixtures. The columns use different grading rules, so the output is diagnostic
-and cannot establish quality uplift.

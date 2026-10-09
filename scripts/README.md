@@ -32,13 +32,19 @@ compile Rust, run npm, invoke models or establish the runtime behavior of an
 agent prompt. Those checks have separate suites.
 
 Artifact discovery excludes template placeholders and build/local-state
-paths. New checks belong in `validate.py` and report `Issue` values with an
+paths, including `.mastermind` research archives. Exclusions are relative to the
+checked repository, so an ancestor directory named `target` does not hide source
+documentation. New checks belong in `validate.py` and report `Issue` values with an
 `error` or `warning` level. Fix newly detected repository violations in the same
 change.
 
 ## Document evidence
 
-`test_document_graph.py` tests the portable history helper in temporary Git
+```sh
+python3 -m unittest tests.validation.test_document_graph
+```
+
+`tests/validation/test_document_graph.py` tests the portable history helper in temporary Git
 repositories: schema and path validation, bounded reads, changed or deleted
 sources and snapshot invalidation. It uses Python's standard library and Git.
 

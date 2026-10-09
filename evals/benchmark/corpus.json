@@ -5,7 +5,7 @@
     {
       "id": "task-phase-continuity-01",
       "role": "calibration",
-      "coverage": ["historical_defect", "workflow_state", "cross_file_evidence"],
+      "coverage": ["contract_drift_rejection", "workflow_state", "cross_file_evidence"],
       "task": "tasks/task-phase-continuity-01.json",
       "rubric": "rubrics/task-phase-continuity-01.json",
       "indexed_files": [

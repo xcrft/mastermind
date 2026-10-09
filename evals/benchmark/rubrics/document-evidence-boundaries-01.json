@@ -1,69 +1,86 @@
 {
   "task_id": "document-evidence-boundaries-01",
-  "source_revision": "ad17b1aad3dcf13bb97c8731f93efc4761b01fd8",
+  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
-      "claim": "Relations are explicitly supplied. The snapshot records endpoints, deterministic relation identities, whole endpoint-file hashes and the local repository revision. It does not infer relations or store complete source contents.",
+      "claim": "Relations are supplied in a manifest, not inferred. A successful snapshot records deterministic edge IDs, unverified relations, endpoint hashes and the repository revision in a new local JSON artifact.",
       "anchors": [
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:123-141",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:388-408",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:478-495"
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:174-190",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731"
       ]
     },
     {
-      "claim": "A successful check compares whole named endpoint files. Changed content or a recordable endpoint failure (missing, unsafe_path, not_regular or unsupported_text) makes the result and incident edges needs_review; unaffected edges can remain current. Edits outside a cited line still count. Other failures, including byte limits, remain errors rather than freshness results.",
+      "claim": "Default snapshots track named endpoint files only. Repeated --corpus-dir options additionally capture scoped Markdown recursively, including uncited documents. A later check reports added, missing and content-changed corpus files separately; it does not infer edges for new documents.",
       "anchors": [
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:388-414",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531"
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:734-760",
+        "skills/workflow/mastermind-project-history/references/document-evidence-graph.md:99-106"
       ]
     },
     {
-      "claim": "Endpoint freshness, HEAD change and dirty-state reporting are separate. Unchanged named files can yield current with revision_changed=true after an unrelated commit. An unlisted ADR is not added to the graph or semantically assessed; an untracked file can still affect the conservative dirty signal.",
+      "claim": "A changed or recordably unreadable named endpoint makes incident edges needs_review. Unchanged edges can stay current. With corpus tracking, a corpus change can make the overall result needs_review while unchanged edges remain current. Byte-limit and other non-recordable failures remain errors.",
       "anchors": [
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:366-385",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531",
-        "skills/workflow/mastermind-project-history/SKILL.md:78-81"
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:549-580",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:761-787"
       ]
     },
     {
-      "claim": "Relations remain unverified, including verified_by and supersedes. Current does not establish passing tests, implementation compliance, accepted decision status or corpus completeness. Supersession requires reading source and status; provenance does not establish semantic truth.",
+      "claim": "HEAD change and content freshness are separate. Current does not prove a relation true, an ADR accepted, a test passed or complete repository coverage. Untracked corpus scope remains not_tracked.",
       "anchors": [
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:433-450",
-        "skills/workflow/mastermind-project-history/SKILL.md:37-52",
-        "skills/workflow/mastermind-project-history/SKILL.md:69-81"
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:672-674",
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:741-787",
+        "skills/workflow/mastermind-project-history/SKILL.md:43-61"
       ]
     },
     {
-      "claim": "Snapshot publishes a new local research JSON artifact without overwriting an existing output; check returns evidence without updating that snapshot. The shipped contract does not import document nodes into codegraph or edit project history. History retrieval and source reading remain separate steps.",
+      "claim": "Snapshot publishes a new artifact and check does not update it or import graph nodes into SQLite. The documented native history/Lens/export integrations require an explicit graph path and preserve separate freshness fields; their runtime implementations are outside this source allowlist.",
       "anchors": [
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:277-307",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:478-495",
-        "skills/workflow/mastermind-project-history/scripts/document_graph.py:498-531",
-        "skills/workflow/mastermind-project-history/references/document-evidence-graph.md:3-6",
-        "skills/workflow/mastermind-project-history/SKILL.md:37-43"
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731",
+        "skills/workflow/mastermind-project-history/SKILL.md:72-94"
       ]
     }
   ],
   "expected_unknowns": [
-    "The semantic truth of a declared relation, the accepted status of a superseding ADR and actual test results require additional evidence.",
-    "The manifest does not establish whether unlisted contradictory or superseding evidence exists.",
-    "Behavior of external consumers and end-to-end Lens/history integration is outside this source allowlist. No execution was performed."
+    "Semantic truth, accepted decision status and actual test results require additional evidence.",
+    "Without explicit corpus directories, unlisted evidence is not tracked. Even tracked directories do not establish coverage outside that scope.",
+    "Native consumer implementations and observed end-to-end integration are outside this source allowlist; this task executes no code."
   ],
   "materially_false_claims": [
-    "Check inserts newly discovered ADR nodes or imports document relationships into the native codegraph.",
     "Current or verified_by proves acceptance, compliance or passing tests.",
-    "Every HEAD change invalidates every graph edge.",
-    "Unchanged HEAD guarantees endpoint freshness or complete evidence.",
-    "All endpoint read failures produce needs_review rather than an error.",
-    "Check rewrites the snapshot or project history, or snapshot overwrites existing output."
+    "Every HEAD change invalidates every edge.",
+    "Unchanged HEAD guarantees endpoint freshness.",
+    "Corpus additions automatically create or semantically verify graph edges.",
+    "All endpoint failures return needs_review rather than an error.",
+    "Check rewrites the saved graph or snapshot overwrites an existing artifact."
   ],
   "reviewer_notes": [
-    "A separate read-only agent reviewed the claims and anchors against the exact source revision. The coordinator applied the distinction between an untracked-file dirty signal and semantic graph discovery. This is agent source review, not runtime evidence, human sign-off or model-quality measurement.",
-    "A successful snapshot is an explicit premise: a schema-valid manifest alone does not establish readable files or in-range endpoint lines.",
-    "The conservative dirty signal may change on a metadata-only touch. Do not require a content change or complete unlisted-file discovery from that flag."
+    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
+    "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."
   ],
-  "review_dimensions": ["claim_to_source_support", "critical_evidence_coverage", "material_false_conclusions", "appropriate_unknowns"],
+  "review_dimensions": [
+    "claim_to_source_support",
+    "critical_evidence_coverage",
+    "material_false_conclusions",
+    "appropriate_unknowns"
+  ],
   "decision_quality": "not_applicable_to_facts_only_research_task",
-  "automatic_quality_score": null
+  "automatic_quality_score": null,
+  "acceptance_criteria": [
+    {
+      "id": "scope",
+      "request_excerpt": "Compare an endpoint-only snapshot with one using explicit --corpus-dir options",
+      "criterion": "Distinguish changes to cited endpoints, uncited in-scope documents and out-of-scope repository changes."
+    },
+    {
+      "id": "meaning",
+      "request_excerpt": "Explain the meaning of current, needs_review and unverified",
+      "criterion": "Explain freshness and review status without treating an unverified document relation as semantic truth or native activation."
+    },
+    {
+      "id": "output_contract",
+      "request_excerpt": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code.",
+      "criterion": "Use at most five source-grounded findings with path:line citations, distinguish observations/inferences/unknowns, and avoid claiming execution of the researched code."
+    }
+  ]
 }

@@ -1,6 +1,7 @@
 use mmcg::indexer::Indexer;
 use mmcg::store::Store;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,7 +26,11 @@ struct BenchmarkReport {
     parse_batch_size: usize,
     cold: RunMetrics,
     warm: RunMetrics,
+    warm_full: RunMetrics,
     incremental: RunMetrics,
+    incremental_full: RunMetrics,
+    warm_equivalent: bool,
+    incremental_equivalent: bool,
 }
 
 fn main() {
@@ -43,6 +48,14 @@ fn main() {
 
     let cold = measure_run(|| indexer.index_all(&mut store, false).expect("cold index"));
     let warm = measure_run(|| indexer.index_all(&mut store, false).expect("warm index"));
+    let warm_evidence = indexed_evidence(&store, files);
+    assert_eq!(warm_evidence.1, files * symbols_per_file);
+    let warm_full = measure_run(|| {
+        indexer
+            .index_all(&mut store, true)
+            .expect("forced warm index")
+    });
+    let warm_equivalent = warm_evidence == indexed_evidence(&store, files);
 
     for index in 0..changed_files {
         let path = source_root.join(format!("file_{index:05}.rs"));
@@ -61,20 +74,39 @@ fn main() {
             .index_all(&mut store, false)
             .expect("incremental index")
     });
+    let incremental_evidence = indexed_evidence(&store, files);
+    assert_eq!(
+        incremental_evidence.1,
+        files * symbols_per_file + changed_files
+    );
+    let incremental_full = measure_run(|| {
+        indexer
+            .index_all(&mut store, true)
+            .expect("forced changed index")
+    });
+    let incremental_equivalent = incremental_evidence == indexed_evidence(&store, files);
 
     let report = BenchmarkReport {
-        schema_version: 1,
+        schema_version: 2,
         files,
         symbols_per_file,
         changed_files,
         parse_batch_size: mmcg::indexer::PARSE_BATCH_SIZE,
         cold,
         warm,
+        warm_full,
         incremental,
+        incremental_full,
+        warm_equivalent,
+        incremental_equivalent,
     };
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("serialize benchmark report")
+    );
+    assert!(
+        warm_equivalent && incremental_equivalent,
+        "cached and full index evidence differ"
     );
 }
 
@@ -99,13 +131,71 @@ fn write_fixture(root: &Path, files: usize, symbols_per_file: usize) {
 fn fixture_body(file_index: usize, symbols_per_file: usize) -> String {
     let mut body = String::new();
     for symbol_index in 0..symbols_per_file {
+        let value = if symbol_index == 0 {
+            "0".to_owned()
+        } else {
+            format!("symbol_{file_index}_{}()", symbol_index - 1)
+        };
         writeln!(
             body,
-            "pub fn symbol_{file_index}_{symbol_index}() -> usize {{ {symbol_index} }}"
+            "pub fn symbol_{file_index}_{symbol_index}() -> usize {{ {value} }}"
         )
         .unwrap();
     }
     body
+}
+
+fn indexed_evidence(store: &Store, files: usize) -> ([u8; 32], usize) {
+    let mut digest = Sha256::new();
+    let mut functions = 0;
+    for index in 0..files {
+        let symbols = store
+            .symbols_in_file(&format!("src/file_{index:05}.rs"))
+            .unwrap();
+        let mut records = Vec::new();
+        for symbol in &symbols {
+            let calls = store.callees_of(symbol.id, Some("calls")).unwrap();
+            let references = store.callees_of(symbol.id, Some("references")).unwrap();
+            if let Some(suffix) = symbol.name.strip_prefix(&format!("symbol_{index}_")) {
+                let position: u32 = suffix.parse().expect("fixture function position");
+                let expected = if position == 0 {
+                    Vec::new()
+                } else {
+                    vec![(format!("symbol_{index}_{}", position - 1), position + 1)]
+                };
+                assert_eq!(calls, expected, "fixture call chain differs");
+                assert!(
+                    references.is_empty(),
+                    "fixture has no function-value references"
+                );
+            }
+            functions += usize::from(symbol.kind == "function");
+            let parent = symbol
+                .parent_id
+                .and_then(|id| symbols.iter().find(|parent| parent.id == id));
+            records.push(
+                serde_json::json!([
+                    symbol.name,
+                    symbol.kind,
+                    symbol.file_path,
+                    symbol.line_start,
+                    symbol.line_end,
+                    symbol.signature,
+                    symbol.decorators,
+                    parent.map(|parent| (&parent.name, &parent.kind, parent.line_start)),
+                    calls,
+                    references
+                ])
+                .to_string(),
+            );
+        }
+        records.sort();
+        for record in records {
+            digest.update(record.as_bytes());
+            digest.update(b"\n");
+        }
+    }
+    (digest.finalize().into(), functions)
 }
 
 fn measure_run<F>(run: F) -> RunMetrics

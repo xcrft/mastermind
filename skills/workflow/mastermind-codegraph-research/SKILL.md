@@ -2,7 +2,7 @@
 name: mastermind-codegraph-research
 description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
 metadata:
-  version: 0.3.3
+  version: 0.3.4
   authors:
     - mastermind
   tags:
@@ -50,6 +50,7 @@ re-exports, and cross-language edges can reduce precision.
 | What bounded context does this planner/executor/auditor need? | `mmcg_brief` |
 | Which local symbols match this natural-language concept? | `mmcg_concept` |
 | Does symbol `X` exist? (get `file:line` + signature) | `mmcg_search` |
+| Where are several already-known symbols defined? | `mmcg_search` with `names` when the advertised schema supports it |
 | What calls `X`? | `mmcg_callers` |
 | Where is `X` used as a function value or inside a Rust macro body? | `mmcg_callers` with `edge_kind: references` |
 | What does `X` call? | `mmcg_callees` |
@@ -61,6 +62,12 @@ re-exports, and cross-language edges can reduce precision.
 | What prior rationale or decision records discuss this topic? | `mmcg_history`, then read the cited records |
 | String contents / comments / log lines | `Grep` |
 | File-name / extension globs | `Glob` |
+
+Batch already-known names rather than rediscovering each separately. Batch search
+returns ordered `queries`; inspect each one's collisions, truncation and precision
+before choosing a definition. Its `top` defaults to 10 and accepts at most 25
+per name. Reuse a previously observed location while its source/index binding
+remains current; a missing or incomplete result still needs investigation.
 
 `mmcg_callees` selects one definition. Check `match_status`: when `ambiguous`,
 choose a returned candidate using its exact indexed `file` and declaration

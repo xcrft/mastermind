@@ -1,6 +1,6 @@
 {
   "task_id": "document-evidence-boundaries-01",
-  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "source_revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
@@ -54,7 +54,7 @@
     "Check rewrites the saved graph or snapshot overwrites an existing artifact."
   ],
   "reviewer_notes": [
-    "Rebound to 7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf during benchmark maintenance. Every cited block is byte-identical to its previous source binding; callers and scope were inspected. This is maintenance source review, not independent outcome qualification.",
+    "Rebound to 9588cc0390e745948cbcbc79f4c9f67d3b6f95b8 during retrieval calibration. Every cited block is byte-identical to its previous binding; MCP handlers and query/storage call paths were inspected. This is maintenance source review, not independent outcome qualification.",
     "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
     "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."
   ],

@@ -4,8 +4,8 @@ from pathlib import Path
 import argparse
 import sys
 
-from . import analysis, artifacts, campaign, review
-from .review_io import Root
+from . import analysis, artifacts, campaign, lookup, review
+from .review_io import Root, sha
 from .tools import READ_LINE_LIMIT
 
 
@@ -81,7 +81,17 @@ def summarize(rows, conditions):
             total = sum(observed) if observed else None
             native_metrics[metric] = {"observed_total": total, "total": total if complete == len(slots) else None,
                 "reported_attempts": len(observed), "unknown_attempts": len(slots) - complete}
-        result[name] = {"attempts": analysis.attempt_counts(slots), "metrics": metrics, "native_delivery":native_metrics}
+        lookup_metrics = {}
+        for metric in lookup.COUNTERS:
+            observed = [row["lookup_ledger"][metric] for row in slots if row.get("lookup_ledger") is not None]
+            complete = sum(row.get("lookup_ledger") is not None and row["status"] == "completed"
+                and row["source_integrity"] == "verified"
+                and row["lookup_ledger"]["lookup_accounting_complete"] for row in slots)
+            total = sum(observed) if observed else None
+            lookup_metrics[metric] = {"observed_total": total, "total": total if complete == len(slots) else None,
+                "reported_attempts": len(observed), "unknown_attempts": len(slots) - complete}
+        result[name] = {"attempts": analysis.attempt_counts(slots), "metrics": metrics,
+                       "native_delivery": native_metrics, "lookup": lookup_metrics}
     return result
 
 
@@ -100,18 +110,30 @@ def summarize_campaign(path):
                     validate_ledger(ledger, sources)
                 else:
                     ledger = None
-                rows.append(dict(slot, case=identifier, read_ledger=ledger))
+                lookup_ledger = None
+                if (slot["source_integrity"] == "verified" and isinstance(adapter, dict)
+                        and adapter.get("raw_stream") == "codex-stream.jsonl"
+                        and isinstance(adapter.get("raw_stream_sha256"), str)):
+                    prefix = slot["trial_id"] + "/"
+                    manifest = root.json(prefix + "manifest.json")
+                    stream = root.read(prefix + "codex-stream.jsonl", manifest["limits"]["trace_bytes"])
+                    if sha(stream) != adapter["raw_stream_sha256"]:
+                        raise artifacts.BenchmarkError("lookup_stream_changed", "lookup stream differs from the retained result")
+                    lookup_ledger = lookup.from_stream(stream, sources)
+                rows.append(dict(slot, case=identifier, read_ledger=ledger, lookup_ledger=lookup_ledger))
             root.recheck()
     return {"kind": "mastermind-retrieval-accounting", "schema_version": 1,
         "campaign_sha256": artifacts.digest(plan), "planned_attempts": plan["planned_attempts"],
         "denominator": "all_planned_attempts", "by_condition": summarize(rows, plan["conditions"]),
         "attempts": [{key: row[key] for key in ("case", "condition", "repetition", "trial_id",
-                    "status", "source_integrity", "manifest_sha256", "result_sha256", "read_ledger")}
+                    "status", "source_integrity", "manifest_sha256", "result_sha256", "read_ledger", "lookup_ledger")}
                      for row in rows],
         "quality_uplift": None,
         "limitations": ["Counts broker-reported delivery, not semantic relevance or source truth.",
             "Missing ledgers and incomplete attempts retain unknown totals and observed partial counts.",
-            "Fewer returned lines do not establish a better answer or lower model token use."]}
+            "Fewer returned lines do not establish a better answer or lower model token use.",
+            "Lookup counts require a hash-bound native Codex stream; missing captures remain unknown.",
+            "Batch submissions and requested names do not establish avoided model rounds or token savings."]}
 
 
 def main(argv=None):

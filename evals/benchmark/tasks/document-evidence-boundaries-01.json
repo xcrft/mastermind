@@ -1,7 +1,7 @@
 {
   "id": "document-evidence-boundaries-01",
   "kind": "research",
-  "revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
   "source_allowlist": [
     "skills/workflow/mastermind-project-history/scripts/document_graph.py",
     "skills/workflow/mastermind-project-history/SKILL.md",

@@ -45,6 +45,7 @@ flowchart LR
 | `analysis` | Paired outcomes, uncertainty and all-attempt resource totals |
 | `efficiency` | Useful outcomes per measured resource, by task and corpus |
 | `retrieval`, `retrieval_analysis` | Per-trial returned-range ledger and all-attempt campaign accounting |
+| `lookup` | Exact-name lookup counts reconstructed from hash-bound Codex streams |
 
 The shared process supervisor lives in `evals.shared.process`. Deterministic
 tests and fixtures live in `tests/evals/benchmark` and `tests/evals/support`.
@@ -113,6 +114,29 @@ The setting is bound through the plan, manifest and adapter request. Role and
 effort calibration requires identical lookup settings. Use balanced repetitions
 and assess complete answers against the common original-request key. Fewer calls
 alone do not establish lower model token use or preserved quality.
+
+Use `agents/instructions/source-lookup.md` in both arms to request the same
+explicit `top=10` and combine only independent names when the schema permits
+it. Inspect recorded limits; the model can omit them. Single and batch defaults
+differ, so a comparison using their defaults may also change delivered context.
+
+`retrieval_analysis` reconstructs lookup use from the pinned Codex event stream.
+It retains requested names, explicit/effective limits, single/batch counts,
+returned matches, truncation, failures and incomplete calls. Missing captures
+remain unknown. Counts do not establish avoided inference rounds or source truth.
+
+### Compare retrieval instructions
+
+Freeze `agents/instructions/source-boundaries.md` in both arms, then add
+`agents/instructions/source-routing.md` to the candidate only. Use identical
+tools, lookup setting, source delivery, model and effort. Declare `role_prompt`
+as the calibration axis. This tests a routing instruction; it does not install
+an automatic router or change the shipped agent defaults.
+
+Run batching as a separate comparison with the same routing instruction in
+both arms. Keep the complete original-request key outside the model inputs.
+Public cases are development calibration; qualify an improvement on unseen
+tasks and retain every failed or unresolved attempt.
 
 ### Source tools
 

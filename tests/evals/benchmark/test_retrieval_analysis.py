@@ -43,6 +43,8 @@ for event in [{'type':'thread.started'}, {'type':'turn.started'},
         for condition in result["by_condition"].values():
             metric = condition["metrics"]["returned_lines"]
             self.assertEqual((metric["total"], metric["unknown_attempts"]), (2, 0))
+            lookups = condition["lookup"]["lookup_calls"]
+            self.assertEqual((lookups["total"], lookups["unknown_attempts"]), (0, 0))
         self.assertEqual([item["source_integrity"] for item in result["attempts"]], ["verified"] * 3)
         self.assertTrue(all(item["result_sha256"] and item["manifest_sha256"] for item in result["attempts"]))
 

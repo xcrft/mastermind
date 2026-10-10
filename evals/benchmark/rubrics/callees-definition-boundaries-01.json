@@ -1,13 +1,13 @@
 {
   "task_id": "callees-definition-boundaries-01",
-  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "source_revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
       "claim": "The public MCP schema exposes name, file, declaration-start line, language, edge_kind and top. The handler validates selectors, checks freshness and passes a bounded row limit to queries::callees.",
       "anchors": [
-        "mcp/servers/mmcg/src/mcp.rs:1926-1944",
-        "mcp/servers/mmcg/src/mcp.rs:2578-2617"
+        "mcp/servers/mmcg/src/mcp.rs:1914-1932",
+        "mcp/servers/mmcg/src/mcp.rs:2584-2623"
       ]
     },
     {
@@ -26,7 +26,7 @@
     {
       "claim": "Outgoing edges are distinct stored target-name/edge-line pairs for the selected source ID, with calls as default. This does not resolve exact target declarations or count runtime invocations.",
       "anchors": [
-        "mcp/servers/mmcg/src/store.rs:5576-5591",
+        "mcp/servers/mmcg/src/store.rs:5602-5617",
         "mcp/servers/mmcg/src/queries.rs:4691-4736"
       ]
     },
@@ -55,7 +55,7 @@
     "Source inspection or navigation queries validate runtime tests, the requested duplicate-declaration scenario, CI or installed-binary conformance."
   ],
   "reviewer_notes": [
-    "Rebound to 7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf during benchmark maintenance. Every cited block is byte-identical to its previous source binding; callers and scope were inspected. This is maintenance source review, not independent outcome qualification.",
+    "Rebound to 9588cc0390e745948cbcbc79f4c9f67d3b6f95b8 during retrieval calibration. Every cited block is byte-identical to its previous binding; MCP handlers and query/storage call paths were inspected. This is maintenance source review, not independent outcome qualification.",
     "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
     "Graph-navigation wording was clarified after preparation of the unbounded campaign. Exposed read-only graph tools are allowed; their use is not semantic validation of the researched scenario. Archived keys and assessments remain unchanged.",
     "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."

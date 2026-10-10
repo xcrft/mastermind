@@ -1,6 +1,6 @@
 {
   "task_id": "reference-removal-evidence-01",
-  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "source_revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
@@ -10,14 +10,14 @@
         "mcp/servers/mmcg/src/indexer/rust_lang.rs:682-726",
         "mcp/servers/mmcg/src/indexer/rust_lang.rs:765-784",
         "mcp/servers/mmcg/src/indexer/rust_lang.rs:1358-1398",
-        "mcp/servers/mmcg/src/store.rs:4885-4902"
+        "mcp/servers/mmcg/src/store.rs:4911-4928"
       ]
     },
     {
       "claim": "callers defaults to calls; explicitly selecting references changes that filter. It returns distinct source symbols with exact total/count/truncation, not one entry per call site. A reference alone need not appear in default callers.",
       "anchors": [
         "mcp/servers/mmcg/src/queries.rs:4611-4646",
-        "mcp/servers/mmcg/src/store.rs:5509-5547"
+        "mcp/servers/mmcg/src/store.rs:5535-5573"
       ]
     },
     {
@@ -31,7 +31,7 @@
       "claim": "Matching uses stored names or type prefixes and syntactic target-kind compatibility. Same-name definitions can be pooled. These queries do not establish compiler-resolved receiver identity or runtime dispatch.",
       "anchors": [
         "mcp/servers/mmcg/src/store.rs:479-497",
-        "mcp/servers/mmcg/src/store.rs:5509-5527",
+        "mcp/servers/mmcg/src/store.rs:5535-5553",
         "mcp/servers/mmcg/src/queries.rs:265-289"
       ]
     },
@@ -58,7 +58,7 @@
     "This research run executed and validated the researched extraction, queries or tests."
   ],
   "reviewer_notes": [
-    "Rebound to 7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf during benchmark maintenance. Every cited block is byte-identical to its previous source binding; callers and scope were inspected. This is maintenance source review, not independent outcome qualification.",
+    "Rebound to 9588cc0390e745948cbcbc79f4c9f67d3b6f95b8 during retrieval calibration. Every cited block is byte-identical to its previous binding; MCP handlers and query/storage call paths were inspected. This is maintenance source review, not independent outcome qualification.",
     "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
     "Task alignment was corrected after the frozen 2026-10-07 experiment: any supported function-value form satisfies the producer requirement. The unrelated ordinary-call producer clause was removed. Archived results retain their original key and unknown outcome; they are not regraded against this corrected key.",
     "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."

@@ -13,6 +13,11 @@ Read the [retained source-delivery calibration](baselines/source-delivery-202610
 before enabling reuse. It retains every attempt and source/runtime bindings;
 its manual, unblinded judgments do not qualify product benefit.
 
+Use the [retained routing and batching comparison](baselines/context-routing-20261010.md)
+to inspect actual lookup use, complete answers and cached versus uncached tokens.
+Require preserved task outcomes and measured resource improvement before promoting
+an instruction to the default workflow.
+
 Codex adapter diagnostics also retain reported reasoning output and the union of
 client-observed tool intervals. Reasoning tokens are a subset of output, not an
 additional cost. Tool event receipt does not isolate server execution; time
@@ -48,6 +53,13 @@ retain each requested limit and batch size; different defaults can change return
 context as well as call count. Keep complete answers and request-bound acceptance
 separate from transport equivalence. A model that never uses batching provides no
 observation of its call-combining benefit.
+
+The experimental [routing instruction](../agents/instructions/source-routing.md)
+selects direct ranges, exact names, literal search or relationship expansion.
+Compare it separately from tool batching; the
+[common lookup instruction](../agents/instructions/source-lookup.md) keeps an
+explicit per-name limit in both arms. Hash-bound lookup accounting retains actual
+batch use and limits. Neither instruction is a qualified production router.
 
 ## Optimize optional context
 

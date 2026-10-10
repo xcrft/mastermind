@@ -77,6 +77,7 @@ class CodexTests(unittest.TestCase):
         assert 'project_doc_max_bytes=0' in sys.argv
         assert 'forced_login_method="chatgpt"' in sys.argv
         assert 'skip_host_skill_discovery' in sys.argv
+        assert 'mcp_servers={{}}' in sys.argv
         assert '--disable' in sys.argv and 'multi_agent' in sys.argv
         assert 'HIDDEN_RUBRIC_CANARY' not in sys.stdin.read()
         for event in [{{'type':'thread.started'}}, {{'type':'turn.started'}},
@@ -128,9 +129,11 @@ class CodexTests(unittest.TestCase):
     def test_stream_rejects_unavailable_tools_context_errors_and_ambiguous_usage(self):
         request = {"model": "fixture-model", "mmcg": None}
         cases = [
+            ({"type": "item.started", "item": {"type": "mcp_tool_call", "id": "1", "server": "codex", "tool": "list_mcp_resources", "arguments": {}}}, "identity_mismatch"),
             ({"type": "item.started", "item": {"type": "mcp_tool_call", "id": "1", "server": "research", "tool": "mmcg_callees"}}, "identity_mismatch"),
             ({"type": "item.completed", "item": {"type": "command_execution"}}, "identity_mismatch"),
             ({"type": "item.completed", "item": {"type": "error", "message": "context unavailable"}}, "protocol_error"),
+            ({"type": "error", "message": None}, "protocol_error"),
             ({"type": "turn.completed", "usage": {"input_tokens": 2, "cached_input_tokens": 3, "cache_write_input_tokens": 0}}, "protocol_error"),
             ({"type": "turn.completed", "usage": {"input_tokens": 2, "cached_input_tokens": 0}}, "protocol_error"),
         ]
@@ -140,3 +143,164 @@ class CodexTests(unittest.TestCase):
                 observer.event({"type": "thread.started"})
                 self.assertIsNotNone(observer.feed(artifacts.canonical(event) + b"\n"))
                 self.assertEqual(observer.failure["state"], state)
+
+    def test_reconnect_notice_waits_for_completion_failure_or_stream_end(self):
+        endings = {
+            "recovered": [
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "Final src/service.py:2."}},
+                {"type": "turn.completed", "usage": {"input_tokens": 30, "cached_input_tokens": 10,
+                    "cache_write_input_tokens": 0, "output_tokens": 4}}],
+            "failed": [{"type": "turn.failed", "error": {"message": "connection exhausted"}}],
+            "ended": [],
+        }
+        for ending, tail in endings.items():
+            with self.subTest(ending=ending):
+                fixture = BenchmarkFixture()
+                self.addCleanup(fixture.close)
+                auth = fixture.root / "auth"
+                auth.mkdir()
+                events = [{"type": "thread.started"}, {"type": "turn.started"},
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": "Reading source."}},
+                    {"type": "error", "message": "Reconnecting... 2/5 (stream disconnected before completion)"},
+                    *tail]
+                cli = fixture.executable("fake-codex", f'''
+        import json, sys
+        if sys.argv[1:] == ['--version']:
+            print('codex-cli 0.162.0-alpha.2')
+            sys.exit(0)
+        sys.stdin.read()
+        for event in {events!r}:
+            print(json.dumps(event), flush=True)
+        ''')
+                cli["version"] = "0.162.0-alpha.2"
+                fixture.config["adapter"] = {"kind": "codex_cli", "cli": cli,
+                    "auth_home": str(auth), "reasoning_effort": "max"}
+                result = trials.run_trial(fixture.prepare())
+                self.assertEqual(result["diagnostics"]["adapter"]["stream_error_events"], 1)
+                if ending == "recovered":
+                    self.assertEqual(result["run_status"], {"state": "completed", "reason": None})
+                    self.assertEqual(result["diagnostics"]["telemetry"]["usage"]["input_tokens"], 20)
+                    self.assertEqual(result["diagnostics"]["telemetry"]["usage"]["output_tokens"], 4)
+                    self.assertIsNotNone(result["diagnostics"]["telemetry"]["timings"]["final_answer_seconds"])
+                else:
+                    self.assertEqual(result["run_status"], {"state": "model_error", "reason":
+                        "codex_turn_failed" if ending == "failed" else "codex_stream_ended_after_error"})
+                    self.assertIsNone(result["diagnostics"]["telemetry"]["usage"]["input_tokens"])
+                    self.assertIsNone(result["diagnostics"]["telemetry"]["timings"]["final_answer_seconds"])
+
+    def test_empty_discovery_uses_the_frozen_broker_and_keeps_source_coverage_separate(self):
+        for unexpected_resource in (False, True):
+            with self.subTest(unexpected_resource=unexpected_resource):
+                fixture = BenchmarkFixture()
+                self.addCleanup(fixture.close)
+                auth = fixture.root / "auth"
+                auth.mkdir()
+                cli = fixture.executable("fake-codex", f'''
+        import json, os, subprocess, sys
+        if sys.argv[1:] == ['--version']:
+            print('codex-cli 0.162.0-alpha.2')
+            sys.exit(0)
+        config = {{}}
+        for i, arg in enumerate(sys.argv[:-1]):
+            if arg == '-c':
+                key, value = sys.argv[i + 1].split('=', 1)
+                config[key] = json.loads(value)
+        assert config['mcp_servers'] == {{}}
+        server = 'mcp_servers.research.'
+        env = dict(os.environ, **{{key[len(server + 'env.'):]: value for key, value in config.items()
+                                 if key.startswith(server + 'env.')}})
+        process = subprocess.Popen([config[server + 'command'], *config[server + 'args']],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+        def rpc(method, params):
+            process.stdin.write(json.dumps({{'jsonrpc':'2.0','id':1,'method':method,'params':params}}) + '\\n')
+            process.stdin.flush()
+            reply = json.loads(process.stdout.readline())
+            assert 'error' not in reply, reply
+            return reply['result']
+        def emit(event):
+            print(json.dumps(event), flush=True)
+        rpc('initialize', {{'protocolVersion':'2025-11-25'}})
+        process.stdin.write(json.dumps({{'jsonrpc':'2.0','method':'notifications/initialized'}}) + '\\n')
+        process.stdin.flush()
+        emit({{'type':'thread.started'}})
+        emit({{'type':'turn.started'}})
+        for identifier, name, args, method in (
+            ('resources', 'list_mcp_resources', {{}}, 'resources/list'),
+            ('templates', 'list_mcp_resource_templates', {{'server':'research'}}, 'resources/templates/list')):
+            item = {{'type':'mcp_tool_call','id':identifier,'server':args.get('server', 'codex'),'tool':name,
+                    'arguments':args,'status':'in_progress'}}
+            emit({{'type':'item.started','item':item}})
+            body = rpc(method, {{}})
+            if args:
+                body['server'] = args['server']
+            if {unexpected_resource!r}:
+                body['resources'] = [{{'uri':'private://unavailable'}}]
+            item.update(status='completed', result={{'content':[{{'type':'text','text':json.dumps(body)}}],
+                'structured_content':None}}, error=None)
+            emit({{'type':'item.completed','item':item}})
+        item = {{'type':'mcp_tool_call','id':'read','server':'research','tool':'source_read',
+                'arguments':{{'path':'src/service.py'}},'status':'in_progress'}}
+        emit({{'type':'item.started','item':item}})
+        item.update(status='completed', result=rpc('tools/call', {{'name':'source_read',
+            'arguments':item['arguments']}}), error=None)
+        emit({{'type':'item.completed','item':item}})
+        process.stdin.close()
+        process.wait()
+        emit({{'type':'item.completed','item':{{'type':'agent_message','text':'Observed src/service.py:2.'}}}})
+        emit({{'type':'turn.completed','usage':{{'input_tokens':30,'cached_input_tokens':0,
+            'cache_write_input_tokens':0,'output_tokens':4}}}})
+        ''')
+                cli["version"] = "0.162.0-alpha.2"
+                fixture.config["adapter"] = {"kind": "codex_cli", "cli": cli,
+                    "auth_home": str(auth), "reasoning_effort": "max"}
+                trial = fixture.prepare()
+                result = trials.run_trial(trial)
+                if unexpected_resource:
+                    self.assertEqual(result["run_status"], {"state": "identity_mismatch",
+                        "reason": "resource_discovery_not_empty"})
+                    self.assertIsNone(result["diagnostics"]["telemetry"]["usage"]["input_tokens"])
+                else:
+                    self.assertEqual(result["run_status"]["state"], "completed")
+                    diagnostics = result["diagnostics"]["adapter"]
+                    self.assertEqual(diagnostics["resource_discovery"], {
+                        "contract": "empty_only", "calls": 2, "completed_empty": 2})
+                    self.assertEqual(diagnostics["mcp_calls"], 3)
+                    self.assertEqual(diagnostics["read_ledger"]["read_calls"], 1)
+                    self.assertEqual(diagnostics["read_ledger"]["unique_returned_lines"], 2)
+                    self.assertEqual(result["diagnostics"]["unexpected_tools"], [])
+
+    def test_discovery_denies_resource_reads_other_servers_pagination_and_unbound_results(self):
+        request = {"model": "fixture", "mmcg": None, "resource_discovery": "empty_only"}
+        base = {"type": "mcp_tool_call", "id": "catalog", "server": "codex",
+                "tool": "list_mcp_resources", "arguments": {}, "status": "in_progress"}
+        for change in ({"tool": "read_mcp_resource"}, {"arguments": {"server": "other"}},
+                       {"arguments": {"cursor": "next"}}, {"arguments": {"uri": "private://x"}},
+                       {"arguments": None}, {"id": None}):
+            with self.subTest(change=change):
+                observer = codex.StreamObserver(request, lambda _: None)
+                self.assertIsNotNone(observer.event({"type": "item.started", "item": base | change}))
+                self.assertEqual(observer.failure["code"], "unavailable_tool_called")
+        for body in ({"resources": [], "nextCursor": "next"}, {"resources": [], "server": "other"},
+                     {"resources": [], "extra": "outside evidence"}, {"resources": [{"uri": "x"}]}):
+            with self.subTest(body=body):
+                observer = codex.StreamObserver(request, lambda _: None)
+                observer.event({"type": "item.started", "item": base})
+                item = base | {"status": "completed", "result": {
+                    "content": [{"type": "text", "text": artifacts.canonical(body).decode()}]}}
+                self.assertIsNotNone(observer.event({"type": "item.completed", "item": item}))
+                self.assertEqual(observer.failure["code"], "resource_discovery_not_empty")
+        observer = codex.StreamObserver(request, lambda _: None)
+        observer.event({"type": "item.started", "item": base})
+        self.assertIsNotNone(observer.event({"type": "item.completed", "item": base | {
+            "server": "research", "arguments": {"server": "research"}}}))
+        self.assertEqual(observer.failure["code"], "resource_discovery_changed")
+
+    def test_unfinished_discovery_cannot_complete_a_trial(self):
+        observer = codex.StreamObserver({"model": "fixture", "mmcg": None,
+            "resource_discovery": "empty_only"}, lambda _: None)
+        observer.event({"type": "item.started", "item": {"type": "mcp_tool_call", "id": "catalog",
+            "server": "codex", "tool": "list_mcp_resources", "arguments": {}}})
+        observer.event({"type": "turn.completed", "usage": {"input_tokens": 1,
+            "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 1}})
+        self.assertEqual(observer.failure, {"state": "protocol_error", "code": "incomplete_resource_discovery"})
+        self.assertEqual(observer.usage["input_tokens"], 1)

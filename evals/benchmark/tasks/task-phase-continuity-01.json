@@ -1,7 +1,7 @@
 {
   "id": "task-phase-continuity-01",
   "kind": "research",
-  "revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+  "revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
   "source_allowlist": [
     "mcp/servers/mmcg/src/run_task.rs",
     "mcp/servers/mmcg/src/verify_spec.rs",

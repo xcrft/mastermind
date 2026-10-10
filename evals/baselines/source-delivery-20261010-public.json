@@ -1,0 +1,1332 @@
+{
+  "adapter_bundle_files": {
+    "evals/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evals/benchmark/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evals/benchmark/adapters/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evals/benchmark/adapters/bundle.py": "7d2c546cfa0e3640a9c447cad0bf879f8fa9730e305185460b483b43a0a84fea",
+    "evals/benchmark/adapters/codex.py": "f566b0e4f930b549513901a419860d031fcab54b85aceae5ce3a09d836c42ae3",
+    "evals/benchmark/adapters/codex_metrics.py": "8415afc664e780ad3bab04767fa73bceb29fb39c972588fe0ccd42ac6d849e56",
+    "evals/benchmark/artifacts.py": "34f870b53a572b18199969e9f184029d44378943d977b8e20ca0bed936a6f452",
+    "evals/benchmark/conditions.py": "0c66a6f472808a6dfcebea4dbe03609094a15270e2da9c0280436f9f0dc1f018",
+    "evals/benchmark/mcp.py": "dbe12da7fcbba9a1348bac31361d7cc06dc40eb9e0b2104d04a265a9566f262c",
+    "evals/benchmark/protocol.py": "e7a11789f72e36aaa471b6e89edc71731147df144cdf8d21c9ad8d9cfb15c716",
+    "evals/benchmark/retrieval.py": "88cf1628f76b22854ca60302c8ec52f1d5b5213db87f868e2fb230784df5298d",
+    "evals/benchmark/runtime.py": "bf3e2f6fd95fb71e04a5314464dda5def573b4724fbc419c7d7d00fa6a549a5f",
+    "evals/benchmark/source.py": "c402a862766ee65d8ac1f0ff36a9a205ef3474b00986bf281bfbbb37a475d691",
+    "evals/benchmark/tools.py": "10a4b3895821919de9cbfe205aac5e13a0a749aa493d46da86c96fd800f48310",
+    "evals/shared/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evals/shared/process.py": "a68118dc9622e42057941ede8c50e0d81de1429307335e2d2cc7a057d2f94ed4",
+    "launch.py": "7858328f2c786a04b5bc623800d84dea523457ee5caf012cc81a9a9697b2568a"
+  },
+  "attempts_completed": 47,
+  "attempts_failed": 1,
+  "attempts_planned": 48,
+  "case_bindings": [
+    {
+      "id": "task-phase-continuity-01",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/audit_spec.rs",
+        "mcp/servers/mmcg/src/run_task.rs",
+        "mcp/servers/mmcg/src/verify_spec.rs"
+      ],
+      "role": "calibration",
+      "rubric_sha256": "84107bdf0d9031f8d296819178a747be1a0e31e87691bbf0995958f43c6bb364",
+      "source_files": [
+        {
+          "bytes": 225261,
+          "git_mode": "100644",
+          "lines": 5881,
+          "path": "mcp/servers/mmcg/src/run_task.rs",
+          "sha256": "50c33dddbc26caf1dc29516fbc8fc8e43a72b7c25ca41b67fd1f3e120bb5ed72"
+        },
+        {
+          "bytes": 49784,
+          "git_mode": "100644",
+          "lines": 1566,
+          "path": "mcp/servers/mmcg/src/verify_spec.rs",
+          "sha256": "9a2564670cb48f99bc44e2376a4f6b36903a1e085c7309a08d81748b32307de5"
+        },
+        {
+          "bytes": 97029,
+          "git_mode": "100644",
+          "lines": 2639,
+          "path": "mcp/servers/mmcg/src/audit_spec.rs",
+          "sha256": "12a91b6736c4fb0a666af83dd983e016fc4a6543969390e0ee5b3c6d9de9e24d"
+        }
+      ],
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+      "task_sha256": "f657d9bcc3a7b089b682fe7132d25f86bfce249ffa7b2363c6473b1540fb94a8"
+    },
+    {
+      "id": "document-evidence-boundaries-01",
+      "indexed_files": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py"
+      ],
+      "role": "calibration",
+      "rubric_sha256": "1c19b3b29135d4263daaa70b5e7c52e145ad32587ddb77e4b74b39a65feb8457",
+      "source_files": [
+        {
+          "bytes": 37527,
+          "git_mode": "100755",
+          "lines": 838,
+          "path": "skills/workflow/mastermind-project-history/scripts/document_graph.py",
+          "sha256": "8ce507d4e1725d5836b922a331f96cbae47009893dec282c43d28ef1c53c2f1b"
+        },
+        {
+          "bytes": 7599,
+          "git_mode": "100644",
+          "lines": 153,
+          "path": "skills/workflow/mastermind-project-history/SKILL.md",
+          "sha256": "88c7c8c8ee089ae2e80a3cfd71245d1e2b21548ecfff93f64b85034bc6ed2b2a"
+        },
+        {
+          "bytes": 13296,
+          "git_mode": "100644",
+          "lines": 240,
+          "path": "skills/workflow/mastermind-project-history/references/document-evidence-graph.md",
+          "sha256": "e171a2d78407cde9624e190922138438dda3d8373ce55e29c09d6e6122857cce"
+        }
+      ],
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+      "task_sha256": "fb0da9581340eec0c1196ed7ba492b5a0bed6b8a394d0cebf632d00091f09c19"
+    },
+    {
+      "id": "callees-definition-boundaries-01",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/store.rs"
+      ],
+      "role": "calibration",
+      "rubric_sha256": "a165b65a497d30e6f844ec71c2495e970382b1508054b0ec10a3adec39cb95a6",
+      "source_files": [
+        {
+          "bytes": 321606,
+          "git_mode": "100644",
+          "lines": 7971,
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "sha256": "8e37d924e3f2ea9ed08723d8cf97105c8c55c6258ab072cae52cd73e2e06bcf5"
+        },
+        {
+          "bytes": 398123,
+          "git_mode": "100644",
+          "lines": 11176,
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "bytes": 467998,
+          "git_mode": "100644",
+          "lines": 12052,
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "sha256": "b03adf54701f442ad18650304cf870c403a2dd13af714f6efb9ce4dc8016bdc8"
+        }
+      ],
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+      "task_sha256": "1f388d317fed179915a165930fcfd734047c4ccd638d36cbde392866488eee2e"
+    },
+    {
+      "id": "reference-removal-evidence-01",
+      "indexed_files": [
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/store.rs"
+      ],
+      "role": "calibration",
+      "rubric_sha256": "b66a9da56e784259a5782f34631307a0eec2aa75fab11418ff0b03db7a5ea386",
+      "source_files": [
+        {
+          "bytes": 56546,
+          "git_mode": "100644",
+          "lines": 1624,
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "bytes": 467998,
+          "git_mode": "100644",
+          "lines": 12052,
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "sha256": "b03adf54701f442ad18650304cf870c403a2dd13af714f6efb9ce4dc8016bdc8"
+        },
+        {
+          "bytes": 398123,
+          "git_mode": "100644",
+          "lines": 11176,
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        }
+      ],
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+      "task_sha256": "1c71a3b1088e24a8d1b65d22cd64b16b222116a6d2bd7fd4105eeae3bb2227e4"
+    }
+  ],
+  "cli_version": "0.162.0-alpha.2",
+  "corpus_sha256": "e71919ff2ff88a0b8d4daf75b999c15bc3695b7b8fcf1bb40b543ad5d1925ac9",
+  "corpus_source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "effort_requested": "high",
+  "effort_served": null,
+  "experiments": [
+    {
+      "adapter_sha256": [
+        "7858328f2c786a04b5bc623800d84dea523457ee5caf012cc81a9a9697b2568a"
+      ],
+      "adapter_versions": [
+        "mastermind-codex-adapter-v7"
+      ],
+      "baseline": {
+        "accepted": 8,
+        "condition": "full",
+        "planned": 8,
+        "run_seconds": 678.7941899180005,
+        "seconds_per_accepted": 84.84927373975006,
+        "tokens_observed_partial": 2355289,
+        "tokens_per_accepted": 294411.125,
+        "tokens_unknown_attempts": 0,
+        "total_tokens": 2355289
+      },
+      "candidate": {
+        "accepted": 7,
+        "condition": "reuse",
+        "planned": 8,
+        "run_seconds": 610.4975877479956,
+        "seconds_per_accepted": 87.21394110685651,
+        "tokens_observed_partial": 2485968,
+        "tokens_per_accepted": 355138.28571428574,
+        "tokens_unknown_attempts": 0,
+        "total_tokens": 2485968
+      },
+      "comparison_sha256": "8b4de53124a195a086516d712d6b86ffb177b331b1ec9120411d58a14d9648a7",
+      "config_sha256": "6c645aad3464001a40416d13599d69baca89fae9936b6152c14a3ad03f8d57a5",
+      "experiment": "delivery",
+      "independent_task_count": 4,
+      "instruction_bindings": [
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "native_source_revision": "01b2feada89772c0bd30fc12103dda59916953ef",
+      "paired_quality_losses": 1,
+      "paired_success_delta": {
+        "lower": -0.125,
+        "point": -0.125,
+        "upper": -0.125
+      },
+      "planned_attempts": 16,
+      "receipts": [
+        {
+          "adapter_runtime_sha256": "8b952613a379c1e87d10e4593e83ad09a3cdb8f0603d728166add398fd06866f",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "a53a46b98666eacd7264dd310a89e3675bacaadcf1a7e227a6e0df0cb4b7f646",
+          "result_sha256": "0ffad030dd6ca6141b8f52af9cdc458dcd91c67cd3f967a3148499b541b3d636",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "f1d94261e61f52138b7c350480472b51011cb4eeb7e3e7bca32570c19041b548",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "97316e51cff782eaf458b2c74684c910d784ab07dbf92652dffd94f36e47e1f3",
+          "result_sha256": "77ba742576dc0757090a0867eda4de8750479f74a3372be1045e504031ecc57e",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "d3f21c83748c0c55d0181020cfb05738e96596861289820f6499aa1eb947efdc",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "821e2c9784935d5126726ba20c4d3fd912b384cdc46969df7dceaa60248f08b8",
+          "result_sha256": "211788b31013e880a1e09e64dce38e0aad0666f42d451e902e460f673eb190f9",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "6993d3e20e94eca8c7d42d33b903cd52d8f6b52001655d4bfa1429dc9de0f733",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "db7c5e6e29700f2c16d6c45ed13926164fdd0a8300b268f7c07e6606fef3e11d",
+          "result_sha256": "18cd25c670b945324b915e1236c2db5b88272ae6bae66cb888e0c2d1ed7d1251",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "17f52033521c9566c349df3f644b069da987c96aca132e0e908d681e287a4787",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "8a6503be3a7ce94c2274dd1d111cf91156498638d11ba8d9746c59b17dad48e2",
+          "result_sha256": "c9c7ed06c9d7bd762afbf5254ec001e9760faa2cc991230758d9851522ef5439",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "e5a9858b1c921e6b4370b65c709f003338a643413da9378653f21af189040b3a",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "d648e480a3181ef182b674328cfa178a59a990354f8ccb4ef69f79fe09bed644",
+          "result_sha256": "71c8d320ad77d9841875612ae43c3b4d82ebab106f3875cea4caf31c857b501d",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "e9e439612584f3c122a1c2dd9b79b8b83c208cdd2897aaa8219a5caca1a411b8",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "49030037133d868b9020c1dbc21e8c8fa7aba99591d473010e93ce4af4372595",
+          "result_sha256": "de623d7a0a8801e022f8af3d98dbdf65954b2897d771d48e8b3bad33ebd2e6cf",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "4d6ad892f4190048d217c14a6d55670b96ceaada401afa6057c4cb2b4294e662",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "75dd4349be6fd77f3169930d3becae89fd03f59c0c5d052cc2de6695d2137f2f",
+          "result_sha256": "93c81424d59f02657562e8c0316a4c9708172d9cc56e4ac3b7a1f574c55eecc8",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "576445f979ff3b0a1d706211aa135e3890eec09ee2e53ea0a867ad9bf53c4bee",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "a1f03fc648d496331b5989ee4948f6030c4c4ba9e88d77f61412080ffd03d7b6",
+          "result_sha256": "c84231360e27f8eb64e53ab061195ce2962e33629bd0d31ea2d21d344428e993",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "b9cc178041c25645b1eee30906b5f8dcaa89e3ed40a4cc39686f3227c03cb8d4",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "46e20e55b8ddb114c44414e0c9e5fd35f898f1799e9d82e0978d8383ac1be47c",
+          "result_sha256": "9cffa81c0e8028ed80c20a335d6b3638088fa0fa939537bf115831a39972878a",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "808d49aca4cec638230748b550612a10a6f3d2496a54f7c794b02a124203c8c7",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "a28523e282be8b4f7961c417cd55d32a0624775e4a747236d93f37ebe56dce52",
+          "result_sha256": "1ff13f97f560607a0cabb8d336579a742fa26e44a066642d4982bdfc758cd783",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "860bce0f08a3315af79391dcd74b569a66f8d1b368b7f127130cf3a0bf36b714",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "86239b5e7faa4fd9bd0fdcc1b31cac4d5bc72c0a82f77332f41c9239b8883bdc",
+          "result_sha256": "678bb9832f2be99d25d4507f0919a1ae9257b31f58a867120d1b25d8fb29fb6e",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "6877fed5e6fae8eef20b4fe88e4e5fb0ab0cbd47b944c0c06723e294814aedd0",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "f303467ddba9ce1ccff4812c9a557dada9ba2bb6952e5919e55bc5cb781ee83b",
+          "result_sha256": "736a01de8e77ecee999bded734570615b9f2ed8e7a3d119f37d76601dbbd08ae",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "b43472a168be00a7f31a7c0c717e3f1ac49da5bff275bb7680040d3e3c9214ed",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "134cd1b0f729394a583489066a12dbc482f6a8c3b2cbfb2a0599416707e03229",
+          "result_sha256": "9186b4d459c726ce81f98c0d8aeb284163b29401efecd6501dd7c68056ac56f7",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "48ba77c7f8edeef00d5850f5323803001c8f3ba9154402a744d5ae66f4fff790",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "10017d75eb560e6d48c2d1bce41a056bfba5994d1bbf0cded9a31fdbb30190c4",
+          "result_sha256": "aa29e25dc6e050749135152627439b94c1ea70bb80d3cd739e3354004be6e777",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "2f00f8d3a74c38bf1947927a0a51e51634336f52b44fb0453ba888e9c84bc2ce",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "752fad835abdb9ba0409ab6261db0c1827b49d6c089ee6c21d59ffb562123302",
+          "result_sha256": "835f18a861c51d863cb01e64753cb327929ff1a36bcbb630c241a4a43f18915e",
+          "reused_lines": 0,
+          "state": "completed"
+        }
+      ],
+      "resource_contrasts": {
+        "context_tokens": {
+          "resource_per_success_savings": -0.20765183114197705,
+          "resource_savings": -0.05669535224922995,
+          "useful_outcomes_per_resource_delta": -5.9011684011218e-07,
+          "useful_outcomes_per_resource_gain": -0.17194676957978672,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.17194676957978672,
+            "reason": null,
+            "upper": -0.17194676957978672
+          }
+        },
+        "cost_usd": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "final_answer_seconds": {
+          "resource_per_success_savings": -0.027232444008569612,
+          "resource_savings": 0.10117161149250165,
+          "useful_outcomes_per_resource_delta": -0.00031552651207242266,
+          "useful_outcomes_per_resource_gain": -0.026510498346703715,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.026510498346703715,
+            "reason": null,
+            "upper": -0.026510498346703715
+          }
+        },
+        "first_message_seconds": {
+          "resource_per_success_savings": -0.09119173874382214,
+          "resource_savings": 0.0452072285991556,
+          "useful_outcomes_per_resource_delta": -0.017392872829887135,
+          "useful_outcomes_per_resource_gain": -0.08357077450824735,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.08357077450824735,
+            "reason": null,
+            "upper": -0.08357077450824735
+          }
+        },
+        "run_seconds": {
+          "resource_per_success_savings": -0.02786903485301906,
+          "resource_savings": 0.10061459450360832,
+          "useful_outcomes_per_resource_delta": -0.0003195479357924365,
+          "useful_outcomes_per_resource_gain": -0.02711341027702452,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.02711341027702452,
+            "reason": null,
+            "upper": -0.02711341027702452
+          }
+        },
+        "total_tokens": {
+          "resource_per_success_savings": -0.20626652852974137,
+          "resource_savings": -0.05548321246352361,
+          "useful_outcomes_per_resource_delta": -5.808062290858888e-07,
+          "useful_outcomes_per_resource_gain": -0.17099581531218422,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.17099581531218422,
+            "reason": null,
+            "upper": -0.17099581531218422
+          }
+        },
+        "trial_total_seconds": {
+          "resource_per_success_savings": -0.02820499843200186,
+          "resource_savings": 0.10032062637199846,
+          "useful_outcomes_per_resource_delta": -0.00031908282107188067,
+          "useful_outcomes_per_resource_gain": -0.027431298695312578,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.027431298695312578,
+            "reason": null,
+            "upper": -0.027431298695312578
+          }
+        }
+      },
+      "review_set_sha256": "1cb2604c5f77fbfa0d7d6c9934435170f59522f42404f6d8b256cce454c47d61"
+    },
+    {
+      "adapter_sha256": [
+        "7858328f2c786a04b5bc623800d84dea523457ee5caf012cc81a9a9697b2568a"
+      ],
+      "adapter_versions": [
+        "mastermind-codex-adapter-v7"
+      ],
+      "baseline": {
+        "accepted": 6,
+        "condition": "neutral",
+        "planned": 8,
+        "run_seconds": 638.7418404159907,
+        "seconds_per_accepted": 106.45697340266513,
+        "tokens_observed_partial": 2369310,
+        "tokens_per_accepted": 394885.0,
+        "tokens_unknown_attempts": 0,
+        "total_tokens": 2369310
+      },
+      "candidate": {
+        "accepted": 8,
+        "condition": "boundaries",
+        "planned": 8,
+        "run_seconds": 820.7419805020036,
+        "seconds_per_accepted": 102.59274756275045,
+        "tokens_observed_partial": 3175625,
+        "tokens_per_accepted": 396953.125,
+        "tokens_unknown_attempts": 0,
+        "total_tokens": 3175625
+      },
+      "comparison_sha256": "03ca18b6a0037e408bfab2ea60c69d3126c6b2430c398ce05a49d60c5208dca7",
+      "config_sha256": "5833543de681cd2442b8e2ae39268b2e34519741ca019967ba98ff3c55049227",
+      "experiment": "scope",
+      "independent_task_count": 4,
+      "instruction_bindings": [
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "boundaries",
+          "instruction_sha256": "4882a90a1a60fe2e6c80a853bf0a0976a6280e8b895918136376adf6a2a1502f"
+        },
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "neutral",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "boundaries",
+          "instruction_sha256": "4882a90a1a60fe2e6c80a853bf0a0976a6280e8b895918136376adf6a2a1502f"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "neutral",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "boundaries",
+          "instruction_sha256": "4882a90a1a60fe2e6c80a853bf0a0976a6280e8b895918136376adf6a2a1502f"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "neutral",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "boundaries",
+          "instruction_sha256": "4882a90a1a60fe2e6c80a853bf0a0976a6280e8b895918136376adf6a2a1502f"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "neutral",
+          "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "native_source_revision": "01b2feada89772c0bd30fc12103dda59916953ef",
+      "paired_quality_losses": 0,
+      "paired_success_delta": {
+        "lower": 0.25,
+        "point": 0.25,
+        "upper": 0.25
+      },
+      "planned_attempts": 16,
+      "receipts": [
+        {
+          "adapter_runtime_sha256": "0ee27083760e747f7221e18f7ea8a102fa882af594f28f3b699309c582406d5f",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "005f8ce0c34c361f2c3ff73165192f42d1d9e5791b0979532564c401a8ef6801",
+          "result_sha256": "7070ebb07222ccd8e83fe28fbdb6a005b220bbaacc7fe9d657e5e347d4234281",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "43b3cdf094494549becb4ae9d5a63e4e3c8a62a9ee1f5c55e034e3e175bb0628",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "e2ce20deff49b4130df254d3ede8539866782f941b06f59198f5ae2d1177b518",
+          "result_sha256": "f04cbbe2677a4243f87f177bffddd10a12aadf19bf53923aba760b2d3359b61c",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "5d56a10c747f44d1309f97f2e70d80d20b49d6b26c974ca14eb25e1b461aac94",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "2e9c4dc0ec4dfe7429aa6c5b98f2062505b75d2169d9cab698b7182fa358ccf4",
+          "result_sha256": "7cc46f3c6aa4c17bc77243f4010311bcf8e6a1843f0c44adb03be305abab37cb",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "8ba6c2a927b69d7327205503f2996973f43c6899267f5d98de98d6ca2e65930c",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "08d8c724283101a768746d0a7e19da4765ac0f897814af482f961faaac10ca30",
+          "result_sha256": "687fb31b3e598684af23cb8be5ce1cb8abb5f2815f6a58ddb84e0c8ffea972ae",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "6317afe5c7f2abdfdc9def613047fde441b92180231e633684097bd4958cf29b",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "93c9cc4b3937bbdced742521cd9796738b856e326b0cfff13c8e1f825de69fce",
+          "result_sha256": "ee47ec689dbfc875b28856a251780e1997c0ab4b0cc5427e5f958ad1e8312232",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "b148149eb909448f9dcf475c8b3a29f35802f4040ee1122e95be07546bf7db7b",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "3f5b44ecc9fd0bdc762ae982fef1faf5df11e8bbbffcd90280d360f679159054",
+          "result_sha256": "410284ea437d35b05df866976b786c1d3f4bd2c37b0fdfe1e34c907c15f02cca",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "7e7d440bd04d57c68a1120bc328606dff81b3f3a00c31afcd7b92cd9d2731751",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "494dba334337c7169db63ba8f5fb1e5a51742d36f3114a7862431c45205df948",
+          "result_sha256": "976ebe844f7ed4ac853ed2a9d9b817d96c38eb169c1afaecc287eee08ed7b398",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "dc35e3269f87042a905deb4b3536e770d10ef785a160baa9e1ad068b63195264",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "168478f45a10eb00d8e4997f6ba3578aac5628d8ef088184bc08dc783300133e",
+          "result_sha256": "8c9d9528eb607fe3684efaa4ccbc24a03f6e2c28eb38b1178068cb0c9fe0399a",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "0134707c2da5e15b24915908cb7851f42b52c54d9a2c69373a81b5a90cda7ac5",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "7296830269ab3dd00f4c010557693477d29293bde65d8bc45c82b591c75db826",
+          "result_sha256": "14fc08a0e79652ebacfff07c03eeba16da8df9c53963b2b210d65c55d1abe096",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "3525962345e75a159df070a51681d275e2cef094bd13509d925da9ec6bfe6463",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "3dbb0e94ec424bb36232c7d67752027786fd19f2bc07ab0fe8cc766eedd4d2a3",
+          "result_sha256": "d9077ef57db39313a6e3e6c84bd879dc83ab8dae18bc05cc4434a9502907fa6e",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "4e250e457afcecea75906205c1b9ec12c3e8f85d464db14803a352072624ddb4",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "bc6c070239cefa2970df50657745d0d94fb8e83a43c78449b15f171274cd3b69",
+          "result_sha256": "51a928368583f49c6ca1f6e1a3f80a5ca881a1be514c3006a89642b622eaa33e",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "556d74ef144d95cda69e0cae538f1ebfa0607777a0fec3e0c5c4a2f3cbe124a1",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "9034b1ce301642735a794240963c4d660e0934905f08d3b505d369ee07ef3dd2",
+          "result_sha256": "a3af3a4bef49e47bdf585c0be75bfcf9eb8575837f5f450cb5a6f95b0fce36f1",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "65fa63755da9c33c67a929e79585e21687996d28affdced0e9bf1d28cd8535c5",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "80896bdd06a20d76a1b9da102587956dce7ba801e2822d6c525f1de7f6aa130f",
+          "result_sha256": "9e984b6cba0ed8c4af599c30e9d104a2b252b316dc9a9e1d1d17326992a57dc0",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "c1728b375bb86286a3b31b8d8e086180d36b06e470909a2338689011fbde70dc",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "b00aab99e62f3828f2cc08a425d39b16bb6cb3e3bca6372f8ada91ef621a1466",
+          "result_sha256": "8b3cc44b57c9b6020aa9b9fa68a86139e59fe5f4e1af1b575ab07f7efcfd85cc",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "8dd106e3b82d98cd09ed0b01cfdabc9cea845ff6006cc36b3ecc000340044728",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "neutral",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "f28914449207533bd32ebd4c8973616b666c20a526d3ddab0a8e4ffad75f4ad0",
+          "result_sha256": "052c8a0c33b13be181a50bdfca406e70e6b8cbd41024173c7ca8f8aeb28244cf",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "702d4bb3de1848d07e93ae63b8ef881946a3e38fb410a2aba3b7e48806fd0e2b",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "boundaries",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "3affae510df41afb6c8e7dba6724fcb5e65eb481f6899cb14fa7e8964fd45fa6",
+          "result_sha256": "89a4344dcce697fa7f40ffb60cb8197afed3da94fb6603044034e99844909bc0",
+          "reused_lines": 0,
+          "state": "completed"
+        }
+      ],
+      "resource_contrasts": {
+        "context_tokens": {
+          "resource_per_success_savings": -0.00538214760879141,
+          "resource_savings": -0.34050953014505536,
+          "useful_outcomes_per_resource_delta": -1.3688161880052526e-08,
+          "useful_outcomes_per_resource_gain": -0.005353335168714168,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.005353335168714168,
+            "reason": null,
+            "upper": -0.005353335168714168
+          }
+        },
+        "cost_usd": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "final_answer_seconds": {
+          "resource_per_success_savings": 0.034665170852090865,
+          "resource_savings": -0.28711310553054536,
+          "useful_outcomes_per_resource_delta": 0.0003403550854445478,
+          "useful_outcomes_per_resource_gain": 0.03590999703459308,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 0.03590999703459308,
+            "reason": null,
+            "upper": 0.03590999703459308
+          }
+        },
+        "first_message_seconds": {
+          "resource_per_success_savings": 0.29224976304543115,
+          "resource_savings": 0.05633301739390817,
+          "useful_outcomes_per_resource_delta": 0.0650793951497991,
+          "useful_outcomes_per_resource_gain": 0.41292782084111246,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 0.41292782084111246,
+            "reason": null,
+            "upper": 0.41292782084111246
+          }
+        },
+        "run_seconds": {
+          "resource_per_success_savings": 0.03629847549111276,
+          "resource_savings": -0.28493536601184966,
+          "useful_outcomes_per_resource_delta": 0.0003538113205215701,
+          "useful_outcomes_per_resource_gain": 0.03766568233832657,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 0.03766568233832657,
+            "reason": null,
+            "upper": 0.03766568233832657
+          }
+        },
+        "total_tokens": {
+          "resource_per_success_savings": -0.005237284272636256,
+          "resource_savings": -0.34031637903018175,
+          "useful_outcomes_per_resource_delta": -1.3193709641752483e-08,
+          "useful_outcomes_per_resource_gain": -0.005209998031883378,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": -0.005209998031883378,
+            "reason": null,
+            "upper": -0.005209998031883378
+          }
+        },
+        "trial_total_seconds": {
+          "resource_per_success_savings": 0.0387996774487257,
+          "resource_savings": -0.2816004300683659,
+          "useful_outcomes_per_resource_delta": 0.00037410893424066373,
+          "useful_outcomes_per_resource_gain": 0.04036585978845819,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 0.04036585978845819,
+            "reason": null,
+            "upper": 0.04036585978845819
+          }
+        }
+      },
+      "review_set_sha256": "43f9c72d332b657481967565d0906c7c5b8a759d6336e9dc4d018d3e4d56f140"
+    },
+    {
+      "adapter_sha256": [
+        "7858328f2c786a04b5bc623800d84dea523457ee5caf012cc81a9a9697b2568a"
+      ],
+      "adapter_versions": [
+        "mastermind-codex-adapter-v7"
+      ],
+      "baseline": {
+        "accepted": 6,
+        "condition": "full",
+        "planned": 8,
+        "run_seconds": 1856.592378415,
+        "seconds_per_accepted": 309.43206306916665,
+        "tokens_observed_partial": 2061267,
+        "tokens_per_accepted": null,
+        "tokens_unknown_attempts": 1,
+        "total_tokens": null
+      },
+      "candidate": {
+        "accepted": 8,
+        "condition": "reuse",
+        "planned": 8,
+        "run_seconds": 750.3823000840057,
+        "seconds_per_accepted": 93.79778751050071,
+        "tokens_observed_partial": 3283802,
+        "tokens_per_accepted": 410475.25,
+        "tokens_unknown_attempts": 0,
+        "total_tokens": 3283802
+      },
+      "comparison_sha256": "c94b8bef76a1c5278f818d3062dc15efda82c55bea73d9ed50f57cefc794bbdb",
+      "config_sha256": "c7a490b22002640102bf8131aa3fa6e2c5b4d6f3540e69129ac60c11e773a8b4",
+      "experiment": "delivery-explicit",
+      "independent_task_count": 4,
+      "instruction_bindings": [
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        },
+        {
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "instruction_sha256": "6fe731fdc098cf615379b88c76c5d4226306073a30a44fbacc096db01cccea7e"
+        }
+      ],
+      "native_source_revision": "1d0071cba9ac4b617dcc4b54c0c8a90f73e96a4e",
+      "paired_quality_losses": 0,
+      "paired_success_delta": {
+        "lower": 0.25,
+        "point": 0.25,
+        "upper": 0.25
+      },
+      "planned_attempts": 16,
+      "receipts": [
+        {
+          "adapter_runtime_sha256": "62914c79fbeebeae200c58abb556577dca63909994c2ff13c31018b082a1ea36",
+          "applied_receipts": 14,
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 14,
+          "repetition": 0,
+          "request_sha256": "6c903367caae181ed489adede283585508cc83b22939a7a40f0914f8b33b1846",
+          "result_sha256": "4c88322b02d89e9fcc9f8e46eec5b79b19a24658bc4e4723859fc9ba7af8252d",
+          "reused_lines": 1,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "690b8eaab806f9b3303a917548e0adedeb40407a524b44e5c5ea0ebd2e39a628",
+          "applied_receipts": 16,
+          "case": "callees-definition-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 16,
+          "repetition": 1,
+          "request_sha256": "ad6e3a399e2f1f25f69b3f63ffe01348c610a955e1636e62eab5704a6ac4ec0b",
+          "result_sha256": "0155094f9f28aec124fc38c4915cf7c05d4d8377a892379ce9509a5186923760",
+          "reused_lines": 4,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "71dfd7fd8d548586e8396221cbe2576a8efb5f8050bd388ae6adbcdb9df1f7a7",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "1a94bdb86afca73fc42f6027191e76f45b6056b1ade590c54ed3615c24691d33",
+          "result_sha256": "af04e3850917897bdaea15e8a19f7db7f49077eeef200890826aa7ec870ff1ad",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "f538e34d138bac5275c084a7cc01d4e9db2aae26af6b93f3510e4d2b76d5d79a",
+          "applied_receipts": 0,
+          "case": "callees-definition-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "fc550ce928355c45a3b2a94a150ec5a4152491dd53640e5a20b2435c3145d211",
+          "result_sha256": "1a9afd7354c11e78005de6274504b31c19a22dc1ec35d5db9e380c1734378baf",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "87089fbf56248738a3959f5ed072772126df0f5d8e03e6f23f233094be2eda0f",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "5c6c11e00ba18e1f2716302d8d1d9e3ca650500f0330893199a6b1be0eeffe27",
+          "result_sha256": "db133fa99adc3b7294fc291aaa33deff1b94709d11a0fa9a857ae98eb8d66924",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "82d4847c8c2481019252132bfa24ac4e8e367db9ea397ce4b94da59d9328fd9a",
+          "applied_receipts": 4,
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 4,
+          "repetition": 0,
+          "request_sha256": "2ee10d786d04d09ce8843c3802847f66b223e5861200523ca4e9e3e541dc88e6",
+          "result_sha256": "067e4f1d877fc672c89068c40316fac3299074b17162b4061554a416ed6f5955",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "5e2d3054329251e00cb7eb3429868dafea5606d9c13185cf99741e06eb842c39",
+          "applied_receipts": 0,
+          "case": "document-evidence-boundaries-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "8e6cb59ee41a1ba4714e4cc516154361366d7422e4f613d403889d9fa4b70917",
+          "result_sha256": "119306ae8c55c1439c8c51d931c0a0695750c120fa7ea96aeec714395e646a00",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "de789e943b6716e758863ed6b58077dfb558afe1a8c7d09bbd894810a9754aae",
+          "applied_receipts": 4,
+          "case": "document-evidence-boundaries-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 4,
+          "repetition": 1,
+          "request_sha256": "5277f856cb3398ca6e8a9ad42fb489a1f3641542fa8a9736358e6837de46deaf",
+          "result_sha256": "2d714e89cf74c09fa3612f91415eac36a00c4b6d649b9339c625aafa8919dffd",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "3ccd51f54d9f50ce39234ab34510f2bacdbc1e9246b6138f2aa35305ffb324bb",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "c80491eeaa8bca3b90d7f896dde506afba7b18e99f2a2a2346b5bc364c3fd3d3",
+          "result_sha256": "341f297e14f616a75425ddc628128835ba8125620e406341057008db87f80a82",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "73c43ca168eda0c53de31dc6db094d15db8d4e261d1da1ebc5d8a37a3430a5da",
+          "applied_receipts": 15,
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 15,
+          "repetition": 0,
+          "request_sha256": "d2e8bdd5e9ab44c1e77fe7f98270a004711340c79b55290a0258ba7aaf07d12d",
+          "result_sha256": "334a53214bbe8a2a7e5a004b5eedede5ce1cd6535b9748ac70508a18c29648cd",
+          "reused_lines": 1,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "60fda8bb713121ab5304be0032f13a87bb70e6e557478af6553629df05cfb0f7",
+          "applied_receipts": 0,
+          "case": "reference-removal-evidence-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "b1c461fa7d14454116f6f772a8d826fbbdee7cd017cf0675b2ca079a200cf2e0",
+          "result_sha256": "e9f6c83064ef9294c3e3131a6ed7e09c5b63b6de12dc2c04c10d04c31ff2b669",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "86272e2f6a0e73cf5cd9bfc97b8f59d97029f900907f7c8925547007697ec128",
+          "applied_receipts": 12,
+          "case": "reference-removal-evidence-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 12,
+          "repetition": 1,
+          "request_sha256": "e3c0b3ab445a30d6160fca3174ebe97d2fe7f78f92ff810723485aa2724b5c56",
+          "result_sha256": "0b85ea8b60f323ec5eae9465078ce6f09db665d7fb092a1ec7ef997409e6d4d2",
+          "reused_lines": 1,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "30171db9f742c082131c29e93b503069add378f7830a19fbc8f4e9fd132d2d5e",
+          "applied_receipts": 13,
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 13,
+          "repetition": 1,
+          "request_sha256": "9997c14e584d9edfe68367316a781a7fee3a479c085abb4195a235f8dda108b8",
+          "result_sha256": "4aef4f9bc09a5a4b27aec310890ef58aaf88e1bb014100e6d3692b076852d892",
+          "reused_lines": 1,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "c3a3fad62760e61fd87c78a054e19a5ff158223eccdf047147d8924b745d9a2c",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "reason": "codex_turn_failed",
+          "receipt_requests": 0,
+          "repetition": 1,
+          "request_sha256": "d51b6e227793eef31716fd6bbade54b44cfa7a038d63b9a5dc007fe1b104a02e",
+          "result_sha256": "de32258ab72a6fc6b33893abb43ca61d6802f6f2b38957da098d3815d5db0f30",
+          "reused_lines": 0,
+          "state": "model_error"
+        },
+        {
+          "adapter_runtime_sha256": "eff88b371c2600ebf148a4ec6c54363ed128b76f0b99e858ab1967bc20010c52",
+          "applied_receipts": 13,
+          "case": "task-phase-continuity-01",
+          "condition": "reuse",
+          "reason": null,
+          "receipt_requests": 13,
+          "repetition": 0,
+          "request_sha256": "d82c8e125696f43935ae3900e26cd10ccd85204c87720b18adf3fcfb616418a3",
+          "result_sha256": "374795203676dd854fa914cc15f84fac2bb72e13b8bbfba9e1f920c839a26774",
+          "reused_lines": 0,
+          "state": "completed"
+        },
+        {
+          "adapter_runtime_sha256": "3af682be8d2c1d5be1ead9d0d38d9ed0ce5469ef8b1f6d970f40340ae060b26a",
+          "applied_receipts": 0,
+          "case": "task-phase-continuity-01",
+          "condition": "full",
+          "reason": null,
+          "receipt_requests": 0,
+          "repetition": 0,
+          "request_sha256": "6bf8286252b2d4ccdd28073e9c2bc14c525366abe68c21d9c7825ad540780c6f",
+          "result_sha256": "3011deac6843d8a91b9c6e4be9120ab03d6b9a5bb7d5559d6bd1c1e93191e18c",
+          "reused_lines": 0,
+          "state": "completed"
+        }
+      ],
+      "resource_contrasts": {
+        "context_tokens": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "cost_usd": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "final_answer_seconds": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "first_message_seconds": {
+          "resource_per_success_savings": 0.2433235942142823,
+          "resource_savings": -0.00890187438095702,
+          "useful_outcomes_per_resource_delta": 0.048582791401963504,
+          "useful_outcomes_per_resource_gain": 0.32156889306151926,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 0.32156889306151926,
+            "reason": null,
+            "upper": 0.32156889306151926
+          }
+        },
+        "run_seconds": {
+          "resource_per_success_savings": 0.6968711432805388,
+          "resource_savings": 0.5958281910407184,
+          "useful_outcomes_per_resource_delta": 0.007429505127746469,
+          "useful_outcomes_per_resource_gain": 2.2989270992615425,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 2.2989270992615425,
+            "reason": null,
+            "upper": 2.2989270992615425
+          }
+        },
+        "total_tokens": {
+          "resource_per_success_savings": null,
+          "resource_savings": null,
+          "useful_outcomes_per_resource_delta": null,
+          "useful_outcomes_per_resource_gain": null,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": null,
+            "reason": "incomplete_measurement",
+            "upper": null
+          }
+        },
+        "trial_total_seconds": {
+          "resource_per_success_savings": 0.694855092644235,
+          "resource_savings": 0.5931401235256466,
+          "useful_outcomes_per_resource_delta": 0.007324821195885637,
+          "useful_outcomes_per_resource_gain": 2.2771315394561418,
+          "useful_outcomes_per_resource_gain_bounds": {
+            "lower": 2.2771315394561418,
+            "reason": null,
+            "upper": 2.2771315394561418
+          }
+        }
+      },
+      "review_set_sha256": "ebb97855ff2d7ca48f53c8874a1b79599682de1a3845cbf2a803dc749d226b11"
+    }
+  ],
+  "failure_attribution": "Frozen v7 stopped Codex on a reconnect notice; its failed attempt and missing usage are retained. v8 recovery is verified separately with deterministic subprocess tests.",
+  "kind": "mastermind-source-delivery-development-report",
+  "limitations": [
+    "Four public source-only research calibrations are not held-out code-fix or personal-style tasks.",
+    "Review is manual and unblinded; no independent reviewer qualification.",
+    "Explicit reuse submitted 91 matching receipts but avoided only eight lines; activation does not establish token savings.",
+    "A v7 transport failure and a long backend stall confound explicit-run latency; full token totals remain unknown.",
+    "Replay assumes all source text is retained; exact reconstruction does not prove model context retention or answer quality."
+  ],
+  "max_output_tokens": null,
+  "max_turns": null,
+  "model_requested": "gpt-6.1-sol",
+  "model_served": null,
+  "model_timeout_seconds": null,
+  "native_sha256": "ff5fda238604525022f18cfb08d6d9412a4279511171254263a380c905711f5b",
+  "native_version": "3.2.4-development",
+  "product_benefit_qualified": false,
+  "production_effort_changed": false,
+  "production_reuse_enabled": false,
+  "replay": {
+    "all_reconstructed_windows_verified": true,
+    "kind": "mastermind-native-delivery-replay-accounting",
+    "model_quality": null,
+    "model_tokens": null,
+    "native_full_visible_result_bytes": 4959724,
+    "native_full_vs_legacy_bytes_percent": 4.572761707371842,
+    "native_reuse_visible_result_bytes": 4551214,
+    "native_reuse_vs_legacy_bytes_percent": -4.040422995058868,
+    "native_reuse_vs_native_full_bytes_percent": -8.236547033665587,
+    "native_reuse_vs_native_full_returned_lines_percent": -9.953303355240406,
+    "original_failed_reads": 0,
+    "original_legacy_visible_result_bytes": 4742845,
+    "original_planned_completed_reads": 329,
+    "replay_sha256": "6cedd5e2c931e490e118bdab0346aff994b7eecae06365f3be73d1f4751963ba",
+    "schema_version": 1
+  },
+  "reviewer": "implementation_agent_unblinded",
+  "schema_version": 1,
+  "source_main_base": "a3c25de7bfc341cb4d68decdf4f9954c532276bb"
+}

@@ -16,6 +16,8 @@ MAX_OUTPUT_TOKENS_LIMIT = 64 * 1024
 
 OPTIONAL_LIMITS = {"timeout_seconds", "max_turns", "max_output_tokens"}
 
+CODEX_EMPTY_DISCOVERY_VERSIONS = ("mastermind-codex-adapter-v7", "mastermind-codex-adapter-v8")
+
 NEUTRAL_INSTRUCTION = (
     "Investigate the supplied question using only the exposed read-only source tools. "
     "The Git repository is an allowlisted projection with a synthetic single commit, "
@@ -123,11 +125,19 @@ def adapter_request(trial: Path, manifest: dict, instruction: str) -> dict:
     if condition_contract.uses_mmcg(manifest):
         request["available_tools"].append("mmcg")
         request["mmcg"] = {"binary": manifest["indexer"]["path"], "index": str(trial / "index/mmcg.db")}
+        spec = condition_contract.condition_spec(manifest)
+        if spec is not None and "symbol_lookup" in spec:
+            request["mmcg"]["symbol_lookup"] = spec["symbol_lookup"]
+        if spec is not None and "source_delivery" in spec:
+            request["mmcg"]["source_delivery"] = spec["source_delivery"]
     if manifest["schema_version"] >= 2:
         request["projection_revision"] = manifest["projection_revision"]
         if request["mmcg"] is not None:
             request["mmcg"].update(runtime=manifest["indexer"], index_sha256=manifest["index_sha256"],
                                    index_contract=manifest["index_contract"], indexed_files=manifest["indexed_files"])
+    if manifest["adapter"].get("version") in CODEX_EMPTY_DISCOVERY_VERSIONS:
+        request["resource_discovery"] = "empty_only"
+        request["available_tools"].append("resource_discovery")
     return request
 
 

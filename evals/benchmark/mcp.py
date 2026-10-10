@@ -11,6 +11,20 @@ import time
 from .artifacts import BenchmarkError, canonical, parse_json
 
 
+def result_body(result):
+    """Require agreement between structured and text MCP representations."""
+    if not isinstance(result, dict):
+        raise ValueError("missing result")
+    bodies = [result[key] for key in ("structured_content", "structuredContent") if result.get(key) is not None]
+    texts = [part["text"] for part in result.get("content", [])
+             if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)]
+    if len(texts) == 1:
+        bodies.append(parse_json(texts[0].encode()))
+    if not bodies or not isinstance(bodies[0], dict) or any(body != bodies[0] for body in bodies[1:]):
+        raise ValueError("inconsistent tool result")
+    return bodies[0]
+
+
 class McpClient:
     """One sequential connection, with no sampling, roots or elicitation access.
 

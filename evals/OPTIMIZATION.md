@@ -2,10 +2,16 @@
 
 Use this guide to choose experiments for code audits and fixes. Native batched
 symbol lookup and diagnostic returned-range accounting in the Codex harness are
-implemented. The remaining applications below are research proposals. Use the
+implemented. Native `mmcg_read` supports explicit missing-range delivery;
+its source-delivery comparison is experimental. Other applications below are
+research proposals. Use the
 measurements to choose routing and context-selection changes.
 Keep objectives and retained results in [PRODUCT.md](PRODUCT.md); do not replace
 those results with improvements reported by another paper.
+
+Read the [retained source-delivery calibration](baselines/source-delivery-20261010-public.json)
+before enabling reuse. It retains every attempt and source/runtime bindings;
+its manual, unblinded judgments do not qualify product benefit.
 
 Codex adapter diagnostics also retain reported reasoning output and the union of
 client-observed tool intervals. Reasoning tokens are a subset of output, not an
@@ -16,12 +22,13 @@ Unavailable stages remain unknown.
 ## Choose a method
 
 Start with deterministic retrieval and context selection. Introduce learned
-policies after collecting independent task outcomes. Production references were
-checked against the clean 3.2.2 source, separately from local harness changes.
+policies after collecting independent task outcomes. Bind each new experiment
+to the checked current sources; retained reports keep their original revisions.
 
 | Order | Method | Mastermind application | Measures to improve | Additional inference |
 |---|---|---|---|---|
 | Measure first | Task-local returned-range ledger and campaign summary (implemented) | Measure repeats, failures and unknowns across every planned attempt before choosing a reuse policy | Repeated delivery and completed range coverage | None for bookkeeping |
+| Measure first | Single versus batched symbol lookup (comparison contract implemented) | Same task, instructions and native binary; explicitly bind `symbol_lookup` in each condition | Lookup calls, returned metadata, original acceptance, tokens and latency | Matched task runs |
 | First | Adaptive retrieval, inspired by [Adaptive-RAG](https://aclanthology.org/2024.naacl-long.389/) | Known location → direct read; named symbol → exact lookup; unresolved cross-file question → concept/graph expansion | Evidence recall, tool rounds, total latency | None for an initial deterministic router |
 | First | [Budgeted submodular coverage](https://research.ibm.com/publications/a-note-on-maximizing-a-submodular-set-function-subject-to-a-knapsack-constraint) | Select complementary optional source/document blocks after preserving admitted profile rules and task constraints | Relevant evidence per context unit, actual input tokens | None with fixed relevance tags |
 | After acceptance labels | [GEPA](https://arxiv.org/abs/2507.19457v2) | Evolve role/refinement/retrieval instructions from failure feedback; retain complementary candidates | Original-request acceptance, corrections, tokens and latency | Offline candidate generation and evaluation |
@@ -34,6 +41,13 @@ The adaptive retrieval paper studies question answering with a trained small-LM
 classifier. A deterministic code router is our proposed adaptation; its benefit
 is unmeasured. Treat a location as usable only after freshness, scope and symbol
 identity checks. Exact-name collisions and incomplete graph edges remain explicit.
+
+For lookup comparisons, follow [the condition contract](benchmark/README.md#compare-symbol-lookup).
+First verify native replies with the same explicit `top` per name. In model runs,
+retain each requested limit and batch size; different defaults can change returned
+context as well as call count. Keep complete answers and request-bound acceptance
+separate from transport equivalence. A model that never uses batching provides no
+observation of its call-combining benefit.
 
 ## Optimize optional context
 
@@ -214,6 +228,11 @@ The current request-led policy is rejected in the retained
 remove evidence to meet a resource goal. Evaluate a different retrieval policy
 or reasoning setting as a separately frozen condition; charge its own overhead
 and check complete answers against the original criteria.
+
+For claims about scope or exceptions, inspect the owning validator as well as
+the successful query or scan path. Naming a resource explicitly does not establish
+that it bypasses an admission rule. Retain a concrete counterexample and the
+rejected criterion when an answer generalizes beyond the allowed inputs.
 
 | Experiment | Arms | Additional observations |
 |---|---|---|

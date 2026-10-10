@@ -53,6 +53,8 @@ alone is not a failure when source evidence answers the claim. Unsupported
 claims stay unknown; call fabrication a fail only when evidence contradicts
 the claim. Never invent concerns or alternatives to fill rows.
 
+Check scope exceptions against the owning validator; naming an input does not bypass it.
+
 Aggregate deterministically:
 
 - two or more evidenced fails, or a correctness fail invalidating the approach → `rethink`

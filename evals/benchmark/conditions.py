@@ -40,13 +40,19 @@ def safe_source_path(value: object) -> str:
 def validate_condition(item: object) -> dict:
     required = {"id", "tools", "instruction_paths"}
     if (not isinstance(item, dict) or not required <= set(item)
-            or set(item) - required - {"reasoning_effort", "role"}
+            or set(item) - required - {"reasoning_effort", "role", "symbol_lookup", "source_delivery"}
             or not isinstance(item["id"], str)
             or not re.fullmatch(r"[a-z][a-z0-9_]{0,47}", item["id"])
             or item["tools"] not in ("source", "mmcg")
             or not isinstance(item["instruction_paths"], list)
             or len(item["instruction_paths"]) > CONDITION_LIMIT):
         raise artifact_io.BenchmarkError("invalid_conditions", "invalid condition specification")
+    if "symbol_lookup" in item and (item["tools"] != "mmcg"
+            or item["symbol_lookup"] not in ("single", "batch")):
+        raise artifact_io.BenchmarkError("invalid_conditions", "symbol_lookup requires mmcg and single or batch")
+    if "source_delivery" in item and (item["tools"] != "mmcg"
+            or item["source_delivery"] not in ("native_full", "native_reuse")):
+        raise artifact_io.BenchmarkError("invalid_conditions", "source_delivery requires mmcg and native_full or native_reuse")
     if "reasoning_effort" in item and item["reasoning_effort"] not in REASONING_EFFORTS:
         raise artifact_io.BenchmarkError("invalid_conditions", "invalid declared reasoning effort")
     if "role" in item and (not isinstance(item["role"], str)
@@ -76,7 +82,7 @@ def validate_calibration(value: object, matrix: object) -> dict:
         raise artifact_io.BenchmarkError("invalid_calibration", "declare a role_prompt or effort axis")
     matrix = validate_conditions(matrix)
     if (any("role" not in item or "reasoning_effort" not in item for item in matrix)
-            or len({item["tools"] for item in matrix}) != 1):
+            or len({(item["tools"], item.get("symbol_lookup"), item.get("source_delivery")) for item in matrix}) != 1):
         raise artifact_io.BenchmarkError("confounded_calibration", "calibration needs explicit roles, efforts and identical tools")
     if value["axis"] == "effort":
         if (len({item["role"] for item in matrix}) != 1

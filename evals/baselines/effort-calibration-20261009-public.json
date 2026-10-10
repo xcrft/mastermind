@@ -1,0 +1,264 @@
+{
+  "kind": "mastermind-effort-calibration",
+  "schema_version": 1,
+  "plan": {
+    "axis": "effort",
+    "baseline": "max",
+    "candidate": "high",
+    "cases": 4,
+    "cli": {
+      "origin": "Installed Codex desktop CLI",
+      "sha256": "cb4e4994627e770800a940b42969c77855a3fc09a6e60b02aa6319f670d6b6ab",
+      "version": "0.162.0-alpha.2"
+    },
+    "comparison_with_prior_runtime": false,
+    "config_sha256": "4b162af0a88935712c6c692189a738e0502b40235f61b1742c0be887d0a4e49b",
+    "gate": {
+      "material_errors": 0,
+      "observed_tail_regression_allowed": false,
+      "paired_acceptance_losses": 0,
+      "time_reduction_fraction": 0.1,
+      "token_reduction_fraction": 0.1
+    },
+    "instructions": [],
+    "limits": {
+      "answer_bytes": 262144,
+      "max_output_tokens": null,
+      "max_turns": null,
+      "stderr_bytes": 262144,
+      "timeout_seconds": null,
+      "trace_bytes": 16777216
+    },
+    "model_requested": "gpt-6.1-sol",
+    "native_sha256": "04358744f8ce2566d93ddf4b75d3cb1d747cde869921c3e7f08ffa05acb86ac4",
+    "native_source_revision": "a3c25de7bfc341cb4d68decdf4f9954c532276bb",
+    "planned_attempts": 16,
+    "production_promotion": "requires independent audit/fix tasks and review",
+    "purpose": "development_effort_calibration",
+    "repetitions": 2,
+    "review": "implementation_agent_unblinded_source_review",
+    "served_model": "not_observed",
+    "symbol_lookup": "single",
+    "tool_revision": "a3c25de7bfc341cb4d68decdf4f9954c532276bb"
+  },
+  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "balanced_positions": true,
+  "planned_attempts": 16,
+  "task_count": 4,
+  "by_condition": {
+    "max": {
+      "run_seconds": 2775.317047708999,
+      "setup_seconds": 10.633177666994015,
+      "trial_total_seconds": 2785.950225375993,
+      "total_tokens": 2841758,
+      "tool_calls": 246,
+      "planned": 8,
+      "completed": 8,
+      "successful_unblinded": 7,
+      "material_error_claims": 1,
+      "usage": {
+        "cache_read_tokens": 2297472,
+        "cache_write_tokens": 0,
+        "input_tokens": 476642,
+        "output_tokens": 67644
+      },
+      "output_breakdown": {
+        "reasoning_output_tokens": 44721,
+        "non_reasoning_output_tokens": 22923
+      },
+      "reads": {
+        "read_calls": 168,
+        "returned_lines": 19058,
+        "unique_returned_lines": 17451,
+        "repeated_lines": 1607,
+        "failed_reads": 0,
+        "unverifiable_reads": 0
+      },
+      "range_accounting_complete": true,
+      "resource_discovery_calls": 0,
+      "tool_interval_union_seconds": 1.2279244139717775,
+      "tool_time_accounting_complete": true,
+      "run_distribution": {
+        "observed_attempts": 8,
+        "p50": 314.47164731249904,
+        "p95": 549.0928778540514,
+        "scope": "observed_attempts_only"
+      },
+      "total_time_distribution": {
+        "observed_attempts": 8,
+        "p50": 315.91744783349714,
+        "p95": 550.1565600229009,
+        "scope": "observed_attempts_only"
+      },
+      "token_distribution": {
+        "observed_attempts": 8,
+        "p50": 346770.5,
+        "p95": 653970.1999999997,
+        "scope": "observed_attempts_only"
+      },
+      "run_seconds_per_accepted": 396.4738639584284,
+      "total_tokens_per_accepted": 405965.4285714286,
+      "billing_cost": null,
+      "served_model": null
+    },
+    "high": {
+      "run_seconds": 1022.4932026240022,
+      "setup_seconds": 8.745573375999811,
+      "trial_total_seconds": 1031.238776000002,
+      "total_tokens": 2534239,
+      "tool_calls": 237,
+      "planned": 8,
+      "completed": 8,
+      "successful_unblinded": 7,
+      "material_error_claims": 1,
+      "usage": {
+        "cache_read_tokens": 2028160,
+        "cache_write_tokens": 0,
+        "input_tokens": 483974,
+        "output_tokens": 22105
+      },
+      "output_breakdown": {
+        "reasoning_output_tokens": 4422,
+        "non_reasoning_output_tokens": 17683
+      },
+      "reads": {
+        "read_calls": 161,
+        "returned_lines": 15634,
+        "unique_returned_lines": 13788,
+        "repeated_lines": 1846,
+        "failed_reads": 0,
+        "unverifiable_reads": 0
+      },
+      "range_accounting_complete": true,
+      "resource_discovery_calls": 0,
+      "tool_interval_union_seconds": 1.0398720819757727,
+      "tool_time_accounting_complete": true,
+      "run_distribution": {
+        "observed_attempts": 8,
+        "p50": 95.71764404149872,
+        "p95": 294.67585637060023,
+        "scope": "observed_attempts_only"
+      },
+      "total_time_distribution": {
+        "observed_attempts": 8,
+        "p50": 96.71253916649766,
+        "p95": 295.89148459790056,
+        "scope": "observed_attempts_only"
+      },
+      "token_distribution": {
+        "observed_attempts": 8,
+        "p50": 344147.5,
+        "p95": 460437.85,
+        "scope": "observed_attempts_only"
+      },
+      "run_seconds_per_accepted": 146.0704575177146,
+      "total_tokens_per_accepted": 362034.14285714284,
+      "billing_cost": null,
+      "served_model": null
+    }
+  },
+  "resource_savings_fraction": {
+    "run_seconds": 0.6315760739955596,
+    "total_tokens": 0.10821435182024652,
+    "trial_total_seconds": 0.6298430723539485
+  },
+  "paired_acceptance": {
+    "wins": 1,
+    "losses": 1,
+    "ties": 6
+  },
+  "review": {
+    "reviewer": "implementation_agent_unblinded",
+    "independent": false,
+    "outcomes": {
+      "unsatisfied": 2,
+      "satisfied": 14
+    },
+    "knowns": {
+      "partial": 19,
+      "covered": 57
+    },
+    "unknowns": {
+      "appropriate": 34,
+      "omitted": 10
+    },
+    "criteria": {
+      "unmet": 2,
+      "met": 54
+    }
+  },
+  "predeclared_gate": {
+    "time_reduction_met": true,
+    "token_reduction_met": true,
+    "no_paired_acceptance_losses": false,
+    "no_candidate_material_errors": false,
+    "observed_tail_preserved": true
+  },
+  "development_gate_met": false,
+  "comparison_accepted": false,
+  "quality_uplift": null,
+  "product_benefit_qualified": false,
+  "optimization_overhead": {
+    "live_runtime_probes": 2,
+    "known_probe_total_tokens": 36530,
+    "unknown_probe_usage_attempts": 1,
+    "preparation_failures_before_inference": 2,
+    "parent_orchestration_review_tokens": null,
+    "total_optimization_tokens": null,
+    "billing_cost": null
+  },
+  "limitations": [
+    "Four public read-only development tasks, repeated twice; not held-out audit/fix qualification.",
+    "Acceptance and material errors are unblinded implementation-agent declarations, not independent user labels.",
+    "Served model/effort, billing and host/network isolation were not independently observed.",
+    "Observed tail distributions are descriptive, not population estimates; repeats are not independent tasks.",
+    "Native source, instructions and tool policy are matched; caching, queue/network and server-side load remain uncontrolled.",
+    "Resources include every planned attempt, including rejected answers; discovery calls do not add source coverage.",
+    "No applied fixes, agent handoffs, profile delivery, mining or refinement were measured.",
+    "Optimization overhead is separate and partly unknown; token totals include cache reads, not subscription billing cost."
+  ],
+  "evidence": [
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/report-reviewed.md",
+      "sha256": "1a3cc2ada35684e2142bf20d42870fc39eb74785d67d7a618f16a2352f6cd7b2"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/calibration.json",
+      "sha256": "7f7f82e52096939e862e95161d02c3c4a4529aa0ab6723ac546a1a8ce699124c"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/comparison.json",
+      "sha256": "4d95ad97cc05ae7680822c6ead106d77240eab0cc95bd551e6f8865c6d8a01ad"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/value.json",
+      "sha256": "18a6456f1c32a3802c4c0c804b9dbff68f5416bdcd3908159e9a33ec25899ac1"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/retrieval.json",
+      "sha256": "f69f93d1a27f5fb2fad808701026e6d5b15ab9dc760f617a1508ea079e198d32"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/attempt-metrics.json",
+      "sha256": "1df92eb480996d101ec2ea22c86aa0a439a1e7a9852cba787131fd75670f82f9"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/scope-error-notes.json",
+      "sha256": "5ed5841316ad6d9a122626cc9e37a5f93de8ac8ad30260527b564920e8933582"
+    },
+    {
+      "path": ".mastermind/research/effort-high-max-20261009/evidence-inventory.json",
+      "sha256": "460013cff47c9c059d568eae45440cbafe60253130aef34d3276aec1992e6425"
+    }
+  ],
+  "harness_sources": {
+    "evals/benchmark/README.md": "2925870e0ffd0cdb37b4c2d44fe417fcc32059b93de4b159b09b73434b0423fe",
+    "evals/benchmark/adapters/codex.py": "f566b0e4f930b549513901a419860d031fcab54b85aceae5ce3a09d836c42ae3",
+    "evals/benchmark/protocol.py": "82b4f221c7a3946d694bab12a5a106674bbf6c96b81d880c21bacd9e5a01a958",
+    "evals/benchmark/review.py": "1a3dd82e97126f53c7cc7db156cc8231bda6259b78fa82dff536bbc47849b8af",
+    "evals/benchmark/tools.py": "65a3d1176847ccd4b62df557d32f70075bdba950c4294264ec422229d62414b7",
+    "tests/evals/benchmark/test_codex.py": "719074e3b09a81d2027c737cbcc4133d80fc0f86db8ce8f97d5943be8f652cf2",
+    "tests/evals/benchmark/test_tools.py": "b5f1c78aadbbf9518727b42727ac3f9eb99bf5673822ffbe004e1ca68e7e89f9"
+  },
+  "optimization_instructions_sha256": "c9720edff386e62816e2366e27a9f296c4931ba859ef14b13134666bf7e6e6e8"
+}

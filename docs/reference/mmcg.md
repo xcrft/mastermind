@@ -11,7 +11,7 @@ CLI, Lens and MCP read the same indexed state.
 
 | Interface | Contract |
 |---|---|
-| MCP | 35 tools: 21 queries that may refresh the managed index, 12 read-only queries, 2 additive writes (scratchpad and task mining) |
+| MCP | 36 tools: 21 queries that may refresh the managed index, 13 read-only queries, 2 additive writes (scratchpad and task mining) |
 | CLI | Indexing, spec gates, setup, ingestion, review export and profile mining |
 | npm commands | `mastermind` and `mmcg` |
 | Cargo command | `mmcg`, used in the examples below |
@@ -1430,6 +1430,36 @@ key. NUL-delimited Git collection still preserves other valid filename bytes,
 including embedded newlines. Watcher removals use the same identity rule.
 
 ## MCP tools
+
+### Read and reuse source ranges
+
+Use `mmcg_read` with a repository-relative `file`, a task/session label in `task`,
+and optional inclusive `start_line`/`end_line`. Each reply contains SHA-256,
+absolute-line `segments`, an opaque `receipt` and explicit continuation fields.
+The default is 80 lines; each reply delivers at most 200 new lines from a UTF-8
+regular file of at most 1 MiB. Hidden path components and symlinks are rejected.
+This reads current bytes independently of graph freshness; it does not establish
+that the index, extraction or runtime behavior is complete.
+
+| Request | Delivery |
+|---|---|
+| No `previous_receipt` | Requested text, with explicit pagination |
+| Matching receipt from this task/file, text still in the caller's context | Missing ranges; `reused_ranges` identifies omitted prior text |
+| File SHA changed, different task/file, expired receipt or server restart | Requested text again, with `reuse_status` explaining the fallback |
+
+Pass only a receipt whose text remains available to the current task. Omit it
+after a handoff or context compaction unless that text was retained. Continue
+at `next_line` with the original end when `range_truncated` is true. Receipts
+retain at most 128 merged ranges; `receipt_coverage_truncated` means some older
+ranges were forgotten and may be delivered again. The server keeps at most 128
+receipts in memory, with no SQLite writes or reuse across server processes.
+
+`mmcg serve` binds reads to its working repository. For an external index, bind
+the root explicitly; index metadata alone does not authorize file reads:
+
+```sh
+mmcg --index /absolute/index/mmcg.db serve --root /absolute/repository
+```
 
 Tool-specific arguments and response bounds are listed below. The
 [protocol contract](#protocol-contract) defines framing and refresh behavior.

@@ -164,7 +164,8 @@ def read_result(root, prefix, manifest, manifest_body):
     review_contracts.require(result["quality"]["status"] == ("review_pending" if answer is not None else "not_evaluated"), "invalid answer review state")
     if manifest["status"] == "setup_failed":
         review_contracts.require(state == "setup_error" and answer is None, "failed preparation cannot produce an answer")
-    if manifest["adapter"].get("version") == "mastermind-codex-adapter-v6" and state == "completed":
+    if manifest["adapter"].get("version") in ("mastermind-codex-adapter-v6",
+            *model_protocol.CODEX_EMPTY_DISCOVERY_VERSIONS) and state == "completed":
         adapter = result["diagnostics"].get("adapter", {})
         review_contracts.require(isinstance(adapter, dict) and adapter.get("raw_stream") == "codex-stream.jsonl",
                 "completed Codex run needs its bound event stream", "review_trace")

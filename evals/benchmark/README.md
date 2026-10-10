@@ -91,6 +91,29 @@ The original public task and review key stay common to all arms. Freeze that key
 before inspecting answers. Live refinement overhead, client delivery and profile
 applicability need separate experiments.
 
+### Compare symbol lookup
+
+Keep instructions, model, effort, task and native binary identical. Set
+`symbol_lookup` on each `tools: "mmcg"` condition:
+
+```json
+{"conditions": [
+  {"id": "single", "tools": "mmcg", "symbol_lookup": "single", "instruction_paths": []},
+  {"id": "batch", "tools": "mmcg", "symbol_lookup": "batch", "instruction_paths": []}
+]}
+```
+
+| Setting | Broker contract |
+|---|---|
+| `single` | Advertise single-name lookup and reject `names`, even when the native binary supports batches |
+| `batch` | Advertise batches after native capability verification; an unsupported binary fails instead of falling back |
+| Omitted | Preserve automatic capability discovery for existing experiments |
+
+The setting is bound through the plan, manifest and adapter request. Role and
+effort calibration requires identical lookup settings. Use balanced repetitions
+and assess complete answers against the common original-request key. Fewer calls
+alone do not establish lower model token use or preserved quality.
+
 ### Source tools
 
 | Tool | Read contract |
@@ -406,6 +429,21 @@ resolve to the inspected files. Earlier v1 archives used an empty client
 directory; check their answer links separately from factual claim support.
 Adapter v3 also accepts explicitly disabled experiment budgets.
 
+Adapter v7 configures one research server and permits the CLI's built-in resource
+and template discovery only when the completed reply is exactly the declared
+empty catalog. Discovery is protocol overhead, not source evidence. Resource
+reads, other servers, pagination, extra content and incomplete discovery fail
+the trial. The broker exposes no resource URI or template. Earlier frozen
+adapters retain their original tool contract; do not retry their failed attempts
+with the new adapter or compare them as a matched runtime.
+
+Adapter v8 retains v7's discovery contract and allows standalone CLI error
+notices, including reconnect progress, to precede a completed turn. It records
+their count and keeps the raw messages. `turn.failed` or stream exit without a
+completed turn remains a failure with unknown usage; a reconnect notice cannot
+turn a partial answer into a completed result. Earlier bundles keep their original
+failure handling and immutable records.
+
 | Codex measurement | Contract |
 |---|---|
 | Model | Requested ID is pinned; the JSON stream does not report the actual served model |
@@ -413,12 +451,13 @@ Adapter v3 also accepts explicitly disabled experiment budgets.
 | Billing | `cost_usd: null`; subscription usage is consumed, API billing is not measured |
 | Turns | CLI conversation turns, not inference rounds or tool calls |
 | Tool calls | Separately reported as `diagnostics.adapter.mcp_calls` |
+| Resource discovery | Adapters v7 and v8 record empty catalog calls separately in `diagnostics.adapter.resource_discovery`; they remain included in tool intervals and total usage |
 | Returned source ranges | Adapter v5 records `diagnostics.adapter.read_ledger`: returned, unique and repeated lines, failed/unverifiable reads and pending calls, with request-pinned source digests |
 | Reasoning output | Adapter v6 records the optional reported reasoning subset and remaining output in `diagnostics.adapter.output_breakdown`; total output already includes reasoning |
 | Tool intervals | Adapter v6 records start/completion receipt times and their interval union in `diagnostics.adapter.tool_timeline`; missing starts or completions keep whole-span totals unknown |
 | Output budget | A finite budget is checked against final reported usage, without a verified live per-response cutoff; `null` keeps usage without rejecting it |
-| Failure | Timeout, missing usage, unknown tool or client error remains a failed attempt |
-| Raw evidence | Private bounded `codex-stream.jsonl`, answers and result envelopes; v6 binds the stream digest and review verifies it |
+| Failure | Timeout, missing usage, unknown tool or terminal client failure remains a failed attempt |
+| Raw evidence | Private bounded `codex-stream.jsonl`, answers and result envelopes; v6, v7 and v8 bind the stream digest and review verifies it |
 
 Use the reasoning subset to distinguish a smaller visible response from less
 reported reasoning. Never add it to total output tokens again. Tool durations
@@ -540,6 +579,40 @@ invocation failure; retained stdout is preserved.
 | Trial manifest | 4 | Explicit instruction/tool specification and file inventory |
 
 The generic adapter protocol stays `mastermind-research-adapter-v1`.
+
+## Compare native source delivery
+
+Declare `source_delivery` on an explicit `tools: mmcg` condition. Keep model,
+effort, instructions, source scope and native binary identical across the arms.
+The broker delegates `source_read` to native `mmcg_read` and checks the reply's
+path/SHA against the frozen source. Older conditions retain their original reader.
+
+| Mode | Exposed contract |
+|---|---|
+| `native_full` | Every read delivers text; receipts cannot be submitted |
+| `native_reuse` | Optional `previous_receipt` allows missing-range delivery |
+
+Both modes require the native tool and explicit root binding. A runtime without
+it fails preparation of the tool catalog; there is no silent reader fallback.
+Do not combine a delivery comparison with changed role prompts or effort. A
+`role_prompt`/`effort` calibration rejects such mixed tool contracts.
+
+The range ledger counts only returned segments as delivered source. Reused lines
+must bind to a receipt observed in that same trial; they are reported separately
+under `native_delivery`. Missing telemetry remains unknown. Inspect actual receipt
+use, complete answers and original-request acceptance before claiming savings.
+
+For an explicit activation comparison, include
+`agents/instructions/source-reuse.md` in both arms' `instruction_paths`. It asks
+for receipts only when the tool supports them and all referenced text remains
+in context. Keep a trial that ignores this instruction in the denominator.
+Receipt submission without reused lines establishes adoption, not avoided
+delivery. A replay assuming retained text does not measure model tokens or quality.
+
+For the separate scope-instruction experiment, freeze
+`agents/instructions/source-boundaries.md` as a candidate instruction path. Keep
+source delivery and effort common. It is a generic development candidate; gold
+keys and case-specific counterexamples stay outside the model input.
 
 ## Test the harness
 

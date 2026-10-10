@@ -1,6 +1,6 @@
 {
   "task_id": "reference-removal-evidence-01",
-  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
@@ -16,7 +16,7 @@
     {
       "claim": "callers defaults to calls; explicitly selecting references changes that filter. It returns distinct source symbols with exact total/count/truncation, not one entry per call site. A reference alone need not appear in default callers.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:4530-4565",
+        "mcp/servers/mmcg/src/queries.rs:4611-4646",
         "mcp/servers/mmcg/src/store.rs:5509-5547"
       ]
     },
@@ -24,7 +24,7 @@
       "claim": "unreferenced considers compatible incoming edges across kinds, including references, then applies kind/language and conventional entry-point/test/framework exclusions. A function with no default callers can therefore be absent from unreferenced.",
       "anchors": [
         "mcp/servers/mmcg/src/store.rs:479-535",
-        "mcp/servers/mmcg/src/queries.rs:4966-5000"
+        "mcp/servers/mmcg/src/queries.rs:5047-5081"
       ]
     },
     {
@@ -32,13 +32,13 @@
       "anchors": [
         "mcp/servers/mmcg/src/store.rs:479-497",
         "mcp/servers/mmcg/src/store.rs:5509-5527",
-        "mcp/servers/mmcg/src/queries.rs:231-255"
+        "mcp/servers/mmcg/src/queries.rs:265-289"
       ]
     },
     {
       "claim": "References do not prove invocation. Zero callers and unreferenced candidates do not prove safe removal: external entry points, generated edges and runtime registration may be missing. Query completeness is separate from extraction completeness.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:247-277"
+        "mcp/servers/mmcg/src/queries.rs:281-311"
       ]
     }
   ],
@@ -58,7 +58,7 @@
     "This research run executed and validated the researched extraction, queries or tests."
   ],
   "reviewer_notes": [
-    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "Rebound to 7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf during benchmark maintenance. Every cited block is byte-identical to its previous source binding; callers and scope were inspected. This is maintenance source review, not independent outcome qualification.",
     "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
     "Task alignment was corrected after the frozen 2026-10-07 experiment: any supported function-value form satisfies the producer requirement. The unrelated ordinary-call producer clause was removed. Archived results retain their original key and unknown outcome; they are not regraded against this corrected key.",
     "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."

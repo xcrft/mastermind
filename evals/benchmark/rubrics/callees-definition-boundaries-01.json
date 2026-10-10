@@ -1,40 +1,40 @@
 {
   "task_id": "callees-definition-boundaries-01",
-  "source_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
   "status": "calibration_key_source_reviewed",
   "required_knowns": [
     {
       "claim": "The public MCP schema exposes name, file, declaration-start line, language, edge_kind and top. The handler validates selectors, checks freshness and passes a bounded row limit to queries::callees.",
       "anchors": [
-        "mcp/servers/mmcg/src/mcp.rs:1925-1943",
-        "mcp/servers/mmcg/src/mcp.rs:2533-2572"
+        "mcp/servers/mmcg/src/mcp.rs:1926-1944",
+        "mcp/servers/mmcg/src/mcp.rs:2578-2617"
       ]
     },
     {
       "claim": "Candidate selection counts exact-name definitions in the language scope before file/line selectors. File and declaration-start line are equality filters. match_status depends on candidate_total, not the length of a truncated candidate list; exactly one total candidate is needed to select a source.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:4567-4614"
+        "mcp/servers/mmcg/src/queries.rs:4648-4695"
       ]
     },
     {
       "claim": "Ambiguous and not_found return no selected source and no outgoing edges. The response reports candidate_total/count/truncation and outgoing total/count/truncation separately. An empty returned list or isError=false alone does not prove dependency absence.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:4604-4655",
-        "mcp/servers/mmcg/src/queries.rs:247-254"
+        "mcp/servers/mmcg/src/queries.rs:4685-4736",
+        "mcp/servers/mmcg/src/queries.rs:281-288"
       ]
     },
     {
       "claim": "Outgoing edges are distinct stored target-name/edge-line pairs for the selected source ID, with calls as default. This does not resolve exact target declarations or count runtime invocations.",
       "anchors": [
         "mcp/servers/mmcg/src/store.rs:5576-5591",
-        "mcp/servers/mmcg/src/queries.rs:4610-4655"
+        "mcp/servers/mmcg/src/queries.rs:4691-4736"
       ]
     },
     {
       "claim": "Selecting the source definition does not upgrade syntactic target resolution. Rust precision remains name-based; references do not prove invocation and query truncation is separate from extraction completeness.",
       "anchors": [
-        "mcp/servers/mmcg/src/queries.rs:136-147",
-        "mcp/servers/mmcg/src/queries.rs:231-277"
+        "mcp/servers/mmcg/src/queries.rs:170-181",
+        "mcp/servers/mmcg/src/queries.rs:265-311"
       ]
     }
   ],
@@ -55,7 +55,7 @@
     "Source inspection or navigation queries validate runtime tests, the requested duplicate-declaration scenario, CI or installed-binary conformance."
   ],
   "reviewer_notes": [
-    "Refreshed against 86b46d436d22ba6b6eb28ba7de6fcf6122421568 by source inspection during benchmark maintenance. Independent review of the older key does not apply to these revised claims. A separate current-key review is still required for a benefit claim.",
+    "Rebound to 7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf during benchmark maintenance. Every cited block is byte-identical to its previous source binding; callers and scope were inspected. This is maintenance source review, not independent outcome qualification.",
     "These public cases are calibration tasks, not held-out evidence or a representative user-task sample.",
     "Graph-navigation wording was clarified after preparation of the unbounded campaign. Exposed read-only graph tools are allowed; their use is not semantic validation of the researched scenario. Archived keys and assessments remain unchanged.",
     "User acceptance is assessed separately from full source-key coverage. These request-bound criteria apply only to future trials; archived keys and judgments are unchanged and need independent calibration before a benefit claim."

@@ -1,6 +1,7 @@
 """Returned-range accounting with overlaps, continuations and unknown results."""
 
 import unittest
+import copy
 
 from evals.benchmark import artifacts
 from evals.benchmark.retrieval import ReadLedger
@@ -20,6 +21,42 @@ def read(identifier, start, end, *, tool="source_read", path="src/value.py"):
 
 
 class ReadLedgerTests(unittest.TestCase):
+    def test_native_receipts_count_only_new_text_and_reject_unobserved_reuse(self):
+        ledger = ReadLedger([{"path":"src/value.py", "sha256":"a"*64}])
+
+        def native(identifier, start, end, spans, reused, receipt_ranges, receipt, previous=None):
+            segments = [{"start_line":a,"end_line":b, "lines":[{"line":n,"text":f"line {n}"} for n in range(a,b+1)]} for a,b in spans]
+            ranges = lambda values: [{"start_line":a,"end_line":b} for a,b in values]
+            body = {"path":"src/value.py", "source_sha256":"a"*64, "total_lines":500,
+                "requested_start_line":start,"requested_end_line":end, "segments":segments,
+                "reused_ranges":ranges(reused), "receipt_ranges":ranges(receipt_ranges), "receipt":receipt,
+                "reuse_status":"applied" if previous else "not_requested", "range_truncated":False,"next_line":None}
+            args = {"path":"src/value.py", "start_line":start,"end_line":end}
+            if previous: args["previous_receipt"] = previous
+            return {"tool":"source_read", "id":identifier,"status":"completed", "arguments":args,
+                "result":{"structuredContent":body}}
+
+        first = native("first",1,3,[(1,3)],[],[(1,3)],"1"*32)
+        second = native("second",3,6,[(4,6)],[(3,3)],[(1,6)],"2"*32,"1"*32)
+        repeat = native("repeat",1,6,[],[(1,6)],[(1,6)],"3"*32,"2"*32)
+        for item in (first,second,repeat): ledger.observe(item)
+        report = ledger.report()
+        self.assertEqual((report["returned_lines"],report["unique_returned_lines"],report["repeated_lines"]),(6,6,0))
+        self.assertEqual(report["native_delivery"],{"read_calls":3,"reused_lines":7})
+        self.assertTrue(report["range_accounting_complete"])
+        for mutate in (lambda body: body.update(source_sha256="b"*64),
+                       lambda body: body["segments"][0]["lines"].pop(),
+                       lambda body: body.update(receipt_ranges=[{"start_line":1,"end_line":500}])):
+            other = ReadLedger([{"path":"src/value.py", "sha256":"a"*64}])
+            bad = copy.deepcopy(first)
+            mutate(bad["result"]["structuredContent"])
+            other.observe(bad)
+            self.assertEqual(other.report()["unique_returned_lines"],0)
+            self.assertFalse(other.report()["range_accounting_complete"])
+        unknown = ReadLedger([{"path":"src/value.py", "sha256":"a"*64}])
+        unknown.observe(repeat)
+        self.assertEqual(unknown.report()["unverifiable_reads"],1)
+        self.assertEqual(unknown.report()["native_delivery"]["reused_lines"],0)
     def test_observer_counts_only_completed_calls_and_merges_overlap_across_read_tools(self):
         source = {"path": "src/value.py", "sha256": "a" * 64}
         observer = StreamObserver({"model": "fixture", "mmcg": None, "source_files": [source]}, lambda _: None)

@@ -180,7 +180,11 @@ enum Cmd {
     /// Serve Mastermind Lens: a local, read-only, diff-first change review UI.
     Ui(UiArgs),
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
-    Serve,
+    Serve {
+        /// Bind source reads to this repository when using an external index.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Watch a directory and re-index files as they change. Long-running.
     Watch(WatchArgs),
     /// Show workflow status: index freshness, installed subagents/skills,
@@ -2493,8 +2497,10 @@ fn run_cli_inner(
                 port,
             )?;
         }
-        Cmd::Serve => {
-            let managed_root = if index_override.is_none() {
+        Cmd::Serve { root } => {
+            let managed_root = if let Some(root) = root {
+                Some(root.canonicalize()?)
+            } else if index_override.is_none() {
                 Some(std::env::current_dir()?.canonicalize()?)
             } else {
                 None

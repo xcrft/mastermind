@@ -1,0 +1,338 @@
+{
+  "checks": {
+    "current_corpus": {
+      "anchors": 40,
+      "cases": 4,
+      "same_cited_bytes": true,
+      "status": "passed"
+    },
+    "diff_whitespace": "passed",
+    "focused_python": {
+      "status": "passed",
+      "tests": 50
+    },
+    "mutations": [
+      {
+        "detected": true,
+        "mutation": "expose_batch_to_single",
+        "returncode": 1,
+        "test": "tests.evals.benchmark.test_tools.SearchBatchTests.test_single_condition_hides_and_denies_batch_even_when_native_supports_it"
+      },
+      {
+        "detected": true,
+        "mutation": "allow_unsupported_batch",
+        "returncode": 1,
+        "test": "tests.evals.benchmark.test_tools.SearchBatchTests.test_batch_condition_rejects_unsupported_native_without_a_query_or_silent_fallback"
+      },
+      {
+        "detected": true,
+        "mutation": "ignore_lookup_in_request",
+        "returncode": 1,
+        "test": "tests.evals.benchmark.test_trials.BenchmarkTests.test_explicit_matrix_freezes_composed_instructions_and_tool_capabilities"
+      }
+    ],
+    "native_production_code_changed": false,
+    "python_unittest": {
+      "status": "passed",
+      "tests": 398
+    }
+  },
+  "comparison_accepted": false,
+  "corpus_bindings": [
+    {
+      "anchors": [
+        {
+          "current": "mcp/servers/mmcg/src/mcp.rs:1926-1944",
+          "old": "mcp/servers/mmcg/src/mcp.rs:1925-1943",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/mcp.rs:2578-2617",
+          "old": "mcp/servers/mmcg/src/mcp.rs:2533-2572",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:4648-4695",
+          "old": "mcp/servers/mmcg/src/queries.rs:4567-4614",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:4685-4736",
+          "old": "mcp/servers/mmcg/src/queries.rs:4604-4655",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:281-288",
+          "old": "mcp/servers/mmcg/src/queries.rs:247-254",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:5576-5591",
+          "old": "mcp/servers/mmcg/src/store.rs:5576-5591",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:4691-4736",
+          "old": "mcp/servers/mmcg/src/queries.rs:4610-4655",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:170-181",
+          "old": "mcp/servers/mmcg/src/queries.rs:136-147",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:265-311",
+          "old": "mcp/servers/mmcg/src/queries.rs:231-277",
+          "same_bytes": true
+        }
+      ],
+      "case": "callees-definition-boundaries-01",
+      "previous_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf"
+    },
+    {
+      "anchors": [
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:174-190",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:174-190",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:734-760",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:734-760",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/references/document-evidence-graph.md:99-106",
+          "old": "skills/workflow/mastermind-project-history/references/document-evidence-graph.md:99-106",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:549-580",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:549-580",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:761-787",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:761-787",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:672-674",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:672-674",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:741-787",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:741-787",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/SKILL.md:43-61",
+          "old": "skills/workflow/mastermind-project-history/SKILL.md:43-61",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731",
+          "old": "skills/workflow/mastermind-project-history/scripts/document_graph.py:706-731",
+          "same_bytes": true
+        },
+        {
+          "current": "skills/workflow/mastermind-project-history/SKILL.md:72-94",
+          "old": "skills/workflow/mastermind-project-history/SKILL.md:72-94",
+          "same_bytes": true
+        }
+      ],
+      "case": "document-evidence-boundaries-01",
+      "previous_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf"
+    },
+    {
+      "anchors": [
+        {
+          "current": "mcp/servers/mmcg/src/indexer/rust_lang.rs:340-401",
+          "old": "mcp/servers/mmcg/src/indexer/rust_lang.rs:340-401",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/indexer/rust_lang.rs:682-726",
+          "old": "mcp/servers/mmcg/src/indexer/rust_lang.rs:682-726",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/indexer/rust_lang.rs:765-784",
+          "old": "mcp/servers/mmcg/src/indexer/rust_lang.rs:765-784",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/indexer/rust_lang.rs:1358-1398",
+          "old": "mcp/servers/mmcg/src/indexer/rust_lang.rs:1358-1398",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:4885-4902",
+          "old": "mcp/servers/mmcg/src/store.rs:4885-4902",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:4611-4646",
+          "old": "mcp/servers/mmcg/src/queries.rs:4530-4565",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:5509-5547",
+          "old": "mcp/servers/mmcg/src/store.rs:5509-5547",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:479-535",
+          "old": "mcp/servers/mmcg/src/store.rs:479-535",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:5047-5081",
+          "old": "mcp/servers/mmcg/src/queries.rs:4966-5000",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:479-497",
+          "old": "mcp/servers/mmcg/src/store.rs:479-497",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/store.rs:5509-5527",
+          "old": "mcp/servers/mmcg/src/store.rs:5509-5527",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:265-289",
+          "old": "mcp/servers/mmcg/src/queries.rs:231-255",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/queries.rs:281-311",
+          "old": "mcp/servers/mmcg/src/queries.rs:247-277",
+          "same_bytes": true
+        }
+      ],
+      "case": "reference-removal-evidence-01",
+      "previous_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf"
+    },
+    {
+      "anchors": [
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:1193-1205",
+          "old": "mcp/servers/mmcg/src/run_task.rs:1193-1205",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:2765-2785",
+          "old": "mcp/servers/mmcg/src/run_task.rs:2765-2785",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:2870-2940",
+          "old": "mcp/servers/mmcg/src/run_task.rs:2870-2940",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:2980-3031",
+          "old": "mcp/servers/mmcg/src/run_task.rs:2980-3031",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:1215-1227",
+          "old": "mcp/servers/mmcg/src/run_task.rs:1215-1227",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:3032-3054",
+          "old": "mcp/servers/mmcg/src/run_task.rs:3032-3054",
+          "same_bytes": true
+        },
+        {
+          "current": "mcp/servers/mmcg/src/run_task.rs:3032-3054",
+          "old": "mcp/servers/mmcg/src/run_task.rs:3032-3054",
+          "same_bytes": true
+        }
+      ],
+      "case": "task-phase-continuity-01",
+      "previous_revision": "86b46d436d22ba6b6eb28ba7de6fcf6122421568",
+      "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf"
+    }
+  ],
+  "date": "2026-10-09",
+  "kind": "mastermind-symbol-lookup-comparison-contract",
+  "log_sha256": {
+    "allow_unsupported_batch.log": "1f44051ede2b00768f0314f6c3d45ed7a26089be6fdbf45c31c411e038623deb",
+    "corpus-current.log": "d509e60efe54dd76c1e15a68d788f24d2b669957ae9080769d292d9c1a302f9e",
+    "expose_batch_to_single.log": "08b31538cc35de24d803c7ca2bf31ae6290115826de208cf4f60b82d216e948d",
+    "focused-tests.log": "817a69f18c848cab039fbb0d826b8267a55b975da1a09a087ad1cc4c8fc327bc",
+    "ignore_lookup_in_request.log": "6545299ef2eb1b8e39010de721b18102120d5da26ecd79889c398580ca015e89",
+    "python-tests.log": "1d463356beba08bce268992470d7ad460f8c11bebe9815389cbd693f79f8fe11",
+    "validate-final.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "validate.log": "0977afd0d1bf7fd6b4c95935a8c2c33a3f649d6e3058fe3439d000ec235e14a9"
+  },
+  "model_trials": 0,
+  "native_comparison": null,
+  "next_measurement": {
+    "conditions": [
+      "single",
+      "batch"
+    ],
+    "fixed": [
+      "task",
+      "key",
+      "source",
+      "model",
+      "effort",
+      "instructions",
+      "native binary"
+    ],
+    "retain": [
+      "requested top",
+      "batch size",
+      "actual batch use",
+      "all attempts",
+      "complete answers",
+      "original request acceptance",
+      "reported tokens",
+      "latency"
+    ],
+    "runtime_requirement": "Build and freeze a separate native binary from the selected Git source before running model trials"
+  },
+  "quality_uplift": null,
+  "schema_version": 1,
+  "shared_native_artifacts": {
+    "debug_version": "3.2.4",
+    "release_version": "3.2.1",
+    "repository_version": "3.2.3",
+    "selected_for_new_model_measurement": false
+  },
+  "source_revision": "7ee2e346078516c5ce626e6a0aa4db34b1ac4fcf",
+  "source_sha256": {
+    "evals/OPTIMIZATION.md": "02169676b91253995a258835b01fa9e09d07c32da0d4b055ff947bb393398f48",
+    "evals/benchmark/README.md": "863032edb35a48be13bec14b74ad5c4d8a502b3ad5434546795d45dc84f308c3",
+    "evals/benchmark/conditions.py": "9976cab1c2ddcc4391bf57164b0735603715c9f89d82e3a1fb46cbfc41a38d8e",
+    "evals/benchmark/protocol.py": "208a23c4dfc33cdeb5a2a6b39ad7651a67b0a5a03986b896ab8adb095bcddae5",
+    "evals/benchmark/rubrics/callees-definition-boundaries-01.json": "fd02dcc3077ea7eebad150149f3a4fd14e01a017b308ec15da3c2153cc989b6d",
+    "evals/benchmark/rubrics/document-evidence-boundaries-01.json": "28b12f2b3708676c1975072086fcb76a569f3f3224598a5ce15f58fb41a0609e",
+    "evals/benchmark/rubrics/reference-removal-evidence-01.json": "ee43286d134a8e0f39bdd830d732d9a25a3b3e23646f360e6cda72ddb2fd7f02",
+    "evals/benchmark/rubrics/task-phase-continuity-01.json": "4b27e64a70411bbee42bafd4323ef109e4cb2c8d7e56b8b56dcc26e4c4f692e6",
+    "evals/benchmark/tasks/callees-definition-boundaries-01.json": "4fec7cd6d4955b093c3646bd952e6116202a4c88de8da823360e4af702865646",
+    "evals/benchmark/tasks/document-evidence-boundaries-01.json": "4d5daa356ed1999d26a5728ddb7c3423dd3278558e2d767325dd7ae63c868293",
+    "evals/benchmark/tasks/reference-removal-evidence-01.json": "7548120c26c9ea53894183b6ad56c9d29bc40b24829ed8630acbc7893bb00a6a",
+    "evals/benchmark/tasks/task-phase-continuity-01.json": "495f07d314751274c76ea3ea4b97f3d76acf6ae5fd7d6e76ac3d1df45047c18f",
+    "evals/benchmark/tools.py": "f999baf831d22f4eeb8d6ec5e3df8c1225582133976c41ecf5952b639a25aa69",
+    "tests/evals/benchmark/test_calibration.py": "705f525766c2c5d664de48fd821eb9f93c4b5c2c67c500e791c9dfef0f2d8596",
+    "tests/evals/benchmark/test_tools.py": "665a4553f93be2a12351a59a784fc5738dcb2bfad27181ca1032ba83b5baff6b",
+    "tests/evals/benchmark/test_trials.py": "504f6317d960bf4435cf8b688839e23bd2d13541d5080d8fbf9ff485ca486fc3"
+  }
+}

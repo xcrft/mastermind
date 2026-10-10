@@ -26,6 +26,16 @@ class CalibrationTests(unittest.TestCase):
             output=output, repetitions=2)
 
     def test_mixed_variables_and_unsupported_workflow_axis_stop_before_preparation(self):
+        def change_lookup(config):
+            for condition in config["conditions"]:
+                condition.update(tools="mmcg", symbol_lookup="single")
+            config["conditions"][1]["symbol_lookup"] = "batch"
+
+        def change_delivery(config):
+            for condition in config["conditions"]:
+                condition.update(tools="mmcg", source_delivery="native_full")
+            config["conditions"][1]["source_delivery"] = "native_reuse"
+
         mutations = {
             "effort": lambda cfg: cfg["conditions"][1].update(reasoning_effort="medium"),
             "tools": lambda cfg: cfg["conditions"][1].update(tools="mmcg"),
@@ -33,6 +43,8 @@ class CalibrationTests(unittest.TestCase):
             "partial_effort": lambda cfg: cfg["conditions"][1].pop("reasoning_effort"),
             "effort_with_changed_prompt": lambda cfg: cfg.update(calibration={"axis": "effort"}),
             "workflow": lambda cfg: cfg.update(calibration={"axis": "workflow"}),
+            "lookup": change_lookup,
+            "delivery": change_delivery,
         }
         for name, mutate in mutations.items():
             config = copy.deepcopy(self.fixture.config)

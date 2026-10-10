@@ -653,6 +653,8 @@ class BenchmarkTests(unittest.TestCase):
     def test_explicit_matrix_freezes_composed_instructions_and_tool_capabilities(self):
         instructions = self.fixture.condition_matrix()
         self.fixture.config["conditions"][-1]["tools"] = "mmcg"
+        self.fixture.config["conditions"][-1]["symbol_lookup"] = "single"
+        self.fixture.config["conditions"][-1]["source_delivery"] = "native_reuse"
         batch = trial_runner.prepare_batch(task=self.fixture.task, rubric=self.fixture.rubric, config=self.fixture.config,
             source_repo=self.fixture.repo, tool_repo=self.fixture.repo, output=self.fixture.root / "batches", repetitions=2)
         value = artifact_io.load_json(batch / "batch.json")
@@ -675,6 +677,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(request["task"], self.fixture.task)
             self.assertNotIn("conditions", request)
             self.assertEqual("mmcg" in request["available_tools"], spec["tools"] == "mmcg")
+            if spec["tools"] == "mmcg":
+                self.assertEqual(request["mmcg"]["symbol_lookup"], spec["symbol_lookup"])
+                self.assertEqual(request["mmcg"]["source_delivery"], spec["source_delivery"])
             self.assertEqual((trial / "indexer-called").exists(), spec["tools"] == "mmcg")
             result = trial_runner.run_trial(trial)
             self.assertEqual(result["run_status"]["state"], "completed")
@@ -684,7 +689,7 @@ class BenchmarkTests(unittest.TestCase):
     def test_rejects_invalid_matrix_before_creating_a_batch(self):
         self.fixture.condition_matrix()
         original = copy.deepcopy(self.fixture.config)
-        for mutation in ("duplicate", "tools", "path", "overlap", "cap"):
+        for mutation in ("duplicate", "tools", "path", "overlap", "lookup_without_graph", "invalid_lookup", "cap"):
             with self.subTest(mutation=mutation):
                 config = copy.deepcopy(original)
                 repetitions = 1
@@ -696,6 +701,10 @@ class BenchmarkTests(unittest.TestCase):
                     config["conditions"][1]["instruction_paths"] = ["../private.md"]
                 elif mutation == "overlap":
                     config["conditions"][1]["instruction_paths"] = ["src/service.py"]
+                elif mutation == "lookup_without_graph":
+                    config["conditions"][1]["symbol_lookup"] = "single"
+                elif mutation == "invalid_lookup":
+                    config["conditions"][1].update(tools="mmcg", symbol_lookup="unknown")
                 else:
                     repetitions = 16
                 with self.assertRaises(artifact_io.BenchmarkError):
@@ -706,8 +715,10 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_matrix_spec_and_instruction_inventory_are_checked_before_invocation(self):
         self.fixture.condition_matrix()
-        for mutation in ("spec", "file"):
+        for mutation in ("spec", "file", "lookup"):
             with self.subTest(mutation=mutation):
+                if mutation == "lookup":
+                    self.fixture.config["conditions"][0].update(tools="mmcg", symbol_lookup="single")
                 batch = trial_runner.prepare_batch(task=self.fixture.task, rubric=self.fixture.rubric, config=self.fixture.config,
                     source_repo=self.fixture.repo, tool_repo=self.fixture.repo, output=self.fixture.root / "batches", repetitions=1)
                 trials = [batch / item["directory"] for item in artifact_io.load_json(batch / "batch.json")["trials"]]
@@ -718,11 +729,13 @@ class BenchmarkTests(unittest.TestCase):
                 manifest = self.manifest(trial)
                 if mutation == "spec":
                     manifest["condition_spec"]["tools"] = "mmcg"
+                elif mutation == "lookup":
+                    manifest["condition_spec"]["symbol_lookup"] = "batch"
                 else:
                     manifest["instruction_files"][0]["sha256"] = "0" * 64
                 manifest["condition_sha256"] = artifact_io.digest(model_protocol.condition_identity(manifest))
                 (trial / "manifest.json").write_bytes(artifact_io.canonical(manifest))
-                if mutation == "spec":
+                if mutation in ("spec", "lookup"):
                     with self.assertRaises(artifact_io.BenchmarkError) as raised:
                         trial_runner.run_trial(trial)
                     self.assertEqual(raised.exception.code, "batch_changed")

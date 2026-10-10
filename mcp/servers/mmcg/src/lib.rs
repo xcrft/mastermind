@@ -48,6 +48,7 @@ pub mod run_task;
 pub mod sarif_export;
 pub mod scip_overlay;
 pub mod setup;
+mod source_read;
 pub mod spec;
 mod spec_removals;
 mod spec_symbols;

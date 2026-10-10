@@ -47,6 +47,12 @@ def validate_ledger(value, sources):
             unique += last - first + 1
             previous = last
     require(unique == value["unique_returned_lines"])
+    native = value.get("native_delivery")
+    if native is not None:
+        require(isinstance(native, dict) and set(native) == {"read_calls", "reused_lines"}
+                and type(native["read_calls"]) is int and 1 <= native["read_calls"] <= value["read_calls"]
+                and type(native["reused_lines"]) is int and native["reused_lines"] >= 0
+                and native["reused_lines"] <= sum(item["lines"] for item in sources) * native["read_calls"])
     return value
 
 
@@ -65,7 +71,17 @@ def summarize(rows, conditions):
             metrics[metric] = {"observed_total": total, "total": total if complete == len(slots) else None,
                 "reported_attempts": len(observed), "complete_attempts": complete,
                 "unknown_attempts": len(slots) - complete}
-        result[name] = {"attempts": analysis.attempt_counts(slots), "metrics": metrics}
+        native_metrics = {}
+        for metric in ("read_calls", "reused_lines"):
+            observed = [row["read_ledger"]["native_delivery"][metric] for row in slots
+                        if row["read_ledger"] is not None and "native_delivery" in row["read_ledger"]]
+            complete = sum(row["read_ledger"] is not None and "native_delivery" in row["read_ledger"]
+                and row["status"] == "completed" and row["source_integrity"] == "verified"
+                and row["read_ledger"]["range_accounting_complete"] for row in slots)
+            total = sum(observed) if observed else None
+            native_metrics[metric] = {"observed_total": total, "total": total if complete == len(slots) else None,
+                "reported_attempts": len(observed), "unknown_attempts": len(slots) - complete}
+        result[name] = {"attempts": analysis.attempt_counts(slots), "metrics": metrics, "native_delivery":native_metrics}
     return result
 
 

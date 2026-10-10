@@ -2164,6 +2164,7 @@ pub struct Store {
     default_budget: Cell<WorkBudget>,
     managed_root: Option<PathBuf>,
     serve_root: Option<PathBuf>,
+    source_read_receipts: crate::source_read::Receipts,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3206,6 +3207,30 @@ impl Store {
         self.serve_root.as_deref()
     }
 
+    pub(crate) fn read_source(
+        &mut self,
+        path: &str,
+        task: &str,
+        start: u32,
+        end: Option<u32>,
+        previous: Option<&str>,
+    ) -> Result<crate::source_read::Delivery, crate::source_read::Error> {
+        let root = self
+            .serve_root()
+            .ok_or(crate::source_read::Error::InvalidSelection)?;
+        let interrupted = || self.work_interrupted();
+        let snapshot = crate::source_read::load(
+            root,
+            path,
+            crate::bounded_fs::ReadControl {
+                deadline: None,
+                interrupted: Some(&interrupted),
+            },
+        )?;
+        self.source_read_receipts
+            .deliver(snapshot, task, start, end, previous)
+    }
+
     fn from_connection(
         conn: Connection,
         db_path: PathBuf,
@@ -3223,6 +3248,7 @@ impl Store {
             default_budget: Cell::new(WorkBudget::from_millis(DEFAULT_SERVE_BUDGET_MS)),
             managed_root: None,
             serve_root: None,
+            source_read_receipts: crate::source_read::Receipts::default(),
         }
     }
 

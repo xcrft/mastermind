@@ -1,0 +1,3350 @@
+{
+  "kind": "mastermind-integrated-repo-map-all-task-report",
+  "schema_version": 1,
+  "input_seal_sha256": "a8c3ba14c16e13757d5ba6deec977cecc6f2c2e05c308438485346410d5a726f",
+  "algorithm": "focused_shortlist_v3",
+  "native": {
+    "origin": "Locked working-tree build; base revision plus retained native-source input hashes",
+    "sha256": "ef6a40049bdf530d17d94d169ead46f40423e4213584c6cec65d7cfadb2496cc",
+    "version": "3.2.4",
+    "source_revision": "f9c336c306d3c2a81dcbd8ba6e50bd6ce8bafa90"
+  },
+  "native_source_inputs_sha256": "6587a9dc85d969b60fd9058d3c05ddd8fb37bbd113939720e45e670dfa5b3ed3",
+  "cli": {
+    "sha256": "0d5ac7aae20c4eda6242428d5e218c55ba96d8763fda2a271088ff37104b9d28",
+    "version": "0.162.0-alpha.17.2",
+    "origin": "Installed Codex desktop CLI"
+  },
+  "cases": {
+    "task-phase-continuity-01": {
+      "split": "public",
+      "task": {
+        "id": "task-phase-continuity-01",
+        "kind": "research",
+        "revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/run_task.rs",
+          "mcp/servers/mmcg/src/verify_spec.rs",
+          "mcp/servers/mmcg/src/audit_spec.rs"
+        ],
+        "question": "Trace one canonical task from successful pre-flight (pre_only=true) to a later explicit post-flight (post_only=true). The on-disk spec text is edited between calls. Assume the saved pre-flight state remains available, executor-report.md is schema-valid (its factual claims are not assumed correct), the repository and index are available, and inputs remain stable during the second call. Which stored and current inputs determine what is checked, and what outcomes, state changes and artifacts can follow?",
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/run_task.rs",
+        "mcp/servers/mmcg/src/verify_spec.rs",
+        "mcp/servers/mmcg/src/audit_spec.rs"
+      ],
+      "task_file": "tasks/task-phase-continuity-01.json",
+      "rubric_file": "rubrics/task-phase-continuity-01.json",
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/task-phase-continuity-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/audit_spec.rs",
+          "git_mode": "100644",
+          "bytes": 97029,
+          "sha256": "12a91b6736c4fb0a666af83dd983e016fc4a6543969390e0ee5b3c6d9de9e24d"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/run_task.rs",
+          "git_mode": "100644",
+          "bytes": 225261,
+          "sha256": "50c33dddbc26caf1dc29516fbc8fc8e43a72b7c25ca41b67fd1f3e120bb5ed72"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/verify_spec.rs",
+          "git_mode": "100644",
+          "bytes": 49784,
+          "sha256": "9a2564670cb48f99bc44e2376a4f6b36903a1e085c7309a08d81748b32307de5"
+        }
+      ],
+      "source_sha256": "2bc6d3da07a36be35125dcbc459a1cb6c63e4f04a3da3519f0b1adad536cdfe2",
+      "projection_revision": "10c07649ea3d2531bb707d5e227ce05d708f74cb",
+      "index_sha256": "c392e093cf7cebbc5956c4ddce332a80d519deb5c0ca0836deb10916d807aee1",
+      "map_sha256": "e2c9f6e282100678c4462f20ad1297fd9f154dd6a5552e44660f506d7373112b",
+      "payload_bytes": 529,
+      "selected": 3,
+      "generation_seconds": 0.03311879199463874,
+      "native_equals_retained_prototype": null
+    },
+    "document-evidence-boundaries-01": {
+      "split": "public",
+      "task": {
+        "id": "document-evidence-boundaries-01",
+        "kind": "research",
+        "revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
+        "source_allowlist": [
+          "skills/workflow/mastermind-project-history/scripts/document_graph.py",
+          "skills/workflow/mastermind-project-history/SKILL.md",
+          "skills/workflow/mastermind-project-history/references/document-evidence-graph.md"
+        ],
+        "question": "Trace the bundled document-relationship helper from a successful snapshot to a later check. Compare an endpoint-only snapshot with one using explicit --corpus-dir options. Explain changes to named endpoints, changes to uncited documents inside the tracked scope, and repository changes outside it. Explain the meaning of current, needs_review and unverified alongside the documented native history/Lens/export consumers. Assume valid manifests, stable inputs and a supported Git worktree. Which conclusions follow, and which need additional evidence?",
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+      },
+      "indexed_files": [
+        "skills/workflow/mastermind-project-history/scripts/document_graph.py"
+      ],
+      "task_file": "tasks/document-evidence-boundaries-01.json",
+      "rubric_file": "rubrics/document-evidence-boundaries-01.json",
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/document-evidence-boundaries-01/source",
+      "source_files": [
+        {
+          "path": "skills/workflow/mastermind-project-history/SKILL.md",
+          "git_mode": "100644",
+          "bytes": 7599,
+          "sha256": "88c7c8c8ee089ae2e80a3cfd71245d1e2b21548ecfff93f64b85034bc6ed2b2a"
+        },
+        {
+          "path": "skills/workflow/mastermind-project-history/references/document-evidence-graph.md",
+          "git_mode": "100644",
+          "bytes": 13296,
+          "sha256": "e171a2d78407cde9624e190922138438dda3d8373ce55e29c09d6e6122857cce"
+        },
+        {
+          "path": "skills/workflow/mastermind-project-history/scripts/document_graph.py",
+          "git_mode": "100755",
+          "bytes": 37527,
+          "sha256": "8ce507d4e1725d5836b922a331f96cbae47009893dec282c43d28ef1c53c2f1b"
+        }
+      ],
+      "source_sha256": "ce033992eb2733d63a8501d1599244cb13de0f37e22bf33b8fae9116c9f1a057",
+      "projection_revision": "4871311f413deef0cdd7b17b85904032751f05ae",
+      "index_sha256": "92483dd968195d28ad5300d3de14762b5e50d7e633ca2e19e286e53d9a7377f0",
+      "map_sha256": "c899536a4b0d688d262b9027af7177191c82855246ddc3a3df8b517cbe3521c1",
+      "payload_bytes": 530,
+      "selected": 3,
+      "generation_seconds": 0.022435790990130045,
+      "native_equals_retained_prototype": null
+    },
+    "callees-definition-boundaries-01": {
+      "split": "public",
+      "task": {
+        "id": "callees-definition-boundaries-01",
+        "kind": "research",
+        "revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/mcp.rs",
+          "mcp/servers/mmcg/src/queries.rs",
+          "mcp/servers/mmcg/src/store.rs"
+        ],
+        "question": "How does the public mmcg_callees tool handle a request when multiple Rust declarations share the requested name? Trace the request through the MCP, query and storage implementation, and explain what a caller can conclude from the returned result. Assume index schema/freshness checks and database operations succeed, and inputs remain stable.",
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/store.rs"
+      ],
+      "task_file": "tasks/callees-definition-boundaries-01.json",
+      "rubric_file": "rubrics/callees-definition-boundaries-01.json",
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/callees-definition-boundaries-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "git_mode": "100644",
+          "bytes": 325046,
+          "sha256": "525e4ffa94c0c7775353531e0aeb0683a0e820c2f6a23ef17704932fa2fc1d89"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        }
+      ],
+      "source_sha256": "6dbd48a2c02f0a9dc11e8e5f33dd5015a2e2f98c6a45e737495a5008b02c7107",
+      "projection_revision": "a0edaa2bc15cd7379d2f703147f72244b3a93f56",
+      "index_sha256": "943df0df32af1d15ec2ae364702632d342dd4fed1a655092b122d4c89f418741",
+      "map_sha256": "6aed5f8cfe33bf77155e41bc92ddfb8f449720f0268983907be782b30964c83d",
+      "payload_bytes": 544,
+      "selected": 3,
+      "generation_seconds": 0.050701790998573415,
+      "native_equals_retained_prototype": null
+    },
+    "reference-removal-evidence-01": {
+      "split": "public",
+      "task": {
+        "id": "reference-removal-evidence-01",
+        "kind": "research",
+        "revision": "9588cc0390e745948cbcbc79f4c9f67d3b6f95b8",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "mcp/servers/mmcg/src/store.rs",
+          "mcp/servers/mmcg/src/queries.rs"
+        ],
+        "question": "Trace how a Rust function used as a value is represented from extraction through storage to queries::callers and queries::unreferenced. Compare the default callers query with an explicit edge_kind=references query, including matching and filtering of results. What would these results justify when reviewing a function for removal, and what additional evidence may matter? Use one supported Rust function-value form as the producer example. Assume successful extraction and persistence of the relevant input and successful queries, with unchanged inputs during research.",
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute the researched code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/queries.rs"
+      ],
+      "task_file": "tasks/reference-removal-evidence-01.json",
+      "rubric_file": "rubrics/reference-removal-evidence-01.json",
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/reference-removal-evidence-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "git_mode": "100644",
+          "bytes": 56546,
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        }
+      ],
+      "source_sha256": "5d3c73b8b89a368e626beecf86fbf54bdcff883bf4b119e6a15c13c8c01fe3b7",
+      "projection_revision": "dba0130d9b5fd3291493ed28a10bf27c5e33801f",
+      "index_sha256": "28df2cb1eb11d3d39959113f0e3a18b5ae54b5561516bd85921a212086390f94",
+      "map_sha256": "0dd2d0d4739d12fac36ffde3503d826bb96797151aabf9f8cb4d3fee55e7f795",
+      "payload_bytes": 516,
+      "selected": 3,
+      "generation_seconds": 0.06825700000626966,
+      "native_equals_retained_prototype": null
+    },
+    "source-receipt-navigation-01": {
+      "split": "repo_map",
+      "task": {
+        "id": "source-receipt-navigation-01",
+        "kind": "research",
+        "question": "How do repeated bounded source reads reuse previously delivered text? Trace receipt validation, missing-range selection and behavior when a file changes. Explain root/path restrictions, range limits, and what a receipt does and does not establish.",
+        "revision": "f9c336c306d3c2a81dcbd8ba6e50bd6ce8bafa90",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/mcp.rs",
+          "mcp/servers/mmcg/src/queries.rs",
+          "mcp/servers/mmcg/src/store.rs",
+          "mcp/servers/mmcg/src/source_read.rs",
+          "mcp/servers/mmcg/src/fts.rs",
+          "mcp/servers/mmcg/src/fingerprint.rs",
+          "mcp/servers/mmcg/src/bounded_fs.rs",
+          "mcp/servers/mmcg/src/declared_files.rs",
+          "mcp/servers/mmcg/src/fact_adapter.rs",
+          "mcp/servers/mmcg/src/facts.rs",
+          "mcp/servers/mmcg/src/scip_overlay.rs",
+          "mcp/servers/mmcg/src/context.rs",
+          "mcp/servers/mmcg/src/context_doctor.rs",
+          "mcp/servers/mmcg/src/indexer.rs",
+          "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "mcp/servers/mmcg/src/indexer/python.rs",
+          "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "mcp/servers/mmcg/src/temporal.rs",
+          "mcp/servers/mmcg/src/diff.rs",
+          "mcp/servers/mmcg/src/policy.rs"
+        ],
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/bounded_fs.rs",
+        "mcp/servers/mmcg/src/context.rs",
+        "mcp/servers/mmcg/src/context_doctor.rs",
+        "mcp/servers/mmcg/src/declared_files.rs",
+        "mcp/servers/mmcg/src/diff.rs",
+        "mcp/servers/mmcg/src/fact_adapter.rs",
+        "mcp/servers/mmcg/src/facts.rs",
+        "mcp/servers/mmcg/src/fingerprint.rs",
+        "mcp/servers/mmcg/src/fts.rs",
+        "mcp/servers/mmcg/src/indexer.rs",
+        "mcp/servers/mmcg/src/indexer/python.rs",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/indexer/typescript.rs",
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/policy.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/scip_overlay.rs",
+        "mcp/servers/mmcg/src/source_read.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/temporal.rs"
+      ],
+      "task_file": null,
+      "rubric_file": null,
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/source-receipt-navigation-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/bounded_fs.rs",
+          "git_mode": "100644",
+          "bytes": 83140,
+          "sha256": "45dc0f2b5ac1d04f3d4fcbf331f126303e8dbe6ec1ba3e4fd009ce787f99336b"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context.rs",
+          "git_mode": "100644",
+          "bytes": 36473,
+          "sha256": "9da783e6a3c2dff10d750493da8699f4866c660120b5d8537ca4243b465a81a9"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context_doctor.rs",
+          "git_mode": "100644",
+          "bytes": 67664,
+          "sha256": "cb462f8556bcacc05949b20021dfc8f6100c75a8d3aa137fecd9992822cca5d2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/declared_files.rs",
+          "git_mode": "100644",
+          "bytes": 37090,
+          "sha256": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/diff.rs",
+          "git_mode": "100644",
+          "bytes": 122562,
+          "sha256": "83fc82e35209fdfd5109c3b4e7a749766442915a7cacc0db440c7330ded07aad"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fact_adapter.rs",
+          "git_mode": "100644",
+          "bytes": 20270,
+          "sha256": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/facts.rs",
+          "git_mode": "100644",
+          "bytes": 73063,
+          "sha256": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fingerprint.rs",
+          "git_mode": "100644",
+          "bytes": 9104,
+          "sha256": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fts.rs",
+          "git_mode": "100644",
+          "bytes": 1309,
+          "sha256": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer.rs",
+          "git_mode": "100644",
+          "bytes": 153294,
+          "sha256": "fc2ed2c91d991edbf54e522cdd57a913a42ac43f33c18d10839b93679bff656e"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/python.rs",
+          "git_mode": "100644",
+          "bytes": 32564,
+          "sha256": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "git_mode": "100644",
+          "bytes": 56546,
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "git_mode": "100644",
+          "bytes": 23553,
+          "sha256": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "git_mode": "100644",
+          "bytes": 325046,
+          "sha256": "525e4ffa94c0c7775353531e0aeb0683a0e820c2f6a23ef17704932fa2fc1d89"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/policy.rs",
+          "git_mode": "100644",
+          "bytes": 62801,
+          "sha256": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/scip_overlay.rs",
+          "git_mode": "100644",
+          "bytes": 90910,
+          "sha256": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/source_read.rs",
+          "git_mode": "100644",
+          "bytes": 7462,
+          "sha256": "3f53da928ccc6db613ef99df42dc3209873d6ac075d37b0bc3fec27eb03b9ec2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/temporal.rs",
+          "git_mode": "100644",
+          "bytes": 82750,
+          "sha256": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01"
+        }
+      ],
+      "source_sha256": "6d1008cb6ab3513c2d592624413236b6444cfef95ef45272b8737d1331ca434c",
+      "projection_revision": "468220dc422dc4bfb1dc4dc8c59b35b33f5fb328",
+      "index_sha256": "3e5413cd95822e33be650355edf059e054de438a6e647b42d78d6cd37b10e0b4",
+      "map_sha256": "e85398b683613f55a1ec40b78e2f4f8e7376510b6dbd39cb7372961bbb6a6a1a",
+      "payload_bytes": 484,
+      "selected": 3,
+      "generation_seconds": 0.10375883300730493,
+      "native_equals_retained_prototype": true
+    },
+    "concept-match-navigation-01": {
+      "split": "repo_map",
+      "task": {
+        "id": "concept-match-navigation-01",
+        "kind": "research",
+        "question": "How does plain-language concept search normalize query terms and select matching definitions? Trace punctuation and repeated terms, whether multiple terms require all matches, language filtering and stale-index handling. Distinguish lexical ranking from semantic certainty.",
+        "revision": "f9c336c306d3c2a81dcbd8ba6e50bd6ce8bafa90",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/mcp.rs",
+          "mcp/servers/mmcg/src/queries.rs",
+          "mcp/servers/mmcg/src/store.rs",
+          "mcp/servers/mmcg/src/source_read.rs",
+          "mcp/servers/mmcg/src/fts.rs",
+          "mcp/servers/mmcg/src/fingerprint.rs",
+          "mcp/servers/mmcg/src/bounded_fs.rs",
+          "mcp/servers/mmcg/src/declared_files.rs",
+          "mcp/servers/mmcg/src/fact_adapter.rs",
+          "mcp/servers/mmcg/src/facts.rs",
+          "mcp/servers/mmcg/src/scip_overlay.rs",
+          "mcp/servers/mmcg/src/context.rs",
+          "mcp/servers/mmcg/src/context_doctor.rs",
+          "mcp/servers/mmcg/src/indexer.rs",
+          "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "mcp/servers/mmcg/src/indexer/python.rs",
+          "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "mcp/servers/mmcg/src/temporal.rs",
+          "mcp/servers/mmcg/src/diff.rs",
+          "mcp/servers/mmcg/src/policy.rs"
+        ],
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/bounded_fs.rs",
+        "mcp/servers/mmcg/src/context.rs",
+        "mcp/servers/mmcg/src/context_doctor.rs",
+        "mcp/servers/mmcg/src/declared_files.rs",
+        "mcp/servers/mmcg/src/diff.rs",
+        "mcp/servers/mmcg/src/fact_adapter.rs",
+        "mcp/servers/mmcg/src/facts.rs",
+        "mcp/servers/mmcg/src/fingerprint.rs",
+        "mcp/servers/mmcg/src/fts.rs",
+        "mcp/servers/mmcg/src/indexer.rs",
+        "mcp/servers/mmcg/src/indexer/python.rs",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/indexer/typescript.rs",
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/policy.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/scip_overlay.rs",
+        "mcp/servers/mmcg/src/source_read.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/temporal.rs"
+      ],
+      "task_file": null,
+      "rubric_file": null,
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/concept-match-navigation-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/bounded_fs.rs",
+          "git_mode": "100644",
+          "bytes": 83140,
+          "sha256": "45dc0f2b5ac1d04f3d4fcbf331f126303e8dbe6ec1ba3e4fd009ce787f99336b"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context.rs",
+          "git_mode": "100644",
+          "bytes": 36473,
+          "sha256": "9da783e6a3c2dff10d750493da8699f4866c660120b5d8537ca4243b465a81a9"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context_doctor.rs",
+          "git_mode": "100644",
+          "bytes": 67664,
+          "sha256": "cb462f8556bcacc05949b20021dfc8f6100c75a8d3aa137fecd9992822cca5d2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/declared_files.rs",
+          "git_mode": "100644",
+          "bytes": 37090,
+          "sha256": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/diff.rs",
+          "git_mode": "100644",
+          "bytes": 122562,
+          "sha256": "83fc82e35209fdfd5109c3b4e7a749766442915a7cacc0db440c7330ded07aad"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fact_adapter.rs",
+          "git_mode": "100644",
+          "bytes": 20270,
+          "sha256": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/facts.rs",
+          "git_mode": "100644",
+          "bytes": 73063,
+          "sha256": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fingerprint.rs",
+          "git_mode": "100644",
+          "bytes": 9104,
+          "sha256": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fts.rs",
+          "git_mode": "100644",
+          "bytes": 1309,
+          "sha256": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer.rs",
+          "git_mode": "100644",
+          "bytes": 153294,
+          "sha256": "fc2ed2c91d991edbf54e522cdd57a913a42ac43f33c18d10839b93679bff656e"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/python.rs",
+          "git_mode": "100644",
+          "bytes": 32564,
+          "sha256": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "git_mode": "100644",
+          "bytes": 56546,
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "git_mode": "100644",
+          "bytes": 23553,
+          "sha256": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "git_mode": "100644",
+          "bytes": 325046,
+          "sha256": "525e4ffa94c0c7775353531e0aeb0683a0e820c2f6a23ef17704932fa2fc1d89"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/policy.rs",
+          "git_mode": "100644",
+          "bytes": 62801,
+          "sha256": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/scip_overlay.rs",
+          "git_mode": "100644",
+          "bytes": 90910,
+          "sha256": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/source_read.rs",
+          "git_mode": "100644",
+          "bytes": 7462,
+          "sha256": "3f53da928ccc6db613ef99df42dc3209873d6ac075d37b0bc3fec27eb03b9ec2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/temporal.rs",
+          "git_mode": "100644",
+          "bytes": 82750,
+          "sha256": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01"
+        }
+      ],
+      "source_sha256": "6d1008cb6ab3513c2d592624413236b6444cfef95ef45272b8737d1331ca434c",
+      "projection_revision": "468220dc422dc4bfb1dc4dc8c59b35b33f5fb328",
+      "index_sha256": "1d50b6a502e7453e97a54b8411190870260127439814963a1a243e7382a70db3",
+      "map_sha256": "2ce916dc0d4cd9a558da197408885691140841b4abe2d921a5ea9872aed752bd",
+      "payload_bytes": 596,
+      "selected": 4,
+      "generation_seconds": 0.07853516699105967,
+      "native_equals_retained_prototype": true
+    },
+    "source-root-bindings-01": {
+      "split": "repo_map",
+      "task": {
+        "id": "source-root-bindings-01",
+        "kind": "research",
+        "question": "How is a source root bound when a store is opened for serving? Trace path normalization, root identity checks during source reads, and behavior when the root or a source path changes. Distinguish opening an index from proving it matches the current repository.",
+        "revision": "f9c336c306d3c2a81dcbd8ba6e50bd6ce8bafa90",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/mcp.rs",
+          "mcp/servers/mmcg/src/queries.rs",
+          "mcp/servers/mmcg/src/store.rs",
+          "mcp/servers/mmcg/src/source_read.rs",
+          "mcp/servers/mmcg/src/fts.rs",
+          "mcp/servers/mmcg/src/fingerprint.rs",
+          "mcp/servers/mmcg/src/bounded_fs.rs",
+          "mcp/servers/mmcg/src/declared_files.rs",
+          "mcp/servers/mmcg/src/fact_adapter.rs",
+          "mcp/servers/mmcg/src/facts.rs",
+          "mcp/servers/mmcg/src/scip_overlay.rs",
+          "mcp/servers/mmcg/src/context.rs",
+          "mcp/servers/mmcg/src/context_doctor.rs",
+          "mcp/servers/mmcg/src/indexer.rs",
+          "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "mcp/servers/mmcg/src/indexer/python.rs",
+          "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "mcp/servers/mmcg/src/temporal.rs",
+          "mcp/servers/mmcg/src/diff.rs",
+          "mcp/servers/mmcg/src/policy.rs"
+        ],
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/bounded_fs.rs",
+        "mcp/servers/mmcg/src/context.rs",
+        "mcp/servers/mmcg/src/context_doctor.rs",
+        "mcp/servers/mmcg/src/declared_files.rs",
+        "mcp/servers/mmcg/src/diff.rs",
+        "mcp/servers/mmcg/src/fact_adapter.rs",
+        "mcp/servers/mmcg/src/facts.rs",
+        "mcp/servers/mmcg/src/fingerprint.rs",
+        "mcp/servers/mmcg/src/fts.rs",
+        "mcp/servers/mmcg/src/indexer.rs",
+        "mcp/servers/mmcg/src/indexer/python.rs",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/indexer/typescript.rs",
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/policy.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/scip_overlay.rs",
+        "mcp/servers/mmcg/src/source_read.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/temporal.rs"
+      ],
+      "task_file": null,
+      "rubric_file": null,
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/source-root-bindings-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/bounded_fs.rs",
+          "git_mode": "100644",
+          "bytes": 83140,
+          "sha256": "45dc0f2b5ac1d04f3d4fcbf331f126303e8dbe6ec1ba3e4fd009ce787f99336b"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context.rs",
+          "git_mode": "100644",
+          "bytes": 36473,
+          "sha256": "9da783e6a3c2dff10d750493da8699f4866c660120b5d8537ca4243b465a81a9"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context_doctor.rs",
+          "git_mode": "100644",
+          "bytes": 67664,
+          "sha256": "cb462f8556bcacc05949b20021dfc8f6100c75a8d3aa137fecd9992822cca5d2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/declared_files.rs",
+          "git_mode": "100644",
+          "bytes": 37090,
+          "sha256": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/diff.rs",
+          "git_mode": "100644",
+          "bytes": 122562,
+          "sha256": "83fc82e35209fdfd5109c3b4e7a749766442915a7cacc0db440c7330ded07aad"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fact_adapter.rs",
+          "git_mode": "100644",
+          "bytes": 20270,
+          "sha256": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/facts.rs",
+          "git_mode": "100644",
+          "bytes": 73063,
+          "sha256": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fingerprint.rs",
+          "git_mode": "100644",
+          "bytes": 9104,
+          "sha256": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fts.rs",
+          "git_mode": "100644",
+          "bytes": 1309,
+          "sha256": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer.rs",
+          "git_mode": "100644",
+          "bytes": 153294,
+          "sha256": "fc2ed2c91d991edbf54e522cdd57a913a42ac43f33c18d10839b93679bff656e"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/python.rs",
+          "git_mode": "100644",
+          "bytes": 32564,
+          "sha256": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "git_mode": "100644",
+          "bytes": 56546,
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "git_mode": "100644",
+          "bytes": 23553,
+          "sha256": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "git_mode": "100644",
+          "bytes": 325046,
+          "sha256": "525e4ffa94c0c7775353531e0aeb0683a0e820c2f6a23ef17704932fa2fc1d89"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/policy.rs",
+          "git_mode": "100644",
+          "bytes": 62801,
+          "sha256": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/scip_overlay.rs",
+          "git_mode": "100644",
+          "bytes": 90910,
+          "sha256": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/source_read.rs",
+          "git_mode": "100644",
+          "bytes": 7462,
+          "sha256": "3f53da928ccc6db613ef99df42dc3209873d6ac075d37b0bc3fec27eb03b9ec2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/temporal.rs",
+          "git_mode": "100644",
+          "bytes": 82750,
+          "sha256": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01"
+        }
+      ],
+      "source_sha256": "6d1008cb6ab3513c2d592624413236b6444cfef95ef45272b8737d1331ca434c",
+      "projection_revision": "468220dc422dc4bfb1dc4dc8c59b35b33f5fb328",
+      "index_sha256": "2f980307e3774086e74aec42e74b545c2118dd39a4b82bbd8ad0cf973ca7e637",
+      "map_sha256": "90e54ed30d0e46114227b3e02fa524b4adab5068be33bb718c131d2094b25cb7",
+      "payload_bytes": 528,
+      "selected": 3,
+      "generation_seconds": 0.16345324998837896,
+      "native_equals_retained_prototype": true
+    },
+    "documentation-concepts-01": {
+      "split": "repo_map",
+      "task": {
+        "id": "documentation-concepts-01",
+        "kind": "research",
+        "question": "How are documentation and signatures turned into searchable concepts for Rust, Python, and TypeScript definitions? Trace term extraction, indexing and query normalization. Explain which unsupported or missing inputs produce no concepts, and distinguish lexical matches from semantic evidence.",
+        "revision": "f9c336c306d3c2a81dcbd8ba6e50bd6ce8bafa90",
+        "source_allowlist": [
+          "mcp/servers/mmcg/src/mcp.rs",
+          "mcp/servers/mmcg/src/queries.rs",
+          "mcp/servers/mmcg/src/store.rs",
+          "mcp/servers/mmcg/src/source_read.rs",
+          "mcp/servers/mmcg/src/fts.rs",
+          "mcp/servers/mmcg/src/fingerprint.rs",
+          "mcp/servers/mmcg/src/bounded_fs.rs",
+          "mcp/servers/mmcg/src/declared_files.rs",
+          "mcp/servers/mmcg/src/fact_adapter.rs",
+          "mcp/servers/mmcg/src/facts.rs",
+          "mcp/servers/mmcg/src/scip_overlay.rs",
+          "mcp/servers/mmcg/src/context.rs",
+          "mcp/servers/mmcg/src/context_doctor.rs",
+          "mcp/servers/mmcg/src/indexer.rs",
+          "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "mcp/servers/mmcg/src/indexer/python.rs",
+          "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "mcp/servers/mmcg/src/temporal.rs",
+          "mcp/servers/mmcg/src/diff.rs",
+          "mcp/servers/mmcg/src/policy.rs"
+        ],
+        "output_contract": "At most five source-grounded findings with path:line citations. Separate observations, inferences and unknowns. Read source only; do not execute code."
+      },
+      "indexed_files": [
+        "mcp/servers/mmcg/src/bounded_fs.rs",
+        "mcp/servers/mmcg/src/context.rs",
+        "mcp/servers/mmcg/src/context_doctor.rs",
+        "mcp/servers/mmcg/src/declared_files.rs",
+        "mcp/servers/mmcg/src/diff.rs",
+        "mcp/servers/mmcg/src/fact_adapter.rs",
+        "mcp/servers/mmcg/src/facts.rs",
+        "mcp/servers/mmcg/src/fingerprint.rs",
+        "mcp/servers/mmcg/src/fts.rs",
+        "mcp/servers/mmcg/src/indexer.rs",
+        "mcp/servers/mmcg/src/indexer/python.rs",
+        "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+        "mcp/servers/mmcg/src/indexer/typescript.rs",
+        "mcp/servers/mmcg/src/mcp.rs",
+        "mcp/servers/mmcg/src/policy.rs",
+        "mcp/servers/mmcg/src/queries.rs",
+        "mcp/servers/mmcg/src/scip_overlay.rs",
+        "mcp/servers/mmcg/src/source_read.rs",
+        "mcp/servers/mmcg/src/store.rs",
+        "mcp/servers/mmcg/src/temporal.rs"
+      ],
+      "task_file": null,
+      "rubric_file": null,
+      "source_root": "/Users/alinaglumova/Documents/personal/mastermind/.mastermind/research/repo-map-all-20261012/cases/documentation-concepts-01/source",
+      "source_files": [
+        {
+          "path": "mcp/servers/mmcg/src/bounded_fs.rs",
+          "git_mode": "100644",
+          "bytes": 83140,
+          "sha256": "45dc0f2b5ac1d04f3d4fcbf331f126303e8dbe6ec1ba3e4fd009ce787f99336b"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context.rs",
+          "git_mode": "100644",
+          "bytes": 36473,
+          "sha256": "9da783e6a3c2dff10d750493da8699f4866c660120b5d8537ca4243b465a81a9"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/context_doctor.rs",
+          "git_mode": "100644",
+          "bytes": 67664,
+          "sha256": "cb462f8556bcacc05949b20021dfc8f6100c75a8d3aa137fecd9992822cca5d2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/declared_files.rs",
+          "git_mode": "100644",
+          "bytes": 37090,
+          "sha256": "b66b5e8b5453e929eb04c2ba649954cc5530c496caf8c37dc45d3d7720a3757a"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/diff.rs",
+          "git_mode": "100644",
+          "bytes": 122562,
+          "sha256": "83fc82e35209fdfd5109c3b4e7a749766442915a7cacc0db440c7330ded07aad"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fact_adapter.rs",
+          "git_mode": "100644",
+          "bytes": 20270,
+          "sha256": "0849193ed0461b8919027558d143148f3a020fd659280522288414e073b14f5d"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/facts.rs",
+          "git_mode": "100644",
+          "bytes": 73063,
+          "sha256": "6a224d44a8af719aa6573e78d45af0d9044321250f508b69077f968ceb2388ce"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fingerprint.rs",
+          "git_mode": "100644",
+          "bytes": 9104,
+          "sha256": "b796ba2ea09e04a3d4a25bb27e31b8beb183b8259bb72772b8bd8fe1ae55c51f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/fts.rs",
+          "git_mode": "100644",
+          "bytes": 1309,
+          "sha256": "4f1f351f6fb17776c7871e72d064da98ed09085816dc192575809c9ad94d86c1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer.rs",
+          "git_mode": "100644",
+          "bytes": 153294,
+          "sha256": "fc2ed2c91d991edbf54e522cdd57a913a42ac43f33c18d10839b93679bff656e"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/python.rs",
+          "git_mode": "100644",
+          "bytes": 32564,
+          "sha256": "93fbdfdd008b4b9b1bec398a4845099925f8bdd309472e41f6310868074190e1"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/rust_lang.rs",
+          "git_mode": "100644",
+          "bytes": 56546,
+          "sha256": "f8fd587882a511e3d7d0d202b8054a92003b31e007dd6341cf66e4681cf3cfb0"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/indexer/typescript.rs",
+          "git_mode": "100644",
+          "bytes": 23553,
+          "sha256": "b29c4b959a57fd7139c373ad58923360a20eefd2339c74b5699220a6f0b39bda"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/mcp.rs",
+          "git_mode": "100644",
+          "bytes": 325046,
+          "sha256": "525e4ffa94c0c7775353531e0aeb0683a0e820c2f6a23ef17704932fa2fc1d89"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/policy.rs",
+          "git_mode": "100644",
+          "bytes": 62801,
+          "sha256": "9b04f78cc9c3f61c68bbfd19d8a39334165b1b8afc2282d2fa874c52c66a7d23"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/queries.rs",
+          "git_mode": "100644",
+          "bytes": 398123,
+          "sha256": "22dcd507141f2f51a3c2079eb93309ae0b9efcd7dd3d289a0fc54a7def9a7d0f"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/scip_overlay.rs",
+          "git_mode": "100644",
+          "bytes": 90910,
+          "sha256": "4eca55134bc8d879e32a427731c0c6be285c2b336d805b204377456a857bba17"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/source_read.rs",
+          "git_mode": "100644",
+          "bytes": 7462,
+          "sha256": "3f53da928ccc6db613ef99df42dc3209873d6ac075d37b0bc3fec27eb03b9ec2"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/store.rs",
+          "git_mode": "100644",
+          "bytes": 468880,
+          "sha256": "c1adff01b60ff76af585d3974b0ae6c112099f4922b4f5da0895021c9e69e4bf"
+        },
+        {
+          "path": "mcp/servers/mmcg/src/temporal.rs",
+          "git_mode": "100644",
+          "bytes": 82750,
+          "sha256": "8a3e7d0704c8509c7028262b78bfbdb8014a931dacdf2a259cd5288ba4326e01"
+        }
+      ],
+      "source_sha256": "6d1008cb6ab3513c2d592624413236b6444cfef95ef45272b8737d1331ca434c",
+      "projection_revision": "468220dc422dc4bfb1dc4dc8c59b35b33f5fb328",
+      "index_sha256": "ee12438ba7112a45c0a91ad6d3d0c7c1721bf2613240f0d073202aeaa53eae2f",
+      "map_sha256": "760ac0c35c738a682842b68053878ff3468b67498e0de3df74a07161fd76225d",
+      "payload_bytes": 729,
+      "selected": 6,
+      "generation_seconds": 0.08991383400280029,
+      "native_equals_retained_prototype": true
+    }
+  },
+  "requested_model": "gpt-6.1-sol",
+  "requested_effort": "high",
+  "served_model": null,
+  "model_rounds": null,
+  "billing_cost_usd": null,
+  "map_token_count": null,
+  "planned_task_slots": 16,
+  "independent_tasks": 8,
+  "producer_attempts": 16,
+  "producer_failed_attempts": 0,
+  "review_attempts": 0,
+  "attempted_assessments": 0,
+  "valid_source_anchored_assessments": 0,
+  "unique_model_sessions": 16,
+  "human_reference_pending": true,
+  "product_benefit_qualified": false,
+  "groups": {
+    "all": {
+      "baseline": {
+        "planned_slots": 8,
+        "effective_slots": {
+          "attempts": 8,
+          "completed": 8,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 131023,
+            "cache_read_tokens": 172800,
+            "cache_write_tokens": 0,
+            "output_tokens": 2979
+          },
+          "total_reported_tokens": 306802,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 409.4421263730037,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 8,
+          "human_completed": 0,
+          "human_reference_pending": 8
+        },
+        "all_attempts": {
+          "attempts": 8,
+          "completed": 8,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 131023,
+            "cache_read_tokens": 172800,
+            "cache_write_tokens": 0,
+            "output_tokens": 2979
+          },
+          "total_reported_tokens": 306802,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 409.4421263730037,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 8,
+          "human_completed": 0,
+          "human_reference_pending": 8
+        }
+      },
+      "map": {
+        "planned_slots": 8,
+        "effective_slots": {
+          "attempts": 8,
+          "completed": 8,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 143572,
+            "cache_read_tokens": 163712,
+            "cache_write_tokens": 0,
+            "output_tokens": 3070
+          },
+          "total_reported_tokens": 310354,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 703.9684474999958,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 8,
+          "human_completed": 0,
+          "human_reference_pending": 8
+        },
+        "all_attempts": {
+          "attempts": 8,
+          "completed": 8,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 143572,
+            "cache_read_tokens": 163712,
+            "cache_write_tokens": 0,
+            "output_tokens": 3070
+          },
+          "total_reported_tokens": 310354,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 703.9684474999958,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 8,
+          "human_completed": 0,
+          "human_reference_pending": 8
+        }
+      },
+      "effective_contrast": {
+        "total_reported_tokens_change": 0.01157749949478817,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 0.7193356573638865,
+        "input_tokens_change": 0.09577707730703769,
+        "cache_read_tokens_change": -0.052592592592592594,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.030547163477677074
+      },
+      "all_attempt_contrast": {
+        "total_reported_tokens_change": 0.01157749949478817,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 0.7193356573638865,
+        "input_tokens_change": 0.09577707730703769,
+        "cache_read_tokens_change": -0.052592592592592594,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.030547163477677074
+      }
+    },
+    "public": {
+      "baseline": {
+        "planned_slots": 4,
+        "effective_slots": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 79989,
+            "cache_read_tokens": 71424,
+            "cache_write_tokens": 0,
+            "output_tokens": 1673
+          },
+          "total_reported_tokens": 153086,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 126.6027707910107,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        },
+        "all_attempts": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 79989,
+            "cache_read_tokens": 71424,
+            "cache_write_tokens": 0,
+            "output_tokens": 1673
+          },
+          "total_reported_tokens": 153086,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 126.6027707910107,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        }
+      },
+      "map": {
+        "planned_slots": 4,
+        "effective_slots": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 74074,
+            "cache_read_tokens": 78720,
+            "cache_write_tokens": 0,
+            "output_tokens": 1590
+          },
+          "total_reported_tokens": 154384,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 602.7204547510046,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        },
+        "all_attempts": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 74074,
+            "cache_read_tokens": 78720,
+            "cache_write_tokens": 0,
+            "output_tokens": 1590
+          },
+          "total_reported_tokens": 154384,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 602.7204547510046,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        }
+      },
+      "effective_contrast": {
+        "total_reported_tokens_change": 0.008478894216322851,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 3.7607208830045615,
+        "input_tokens_change": -0.07394766780432309,
+        "cache_read_tokens_change": 0.10215053763440861,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": -0.049611476389719064
+      },
+      "all_attempt_contrast": {
+        "total_reported_tokens_change": 0.008478894216322851,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 3.7607208830045615,
+        "input_tokens_change": -0.07394766780432309,
+        "cache_read_tokens_change": 0.10215053763440861,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": -0.049611476389719064
+      }
+    },
+    "repo_map": {
+      "baseline": {
+        "planned_slots": 4,
+        "effective_slots": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 51034,
+            "cache_read_tokens": 101376,
+            "cache_write_tokens": 0,
+            "output_tokens": 1306
+          },
+          "total_reported_tokens": 153716,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 282.839355581993,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        },
+        "all_attempts": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 51034,
+            "cache_read_tokens": 101376,
+            "cache_write_tokens": 0,
+            "output_tokens": 1306
+          },
+          "total_reported_tokens": 153716,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 282.839355581993,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        }
+      },
+      "map": {
+        "planned_slots": 4,
+        "effective_slots": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 69498,
+            "cache_read_tokens": 84992,
+            "cache_write_tokens": 0,
+            "output_tokens": 1480
+          },
+          "total_reported_tokens": 155970,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 101.24799274899124,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        },
+        "all_attempts": {
+          "attempts": 4,
+          "completed": 4,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 69498,
+            "cache_read_tokens": 84992,
+            "cache_write_tokens": 0,
+            "output_tokens": 1480
+          },
+          "total_reported_tokens": 155970,
+          "mcp_calls": 0,
+          "mcp_completed_calls": 0,
+          "returned_lines": 0,
+          "repeated_lines": 0,
+          "run_seconds": 101.24799274899124,
+          "blind_satisfied": 0,
+          "blind_unsatisfied": 0,
+          "blind_unknown_or_pending": 4,
+          "human_completed": 0,
+          "human_reference_pending": 4
+        }
+      },
+      "effective_contrast": {
+        "total_reported_tokens_change": 0.014663405240833746,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.642030040194883,
+        "input_tokens_change": 0.361798017008269,
+        "cache_read_tokens_change": -0.16161616161616163,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.1332312404287902
+      },
+      "all_attempt_contrast": {
+        "total_reported_tokens_change": 0.014663405240833746,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.642030040194883,
+        "input_tokens_change": 0.361798017008269,
+        "cache_read_tokens_change": -0.16161616161616163,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.1332312404287902
+      }
+    }
+  },
+  "pairs": [
+    {
+      "case": "task-phase-continuity-01",
+      "split": "public",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.008691313937611595,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 8.875088083432887,
+        "input_tokens_change": -0.3767263025737602,
+        "cache_read_tokens_change": 0.8210526315789474,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": -0.11697247706422019
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "document-evidence-boundaries-01",
+      "split": "public",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.012129167760567078,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 2.412265641194758,
+        "input_tokens_change": 1.746858298425538,
+        "cache_read_tokens_change": -1.0,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.19036697247706422
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "callees-definition-boundaries-01",
+      "split": "public",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.0021048255073668892,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 0.10324966606662743,
+        "input_tokens_change": -0.0018982002249718784,
+        "cache_read_tokens_change": 0.010752688172043012,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": -0.328159645232816
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "reference-removal-evidence-01",
+      "split": "public",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.01103333420073382,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.020843065365994756,
+        "input_tokens_change": -0.7745828761681359,
+        "cache_read_tokens_change": 1.7912087912087913,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.09428571428571429
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "source-receipt-navigation-01",
+      "split": "repo_map",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.008120378778051628,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.8655863449617645,
+        "input_tokens_change": 3.6595183687818595,
+        "cache_read_tokens_change": -0.6338582677165354,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.29651162790697677
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "concept-match-navigation-01",
+      "split": "repo_map",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.023192182410423454,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.34987699830021485,
+        "input_tokens_change": 0.033883765815998286,
+        "cache_read_tokens_change": 0.015957446808510637,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.09937888198757763
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "source-root-bindings-01",
+      "split": "repo_map",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.012868940005731107,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": 0.21676006619569504,
+        "input_tokens_change": -0.44767667364828173,
+        "cache_read_tokens_change": 0.9791666666666666,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.012618296529968454
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    },
+    {
+      "case": "documentation-concepts-01",
+      "split": "repo_map",
+      "baseline_status": "completed",
+      "map_status": "completed",
+      "contrast": {
+        "total_reported_tokens_change": 0.014501809471738394,
+        "mcp_calls_change": null,
+        "returned_lines_change": null,
+        "repeated_lines_change": null,
+        "run_seconds_change": -0.10573010674584138,
+        "input_tokens_change": 1.5631503408683172,
+        "cache_read_tokens_change": -0.25196850393700787,
+        "cache_write_tokens_change": null,
+        "output_tokens_change": 0.11145510835913312
+      },
+      "baseline_blind": null,
+      "map_blind": null
+    }
+  ],
+  "rows": [
+    {
+      "trial": "runs/task-phase-continuity-01-baseline",
+      "case": "task-phase-continuity-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 46.0217623750068,
+      "usage": {
+        "cache_read_tokens": 12160,
+        "cache_write_tokens": 0,
+        "input_tokens": 25488,
+        "output_tokens": 436
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 45.83907899999758,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 45.83907899999758,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-18d8-7c31-bad8-c8efd4214869"
+      ],
+      "answer_sha256": "5d5d334d4e354dcde5a5d67e3890fff986d1c9da8eaca5d362a458417bf96f61",
+      "result_sha256": "b18a9edb65681eb732255eb59e9a766d32b355f4de02a94740441ee5ac045f01",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/task-phase-continuity-01-map",
+      "case": "task-phase-continuity-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 454.46895720800967,
+      "usage": {
+        "cache_read_tokens": 22144,
+        "cache_write_tokens": 0,
+        "input_tokens": 15886,
+        "output_tokens": 385
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 454.23738741698617,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 454.23738741698617,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-ccc6-71c1-9223-9636c5c076d1"
+      ],
+      "answer_sha256": "c9af9917bed7d9a10f943ddf19d3289aabcbdf7124938d4285aa7fbb38afc74c",
+      "result_sha256": "58292c90845cc88c6159669534af8152add10a057bda768b6b99a07ddaefb719",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/document-evidence-boundaries-01-map",
+      "case": "document-evidence-boundaries-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 92.56522145899362,
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 38033,
+        "output_tokens": 519
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 92.38362008299737,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 92.38362008299737,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-18d8-7762-a347-3a4e4a50b44e"
+      ],
+      "answer_sha256": "2b439e30f74343816e1175fed6628b56c77320a19eda867ad5fe1dbc06207039",
+      "result_sha256": "eb4b40d4d3fbba5030c317f5070bcc4dfa0b5d75ea03704f6e07bd2cbf6f0393",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/document-evidence-boundaries-01-baseline",
+      "case": "document-evidence-boundaries-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 27.127202624993515,
+      "usage": {
+        "cache_read_tokens": 23808,
+        "cache_write_tokens": 0,
+        "input_tokens": 13846,
+        "output_tokens": 436
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.908734750002623,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.908734750002623,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310a-8244-7152-972e-35dad1087789"
+      ],
+      "answer_sha256": "3529959f9d1eb5522dc5cb662b03db24defdf023d14cc5dbb45bf611f3bd6a3d",
+      "result_sha256": "11808c09031d8271a2b830ccc471e9504501641269ec808d22a1cce976e39309",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/callees-definition-boundaries-01-baseline",
+      "case": "callees-definition-boundaries-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.96863404099713,
+      "usage": {
+        "cache_read_tokens": 23808,
+        "cache_write_tokens": 0,
+        "input_tokens": 14224,
+        "output_tokens": 451
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.701999541997793,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.701999541997793,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310a-ec9f-7571-ba40-4ec23691c8ce"
+      ],
+      "answer_sha256": "070368faf2a7a57b376d6e17731589e1286b9f3bf2c6214025a78e7e5b39fe2c",
+      "result_sha256": "d1f2ab2c2bd50f0e8ea86114b148dd25f53fd84ea8116d14c26e3aca45db07f0",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/callees-definition-boundaries-01-map",
+      "case": "callees-definition-boundaries-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 29.753136500003166,
+      "usage": {
+        "cache_read_tokens": 24064,
+        "cache_write_tokens": 0,
+        "input_tokens": 14197,
+        "output_tokens": 303
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 29.50735691700538,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 29.50735691700538,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310b-55ae-7de3-ba3f-c9b469d75ed2"
+      ],
+      "answer_sha256": "a98b196b722fc5af50024aeb4328636ac5319ef18f49ac1e6e7b1e82b13f388d",
+      "result_sha256": "eec707d227241398c695dc66c90e0078c9cf99ad903fc0f4b4d8ceccb3e6be21",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/reference-removal-evidence-01-map",
+      "case": "reference-removal-evidence-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 25.933139583998127,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5958,
+        "output_tokens": 383
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 25.737433959002374,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 25.737433959002374,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310b-c9b3-7a13-b0eb-f431ddcb2387"
+      ],
+      "answer_sha256": "983eb15bfc409e9ef6a5603acbcb7b5ab8d88c741b911c5f603294f94b013a93",
+      "result_sha256": "ff89ac117687318747f2d207ca7e3db3c9efc9566f60813da167e0c2146e642e",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/reference-removal-evidence-01-baseline",
+      "case": "reference-removal-evidence-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.48517175001325,
+      "usage": {
+        "cache_read_tokens": 11648,
+        "cache_write_tokens": 0,
+        "input_tokens": 26431,
+        "output_tokens": 350
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.294606833995203,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.294606833995203,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310c-2efd-7c70-96cb-64f5a9c800a3"
+      ],
+      "answer_sha256": "6f615a6110d11d8783806cfa3ea340d196f6806982993ae8c25c7791614214ba",
+      "result_sha256": "95588dfc7a71b3cb93572f5eadf1e20e5a6ae0683f2a865b0c2433cabb7421a5",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/source-receipt-navigation-01-baseline",
+      "case": "source-receipt-navigation-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 197.50343749999593,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5689,
+        "output_tokens": 344
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 197.29642683400016,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 197.29642683400016,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310c-968f-7942-9354-b38f42fc2fb1"
+      ],
+      "answer_sha256": "c16896f25db0999a72a91fcfd64d9763dfbe574eb9b938c09916fa77bddfc5a5",
+      "result_sha256": "f037e9c7026f7c37c6c1fb6f9e7ccf6557360b3b88af12605e23f91ca37f6fb6",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/source-receipt-navigation-01-map",
+      "case": "source-receipt-navigation-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.547158916990156,
+      "usage": {
+        "cache_read_tokens": 11904,
+        "cache_write_tokens": 0,
+        "input_tokens": 26508,
+        "output_tokens": 446
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.352972124994267,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.352972124994267,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310f-99f9-7d21-be8a-b890fc31ca54"
+      ],
+      "answer_sha256": "4cd1286bcf5b793b92c6a3d35c04c612c1d29e77bec0d361fd9745e9dc1cf956",
+      "result_sha256": "ab20e4e72ddf8ad40b3e512cc23fc53981d3ace661b6d7b1a4b0f019c790dbfb",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/concept-match-navigation-01-map",
+      "case": "concept-match-navigation-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 23.03844616599963,
+      "usage": {
+        "cache_read_tokens": 24448,
+        "cache_write_tokens": 0,
+        "input_tokens": 14463,
+        "output_tokens": 354
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 22.8150222080003,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 22.8150222080003,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-01d3-79a3-ae83-6bcc0db8fe15"
+      ],
+      "answer_sha256": "b88312f59c8e5a13609ba4558d607fa8dd41d7d9e1ebd1e0c37e5a0ed3bc07a8",
+      "result_sha256": "59014592399f2bb57897317fbfcd47b23a171eb9e69178b7e11e49beb6eec7ed",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/concept-match-navigation-01-baseline",
+      "case": "concept-match-navigation-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 35.43705745799525,
+      "usage": {
+        "cache_read_tokens": 24064,
+        "cache_write_tokens": 0,
+        "input_tokens": 13989,
+        "output_tokens": 322
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 35.191366500002914,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 35.191366500002914,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-5c00-7a60-8255-fcde1a98a2ef"
+      ],
+      "answer_sha256": "9a7692c44d29f1d4e9ad5d753145d5d8dfa87086a49016cdd98d48980f2c684c",
+      "result_sha256": "f1450bbcacb7618275bffccb4d9c799249b10e566b45689dc43307bf952305f4",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/source-root-bindings-01-baseline",
+      "case": "source-root-bindings-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 21.828072582997265,
+      "usage": {
+        "cache_read_tokens": 12288,
+        "cache_write_tokens": 0,
+        "input_tokens": 25782,
+        "output_tokens": 317
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 21.641303374999552,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 21.641303374999552,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-bb95-7400-807a-14bc5ab50a46"
+      ],
+      "answer_sha256": "1835d5f90748ca8535c0b4876b1120e8a7817f906883dc0f5591f0d5f5e3aa49",
+      "result_sha256": "6f4a2a114debeba102dcae6d646e1c76ad3f07633248880a1dbc5651f9816ec6",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/source-root-bindings-01-map",
+      "case": "source-root-bindings-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.55952704101219,
+      "usage": {
+        "cache_read_tokens": 24320,
+        "cache_write_tokens": 0,
+        "input_tokens": 14240,
+        "output_tokens": 321
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.36519275000319,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.36519275000319,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13111-10df-7a02-a8d5-7f306dace717"
+      ],
+      "answer_sha256": "b7d14c66b43a86854b343da0d10dc6002079c342938da2f2e12e1c25bb4fd77d",
+      "result_sha256": "41cfbca2acd6264648f8bbc22a578f14b1fff2b9ddcfb22c7a4e152364505323",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/documentation-concepts-01-map",
+      "case": "documentation-concepts-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 25.102860624989262,
+      "usage": {
+        "cache_read_tokens": 24320,
+        "cache_write_tokens": 0,
+        "input_tokens": 14287,
+        "output_tokens": 359
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 24.905844000008074,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 24.905844000008074,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-e60f-75e3-bb8f-13e86fd1e195"
+      ],
+      "answer_sha256": "404dca32f8ddb08b3c632987c18d33e5b43e713866e50695bd6e5c222ba1a2bb",
+      "result_sha256": "eef144cc686d68af58b4f32a48174d936284dc2f9bfbdd412b30870b2d84d8da",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    },
+    {
+      "trial": "runs/documentation-concepts-01-baseline",
+      "case": "documentation-concepts-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 28.070788041004562,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5574,
+        "output_tokens": 323
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 27.851194667004165,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 27.851194667004165,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13111-484d-77f0-b61e-9ae929523e25"
+      ],
+      "answer_sha256": "3e9d97ae36fbf81f3e1b751d3faea4b956b9ea47d237441fb2ad340906b70d40",
+      "result_sha256": "1de6431cb83af7b6c1d70c44f466917806e5e4e69157d74ade38d815e2fb6a50",
+      "blind_outcome": null,
+      "blind_review_status": "pending",
+      "human_outcome": null
+    }
+  ],
+  "matched_complete_pairs": {
+    "count": 8,
+    "groups": {
+      "baseline": {
+        "attempts": 8,
+        "completed": 8,
+        "usage_complete": true,
+        "usage": {
+          "input_tokens": 131023,
+          "cache_read_tokens": 172800,
+          "cache_write_tokens": 0,
+          "output_tokens": 2979
+        },
+        "total_reported_tokens": 306802,
+        "mcp_calls": 0,
+        "mcp_completed_calls": 0,
+        "returned_lines": 0,
+        "repeated_lines": 0,
+        "run_seconds": 409.4421263730037,
+        "blind_satisfied": 0,
+        "blind_unsatisfied": 0,
+        "blind_unknown_or_pending": 8,
+        "human_completed": 0,
+        "human_reference_pending": 8
+      },
+      "map": {
+        "attempts": 8,
+        "completed": 8,
+        "usage_complete": true,
+        "usage": {
+          "input_tokens": 143572,
+          "cache_read_tokens": 163712,
+          "cache_write_tokens": 0,
+          "output_tokens": 3070
+        },
+        "total_reported_tokens": 310354,
+        "mcp_calls": 0,
+        "mcp_completed_calls": 0,
+        "returned_lines": 0,
+        "repeated_lines": 0,
+        "run_seconds": 703.9684474999958,
+        "blind_satisfied": 0,
+        "blind_unsatisfied": 0,
+        "blind_unknown_or_pending": 8,
+        "human_completed": 0,
+        "human_reference_pending": 8
+      }
+    },
+    "contrast": {
+      "total_reported_tokens_change": 0.01157749949478817,
+      "mcp_calls_change": null,
+      "returned_lines_change": null,
+      "repeated_lines_change": null,
+      "run_seconds_change": 0.7193356573638865,
+      "input_tokens_change": 0.09577707730703769,
+      "cache_read_tokens_change": -0.052592592592592594,
+      "cache_write_tokens_change": null,
+      "output_tokens_change": 0.030547163477677074
+    },
+    "scope": "Conditional on both producer attempts completing; missing usage and failed slots are retained outside this subset."
+  },
+  "producer_attempt_records": [
+    {
+      "trial": "runs/task-phase-continuity-01-baseline",
+      "case": "task-phase-continuity-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 46.0217623750068,
+      "usage": {
+        "cache_read_tokens": 12160,
+        "cache_write_tokens": 0,
+        "input_tokens": 25488,
+        "output_tokens": 436
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 45.83907899999758,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 45.83907899999758,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-18d8-7c31-bad8-c8efd4214869"
+      ],
+      "answer_sha256": "5d5d334d4e354dcde5a5d67e3890fff986d1c9da8eaca5d362a458417bf96f61",
+      "result_sha256": "b18a9edb65681eb732255eb59e9a766d32b355f4de02a94740441ee5ac045f01"
+    },
+    {
+      "trial": "runs/task-phase-continuity-01-map",
+      "case": "task-phase-continuity-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 454.46895720800967,
+      "usage": {
+        "cache_read_tokens": 22144,
+        "cache_write_tokens": 0,
+        "input_tokens": 15886,
+        "output_tokens": 385
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 454.23738741698617,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 454.23738741698617,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-ccc6-71c1-9223-9636c5c076d1"
+      ],
+      "answer_sha256": "c9af9917bed7d9a10f943ddf19d3289aabcbdf7124938d4285aa7fbb38afc74c",
+      "result_sha256": "58292c90845cc88c6159669534af8152add10a057bda768b6b99a07ddaefb719"
+    },
+    {
+      "trial": "runs/document-evidence-boundaries-01-map",
+      "case": "document-evidence-boundaries-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 92.56522145899362,
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "input_tokens": 38033,
+        "output_tokens": 519
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 92.38362008299737,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 92.38362008299737,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13109-18d8-7762-a347-3a4e4a50b44e"
+      ],
+      "answer_sha256": "2b439e30f74343816e1175fed6628b56c77320a19eda867ad5fe1dbc06207039",
+      "result_sha256": "eb4b40d4d3fbba5030c317f5070bcc4dfa0b5d75ea03704f6e07bd2cbf6f0393"
+    },
+    {
+      "trial": "runs/document-evidence-boundaries-01-baseline",
+      "case": "document-evidence-boundaries-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 27.127202624993515,
+      "usage": {
+        "cache_read_tokens": 23808,
+        "cache_write_tokens": 0,
+        "input_tokens": 13846,
+        "output_tokens": 436
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.908734750002623,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.908734750002623,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310a-8244-7152-972e-35dad1087789"
+      ],
+      "answer_sha256": "3529959f9d1eb5522dc5cb662b03db24defdf023d14cc5dbb45bf611f3bd6a3d",
+      "result_sha256": "11808c09031d8271a2b830ccc471e9504501641269ec808d22a1cce976e39309"
+    },
+    {
+      "trial": "runs/callees-definition-boundaries-01-baseline",
+      "case": "callees-definition-boundaries-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.96863404099713,
+      "usage": {
+        "cache_read_tokens": 23808,
+        "cache_write_tokens": 0,
+        "input_tokens": 14224,
+        "output_tokens": 451
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.701999541997793,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.701999541997793,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310a-ec9f-7571-ba40-4ec23691c8ce"
+      ],
+      "answer_sha256": "070368faf2a7a57b376d6e17731589e1286b9f3bf2c6214025a78e7e5b39fe2c",
+      "result_sha256": "d1f2ab2c2bd50f0e8ea86114b148dd25f53fd84ea8116d14c26e3aca45db07f0"
+    },
+    {
+      "trial": "runs/callees-definition-boundaries-01-map",
+      "case": "callees-definition-boundaries-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 29.753136500003166,
+      "usage": {
+        "cache_read_tokens": 24064,
+        "cache_write_tokens": 0,
+        "input_tokens": 14197,
+        "output_tokens": 303
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 29.50735691700538,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 29.50735691700538,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310b-55ae-7de3-ba3f-c9b469d75ed2"
+      ],
+      "answer_sha256": "a98b196b722fc5af50024aeb4328636ac5319ef18f49ac1e6e7b1e82b13f388d",
+      "result_sha256": "eec707d227241398c695dc66c90e0078c9cf99ad903fc0f4b4d8ceccb3e6be21"
+    },
+    {
+      "trial": "runs/reference-removal-evidence-01-map",
+      "case": "reference-removal-evidence-01",
+      "condition": "map",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 25.933139583998127,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5958,
+        "output_tokens": 383
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 25.737433959002374,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 25.737433959002374,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310b-c9b3-7a13-b0eb-f431ddcb2387"
+      ],
+      "answer_sha256": "983eb15bfc409e9ef6a5603acbcb7b5ab8d88c741b911c5f603294f94b013a93",
+      "result_sha256": "ff89ac117687318747f2d207ca7e3db3c9efc9566f60813da167e0c2146e642e"
+    },
+    {
+      "trial": "runs/reference-removal-evidence-01-baseline",
+      "case": "reference-removal-evidence-01",
+      "condition": "baseline",
+      "split": "public",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.48517175001325,
+      "usage": {
+        "cache_read_tokens": 11648,
+        "cache_write_tokens": 0,
+        "input_tokens": 26431,
+        "output_tokens": 350
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.294606833995203,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.294606833995203,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310c-2efd-7c70-96cb-64f5a9c800a3"
+      ],
+      "answer_sha256": "6f615a6110d11d8783806cfa3ea340d196f6806982993ae8c25c7791614214ba",
+      "result_sha256": "95588dfc7a71b3cb93572f5eadf1e20e5a6ae0683f2a865b0c2433cabb7421a5"
+    },
+    {
+      "trial": "runs/source-receipt-navigation-01-baseline",
+      "case": "source-receipt-navigation-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 197.50343749999593,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5689,
+        "output_tokens": 344
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 197.29642683400016,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 197.29642683400016,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310c-968f-7942-9354-b38f42fc2fb1"
+      ],
+      "answer_sha256": "c16896f25db0999a72a91fcfd64d9763dfbe574eb9b938c09916fa77bddfc5a5",
+      "result_sha256": "f037e9c7026f7c37c6c1fb6f9e7ccf6557360b3b88af12605e23f91ca37f6fb6"
+    },
+    {
+      "trial": "runs/source-receipt-navigation-01-map",
+      "case": "source-receipt-navigation-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.547158916990156,
+      "usage": {
+        "cache_read_tokens": 11904,
+        "cache_write_tokens": 0,
+        "input_tokens": 26508,
+        "output_tokens": 446
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.352972124994267,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.352972124994267,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a1310f-99f9-7d21-be8a-b890fc31ca54"
+      ],
+      "answer_sha256": "4cd1286bcf5b793b92c6a3d35c04c612c1d29e77bec0d361fd9745e9dc1cf956",
+      "result_sha256": "ab20e4e72ddf8ad40b3e512cc23fc53981d3ace661b6d7b1a4b0f019c790dbfb"
+    },
+    {
+      "trial": "runs/concept-match-navigation-01-map",
+      "case": "concept-match-navigation-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 23.03844616599963,
+      "usage": {
+        "cache_read_tokens": 24448,
+        "cache_write_tokens": 0,
+        "input_tokens": 14463,
+        "output_tokens": 354
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 22.8150222080003,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 22.8150222080003,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-01d3-79a3-ae83-6bcc0db8fe15"
+      ],
+      "answer_sha256": "b88312f59c8e5a13609ba4558d607fa8dd41d7d9e1ebd1e0c37e5a0ed3bc07a8",
+      "result_sha256": "59014592399f2bb57897317fbfcd47b23a171eb9e69178b7e11e49beb6eec7ed"
+    },
+    {
+      "trial": "runs/concept-match-navigation-01-baseline",
+      "case": "concept-match-navigation-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 35.43705745799525,
+      "usage": {
+        "cache_read_tokens": 24064,
+        "cache_write_tokens": 0,
+        "input_tokens": 13989,
+        "output_tokens": 322
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 35.191366500002914,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 35.191366500002914,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-5c00-7a60-8255-fcde1a98a2ef"
+      ],
+      "answer_sha256": "9a7692c44d29f1d4e9ad5d753145d5d8dfa87086a49016cdd98d48980f2c684c",
+      "result_sha256": "f1450bbcacb7618275bffccb4d9c799249b10e566b45689dc43307bf952305f4"
+    },
+    {
+      "trial": "runs/source-root-bindings-01-baseline",
+      "case": "source-root-bindings-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 21.828072582997265,
+      "usage": {
+        "cache_read_tokens": 12288,
+        "cache_write_tokens": 0,
+        "input_tokens": 25782,
+        "output_tokens": 317
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 21.641303374999552,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 21.641303374999552,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-bb95-7400-807a-14bc5ab50a46"
+      ],
+      "answer_sha256": "1835d5f90748ca8535c0b4876b1120e8a7817f906883dc0f5591f0d5f5e3aa49",
+      "result_sha256": "6f4a2a114debeba102dcae6d646e1c76ad3f07633248880a1dbc5651f9816ec6"
+    },
+    {
+      "trial": "runs/source-root-bindings-01-map",
+      "case": "source-root-bindings-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 26.55952704101219,
+      "usage": {
+        "cache_read_tokens": 24320,
+        "cache_write_tokens": 0,
+        "input_tokens": 14240,
+        "output_tokens": 321
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 26.36519275000319,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 26.36519275000319,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13111-10df-7a02-a8d5-7f306dace717"
+      ],
+      "answer_sha256": "b7d14c66b43a86854b343da0d10dc6002079c342938da2f2e12e1c25bb4fd77d",
+      "result_sha256": "41cfbca2acd6264648f8bbc22a578f14b1fff2b9ddcfb22c7a4e152364505323"
+    },
+    {
+      "trial": "runs/documentation-concepts-01-map",
+      "case": "documentation-concepts-01",
+      "condition": "map",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 25.102860624989262,
+      "usage": {
+        "cache_read_tokens": 24320,
+        "cache_write_tokens": 0,
+        "input_tokens": 14287,
+        "output_tokens": 359
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 24.905844000008074,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 24.905844000008074,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13110-e60f-75e3-bb8f-13e86fd1e195"
+      ],
+      "answer_sha256": "404dca32f8ddb08b3c632987c18d33e5b43e713866e50695bd6e5c222ba1a2bb",
+      "result_sha256": "eef144cc686d68af58b4f32a48174d936284dc2f9bfbdd412b30870b2d84d8da"
+    },
+    {
+      "trial": "runs/documentation-concepts-01-baseline",
+      "case": "documentation-concepts-01",
+      "condition": "baseline",
+      "split": "repo_map",
+      "status": "completed",
+      "failure": null,
+      "run_seconds": 28.070788041004562,
+      "usage": {
+        "cache_read_tokens": 32512,
+        "cache_write_tokens": 0,
+        "input_tokens": 5574,
+        "output_tokens": 323
+      },
+      "mcp_calls": 0,
+      "tool_counts": {},
+      "mcp_completed_calls": 0,
+      "pending_mcp_calls": 0,
+      "tool_timeline": {
+        "accounting_complete": true,
+        "call_count": 0,
+        "calls": [],
+        "command_seconds": 27.851194667004165,
+        "duplicate_completions": 0,
+        "limitations": "Event receipt includes client and transport overhead. Outside intervals include startup, model work, network and queuing; neither measure isolates native execution or reasoning time.",
+        "observed_tool_interval_union_seconds": 0,
+        "observed_tool_span_seconds": 0,
+        "outside_tool_intervals_seconds": 27.851194667004165,
+        "schema_version": 1,
+        "scope": "client_observed_tool_event_intervals",
+        "tool_interval_union_seconds": 0,
+        "unknown_spans": 0
+      },
+      "read_ledger": {
+        "duplicate_completions": 0,
+        "failed_reads": 0,
+        "limitations": "Counts reported delivery, not semantic relevance or source truth. Trial integrity remains a separate gate.",
+        "pending_read_calls": 0,
+        "range_accounting_complete": true,
+        "read_calls": 0,
+        "repeated_lines": 0,
+        "returned_lines": 0,
+        "schema_version": 1,
+        "scope": "broker_reported_ranges_in_one_frozen_trial",
+        "sources": [],
+        "unique_returned_lines": 0,
+        "unverifiable_reads": 0
+      },
+      "sessions": [
+        "01a13111-484d-77f0-b61e-9ae929523e25"
+      ],
+      "answer_sha256": "3e9d97ae36fbf81f3e1b751d3faea4b956b9ea47d237441fb2ad340906b70d40",
+      "result_sha256": "1de6431cb83af7b6c1d70c44f466917806e5e4e69157d74ade38d815e2fb6a50"
+    }
+  ],
+  "review_attempt_records": [],
+  "intervention": "Native integrated grouped shortlist plus direct-read/uncovered-range instruction. Same native binary, tools and base instructions in both conditions.",
+  "limitations": [
+    "All questions are development calibration, on one repository; no held-out user-task qualification.",
+    "One repetition per task/condition; question-to-question variation does not identify a universal gain.",
+    "Native working-tree source input hashes supplement the base commit; this is not a released artifact.",
+    "Requested model/effort only; served identity, billing and model rounds are unobserved.",
+    "Same requested model family produces and reviews; human reference labels remain pending."
+  ],
+  "research_valid": false,
+  "invalid_reason": "Native runtime pin lacked required path; all 16 producers had zero research tool calls and returned access refusals.",
+  "comparison_scope": "Recorded token usage is setup/refusal overhead only; invalid for repo-map quality or efficiency inference.",
+  "recovery_report": "repo-map-all-transport-v2-20261012.json"
+}

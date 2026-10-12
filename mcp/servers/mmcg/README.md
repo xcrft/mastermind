@@ -66,6 +66,7 @@ The default index is `.mastermind/mmcg.db`. Indexing is incremental. Use
 | Look up a definition | `mmcg query search PaymentService` |
 | Find containing callers | `mmcg query callers charge` |
 | Find symbols by concept | `mmcg concept "payment retry handler" --top 10` |
+| Build a question-specific shortlist | `mmcg repo-map "payment retry handler" --source-sha256 <verified-source-digest> --budget-bytes 1600` |
 | Prepare a role briefing | `mmcg brief --role executor --since main --budget-tokens 2000` |
 | Search project history | `mmcg history "retry policy"` |
 | Add compiler-resolved evidence | `mmcg enrich --scip index.scip` |
@@ -73,6 +74,20 @@ The default index is `.mastermind/mmcg.db`. Indexing is incremental. Use
 
 Supported languages: Python and type stubs, TypeScript/TSX, JavaScript/JSX,
 Vue SFC, Rust, C#, Go, Java, PHP and C/C++.
+
+`repo-map` returns a JSON navigation payload using `focused_shortlist_v3`: weighted
+task-term overlap, grouped file locations, at most three files and three definitions
+per file. It leaves spare budget unused and excludes declared test functions. It
+is an experimental query heuristic, not PageRank or source evidence. Read original
+source at the selected locations and follow the relevant call paths.
+
+Before requesting a map, validate the source projection, index freshness and
+allowlist, then provide that projection's SHA-256 as `--source-sha256`. The digest
+is supplied by the caller; this command does not verify an arbitrary digest against
+live files. It opens the index read-only, checks schema compatibility and rejects
+candidate sets larger than 20,000 instead of silently ranking a partial prefix.
+Invalid digest/budget/location or an index change exits unsuccessfully. Rebuild a
+stale index against the intended scope and generate a new binding before retrying.
 
 ## Connect an agent
 

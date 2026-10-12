@@ -82,6 +82,29 @@ pub fn dispatch_map(
     Ok(())
 }
 
+pub fn dispatch_repo_map(
+    question: &str,
+    source_sha256: &str,
+    budget_bytes: usize,
+    index_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store = open_query_store(index_path)?;
+    let symbols = store.with_work_budget(
+        WorkBudget::from_millis(query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS)),
+        || store.repo_map_symbols(),
+    )?;
+    let mapping = mmcg::repo_map::build(mmcg::repo_map::Input {
+        question: question.into(),
+        source_sha256: source_sha256.into(),
+        budget_bytes,
+        symbols,
+    })
+    .map_err(std::io::Error::other)?;
+    store.ensure_source_snapshot_current()?;
+    println!("{}", serde_json::to_string(&mapping)?);
+    Ok(())
+}
+
 pub fn dispatch_temporal(
     options: &mmcg::temporal::TemporalOptions,
     format: crate::TemporalFormat,

@@ -7690,6 +7690,26 @@ impl Store {
         Ok((total.clamp(0, i64::from(u32::MAX)) as u32, files))
     }
 
+    /// A stable bounded candidate export, including one overflow probe row.
+    pub fn repo_map_symbols(&self) -> SqlResult<Vec<crate::repo_map::Symbol>> {
+        let mut statement = self.conn.prepare(
+            "SELECT file_path, name, kind, line_start, signature FROM symbols
+             ORDER BY file_path, line_start, name, kind, signature LIMIT ?1",
+        )?;
+        let result = statement
+            .query_map([crate::repo_map::MAX_SYMBOLS as i64 + 1], |row| {
+                Ok(crate::repo_map::Symbol {
+                    file: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get(3)?,
+                    signature: row.get(4)?,
+                })
+            })?
+            .collect();
+        result
+    }
+
     /// All symbols defined in a given file, ordered by line.
     pub fn symbols_in_file(&self, file_path: &str) -> SqlResult<Vec<Symbol>> {
         self.symbols_in_file_rows(file_path, None)
@@ -8261,6 +8281,30 @@ fn tarjan_scc(adj: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_map_export_probes_overflow_instead_of_silently_dropping_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("map.db")).unwrap();
+        store
+            .conn
+            .execute(
+                "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?1)
+             INSERT INTO symbols(name, kind, file_path, line_start, line_end)
+             SELECT 'cache_' || n, 'function', 'src/cache.rs', n, n FROM ids",
+                [crate::repo_map::MAX_SYMBOLS as i64 + 2],
+            )
+            .unwrap();
+        let symbols = store.repo_map_symbols().unwrap();
+        assert_eq!(symbols.len(), crate::repo_map::MAX_SYMBOLS + 1);
+        let result = crate::repo_map::build(crate::repo_map::Input {
+            question: "How does cache delivery work?".into(),
+            source_sha256: "a".repeat(64),
+            budget_bytes: 1600,
+            symbols,
+        });
+        assert!(result.is_err());
+    }
     use std::collections::{BTreeMap, BTreeSet};
     use std::env;
     #[cfg(unix)]

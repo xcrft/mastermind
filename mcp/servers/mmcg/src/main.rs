@@ -163,6 +163,15 @@ enum Cmd {
     Workflow(WorkflowCmd),
     /// Build a compact deterministic architecture briefing from the codegraph.
     Map(MapArgs),
+    /// Build a bounded question-specific navigation shortlist from indexed definitions.
+    RepoMap {
+        question: String,
+        /// Source projection digest already validated by the caller; metadata is not source evidence.
+        #[arg(long)]
+        source_sha256: String,
+        #[arg(long, default_value_t = 1600, value_parser = clap::value_parser!(u32).range(512..=16384))]
+        budget_bytes: u32,
+    },
     /// Analyze changes through calls and syntactic references, component crossings, and candidate tests.
     Impact(ImpactArgs),
     /// Build one bounded revision-bound context packet for an agent role.
@@ -2157,6 +2166,18 @@ fn run_cli_inner(
         }) => {
             commands::query::dispatch_map(&path, format, depth, top, production_only, &index_path)?
         }
+        Cmd::RepoMap {
+            question,
+            source_sha256,
+            budget_bytes,
+        } => {
+            commands::query::dispatch_repo_map(
+                &question,
+                &source_sha256,
+                budget_bytes as usize,
+                &index_path,
+            )?;
+        }
         Cmd::Impact(ImpactArgs {
             since,
             format,
@@ -3974,6 +3995,37 @@ mod tests {
                 Cli::try_parse_from(["mastermind", "concept", "handler", "--top", top,]).is_err()
             );
         }
+    }
+
+    #[test]
+    fn repo_map_cli_requires_a_source_binding_and_bounded_payload() {
+        let digest = "a".repeat(64);
+        let cli = Cli::try_parse_from([
+            "mastermind",
+            "repo-map",
+            "How does cache delivery work?",
+            "--source-sha256",
+            &digest,
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::RepoMap {
+                budget_bytes: 1600,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["mastermind", "repo-map", "cache"]).is_err());
+        assert!(Cli::try_parse_from([
+            "mastermind",
+            "repo-map",
+            "cache",
+            "--source-sha256",
+            &digest,
+            "--budget-bytes",
+            "511",
+        ])
+        .is_err());
     }
 
     #[test]

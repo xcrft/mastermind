@@ -193,6 +193,13 @@ impl Fixture {
         let value = parse(&output);
         (output, value)
     }
+    fn rejected_submit(&self, body: &str) -> String {
+        self.write(INPUT, body);
+        let output = self.run(&["review-task", "submit", SPEC, "--report", INPUT, "--json"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        String::from_utf8(output.stderr).unwrap()
+    }
     fn submit_positive(&self) -> Value {
         let report = positive(&self.request());
         let (output, accepted) = self.submit(&report);
@@ -229,6 +236,9 @@ fn assert_success(output: &Output) {
 fn parse(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("invalid JSON: {error}: {output:?}"))
+}
+fn error_line(rule: &str) -> String {
+    format!("mmcg error: {rule}\n")
 }
 fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -367,6 +377,9 @@ fn prepare_is_read_only_and_unknown_until_typed_positive_review_closes_across_pr
     let before_state = fs::read(fixture.path(STATE)).unwrap();
     let before_checks = fs::read(fixture.path(".mastermind/check-runs")).unwrap();
     let request = fixture.request();
+    assert!(request["instructions"].as_str().unwrap().contains(
+        "Allowed values: every status is satisfied, unsatisfied or unknown; reviewer.kind is human or llm; both history decisions are no_change, update_required or unknown. The draft leaves reviewer.kind and reviewer.name for you to declare."
+    ));
     assert_eq!(request["target_revision"].as_str().unwrap().len(), 64);
     assert!(request["expected_review_revision"].is_null());
     assert_eq!(
@@ -783,6 +796,286 @@ fn malformed_incomplete_or_unbound_assessments_cannot_overwrite_an_accepted_reco
 }
 
 #[test]
+fn submit_names_the_first_broken_rule_and_where_it_is() {
+    let fixture = Fixture::held();
+    let request = fixture.request();
+    let valid = positive(&request);
+
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, &str); 28] = [
+        (
+            "schema",
+            |r| r["schema_version"] = json!(2),
+            "semantic_review_schema_version_unsupported",
+        ),
+        (
+            "revision",
+            |r| r["target_revision"] = json!("stale"),
+            "semantic_review_target_revision_mismatch",
+        ),
+        (
+            "name",
+            |r| r["reviewer"]["name"] = json!(""),
+            "semantic_review_reviewer_name_invalid",
+        ),
+        (
+            "kind",
+            |r| r["reviewer"]["kind"] = Value::Null,
+            "semantic_review_reviewer_kind_required",
+        ),
+        (
+            "unknown criterion",
+            |r| r["criteria"][0]["id"] = json!("other"),
+            "criteria[0]: semantic_review_unknown_criterion",
+        ),
+        (
+            "duplicate criterion",
+            |r| {
+                let copy = r["criteria"][0].clone();
+                r["criteria"].as_array_mut().unwrap().push(copy);
+            },
+            "criterion:service-result: semantic_review_duplicate_criterion",
+        ),
+        (
+            "missing criterion",
+            |r| r["criteria"] = json!([]),
+            "criterion:service-result: semantic_review_criterion_missing",
+        ),
+        (
+            "uncited check",
+            |r| r["criteria"][0]["evidence"] = json!(["check:unit"]),
+            "criterion:service-result: semantic_review_required_check_not_cited",
+        ),
+        (
+            "criterion reason",
+            |r| r["criteria"][0]["reason"] = json!("pending"),
+            "criterion:service-result: semantic_review_reason_invalid",
+        ),
+        (
+            "criterion limit",
+            |r| r["criteria"][0]["evidence"] = json!(vec!["check:unit"; 65]),
+            "criterion:service-result: semantic_review_evidence_limit",
+        ),
+        (
+            "criterion duplicate",
+            |r| r["criteria"][0]["evidence"] = json!(["check:unit", "check:unit"]),
+            "criterion:service-result: semantic_review_evidence_duplicate",
+        ),
+        (
+            "criterion required",
+            |r| {
+                r["criteria"][0]["status"] = json!("unsatisfied");
+                r["criteria"][0]["evidence"] = json!([]);
+            },
+            "criterion:service-result: semantic_review_evidence_required",
+        ),
+        (
+            "criterion unknown",
+            |r| {
+                r["criteria"][0]["evidence"] =
+                    json!(["check:unit", "check:integration", "check:missing"])
+            },
+            "criterion:service-result: semantic_review_evidence_unknown",
+        ),
+        (
+            "quality reason",
+            |r| r["verification_quality"]["reason"] = json!(""),
+            "verification_quality: semantic_review_reason_invalid",
+        ),
+        (
+            "scope limit",
+            |r| r["scope_control"]["evidence"] = json!(vec!["spec"; 65]),
+            "scope_control: semantic_review_evidence_limit",
+        ),
+        (
+            "scope duplicate",
+            |r| r["scope_control"]["evidence"] = json!(["spec", "spec"]),
+            "scope_control: semantic_review_evidence_duplicate",
+        ),
+        (
+            "quality required",
+            |r| r["verification_quality"]["evidence"] = json!([]),
+            "verification_quality: semantic_review_evidence_required",
+        ),
+        (
+            "proportionality unknown",
+            |r| r["proportionality"]["evidence"] = json!(["nowhere"]),
+            "proportionality: semantic_review_evidence_unknown",
+        ),
+        (
+            "context reason",
+            |r| r["history"]["context"]["reason"] = json!("pending"),
+            "history.context: history_disposition_reason_invalid",
+        ),
+        (
+            "lessons limit",
+            |r| r["history"]["lessons"]["evidence"] = json!(vec!["knowledge:lessons"; 65]),
+            "history.lessons: history_disposition_evidence_limit",
+        ),
+        (
+            "context duplicate",
+            |r| {
+                r["history"]["context"]["evidence"] =
+                    json!(["knowledge:context", "knowledge:context"])
+            },
+            "history.context: history_disposition_evidence_duplicate",
+        ),
+        (
+            "lessons unknown",
+            |r| r["history"]["lessons"]["evidence"] = json!(["knowledge:lessons", "nowhere"]),
+            "history.lessons: history_disposition_evidence_unknown",
+        ),
+        (
+            "context source",
+            |r| r["history"]["context"]["evidence"] = json!(["knowledge:lessons"]),
+            "history.context: history_disposition_source_not_cited",
+        ),
+        (
+            "lessons source",
+            |r| r["history"]["lessons"]["evidence"] = json!([]),
+            "history.lessons: history_disposition_source_not_cited",
+        ),
+        (
+            "history precedes criteria",
+            |r| {
+                r["history"]["context"]["reason"] = json!("pending");
+                r["criteria"] = json!([]);
+            },
+            "history.context: history_disposition_reason_invalid",
+        ),
+        (
+            "criterion precedes dimension",
+            |r| {
+                r["criteria"][0]["reason"] = json!("pending");
+                r["scope_control"]["reason"] = json!("pending");
+            },
+            "criterion:service-result: semantic_review_reason_invalid",
+        ),
+        (
+            "report precedes history",
+            |r| {
+                r["reviewer"]["name"] = json!("");
+                r["history"]["context"]["reason"] = json!("pending");
+            },
+            "semantic_review_reviewer_name_invalid",
+        ),
+        (
+            "reason precedes limit",
+            |r| {
+                r["scope_control"]["reason"] = json!("pending");
+                r["scope_control"]["evidence"] = json!(vec!["spec"; 65]);
+            },
+            "scope_control: semantic_review_reason_invalid",
+        ),
+    ];
+    for (label, edit, rule) in cases {
+        let mut report = valid.clone();
+        edit(&mut report);
+        assert_eq!(
+            fixture.rejected_submit(&report.to_string()),
+            error_line(rule),
+            "{label}"
+        );
+    }
+
+    let mut draft = request["draft"].clone();
+    draft["reviewer"]["name"] = json!("Synthetic service reviewer");
+    assert_eq!(
+        fixture.rejected_submit(&draft.to_string()),
+        error_line("semantic_review_reviewer_kind_required")
+    );
+    assert!(!fixture.path(REVIEW).exists());
+}
+
+#[test]
+fn submit_locates_a_parse_error_without_quoting_the_report() {
+    let fixture = Fixture::held();
+    let valid = positive(&fixture.request());
+
+    let locate = |body: &str, offset: usize| {
+        let line = body[..offset].matches('\n').count() + 1;
+        let column = offset - body[..offset].rfind('\n').map_or(0, |index| index + 1);
+        format!("at line {line} column {column}")
+    };
+    let broken = "{broken";
+    assert_eq!(
+        fixture.rejected_submit(broken),
+        error_line(&format!(
+            "semantic_review_report_invalid: syntax error {}",
+            locate(broken, 2)
+        ))
+    );
+    let truncated = r#"{"schema_version":"#;
+    assert_eq!(
+        fixture.rejected_submit(truncated),
+        error_line(&format!(
+            "semantic_review_report_invalid: unexpected end of input {}",
+            locate(truncated, truncated.len())
+        ))
+    );
+
+    let mut null_status = valid.clone();
+    null_status["history"]["context"]["status"] = Value::Null;
+    let body = null_status.to_string();
+    assert_eq!(
+        fixture.rejected_submit(&body),
+        error_line(&format!(
+            "semantic_review_report_invalid: invalid field or value {}",
+            locate(
+                &body,
+                body.find("\"status\":null").unwrap() + "\"status\"".len()
+            )
+        ))
+    );
+
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("scope_control");
+    let body = missing.to_string();
+    assert_eq!(
+        fixture.rejected_submit(&body),
+        error_line(&format!(
+            "semantic_review_report_invalid: invalid field or value {}",
+            locate(&body, body.len())
+        ))
+    );
+
+    let mut private = valid.clone();
+    private["reviewer"]["kind"] = json!("PRIVATE_REVIEW_VALUE");
+    let body = private.to_string();
+    let stderr = fixture.rejected_submit(&body);
+    assert!(!stderr.contains("PRIVATE_REVIEW_VALUE"), "{stderr}");
+    assert_eq!(
+        stderr,
+        error_line(&format!(
+            "semantic_review_report_invalid: invalid field or value {}",
+            locate(
+                &body,
+                body.find("\"PRIVATE_REVIEW_VALUE\"").unwrap() + "\"PRIVATE_REVIEW_VALUE\"".len()
+            )
+        ))
+    );
+
+    let mut extra = valid.clone();
+    extra["PRIVATE_REVIEW_VALUE"] = json!(true);
+    let body = serde_json::to_string_pretty(&extra).unwrap();
+    let stderr = fixture.rejected_submit(&body);
+    let line = body
+        .lines()
+        .position(|line| line.contains("PRIVATE_REVIEW_VALUE"))
+        .unwrap()
+        + 1;
+    assert!(line > 1);
+    assert!(!stderr.contains("PRIVATE_REVIEW_VALUE"), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "mmcg error: semantic_review_report_invalid: invalid field or value at line {line} column "
+        )),
+        "{stderr}"
+    );
+    assert!(!fixture.path(REVIEW).exists());
+}
+
+#[test]
 fn missing_or_corrupted_pinned_record_cannot_fall_back_to_markdown_completion() {
     for missing in [true, false] {
         let fixture = Fixture::held();
@@ -832,6 +1125,34 @@ fn damaging_the_review_of_a_learned_task_revokes_complete_in_status_and_next() {
     assert!(!next.contains("All tasks complete"), "{next}");
     assert_eq!(fs::read(fixture.path(STATE)).unwrap(), state);
     fixture.require_blocked_completion();
+}
+
+#[test]
+fn a_pinned_target_that_repeats_a_criterion_id_is_unavailable() {
+    let fixture = Fixture::held();
+    fixture.submit_positive();
+    assert_success(&fixture.run(&["run-task", SPEC]));
+    assert_eq!(fixture.state()["status"], "learned");
+
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(fixture.path(REVIEW)).unwrap()).unwrap();
+    let criteria = record["target"]["criteria"].as_array_mut().unwrap();
+    let mut copy = criteria[0].clone();
+    // Accepting this target would leave the copy's check uncited by any assessment.
+    copy["checks"] = json!(["copy-only"]);
+    criteria.push(copy);
+    let target: mmcg::task_review::Target =
+        serde_json::from_value(record["target"].clone()).unwrap();
+    record["report"]["target_revision"] = json!(sha(&serde_json::to_vec(&target).unwrap()));
+    fixture.write(REVIEW, &record.to_string());
+    let mut state = fixture.state();
+    state["semantic_review_sha256"] = json!(sha(&fs::read(fixture.path(REVIEW)).unwrap()));
+    fixture.write(STATE, &state.to_string());
+
+    let (output, status) = fixture.status();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(status["status"], "unavailable", "{status}");
+    assert_eq!(status["reason"], "semantic_review_target_invalid");
 }
 
 #[test]

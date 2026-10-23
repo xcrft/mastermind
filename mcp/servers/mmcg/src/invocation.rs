@@ -77,6 +77,11 @@ impl NativeRole {
     }
 }
 
+/// Executor native turns when neither a flag nor the project setting names a budget.
+pub const DEFAULT_MAX_TURNS: u32 = 40;
+/// Executor wall-clock limit in seconds when neither a flag nor the project setting names one.
+pub const DEFAULT_WALL_TIMEOUT_SECS: u64 = 1800;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationOptions {
@@ -94,8 +99,8 @@ fn is_false(value: &bool) -> bool {
 impl Default for InvocationOptions {
     fn default() -> Self {
         Self {
-            wall_timeout_secs: 1800,
-            max_turns: 40,
+            wall_timeout_secs: DEFAULT_WALL_TIMEOUT_SECS,
+            max_turns: DEFAULT_MAX_TURNS,
             profile_client: None,
             guarded: false,
         }

@@ -94,6 +94,11 @@ bytes. Postflight excludes unchanged prior work; editing, deleting, restoring,
 or changing the executable mode of those files remains part of the task diff.
 Retries keep this initial worktree rather than absorbing implementation into it.
 
+Keep one open task per checkout. Postflight audits every change made after the
+first approval, so another task's edits appear as `unexpected_file` findings
+and the verdict becomes Broken. They also make this task's check receipts stale.
+Close a task before approving the next one in the same checkout.
+
 ### 2. Implement and record checks
 
 Give the approved spec to an implementation client. The executor writes
@@ -221,6 +226,10 @@ The controller rechecks receipts, executables, audit, and review before
 the reviewed iteration, not deployment or future correctness.
 Use `--post-only` to audit current work again.
 
+Commit after `learned`. Check receipts bind HEAD and the Git index, so a commit
+or staged change during an open task makes them stale (`receipt_snapshot_changed`).
+The checks, postflight and review then have to run again.
+
 <a id="continue-from-review-feedback"></a>
 
 ## Continue from feedback
@@ -289,8 +298,8 @@ mastermind review-task run "$TASK_SPEC" --timeout 600 --max-turns 30 --json
 The reviewer requests `Read,Grep,Glob`, no permission prompts, empty MCP, and
 supported native restrictions. It answers through Claude Code's StructuredOutput
 tool against a closed JSON schema (Claude Code 2.1.290 or later) and has 30
-turns by default; `mastermind init --review-max-turns N` sets the project
-default. It injects no personal profile.
+turns and 600 seconds by default. `mastermind init --review-max-turns N` and
+`--review-timeout N` set the project defaults. It injects no personal profile.
 `review-invocation.json` records the attempt separately.
 
 ```bash
@@ -314,8 +323,14 @@ unresolved history and native failures stop even when that flag is enabled.
 |---|---:|---:|
 | Default process time | 1,800 s | 600 s |
 | Allowed process time | 1–7,200 s | 1–7,200 s |
-| Default turns | 40 | 20 |
+| Default turns | 40 | 30 |
 | Allowed turns | 1–100 | 1–100 |
+
+Each limit resolves as an explicit flag, then the project setting in
+`.mastermind/setup.json`, then the default above. `mastermind init
+--exec-max-turns N`, `--exec-timeout N`, `--review-max-turns N` and
+`--review-timeout N` store the project settings; a default value is never
+written.
 
 Sources: [CLI definitions](../mcp/servers/mmcg/src/main.rs) and
 [runtime contract](reference/task-runtime.md). Preparation has separate bounds.

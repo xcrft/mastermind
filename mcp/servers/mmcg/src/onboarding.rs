@@ -5,7 +5,8 @@ use crate::bounded_fs::{
     self, AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability,
     StableFileIdentity, StableFileLock,
 };
-use crate::review_invocation::DEFAULT_MAX_TURNS;
+use crate::invocation::{DEFAULT_MAX_TURNS as DEFAULT_EXEC_MAX_TURNS, DEFAULT_WALL_TIMEOUT_SECS};
+use crate::review_invocation::{DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -25,8 +26,8 @@ fn is_default_profile_budget_tokens(value: &usize) -> bool {
     *value == DEFAULT_PROFILE_BUDGET_TOKENS
 }
 
-pub const MIN_REVIEW_MAX_TURNS: u32 = 1;
-pub const MAX_REVIEW_MAX_TURNS: u32 = 100;
+pub const MIN_TURN_LIMIT: u32 = 1;
+pub const MAX_TURN_LIMIT: u32 = 100;
 
 fn default_review_max_turns() -> u32 {
     DEFAULT_MAX_TURNS
@@ -34,6 +35,33 @@ fn default_review_max_turns() -> u32 {
 
 fn is_default_review_max_turns(value: &u32) -> bool {
     *value == DEFAULT_MAX_TURNS
+}
+
+pub const MIN_TIMEOUT_SECS: u64 = 1;
+pub const MAX_TIMEOUT_SECS: u64 = 7200;
+
+fn default_exec_max_turns() -> u32 {
+    DEFAULT_EXEC_MAX_TURNS
+}
+
+fn is_default_exec_max_turns(value: &u32) -> bool {
+    *value == DEFAULT_EXEC_MAX_TURNS
+}
+
+fn default_exec_timeout_secs() -> u64 {
+    DEFAULT_WALL_TIMEOUT_SECS
+}
+
+fn is_default_exec_timeout_secs(value: &u64) -> bool {
+    *value == DEFAULT_WALL_TIMEOUT_SECS
+}
+
+fn default_review_timeout_secs() -> u64 {
+    DEFAULT_TIMEOUT_SECS
+}
+
+fn is_default_review_timeout_secs(value: &u64) -> bool {
+    *value == DEFAULT_TIMEOUT_SECS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +103,27 @@ pub struct Settings {
         skip_serializing_if = "is_default_review_max_turns"
     )]
     pub review_max_turns: u32,
+    /// Native turns for `run-task --exec` when the command line does not pass
+    /// an explicit budget.
+    #[serde(
+        default = "default_exec_max_turns",
+        skip_serializing_if = "is_default_exec_max_turns"
+    )]
+    pub exec_max_turns: u32,
+    /// Wall-clock seconds for `run-task --exec` when the command line does not
+    /// pass an explicit limit.
+    #[serde(
+        default = "default_exec_timeout_secs",
+        skip_serializing_if = "is_default_exec_timeout_secs"
+    )]
+    pub exec_timeout_secs: u64,
+    /// Wall-clock seconds for `review-task run` and `run-task --auto-review`
+    /// when the command line does not pass an explicit limit.
+    #[serde(
+        default = "default_review_timeout_secs",
+        skip_serializing_if = "is_default_review_timeout_secs"
+    )]
+    pub review_timeout_secs: u64,
 }
 
 impl Settings {
@@ -93,6 +142,9 @@ impl Settings {
             workflow: true,
             profile_budget_tokens: DEFAULT_PROFILE_BUDGET_TOKENS,
             review_max_turns: DEFAULT_MAX_TURNS,
+            exec_max_turns: DEFAULT_EXEC_MAX_TURNS,
+            exec_timeout_secs: DEFAULT_WALL_TIMEOUT_SECS,
+            review_timeout_secs: DEFAULT_TIMEOUT_SECS,
         }
     }
 
@@ -131,9 +183,23 @@ impl Settings {
             )
             .into());
         }
-        if !(MIN_REVIEW_MAX_TURNS..=MAX_REVIEW_MAX_TURNS).contains(&self.review_max_turns) {
+        if !(MIN_TURN_LIMIT..=MAX_TURN_LIMIT).contains(&self.review_max_turns) {
+            return Err(
+                format!("review max turns must be {MIN_TURN_LIMIT}-{MAX_TURN_LIMIT}").into(),
+            );
+        }
+        if !(MIN_TURN_LIMIT..=MAX_TURN_LIMIT).contains(&self.exec_max_turns) {
+            return Err(format!("exec max turns must be {MIN_TURN_LIMIT}-{MAX_TURN_LIMIT}").into());
+        }
+        if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&self.exec_timeout_secs) {
             return Err(format!(
-                "review max turns must be {MIN_REVIEW_MAX_TURNS}-{MAX_REVIEW_MAX_TURNS}"
+                "exec timeout must be {MIN_TIMEOUT_SECS}-{MAX_TIMEOUT_SECS} seconds"
+            )
+            .into());
+        }
+        if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&self.review_timeout_secs) {
+            return Err(format!(
+                "review timeout must be {MIN_TIMEOUT_SECS}-{MAX_TIMEOUT_SECS} seconds"
             )
             .into());
         }
@@ -197,21 +263,39 @@ pub fn load(root: &Path) -> Result<Option<Settings>, Error> {
 /// Missing or unreadable `setup.json` uses the in-memory default rather than
 /// blocking profile delivery. Loading never creates onboarding state.
 pub fn profile_budget_tokens(root: &Path) -> usize {
+    setting(root, DEFAULT_PROFILE_BUDGET_TOKENS, |s| {
+        s.profile_budget_tokens
+    })
+}
+
+fn setting<T>(root: &Path, default: T, pick: fn(&Settings) -> T) -> T {
     load(root)
         .ok()
         .flatten()
-        .map_or(DEFAULT_PROFILE_BUDGET_TOKENS, |settings| {
-            settings.profile_budget_tokens
-        })
+        .map_or(default, |settings| pick(&settings))
 }
 
 /// Project reviewer turn budget, fail-soft like [`profile_budget_tokens`]: a
 /// missing or unreadable `setup.json` reads as the default.
 pub fn review_max_turns(root: &Path) -> u32 {
-    load(root)
-        .ok()
-        .flatten()
-        .map_or(DEFAULT_MAX_TURNS, |settings| settings.review_max_turns)
+    setting(root, DEFAULT_MAX_TURNS, |s| s.review_max_turns)
+}
+
+/// Project executor turn budget; a missing or unreadable `setup.json` reads as the default.
+pub fn exec_max_turns(root: &Path) -> u32 {
+    setting(root, DEFAULT_EXEC_MAX_TURNS, |s| s.exec_max_turns)
+}
+
+/// Project executor wall-clock limit in seconds; a missing or unreadable `setup.json` reads as
+/// the default.
+pub fn exec_timeout_secs(root: &Path) -> u64 {
+    setting(root, DEFAULT_WALL_TIMEOUT_SECS, |s| s.exec_timeout_secs)
+}
+
+/// Project reviewer wall-clock limit in seconds; a missing or unreadable `setup.json` reads as
+/// the default.
+pub fn review_timeout_secs(root: &Path) -> u64 {
+    setting(root, DEFAULT_TIMEOUT_SECS, |s| s.review_timeout_secs)
 }
 
 pub fn profile_access(root: &Path, client: &str) -> Result<bool, Error> {
@@ -375,56 +459,71 @@ mod tests {
             .contains("profile_budget_tokens"));
     }
 
-    #[test]
-    fn review_turns_fall_back_to_the_default_on_a_missing_or_unreadable_file() {
+    fn write_settings(root: &Path, settings: &Settings) {
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        std::fs::write(
+            root.join(".mastermind/setup.json"),
+            serde_json::to_vec(settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn assert_range<T: Copy + std::fmt::Debug>(
+        set: impl Fn(&mut Settings, T),
+        valid: [T; 2],
+        invalid: [T; 2],
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        assert_eq!(review_max_turns(&root), DEFAULT_MAX_TURNS);
+        let mut settings = Settings::local(&root);
+        for value in valid {
+            set(&mut settings, value);
+            assert!(settings.validate(&root).is_ok(), "{value:?}");
+        }
+        for value in invalid {
+            set(&mut settings, value);
+            assert!(settings.validate(&root).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn turn_limits_outside_one_to_one_hundred_are_invalid() {
+        assert_range(|s, v| s.review_max_turns = v, [1, 100], [0, 101]);
+        assert_range(|s, v| s.exec_max_turns = v, [1, 100], [0, 101]);
+    }
+
+    #[test]
+    fn exec_and_review_timeouts_outside_one_to_7200_seconds_are_invalid() {
+        assert_range(|s, v| s.exec_timeout_secs = v, [1, 7200], [0, 7201]);
+        assert_range(|s, v| s.review_timeout_secs = v, [1, 7200], [0, 7201]);
+    }
+
+    #[test]
+    fn the_native_limits_read_as_the_defaults_without_a_readable_setup_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let defaults = (
+            crate::review_invocation::DEFAULT_MAX_TURNS,
+            crate::invocation::DEFAULT_MAX_TURNS,
+            crate::invocation::DEFAULT_WALL_TIMEOUT_SECS,
+            crate::review_invocation::DEFAULT_TIMEOUT_SECS,
+        );
+        let read = |root: &Path| {
+            (
+                review_max_turns(root),
+                exec_max_turns(root),
+                exec_timeout_secs(root),
+                review_timeout_secs(root),
+            )
+        };
+        assert_eq!(defaults, (30, 40, 1800, 600));
+        assert_eq!(read(&root), defaults);
 
         std::fs::create_dir(root.join(".mastermind")).unwrap();
         std::fs::write(root.join(".mastermind/setup.json"), b"not json").unwrap();
         assert!(load(&root).is_err());
-        assert_eq!(review_max_turns(&root), DEFAULT_MAX_TURNS);
-    }
+        assert_eq!(read(&root), defaults);
 
-    #[test]
-    fn review_turns_outside_one_to_one_hundred_are_invalid() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let mut settings = Settings::local(&root);
-        for valid in [1, 100] {
-            settings.review_max_turns = valid;
-            assert!(settings.validate(&root).is_ok(), "{valid}");
-        }
-        for invalid in [0, 101] {
-            settings.review_max_turns = invalid;
-            assert!(settings.validate(&root).is_err(), "{invalid}");
-        }
-    }
-
-    #[test]
-    fn a_configured_review_turn_budget_is_read_back_and_the_default_is_never_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join(".mastermind")).unwrap();
-        let mut settings = Settings::local(&root);
-        assert!(!serde_json::to_string(&settings)
-            .unwrap()
-            .contains("review_max_turns"));
-        settings.review_max_turns = 25;
-        std::fs::write(
-            root.join(".mastermind/setup.json"),
-            serde_json::to_vec(&settings).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(review_max_turns(&root), 25);
-    }
-
-    #[test]
-    fn old_setup_file_without_the_review_turn_key_loads_as_the_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join(".mastermind")).unwrap();
         let legacy = serde_json::json!({
             "schema_version": 1,
             "project_root": root,
@@ -442,6 +541,31 @@ mod tests {
             serde_json::to_vec(&legacy).unwrap(),
         )
         .unwrap();
-        assert_eq!(review_max_turns(&root), DEFAULT_MAX_TURNS);
+        assert_eq!(read(&root), defaults);
+    }
+
+    #[test]
+    fn configured_native_limits_are_read_back_and_defaults_are_never_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut settings = Settings::local(&root);
+        let written = serde_json::to_string(&settings).unwrap();
+        for key in [
+            "review_max_turns",
+            "exec_max_turns",
+            "exec_timeout_secs",
+            "review_timeout_secs",
+        ] {
+            assert!(!written.contains(key), "{key}");
+        }
+        settings.review_max_turns = 25;
+        settings.exec_max_turns = 7;
+        settings.exec_timeout_secs = 20;
+        settings.review_timeout_secs = 45;
+        write_settings(&root, &settings);
+        assert_eq!(review_max_turns(&root), 25);
+        assert_eq!(exec_max_turns(&root), 7);
+        assert_eq!(exec_timeout_secs(&root), 20);
+        assert_eq!(review_timeout_secs(&root), 45);
     }
 }

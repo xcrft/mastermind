@@ -727,6 +727,35 @@ fn native_executor_preserves_profile_delivery_opt_out_without_revoking_mcp_acces
 }
 
 #[test]
+fn the_project_limits_are_the_executor_defaults_and_a_flag_wins() {
+    let fixture = Fixture::new("repair");
+    assert_success(&fixture.execute(&[]));
+    let receipt = fixture.receipt();
+    assert_eq!(receipt["options"]["max_turns"], 40);
+    assert_eq!(receipt["options"]["wall_timeout_secs"], 1800);
+
+    assert_success(&fixture.run(&[
+        "init",
+        "--client",
+        "none",
+        "--exec-max-turns",
+        "7",
+        "--exec-timeout",
+        "20",
+        "--json",
+    ]));
+    assert_success(&fixture.execute(&[]));
+    let receipt = fixture.receipt();
+    assert_eq!(receipt["options"]["max_turns"], 7);
+    assert_eq!(receipt["options"]["wall_timeout_secs"], 20);
+
+    assert_success(&fixture.execute(&["--exec-max-turns", "9", "--exec-timeout", "30"]));
+    let receipt = fixture.receipt();
+    assert_eq!(receipt["options"]["max_turns"], 9);
+    assert_eq!(receipt["options"]["wall_timeout_secs"], 30);
+}
+
+#[test]
 fn successful_invocation_binds_exact_stdin_context_and_keeps_private_payloads_out_of_receipt() {
     let fixture = Fixture::new("repair");
     fixture.seed_private_preference();

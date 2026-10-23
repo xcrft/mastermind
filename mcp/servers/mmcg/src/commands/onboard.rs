@@ -37,6 +37,18 @@ pub struct Options {
     /// run-task --auto-review); an explicit command flag wins.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     review_max_turns: Option<u32>,
+    /// Native turns the task executor gets by default (run-task --exec); an
+    /// explicit command flag wins.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    exec_max_turns: Option<u32>,
+    /// Wall-clock seconds the task executor gets by default (run-task --exec);
+    /// an explicit command flag wins.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    exec_timeout: Option<u64>,
+    /// Wall-clock seconds the task reviewer gets by default (review-task run and
+    /// run-task --auto-review); an explicit command flag wins.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    review_timeout: Option<u64>,
     /// Allow selected clients to read the personal profile. Enabled on first client setup.
     #[arg(long, value_parser = ["on", "off"])]
     profile_access: Option<String>,
@@ -156,6 +168,15 @@ fn selection(
     }
     if let Some(value) = options.review_max_turns {
         settings.review_max_turns = value;
+    }
+    if let Some(value) = options.exec_max_turns {
+        settings.exec_max_turns = value;
+    }
+    if let Some(value) = options.exec_timeout {
+        settings.exec_timeout_secs = value;
+    }
+    if let Some(value) = options.review_timeout {
+        settings.review_timeout_secs = value;
     }
     if let Some(value) = &options.profile_access {
         settings.profile_access = value == "on";

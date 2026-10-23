@@ -217,23 +217,31 @@ pub(crate) fn validate(
     decisions: &Decisions,
     evidence_ids: &BTreeSet<String>,
 ) -> Result<(), String> {
-    for (key, assessment) in [
-        ("knowledge:context", &decisions.context),
-        ("knowledge:lessons", &decisions.lessons),
+    for (location, key, assessment) in [
+        ("history.context", "knowledge:context", &decisions.context),
+        ("history.lessons", "knowledge:lessons", &decisions.lessons),
     ] {
         let unique: BTreeSet<&String> = assessment.evidence.iter().collect();
-        if !valid_reason(&assessment.reason)
-            || assessment.evidence.len() > 64
-            || unique.len() != assessment.evidence.len()
-            || assessment
-                .evidence
-                .iter()
-                .any(|id| !evidence_ids.contains(id))
-            || (assessment.decision != Decision::Unknown
-                && !assessment.evidence.iter().any(|id| id == key))
+        let rule = if !valid_reason(&assessment.reason) {
+            "history_disposition_reason_invalid"
+        } else if assessment.evidence.len() > 64 {
+            "history_disposition_evidence_limit"
+        } else if unique.len() != assessment.evidence.len() {
+            "history_disposition_evidence_duplicate"
+        } else if assessment
+            .evidence
+            .iter()
+            .any(|id| !evidence_ids.contains(id))
         {
-            return Err("history_disposition_assessment_invalid".into());
-        }
+            "history_disposition_evidence_unknown"
+        } else if assessment.decision != Decision::Unknown
+            && !assessment.evidence.iter().any(|id| id == key)
+        {
+            "history_disposition_source_not_cited"
+        } else {
+            continue;
+        };
+        return Err(format!("{location}: {rule}"));
     }
     Ok(())
 }
@@ -429,14 +437,39 @@ mod tests {
         let valid = reviewed();
         validate(&valid, &ids).unwrap();
         assert_eq!(status(&valid), HistoryStatus::Resolved);
-        assert!(validate(&Decisions::unknown(), &ids).is_err());
-        for mutation in [
-            "duplicate",
-            "unknown",
-            "wrong_source",
-            "placeholder",
-            "reason_limit",
-            "ref_limit",
+        assert_eq!(
+            validate(&Decisions::unknown(), &ids),
+            Err("history.context: history_disposition_reason_invalid".into())
+        );
+        for (mutation, expected) in [
+            (
+                "duplicate",
+                "history.context: history_disposition_evidence_duplicate",
+            ),
+            (
+                "unknown",
+                "history.context: history_disposition_evidence_unknown",
+            ),
+            (
+                "wrong_source",
+                "history.context: history_disposition_source_not_cited",
+            ),
+            (
+                "placeholder",
+                "history.context: history_disposition_reason_invalid",
+            ),
+            (
+                "reason_limit",
+                "history.context: history_disposition_reason_invalid",
+            ),
+            (
+                "ref_limit",
+                "history.context: history_disposition_evidence_limit",
+            ),
+            (
+                "lessons_placeholder",
+                "history.lessons: history_disposition_reason_invalid",
+            ),
         ] {
             let mut invalid = valid.clone();
             let mut known = ids.clone();
@@ -453,9 +486,14 @@ mod tests {
                         invalid.context.evidence.push(id);
                     }
                 }
+                "lessons_placeholder" => invalid.lessons.reason = "TODO".into(),
                 _ => unreachable!(),
             }
-            assert!(validate(&invalid, &known).is_err(), "{mutation}");
+            assert_eq!(
+                validate(&invalid, &known),
+                Err(expected.into()),
+                "{mutation}"
+            );
         }
     }
 

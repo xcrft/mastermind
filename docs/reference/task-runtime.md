@@ -263,7 +263,7 @@ acceptance:
 
 | Native transport | Limit |
 |---|---|
-| Executor wall time / turns | 1–7,200 seconds / 1–100, defaults 1,800 / 40 |
+| Executor wall time / turns | 1–7,200 seconds / 1–100, defaults 1,800 / 40. `mastermind init --exec-timeout N` and `--exec-max-turns N` set the project defaults in `.mastermind/setup.json`. An explicit `--exec-timeout` or `--exec-max-turns` wins. The defaults are never written |
 | Input | 128 KiB |
 | Process output / protocol line | 16 MiB / 1 MiB |
 | Version/help probe output | 64 KiB |
@@ -351,7 +351,7 @@ semantic correctness.
 | Source inventory | 10,000 files, 4 MiB/file, 64 MiB per snapshot |
 | Patch / complete prompt | 64 KiB / 128 KiB |
 | Terminal result | 1 MiB |
-| Wall time / turns | 1–7,200 seconds / 1–100, defaults 600 / 30. `mastermind init --review-max-turns N` (1–100) sets the project default turns in `.mastermind/setup.json`. An explicit `--max-turns` or `--review-max-turns` wins. The default 30 is never written |
+| Wall time / turns | 1–7,200 seconds / 1–100, defaults 600 / 30. `mastermind init --review-max-turns N` (1–100) and `--review-timeout N` (1–7,200) set the project default turns and seconds in `.mastermind/setup.json`. An explicit `--max-turns`, `--review-max-turns`, `--timeout` or `--review-timeout` wins. The defaults 30 and 600 are never written |
 | Review invocation receipt | 256 KiB |
 
 | Native reviewer setting | Required value or limit |

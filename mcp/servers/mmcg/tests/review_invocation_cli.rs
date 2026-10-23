@@ -1909,19 +1909,19 @@ impl Fixture {
         args[flag + 1].to_owned()
     }
 
-    fn init_review_turns(&self, turns: &str) -> Output {
-        self.run(&[
-            "init",
-            "--client",
-            "none",
-            "--review-max-turns",
-            turns,
-            "--json",
-        ])
+    fn review_wall_timeout(&self) -> Value {
+        self.value(NATIVE_RECEIPT)["invocation"]["options"]["wall_timeout_secs"].clone()
     }
 
-    fn init_and_commit_review_turns(&self, turns: &str) {
-        assert_success(&self.init_review_turns(turns));
+    fn init_with(&self, flags: &[&str]) -> Output {
+        let mut args = vec!["init", "--client", "none"];
+        args.extend(flags);
+        args.push("--json");
+        self.run(&args)
+    }
+
+    fn init_and_commit_with(&self, flags: &[&str]) {
+        assert_success(&self.init_with(flags));
         self.git(&["add", "."]);
         self.git(&["commit", "-qm", "Scaffold written by init"]);
         self.index();
@@ -1945,7 +1945,7 @@ fn the_reviewer_gets_thirty_turns_unless_a_flag_says_otherwise() {
 #[test]
 fn the_project_setting_is_the_review_task_run_default_and_a_flag_wins() {
     let fixture = Fixture::new();
-    fixture.init_and_commit_review_turns("25");
+    fixture.init_and_commit_with(&["--review-max-turns", "25"]);
     let fixture = fixture.hold();
     assert_success(&fixture.native_review(&["--timeout", "20"]));
     assert_eq!(fixture.reviewer_max_turns(1), "25");
@@ -1957,7 +1957,7 @@ fn the_project_setting_is_the_review_task_run_default_and_a_flag_wins() {
 fn the_project_setting_is_the_auto_review_default_and_a_flag_wins() {
     for (flag, expected) in [(None, "25"), (Some("12"), "12")] {
         let fixture = Fixture::new();
-        fixture.init_and_commit_review_turns("25");
+        fixture.init_and_commit_with(&["--review-max-turns", "25"]);
         let mut args = vec!["run-task", SPEC, "--exec", "--auto-review"];
         if let Some(turns) = flag {
             args.extend(["--review-max-turns", turns]);
@@ -1968,26 +1968,98 @@ fn the_project_setting_is_the_auto_review_default_and_a_flag_wins() {
 }
 
 #[test]
-fn init_stores_a_non_default_review_turn_budget_and_never_the_default() {
+fn init_stores_non_default_native_limits_and_never_the_defaults() {
     let fixture = Fixture::new();
-    assert_success(&fixture.init_review_turns("30"));
-    assert!(fixture
-        .setup_json()
-        .unwrap()
-        .get("review_max_turns")
-        .is_none());
-    assert_success(&fixture.init_review_turns("25"));
-    assert_eq!(fixture.setup_json().unwrap()["review_max_turns"], 25);
+    assert_success(&fixture.init_with(&[
+        "--review-max-turns",
+        "30",
+        "--exec-max-turns",
+        "40",
+        "--exec-timeout",
+        "1800",
+        "--review-timeout",
+        "600",
+    ]));
+    let setup = fixture.setup_json().unwrap();
+    for key in [
+        "review_max_turns",
+        "exec_max_turns",
+        "exec_timeout_secs",
+        "review_timeout_secs",
+    ] {
+        assert!(setup.get(key).is_none(), "{key}");
+    }
+    assert_success(&fixture.init_with(&[
+        "--review-max-turns",
+        "25",
+        "--exec-max-turns",
+        "7",
+        "--exec-timeout",
+        "20",
+        "--review-timeout",
+        "45",
+    ]));
+    let setup = fixture.setup_json().unwrap();
+    assert_eq!(setup["review_max_turns"], 25);
+    assert_eq!(setup["exec_max_turns"], 7);
+    assert_eq!(setup["exec_timeout_secs"], 20);
+    assert_eq!(setup["review_timeout_secs"], 45);
 }
 
 #[test]
-fn init_rejects_a_review_turn_budget_outside_one_to_one_hundred() {
+fn init_rejects_native_limits_outside_their_ranges() {
     let fixture = Fixture::new();
-    for turns in ["0", "101"] {
-        let output = fixture.init_review_turns(turns);
-        assert!(!output.status.success(), "{turns}: {output:?}");
-        assert!(fixture.setup_json().is_none(), "{turns}");
+    for (flag, value, range) in [
+        ("--review-max-turns", "0", "1..=100"),
+        ("--review-max-turns", "101", "1..=100"),
+        ("--exec-max-turns", "0", "1..=100"),
+        ("--exec-max-turns", "101", "1..=100"),
+        ("--exec-timeout", "0", "1..=7200"),
+        ("--exec-timeout", "7201", "1..=7200"),
+        ("--review-timeout", "0", "1..=7200"),
+        ("--review-timeout", "7201", "1..=7200"),
+    ] {
+        let output = fixture.init_with(&[flag, value]);
+        assert!(!output.status.success(), "{flag} {value}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{value} is not in {range}")),
+            "{flag}: {stderr}"
+        );
+        assert!(fixture.setup_json().is_none(), "{flag} {value}");
     }
+}
+
+#[test]
+fn the_project_setting_is_the_review_task_run_timeout_and_a_flag_wins() {
+    let fixture = Fixture::new();
+    fixture.init_and_commit_with(&["--review-timeout", "45"]);
+    let fixture = fixture.hold();
+    assert_success(&fixture.native_review(&[]));
+    assert_eq!(fixture.review_wall_timeout(), 45);
+    assert_success(&fixture.native_review(&["--timeout", "20"]));
+    assert_eq!(fixture.review_wall_timeout(), 20);
+}
+
+#[test]
+fn the_project_setting_is_the_auto_review_timeout_and_a_flag_wins() {
+    for (flag, expected) in [(None, 45), (Some("20"), 20)] {
+        let fixture = Fixture::new();
+        fixture.init_and_commit_with(&["--review-timeout", "45"]);
+        let mut args = vec!["run-task", SPEC, "--exec", "--auto-review"];
+        if let Some(seconds) = flag {
+            args.extend(["--review-timeout", seconds]);
+        }
+        assert_success(&fixture.run(&args));
+        assert_eq!(fixture.review_wall_timeout(), expected);
+    }
+}
+
+#[test]
+fn the_reviewer_timeout_is_600_seconds_without_a_flag_or_project_setting() {
+    let fixture = Fixture::held();
+    assert_success(&fixture.native_review(&[]));
+    assert_eq!(fixture.review_wall_timeout(), 600);
 }
 
 #[test]

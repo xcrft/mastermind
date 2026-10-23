@@ -24,6 +24,8 @@ const PATH_LIMIT: usize = 10_000;
 /// Reviewer turns when neither a flag nor the project setting names a budget.
 /// The StructuredOutput answer costs one turn on top of the inspection.
 pub const DEFAULT_MAX_TURNS: u32 = 30;
+/// Reviewer wall-clock limit in seconds when neither a flag nor the project setting names one.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -34,7 +36,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            timeout_secs: 600,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_turns: DEFAULT_MAX_TURNS,
         }
     }

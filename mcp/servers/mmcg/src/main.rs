@@ -787,19 +787,22 @@ struct RunTaskArgs {
     /// Allow one concrete negative-criterion repair followed by a fresh review.
     #[arg(long, requires_all = ["exec", "auto_review"], conflicts_with_all = ["pre_only", "post_only", "force_iteration"])]
     auto_follow_up: bool,
-    /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds).
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
-    review_timeout: u64,
+    /// Reviewer wall-clock limit, independent of the executor (1–7200 seconds). Defaults to the
+    /// project's `init --review-timeout`, else 600.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    review_timeout: Option<u64>,
     /// Reviewer native turn budget, independent of the executor (1–100). Defaults to the
     /// project's `init --review-max-turns`, else 30.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     review_max_turns: Option<u32>,
-    /// Wall-clock limit for the native invocation, in seconds (1–7200).
-    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
-    exec_timeout: u64,
-    /// Native agent turn budget (1–100).
-    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..=100))]
-    exec_max_turns: u32,
+    /// Wall-clock limit for the native invocation, in seconds (1–7200). Defaults to the
+    /// project's `init --exec-timeout`, else 1800.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    exec_timeout: Option<u64>,
+    /// Native agent turn budget (1–100). Defaults to the project's `init --exec-max-turns`,
+    /// else 40.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    exec_max_turns: Option<u32>,
     /// Override the automatically selected project profile audience for this invocation.
     #[arg(long, requires = "exec")]
     profile_client: Option<String>,
@@ -1034,8 +1037,10 @@ enum TaskReviewCmd {
         spec: PathBuf,
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
-        timeout: u64,
+        /// Wall-clock limit in seconds (1–7200). Defaults to the project's
+        /// `init --review-timeout`, else 600.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        timeout: Option<u64>,
         /// Native turn budget (1–100). Defaults to the project's `init --review-max-turns`, else 30.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
         max_turns: Option<u32>,
@@ -2073,14 +2078,19 @@ fn parse_cli() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
 }
 
-/// Explicit flag, else the project's `init --review-max-turns`, else the default.
-fn review_max_turns(flag: Option<u32>, root: &std::path::Path) -> u32 {
-    if let Some(turns) = flag {
-        return turns;
+/// Explicit flag, else the project's `setup.json` value read by `read`, else `default`.
+fn resolve_limit<T>(
+    flag: Option<T>,
+    root: &std::path::Path,
+    read: fn(&std::path::Path) -> T,
+    default: T,
+) -> T {
+    if let Some(value) = flag {
+        return value;
     }
     match root.canonicalize() {
-        Ok(root) => mmcg::onboarding::review_max_turns(&root),
-        Err(_) => mmcg::review_invocation::DEFAULT_MAX_TURNS,
+        Ok(root) => read(&root),
+        Err(_) => default,
     }
 }
 
@@ -2851,16 +2861,21 @@ fn run_cli_inner(
                     max_turns,
                     json,
                 } => {
-                    let max_turns = review_max_turns(max_turns, &root);
-                    dispatch(
-                        &spec,
-                        root,
-                        Action::Run(&mmcg::review_invocation::Options {
-                            timeout_secs: timeout,
+                    let options = mmcg::review_invocation::Options {
+                        timeout_secs: resolve_limit(
+                            timeout,
+                            &root,
+                            mmcg::onboarding::review_timeout_secs,
+                            mmcg::review_invocation::DEFAULT_TIMEOUT_SECS,
+                        ),
+                        max_turns: resolve_limit(
                             max_turns,
-                        }),
-                        json,
-                    )?
+                            &root,
+                            mmcg::onboarding::review_max_turns,
+                            mmcg::review_invocation::DEFAULT_MAX_TURNS,
+                        ),
+                    };
+                    dispatch(&spec, root, Action::Run(&options), json)?
                 }
                 TaskReviewCmd::Prepare { spec, root, json } => {
                     dispatch(&spec, root, Action::Prepare, json)?
@@ -3069,12 +3084,32 @@ fn run_cli_inner(
                     auto_review,
                     auto_follow_up,
                     review_invocation: mmcg::review_invocation::Options {
-                        timeout_secs: review_timeout,
-                        max_turns: review_max_turns(review_max_turns_flag, &index_root),
+                        timeout_secs: resolve_limit(
+                            review_timeout,
+                            &index_root,
+                            mmcg::onboarding::review_timeout_secs,
+                            mmcg::review_invocation::DEFAULT_TIMEOUT_SECS,
+                        ),
+                        max_turns: resolve_limit(
+                            review_max_turns_flag,
+                            &index_root,
+                            mmcg::onboarding::review_max_turns,
+                            mmcg::review_invocation::DEFAULT_MAX_TURNS,
+                        ),
                     },
                     invocation: mmcg::invocation::InvocationOptions {
-                        wall_timeout_secs: exec_timeout,
-                        max_turns: exec_max_turns,
+                        wall_timeout_secs: resolve_limit(
+                            exec_timeout,
+                            &index_root,
+                            mmcg::onboarding::exec_timeout_secs,
+                            mmcg::invocation::DEFAULT_WALL_TIMEOUT_SECS,
+                        ),
+                        max_turns: resolve_limit(
+                            exec_max_turns,
+                            &index_root,
+                            mmcg::onboarding::exec_max_turns,
+                            mmcg::invocation::DEFAULT_MAX_TURNS,
+                        ),
                         profile_client,
                         guarded: guarded_exec,
                     },

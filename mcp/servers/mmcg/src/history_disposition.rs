@@ -248,6 +248,7 @@ pub(crate) fn validate(
 
 fn valid_reason(reason: &str) -> bool {
     let text = reason.trim();
+    let placeholder = text.starts_with('<') && text.ends_with('>');
     reason.len() <= 8192
         && !text.is_empty()
         && !reason
@@ -268,7 +269,7 @@ fn valid_reason(reason: &str) -> bool {
                 | "pending semantic review"
                 | "semantic review required"
         )
-        && !(text.starts_with('<') && text.ends_with('>'))
+        && !placeholder
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

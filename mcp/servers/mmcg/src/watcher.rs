@@ -1,48 +1,82 @@
 //! Filesystem watcher — keeps the index fresh as files change.
 //!
 //! Architecture:
-//!   1. Initial full index of `root`
-//!   2. Subscribe to recursive filesystem events under `root`
+//!   1. Subscribe to recursive filesystem events under `root`
+//!   2. Initial full index of `root`
 //!   3. Coalesce rapid-fire events per path with a 500ms debounce
 //!   4. Re-index files on Modify/Create, purge on Remove
 //!
 //! Runs in the foreground until stdin closes or Ctrl-C.
 
 use crate::indexer::{
-    extractor_for_path, IndexError, Indexer, SourceMatcher, PROJECT_DECISION_DIRS,
+    extractor_for_path, IndexError, IndexStats, Indexer, SourceMatcher, PROJECT_DECISION_DIRS,
 };
 use crate::store::Store;
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const RX_TIMEOUT: Duration = Duration::from_millis(100);
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_INDEX_ATTEMPTS: u8 = 3;
+const MAX_QUEUED_EVENTS: usize = 4096;
+const MAX_PENDING_PATHS: usize = 4096;
+
+#[derive(Default)]
+struct PendingChanges {
+    paths: HashMap<PathBuf, Instant>,
+    full_refresh: Option<PendingRefresh>,
+}
+
+struct PendingRefresh {
+    ready_at: Instant,
+    failures: u8,
+}
 
 pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     let indexer = Indexer::new(&root);
+
+    let (tx, rx) = mpsc::sync_channel::<notify::Result<notify::Event>>(MAX_QUEUED_EVENTS);
+    let overflow = Arc::new(AtomicBool::new(false));
+    let callback_overflow = Arc::clone(&overflow);
+    let database_path = store.db_path().canonicalize()?;
+    let index_files: Vec<PathBuf> = ["", "-wal", "-shm", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let mut path = database_path.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        })
+        .collect();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
+        queue_event(event, &index_files, &tx, &callback_overflow);
+    })?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
     let mut source_matcher = SourceMatcher::new(&root);
 
-    // Initial pass — bring the index current before watching. Incremental:
-    // only re-parses files whose mtime is newer than the stored index.
-    let stats = indexer.index_all(&mut store, false)?;
-    eprintln!(
-        "[mastermind watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
-        stats.files_indexed, stats.files_unchanged, stats.files_purged, stats.duration_ms
-    );
+    let mut pending_changes = PendingChanges::default();
+    match refresh_index(&indexer, &mut store) {
+        Ok(stats) => eprintln!(
+            "[mastermind watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
+            stats.files_indexed, stats.files_unchanged, stats.files_purged, stats.duration_ms
+        ),
+        Err(error) => record_failure(&mut pending_changes, Instant::now(), error)?,
+    }
     eprintln!("[mastermind watch] watching {}", root.display());
 
-    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(tx)?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
-
-    let mut pending_changes: HashMap<PathBuf, Instant> = HashMap::new();
-
     loop {
+        if overflow.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other(
+                "[mastermind watch] event queue overflow, index may be stale; run mastermind index and restart watch",
+            )
+            .into());
+        }
         // Short timeout so we can also flush pending changes between events.
         match rx.recv_timeout(RX_TIMEOUT) {
             Ok(Ok(event)) => handle_event(
@@ -52,8 +86,12 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
                 &mut source_matcher,
                 &mut pending_changes,
                 &mut store,
-            ),
-            Ok(Err(e)) => eprintln!("[mastermind watch] notify error: {e}"),
+            )?,
+            Ok(Err(error)) => {
+                return Err(std::io::Error::other(format!(
+                    "[mastermind watch] notify error: {error}; index may be stale, run mastermind index and restart watch"
+                )).into());
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 eprintln!("[mastermind watch] watcher channel closed");
@@ -61,10 +99,34 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
             }
         }
 
-        flush_settled(&indexer, &mut store, &mut pending_changes);
+        flush_settled(&indexer, &mut store, &mut pending_changes, Instant::now())?;
     }
 
     Ok(())
+}
+
+fn queue_event(
+    mut event: notify::Result<notify::Event>,
+    index_files: &[PathBuf],
+    tx: &mpsc::SyncSender<notify::Result<notify::Event>>,
+    overflow: &AtomicBool,
+) {
+    if let Ok(event) = &mut event {
+        if matches!(event.kind, EventKind::Access(_)) && !event.need_rescan() {
+            return;
+        }
+        event.paths.retain(|path| !index_files.contains(path));
+        if event.paths.is_empty() && !event.need_rescan() {
+            return;
+        }
+        if event.paths.len() > MAX_PENDING_PATHS {
+            overflow.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+    if matches!(tx.try_send(event), Err(mpsc::TrySendError::Full(_))) {
+        overflow.store(true, Ordering::Relaxed);
+    }
 }
 
 fn handle_event(
@@ -72,11 +134,16 @@ fn handle_event(
     root: &Path,
     indexer: &Indexer,
     source_matcher: &mut SourceMatcher,
-    pending: &mut HashMap<PathBuf, Instant>,
+    pending: &mut PendingChanges,
     store: &mut Store,
-) {
+) -> std::io::Result<()> {
+    if event.need_rescan() {
+        return Err(std::io::Error::other(
+            "[mastermind watch] filesystem events were lost; index may be stale, run mastermind index and restart watch",
+        ));
+    }
     if matches!(event.kind, EventKind::Access(_)) {
-        return;
+        return Ok(());
     }
     let may_replace_directory = matches!(
         event.kind,
@@ -86,30 +153,30 @@ fn handle_event(
             | EventKind::Modify(ModifyKind::Name(_))
             | EventKind::Any
     );
-    if event.paths.iter().any(|path| {
-        is_project_history_path(path, root)
-            || (may_replace_directory && is_project_history_container(path, root))
-    }) {
+    if pending.full_refresh.is_none()
+        && event.paths.iter().any(|path| {
+            is_project_history_path(path, root)
+                || (may_replace_directory && is_project_history_container(path, root))
+        })
+    {
         match indexer.index_project_history(store) {
             Ok(stats) => eprintln!(
                 "[mastermind watch] refreshed {} history entries (skipped {}, truncated {})",
                 stats.indexed, stats.skipped, stats.truncated
             ),
-            Err(error) => eprintln!("[mastermind watch] history refresh failed: {error}"),
+            Err(error) => record_failure(pending, Instant::now(), error)?,
         }
     }
 
     if event.paths.iter().any(|path| is_ignore_config(path, root)) {
         *source_matcher = SourceMatcher::new(root);
-        pending.clear();
-        match indexer.index_all(store, false) {
-            Ok(stats) => eprintln!(
-                "[mastermind watch] ignore rules changed: indexed {} (unchanged {}, purged {})",
-                stats.files_indexed, stats.files_unchanged, stats.files_purged
-            ),
-            Err(error) => eprintln!("[mastermind watch] ignore-rule refresh failed: {error}"),
+        if pending.full_refresh.is_none() {
+            refresh_all(indexer, store, pending, Instant::now())?;
         }
-        return;
+        return Ok(());
+    }
+    if pending.full_refresh.is_some() {
+        return Ok(());
     }
 
     match event.kind {
@@ -118,8 +185,7 @@ fn handle_event(
             let indexed_paths = match store.indexed_paths() {
                 Ok(paths) => paths,
                 Err(error) => {
-                    eprintln!("[mastermind watch] rename inventory failed: {error}");
-                    Vec::new()
+                    return record_failure(pending, Instant::now(), error);
                 }
             };
             let mut purge_paths = Vec::new();
@@ -130,7 +196,7 @@ fn handle_event(
                 );
 
             for (position, path) in paths.iter().enumerate() {
-                pending.remove(path);
+                pending.paths.remove(path);
                 if path.is_dir() {
                     full_refresh = true;
                 }
@@ -158,23 +224,18 @@ fn handle_event(
             purge_paths.dedup();
             for rel in purge_paths {
                 if let Err(error) = store.purge_file(&rel) {
-                    eprintln!("[mastermind watch] rename purge failed {rel}: {error}");
-                    full_refresh = true;
+                    return record_failure(
+                        pending,
+                        Instant::now(),
+                        format!("rename purge failed {rel}: {error}"),
+                    );
                 } else {
                     eprintln!("[mastermind watch] rename purged {rel}");
                 }
             }
 
             if full_refresh {
-                pending.clear();
-                match indexer.index_all(store, false) {
-                    Ok(stats) => eprintln!(
-                        "[mastermind watch] rename refresh: indexed {} (unchanged {}, purged {})",
-                        stats.files_indexed, stats.files_unchanged, stats.files_purged
-                    ),
-                    Err(error) => eprintln!("[mastermind watch] rename refresh failed: {error}"),
-                }
-                return;
+                return refresh_all(indexer, store, pending, Instant::now());
             }
 
             for (position, path) in paths.into_iter().enumerate() {
@@ -185,7 +246,7 @@ fn handle_event(
                     && extractor_for_path(&path).is_some()
                     && !source_matcher.is_ignored(&path, false)
                 {
-                    pending.insert(path, Instant::now());
+                    queue_change(pending, path, Instant::now())?;
                 }
             }
         }
@@ -195,7 +256,7 @@ fn handle_event(
                     && extractor_for_path(&path).is_some()
                     && !source_matcher.is_ignored(&path, false)
                 {
-                    pending.insert(path, Instant::now());
+                    queue_change(pending, path, Instant::now())?;
                 }
             }
         }
@@ -203,21 +264,16 @@ fn handle_event(
             let indexed_paths = match store.indexed_paths() {
                 Ok(paths) => paths,
                 Err(error) => {
-                    eprintln!("[mastermind watch] removal inventory failed: {error}");
-                    match indexer.index_all(store, false) {
-                        Ok(_) => {}
-                        Err(refresh_error) => {
-                            eprintln!("[mastermind watch] removal refresh failed: {refresh_error}");
-                        }
-                    }
-                    return;
+                    return record_failure(pending, Instant::now(), error);
                 }
             };
             let mut purge_paths = Vec::new();
             for path in event.paths {
                 // Drop descendants too — a directory remove otherwise leaves
                 // debounced child paths able to re-enter the index.
-                pending.retain(|candidate, _| !candidate.starts_with(&path));
+                pending
+                    .paths
+                    .retain(|candidate, _| !candidate.starts_with(&path));
                 if let Some(rel) = relative_path(&path, root) {
                     let descendant_prefix = format!("{rel}/");
                     let mut matched = false;
@@ -236,7 +292,11 @@ fn handle_event(
             purge_paths.dedup();
             for rel in purge_paths {
                 if let Err(error) = store.purge_file(&rel) {
-                    eprintln!("[mastermind watch] purge failed {rel}: {error}");
+                    return record_failure(
+                        pending,
+                        Instant::now(),
+                        format!("purge failed {rel}: {error}"),
+                    );
                 } else {
                     eprintln!("[mastermind watch] purged {rel}");
                 }
@@ -244,29 +304,126 @@ fn handle_event(
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn flush_settled(indexer: &Indexer, store: &mut Store, pending: &mut HashMap<PathBuf, Instant>) {
-    let now = Instant::now();
+fn queue_change(pending: &mut PendingChanges, path: PathBuf, now: Instant) -> std::io::Result<()> {
+    if pending.full_refresh.is_some() {
+        return Ok(());
+    }
+    if pending.paths.len() >= MAX_PENDING_PATHS && !pending.paths.contains_key(&path) {
+        return Err(std::io::Error::other(
+            "[mastermind watch] pending path limit exceeded, index may be stale; run mastermind index and restart watch",
+        ));
+    }
+    pending.paths.insert(path, now + DEBOUNCE);
+    Ok(())
+}
+
+fn refresh_index(indexer: &Indexer, store: &mut Store) -> Result<IndexStats, IndexError> {
+    let stats = indexer.index_all(store, false)?;
+    if stats.files_failed > 0 {
+        return Err(IndexError::Other(format!(
+            "refresh failed for {} file(s)",
+            stats.files_failed
+        )));
+    }
+    if !store
+        .concept_contract_current()
+        .map_err(|error| IndexError::Other(error.to_string()))?
+    {
+        return Err(IndexError::Other(
+            "refreshed corpus is still stale".to_string(),
+        ));
+    }
+    Ok(stats)
+}
+
+fn refresh_all(
+    indexer: &Indexer,
+    store: &mut Store,
+    pending: &mut PendingChanges,
+    now: Instant,
+) -> std::io::Result<()> {
+    match refresh_index(indexer, store) {
+        Ok(stats) => {
+            pending.paths.clear();
+            pending.full_refresh = None;
+            eprintln!(
+                "[mastermind watch] refreshed: indexed {} (unchanged {}, purged {})",
+                stats.files_indexed, stats.files_unchanged, stats.files_purged
+            );
+            Ok(())
+        }
+        Err(error) => record_failure(pending, now, error),
+    }
+}
+
+fn record_failure(
+    pending: &mut PendingChanges,
+    now: Instant,
+    error: impl std::fmt::Display,
+) -> std::io::Result<()> {
+    // A full refresh subsumes file retries and restores contracts dirtied by failed writes.
+    pending.paths.clear();
+    let refresh = pending.full_refresh.get_or_insert(PendingRefresh {
+        ready_at: now,
+        failures: 0,
+    });
+    refresh.failures += 1;
+    if refresh.failures >= MAX_INDEX_ATTEMPTS {
+        pending.full_refresh = None;
+        return Err(std::io::Error::other(format!(
+            "[mastermind watch] retry limit exhausted after {MAX_INDEX_ATTEMPTS} attempts: {error}; run mastermind index and restart watch",
+        )));
+    }
+    refresh.ready_at = now + RETRY_DELAY;
+    eprintln!(
+        "[mastermind watch] failed (attempt {}/{MAX_INDEX_ATTEMPTS}), retrying full refresh: {error}",
+        refresh.failures
+    );
+    Ok(())
+}
+
+fn flush_settled(
+    indexer: &Indexer,
+    store: &mut Store,
+    pending: &mut PendingChanges,
+    now: Instant,
+) -> std::io::Result<()> {
+    if let Some(refresh) = &pending.full_refresh {
+        return if refresh.ready_at <= now {
+            refresh_all(indexer, store, pending, now)
+        } else {
+            Ok(())
+        };
+    }
     let ready: Vec<PathBuf> = pending
+        .paths
         .iter()
-        .filter(|(_, t)| now.duration_since(**t) >= DEBOUNCE)
-        .map(|(p, _)| p.clone())
+        .filter(|(_, ready_at)| **ready_at <= now)
+        .map(|(path, _)| path.clone())
         .collect();
 
     for path in ready {
-        pending.remove(&path);
         if !path.is_file() {
-            continue;
+            return refresh_all(indexer, store, pending, now);
         }
         match indexer.index_one(store, &path) {
-            Ok(()) => eprintln!("[mastermind watch] reindexed {}", path.display()),
-            Err(IndexError::Skipped(reason)) => {
-                eprintln!("[mastermind watch] skipped {}: {reason:?}", path.display())
+            Ok(()) => {
+                pending.paths.remove(&path);
+                eprintln!("[mastermind watch] reindexed {}", path.display());
             }
-            Err(e) => eprintln!("[mastermind watch] failed {}: {e}", path.display()),
+            Err(IndexError::Skipped(reason)) => {
+                pending.paths.remove(&path);
+                eprintln!("[mastermind watch] skipped {}: {reason:?}", path.display());
+            }
+            Err(error) => {
+                return record_failure(pending, now, format!("{}: {error}", path.display()));
+            }
         }
     }
+    Ok(())
 }
 
 fn relative_path(absolute: &Path, root: &Path) -> Option<String> {
@@ -316,6 +473,404 @@ fn is_project_history_container(path: &Path, root: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn transient_write_failure_is_retried_without_another_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("changing.rs");
+        let database = root.join("index.db");
+        std::fs::write(&source, "pub fn before_failure() {}\n").unwrap();
+        let mut store = Store::open(&database).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        std::fs::write(&source, "pub fn after_recovery() {}\n").unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_watched_update BEFORE INSERT ON symbols BEGIN
+                 SELECT RAISE(ABORT, 'injected transient write failure');
+             END;",
+            )
+            .unwrap();
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = PendingChanges::default();
+        handle_event(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone()),
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        )
+        .unwrap();
+        let settled = pending.paths[&source];
+        flush_settled(&indexer, &mut store, &mut pending, settled).unwrap();
+        assert!(pending.paths.is_empty());
+        assert!(pending.full_refresh.is_some());
+        assert_eq!(pending.full_refresh.as_ref().unwrap().failures, 1);
+        assert_eq!(
+            store
+                .search_symbols("before_failure", None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .search_symbols("after_recovery", None, None)
+            .unwrap()
+            .is_empty());
+
+        connection
+            .execute_batch("DROP TRIGGER reject_watched_update")
+            .unwrap();
+        flush_settled(
+            &indexer,
+            &mut store,
+            &mut pending,
+            settled + RETRY_DELAY - Duration::from_nanos(1),
+        )
+        .unwrap();
+        assert!(pending.paths.is_empty());
+        assert!(pending.full_refresh.is_some());
+        assert!(store
+            .search_symbols("after_recovery", None, None)
+            .unwrap()
+            .is_empty());
+        flush_settled(&indexer, &mut store, &mut pending, settled + RETRY_DELAY).unwrap();
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+        assert!(store
+            .search_symbols("before_failure", None, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .search_symbols("after_recovery", None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.concept_contract_current().unwrap());
+    }
+
+    #[test]
+    fn persistent_write_failure_exhausts_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("changing.rs");
+        let database = root.join("index.db");
+        std::fs::write(&source, "pub fn before_failure() {}\n").unwrap();
+        let mut store = Store::open(&database).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        std::fs::write(&source, "pub fn after_recovery() {}\n").unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_watched_update BEFORE INSERT ON symbols BEGIN
+                 SELECT RAISE(ABORT, 'injected persistent write failure');
+             END;",
+            )
+            .unwrap();
+        let mut pending = PendingChanges::default();
+        let now = Instant::now();
+        queue_change(&mut pending, source.clone(), now).unwrap();
+        for attempt in 1..MAX_INDEX_ATTEMPTS {
+            flush_settled(
+                &indexer,
+                &mut store,
+                &mut pending,
+                now + DEBOUNCE + RETRY_DELAY * u32::from(attempt - 1),
+            )
+            .unwrap();
+            assert_eq!(pending.full_refresh.as_ref().unwrap().failures, attempt);
+        }
+        let exhausted = now + DEBOUNCE + RETRY_DELAY * u32::from(MAX_INDEX_ATTEMPTS - 1);
+        let error = flush_settled(&indexer, &mut store, &mut pending, exhausted).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("retry limit exhausted"));
+        assert!(message.contains("after 3 attempts"));
+        assert!(message.contains("refresh failed for 1 file(s)"));
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+        connection
+            .execute_batch("DROP TRIGGER reject_watched_update")
+            .unwrap();
+        flush_settled(&indexer, &mut store, &mut pending, exhausted + RETRY_DELAY).unwrap();
+        assert_eq!(
+            store
+                .search_symbols("before_failure", None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .search_symbols("after_recovery", None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn rename_and_ignore_events_preserve_a_failed_update_until_full_recovery() {
+        for rename in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let source = root.join("changing.rs");
+            let excluded = root.join("excluded.rs");
+            let database = root.join("index.db");
+            std::fs::write(&source, "pub fn before_failure() {}\n").unwrap();
+            std::fs::write(&excluded, "pub fn excluded_symbol() {}\n").unwrap();
+            let mut store = Store::open(&database).unwrap();
+            let indexer = Indexer::new(&root);
+            indexer.index_all(&mut store, false).unwrap();
+            std::fs::write(&source, "pub fn after_recovery() {}\n").unwrap();
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_watched_update BEFORE INSERT ON symbols BEGIN
+                     SELECT RAISE(ABORT, 'injected transient write failure');
+                 END;",
+                )
+                .unwrap();
+            let mut matcher = SourceMatcher::new(&root);
+            let mut pending = PendingChanges::default();
+            let now = Instant::now();
+            queue_change(&mut pending, source.clone(), now).unwrap();
+            flush_settled(&indexer, &mut store, &mut pending, now + DEBOUNCE).unwrap();
+            let retry_at = pending.full_refresh.as_ref().unwrap().ready_at;
+            let event = if rename {
+                let renamed = root.join("renamed.rs");
+                std::fs::rename(&source, &renamed).unwrap();
+                notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                    .add_path(source.clone())
+                    .add_path(renamed)
+            } else {
+                let ignore = root.join(".gitignore");
+                std::fs::write(&ignore, "excluded.rs\n").unwrap();
+                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(ignore)
+            };
+            handle_event(
+                event,
+                &root,
+                &indexer,
+                &mut matcher,
+                &mut pending,
+                &mut store,
+            )
+            .unwrap();
+            assert_eq!(pending.full_refresh.as_ref().unwrap().ready_at, retry_at);
+            assert_eq!(pending.full_refresh.as_ref().unwrap().failures, 1);
+            connection
+                .execute_batch("DROP TRIGGER reject_watched_update")
+                .unwrap();
+            flush_settled(&indexer, &mut store, &mut pending, retry_at).unwrap();
+            assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+            assert!(store
+                .search_symbols("before_failure", None, None)
+                .unwrap()
+                .is_empty());
+            let recovered = store.search_symbols("after_recovery", None, None).unwrap();
+            assert_eq!(recovered.len(), 1);
+            if rename {
+                assert_eq!(recovered[0].file_path, "renamed.rs");
+                assert!(store.symbols_in_file("changing.rs").unwrap().is_empty());
+            } else {
+                assert!(store.symbols_in_file("excluded.rs").unwrap().is_empty());
+                assert!(matcher.is_ignored(&excluded, false));
+            }
+            assert!(store.concept_contract_current().unwrap());
+        }
+    }
+
+    #[test]
+    fn failed_removal_is_purged_by_the_retained_full_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("removed.rs");
+        let database = root.join("index.db");
+        std::fs::write(&source, "pub fn removed_handler() {}\n").unwrap();
+        let mut store = Store::open(&database).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_watched_removal BEFORE DELETE ON symbols BEGIN
+                 SELECT RAISE(ABORT, 'injected transient purge failure');
+             END;",
+            )
+            .unwrap();
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = PendingChanges::default();
+        queue_change(&mut pending, source.clone(), Instant::now()).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        handle_event(
+            notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File)).add_path(source),
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(pending.full_refresh.as_ref().unwrap().failures, 1);
+        assert!(!store.symbols_in_file("removed.rs").unwrap().is_empty());
+        connection
+            .execute_batch("DROP TRIGGER reject_watched_removal")
+            .unwrap();
+        let retry_at = pending.full_refresh.as_ref().unwrap().ready_at;
+        flush_settled(&indexer, &mut store, &mut pending, retry_at).unwrap();
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+        assert!(store.symbols_in_file("removed.rs").unwrap().is_empty());
+        assert!(store.search_concepts("\"removed\"", 10).unwrap().is_empty());
+        assert!(store.concept_contract_current().unwrap());
+    }
+
+    #[test]
+    fn history_write_failure_uses_the_same_retained_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let database = root.join("index.db");
+        let context = root.join("CONTEXT.md");
+        let body = |decision: &str| {
+            format!(
+            "# Context\n## Decision log\n### Storage\n- **Decision:** {decision}\n- **Status:** active\n"
+        )
+        };
+        std::fs::write(&context, body("Keep ephemeral storage.")).unwrap();
+        let mut store = Store::open(&database).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_history_update BEFORE INSERT ON project_claim BEGIN
+                 SELECT RAISE(ABORT, 'injected transient history failure');
+             END;",
+            )
+            .unwrap();
+        std::fs::write(&context, body("Keep durable storage.")).unwrap();
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = PendingChanges::default();
+        handle_event(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(context),
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(pending.full_refresh.as_ref().unwrap().failures, 1);
+        connection
+            .execute_batch("DROP TRIGGER reject_history_update")
+            .unwrap();
+        let retry_at = pending.full_refresh.as_ref().unwrap().ready_at;
+        flush_settled(&indexer, &mut store, &mut pending, retry_at).unwrap();
+        assert!(pending.full_refresh.is_none());
+        assert!(store
+            .search_project_history("ephemeral", Some("context"), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .search_project_history("durable", Some("context"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn empty_rescan_event_survives_queue_filtering_and_refuses_silent_continuation() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let overflow = AtomicBool::new(false);
+        queue_event(
+            Ok(notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)),
+            &[],
+            &tx,
+            &overflow,
+        );
+        let event = rx.try_recv().unwrap().unwrap();
+        assert!(event.need_rescan());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let indexer = Indexer::new(&root);
+        let mut matcher = SourceMatcher::new(&root);
+        let mut pending = PendingChanges::default();
+        let mut store = Store::open(root.join("index.db")).unwrap();
+        let error = handle_event(
+            event,
+            &root,
+            &indexer,
+            &mut matcher,
+            &mut pending,
+            &mut store,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("filesystem events were lost"));
+        assert!(error.to_string().contains("restart watch"));
+    }
+
+    #[test]
+    fn pending_path_capacity_allows_updates_but_rejects_new_paths() {
+        let now = Instant::now();
+        let mut pending = PendingChanges::default();
+        for position in 0..MAX_PENDING_PATHS {
+            queue_change(&mut pending, PathBuf::from(format!("{position}.rs")), now).unwrap();
+        }
+        queue_change(&mut pending, PathBuf::from("0.rs"), now + DEBOUNCE).unwrap();
+        let error = queue_change(&mut pending, PathBuf::from("overflow.rs"), now).unwrap_err();
+        assert!(error.to_string().contains("pending path limit exceeded"));
+        assert_eq!(pending.paths.len(), MAX_PENDING_PATHS);
+        assert!(!pending.paths.contains_key(Path::new("overflow.rs")));
+    }
+
+    #[test]
+    fn index_database_events_are_filtered_before_bounded_queue_admission() {
+        let index_files: Vec<PathBuf> = [
+            "index.db",
+            "index.db-wal",
+            "index.db-shm",
+            "index.db-journal",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let overflow = AtomicBool::new(false);
+        for _ in 0..MAX_QUEUED_EVENTS {
+            queue_event(
+                Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path(index_files[1].clone())),
+                &index_files,
+                &tx,
+                &overflow,
+            );
+        }
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(!overflow.load(Ordering::Relaxed));
+        let history = PathBuf::from(".mastermind/tasks/001-task/spec.md");
+        queue_event(
+            Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(index_files[0].clone())
+                .add_path(history.clone())),
+            &index_files,
+            &tx,
+            &overflow,
+        );
+        assert_eq!(rx.try_recv().unwrap().unwrap().paths, vec![history]);
+        for _ in 0..2 {
+            queue_event(
+                Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path(PathBuf::from("source.rs"))),
+                &index_files,
+                &tx,
+                &overflow,
+            );
+        }
+        assert!(overflow.load(Ordering::Relaxed));
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn removal_paths_do_not_alias_literal_backslashes() {
@@ -340,7 +895,7 @@ mod tests {
         assert_eq!(store.indexed_paths().unwrap(), vec!["ignored.rs"]);
 
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         let ignore_file = root.join(".gitignore");
         std::fs::write(&ignore_file, "ignored.rs\n").unwrap();
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(ignore_file);
@@ -352,9 +907,10 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
-        assert!(pending.is_empty());
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
         assert!(matcher.is_ignored(&source, false));
         assert!(store.indexed_paths().unwrap().is_empty());
     }
@@ -373,7 +929,7 @@ mod tests {
         std::fs::write(&context, "# Context\n\nUse durable idempotency keys.\n").unwrap();
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(context);
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             event,
             &root,
@@ -381,7 +937,8 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             store
@@ -402,7 +959,7 @@ mod tests {
             let indexer = Indexer::new(&root);
             indexer.index_all(&mut store, false).unwrap();
             let mut matcher = SourceMatcher::new(&root);
-            let mut pending = HashMap::new();
+            let mut pending = PendingChanges::default();
             let path = root.join(relative).join("nested/001-storage.md");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "# Storage\n\nUse ephemeral state.\n").unwrap();
@@ -414,7 +971,8 @@ mod tests {
                 &mut matcher,
                 &mut pending,
                 &mut store,
-            );
+            )
+            .unwrap();
             assert_eq!(
                 store
                     .search_project_history("ephemeral", Some("architecture_decision"), 10)
@@ -432,7 +990,8 @@ mod tests {
                 &mut matcher,
                 &mut pending,
                 &mut store,
-            );
+            )
+            .unwrap();
             assert!(store
                 .search_project_history("ephemeral", Some("architecture_decision"), 10)
                 .unwrap()
@@ -453,7 +1012,8 @@ mod tests {
                 &mut matcher,
                 &mut pending,
                 &mut store,
-            );
+            )
+            .unwrap();
             let hits = store
                 .search_project_history("durable", Some("architecture_decision"), 10)
                 .unwrap();
@@ -469,7 +1029,8 @@ mod tests {
                 &mut matcher,
                 &mut pending,
                 &mut store,
-            );
+            )
+            .unwrap();
             assert!(store
                 .search_project_history("durable", Some("architecture_decision"), 10)
                 .unwrap()
@@ -497,7 +1058,7 @@ mod tests {
 
         std::fs::remove_dir_all(root.join("docs")).unwrap();
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
                 .add_path(root.join("docs")),
@@ -506,7 +1067,8 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
         assert!(store
             .search_project_history("durable", Some("architecture_decision"), 10)
             .unwrap()
@@ -525,7 +1087,7 @@ mod tests {
         indexer.index_all(&mut store, false).unwrap();
         std::fs::write(&path, "# Changed context\n").unwrap();
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             notify::Event::new(EventKind::Access(notify::event::AccessKind::Read)).add_path(path),
             &root,
@@ -533,7 +1095,8 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
         assert_eq!(
             store
                 .search_project_history("initial", Some("context"), 10)
@@ -563,7 +1126,7 @@ mod tests {
         .add_path(old_path.clone())
         .add_path(new_path.clone());
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             event,
             &root,
@@ -571,13 +1134,15 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert!(store.symbols_in_file("old_handler.rs").unwrap().is_empty());
         assert!(store.search_concepts("\"old\"", 10).unwrap().is_empty());
-        assert!(pending.contains_key(&new_path));
-        pending.insert(new_path, Instant::now() - DEBOUNCE);
-        flush_settled(&indexer, &mut store, &mut pending);
+        assert!(pending.paths.contains_key(&new_path));
+        let now = Instant::now();
+        queue_change(&mut pending, new_path, now).unwrap();
+        flush_settled(&indexer, &mut store, &mut pending, now + DEBOUNCE).unwrap();
 
         assert_eq!(store.symbols_in_file("new_handler.rs").unwrap().len(), 2);
         assert_eq!(store.search_concepts("\"new\"", 10).unwrap().len(), 2);
@@ -609,7 +1174,7 @@ mod tests {
         .add_path(old_path)
         .add_path(new_path);
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             event,
             &root,
@@ -617,7 +1182,8 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert!(store.symbols_in_file("old/first.rs").unwrap().is_empty());
         assert!(store
@@ -629,7 +1195,7 @@ mod tests {
             store.symbols_in_file("new/nested/second.py").unwrap().len(),
             2
         );
-        assert!(pending.is_empty());
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
         assert!(store.concept_contract_current().unwrap());
     }
 
@@ -649,7 +1215,7 @@ mod tests {
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
             .add_path(new_path);
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             event,
             &root,
@@ -657,11 +1223,12 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert!(store.symbols_in_file("old.rs").unwrap().is_empty());
         assert_eq!(store.symbols_in_file("new.rs").unwrap().len(), 2);
-        assert!(pending.is_empty());
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
         assert!(store.concept_contract_current().unwrap());
     }
 
@@ -692,7 +1259,7 @@ mod tests {
             .add_path(old_path.clone())
             .add_path(new_path.clone());
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending = HashMap::new();
+        let mut pending = PendingChanges::default();
         handle_event(
             event,
             &root,
@@ -700,13 +1267,15 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert!(old_path.is_file());
-        assert!(!pending.contains_key(&old_path));
-        assert!(pending.contains_key(&new_path));
-        pending.insert(new_path, Instant::now() - DEBOUNCE);
-        flush_settled(&indexer, &mut store, &mut pending);
+        assert!(!pending.paths.contains_key(&old_path));
+        assert!(pending.paths.contains_key(&new_path));
+        let now = Instant::now();
+        queue_change(&mut pending, new_path, now).unwrap();
+        flush_settled(&indexer, &mut store, &mut pending, now + DEBOUNCE).unwrap();
         assert!(store.symbols_in_file("Handler.rs").unwrap().is_empty());
         assert_eq!(store.symbols_in_file("handler.rs").unwrap().len(), 2);
         assert!(store.concept_contract_current().unwrap());
@@ -734,8 +1303,13 @@ mod tests {
         let event = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
             .add_path(removed.clone());
         let mut matcher = SourceMatcher::new(&root);
-        let mut pending =
-            HashMap::from([(removed.join("nested/second.py"), Instant::now() - DEBOUNCE)]);
+        let mut pending = PendingChanges::default();
+        queue_change(
+            &mut pending,
+            removed.join("nested/second.py"),
+            Instant::now(),
+        )
+        .unwrap();
         handle_event(
             event,
             &root,
@@ -743,11 +1317,12 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
-        );
+        )
+        .unwrap();
 
         assert!(store.indexed_paths().unwrap().is_empty());
         assert_eq!(store.concept_count().unwrap(), 0);
-        assert!(pending.is_empty());
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
         assert!(store.concept_contract_current().unwrap());
     }
 

@@ -238,12 +238,7 @@ pub(super) fn finish(episode: &str) -> Result<(), Error> {
             Ok(super::refresh_task_profile(root, reader.as_deref()))
         })();
         match result {
-            Ok(Some(result))
-                if matches!(
-                    result["status"].as_str(),
-                    Some("refreshed" | "no_authored_commits")
-                ) =>
-            {
+            Ok(Some(result)) if crate::miner::profile::task_refresh_completed(&result) => {
                 db.record_task_finalizer(episode, &owner, FinalizerState::Completed(None))?
             }
             Ok(None) => db.record_task_finalizer(

@@ -2170,10 +2170,23 @@ remain read-only.
 ## Watcher (`mmcg watch`)
 
 A long-running process that:
-1. Does an initial full index
-2. Subscribes to recursive filesystem events under the project root
-3. Coalesces rapid-fire events per path with a 500 ms debounce
-4. Re-indexes files on Modify/Create, purges on Remove
+
+1. Subscribes to recursive filesystem events under the project root.
+2. Builds the initial index while retaining arriving events.
+3. Coalesces rapid changes per path with a 500 ms debounce.
+4. Re-indexes changed files and purges removed files.
+
+A failed update stays pending for up to three attempts, with one second between
+retries. Recovery can rebuild the index to restore the concept corpus after a
+failed write. A new source edit is not required for a retry. Database and
+sidecar writes are excluded from the event queue.
+
+The event queue and pending paths each hold at most 4,096 entries. Overflow or
+an exhausted retry budget stops the watcher with an error. Resolve the reported
+cause, rebuild the same index with `mastermind index ROOT`, then restart the
+original watch command. Preserve its working directory, root and `--index` or
+`MMCG_INDEX_PATH` setting for both commands. An error does not establish that
+the index is current.
 
 Architecture: separate process from `mmcg serve`. Both can run concurrently against the same SQLite file thanks to WAL mode (writers don't block readers).
 
@@ -2184,6 +2197,15 @@ mmcg watch
 # Terminal 2 (or auto-started by your MCP client): serve queries
 mmcg serve
 ```
+
+The default `serve`, `concept` and `concept-review` index is
+`<repository root>/.mastermind/mmcg.db`, including on Windows. With
+`serve --root PATH`, the default index belongs to that root. Explicit external
+indexes remain read-only and require a separate `mastermind index` refresh.
+
+Bounded freshness checks require a Git worktree and available Git. A directory
+without Git can be indexed manually, but structural MCP queries return
+`index_stale` because source freshness cannot be established.
 
 ## Env vars
 

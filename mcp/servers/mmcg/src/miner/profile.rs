@@ -153,6 +153,13 @@ pub fn refresh_for_task(
     })
 }
 
+pub(crate) fn task_refresh_completed(result: &serde_json::Value) -> bool {
+    matches!(
+        result["status"].as_str(),
+        Some("refreshed" | "no_authored_commits")
+    )
+}
+
 fn mine_to_paths(
     repo_root: &Path,
     author: Option<String>,
@@ -3956,13 +3963,13 @@ mod tests {
                     &mut Current,
                 )
                 .unwrap();
-                assert!(
+                assert_eq!(
                     packet["conventions"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|rule| rule["statement"].as_str().unwrap().contains("TS/JS"))
-                        == !paths.is_empty()
+                        .any(|rule| rule["statement"].as_str().unwrap().contains("TS/JS")),
+                    !paths.is_empty()
                 );
                 assert_eq!(
                     packet["feedback"].as_array().unwrap().len(),

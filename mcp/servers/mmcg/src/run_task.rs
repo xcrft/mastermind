@@ -1957,6 +1957,12 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, mut opts: RunO
         eprintln!("error: --post-only cannot be combined with --pre-only, --reset, or --exec");
         return Outcome::PreFailed;
     }
+    if (opts.exec && !opts.pre_only) || opts.auto_review {
+        if let Err(reason) = crate::invocation::require_native_runtime() {
+            eprintln!("error: {reason}");
+            return Outcome::PreFailed;
+        }
+    }
     let identity = match controller_identity(repo_root, spec_path) {
         Ok(identity) => identity,
         Err(error) => {

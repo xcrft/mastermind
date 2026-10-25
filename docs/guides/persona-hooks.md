@@ -141,6 +141,12 @@ Independent semantic review receives no personal profile. See
 [context packets](../reference/persona-context.md) for audience, scope and
 delivery receipts.
 
+The supervised miner records an optional profile refresh failure as
+`run.reason: profile_refresh_failed` in worker status and continues its work.
+A later successful refresh clears that warning. A terminal worker reason, such
+as a stop request or exhausted budget, takes precedence. This warning cannot
+approve or fail the core task.
+
 To disable automatic delivery while retaining capture and MCP read access:
 
 ```bash

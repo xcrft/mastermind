@@ -252,6 +252,7 @@ pub(crate) fn validate_evidence(
 }
 
 pub fn run(spec: &Path, repository: &Path, options: &Options) -> Result<Report, String> {
+    invocation::require_native_runtime()?;
     let state_path = crate::run_task::state_file_path(repository, spec);
     let _lock = crate::run_task::controller_lock(repository, &state_path)?;
     run_locked(spec, repository, options)
@@ -263,6 +264,7 @@ pub(crate) fn run_locked(
     options: &Options,
 ) -> Result<Report, String> {
     options.validate()?;
+    invocation::require_native_runtime()?;
     let root =
         RootCapability::open(repository).map_err(|_| "review_invocation_root_unavailable")?;
     let mut state = task_review::state(&root, spec)?;

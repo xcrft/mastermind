@@ -234,6 +234,33 @@ fn explicit_capture_registers_audience_without_claiming_activation_or_profile_ac
 }
 
 #[test]
+fn optional_git_seed_failure_is_visible_without_failing_setup() {
+    let f = Fixture::new();
+    f.client("codex");
+    let report = f.success(&["init", "--client", "codex", "--no-global", "--json"]);
+    assert_eq!(report["status"], "configured");
+    let step = report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["component"] == "profile.git")
+        .unwrap();
+    assert_eq!(step["status"], "degraded");
+    assert_eq!(step["detail"]["status"], "unavailable");
+    assert!(step["detail"]["reason"].as_str().is_some());
+    assert_eq!(
+        report["observed"]["clients"][0]["profile_access"]["allowed"],
+        true
+    );
+    let output = f.run(&["init"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("degraded  profile.git"));
+    f.no_provider_calls();
+}
+
+#[test]
 fn first_init_uses_the_active_client_and_arms_personalization_without_inference() {
     let f = Fixture::new();
     f.client("claude");

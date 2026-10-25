@@ -232,7 +232,7 @@ enum Cmd {
     Ui(UiArgs),
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
     Serve {
-        /// Bind source reads to this repository when using an external index.
+        /// Root for the default index and source reads from an external index.
         #[arg(long)]
         root: Option<PathBuf>,
     },
@@ -2422,10 +2422,14 @@ fn run_cli_inner(
         }) => {
             mmcg::queries::validate_concept_request(&query, top)?;
             let managed_root = if index_override.is_none() {
-                Some(std::env::current_dir()?.canonicalize()?)
+                Some(std::env::current_dir()?)
             } else {
                 None
             };
+            let index_path = index_path_for_root(
+                index_override.as_deref(),
+                managed_root.as_deref().unwrap_or(std::path::Path::new(".")),
+            );
             let mut store = Store::open_for_serve(&index_path, managed_root.as_deref())?;
             store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
                 mmcg::store::DEFAULT_CLI_BUDGET_MS,
@@ -2450,7 +2454,9 @@ fn run_cli_inner(
             print!("{}", commands::query::render_concept(&response?, format)?);
         }
         Cmd::ConceptReview(command) => {
-            let root = std::env::current_dir()?.canonicalize()?;
+            let requested_root = std::env::current_dir()?;
+            let root = requested_root.canonicalize()?;
+            let index_path = index_path_for_root(index_override.as_deref(), &requested_root);
             let request_contract = match &command {
                 ConceptReviewCmd::Prepare(ConceptReviewPrepareArgs {
                     query,
@@ -2468,7 +2474,7 @@ fn run_cli_inner(
                     query, top, hints, ..
                 }) => {
                     mmcg::concept_review::validate_request(query, *top, hints)?;
-                    Store::open_for_serve(&index_path, Some(&root))?
+                    Store::open_for_serve(&index_path, Some(&requested_root))?
                 }
                 ConceptReviewCmd::Finish(_) => Store::open_read_only_for_root(&index_path, &root)?,
             };
@@ -2722,12 +2728,16 @@ fn run_cli_inner(
         }
         Cmd::Serve { root } => {
             let managed_root = if let Some(root) = root {
-                Some(root.canonicalize()?)
+                Some(root)
             } else if index_override.is_none() {
-                Some(std::env::current_dir()?.canonicalize()?)
+                Some(std::env::current_dir()?)
             } else {
                 None
             };
+            let index_path = index_path_for_root(
+                index_override.as_deref(),
+                managed_root.as_deref().unwrap_or(std::path::Path::new(".")),
+            );
             let store = Store::open_for_serve(&index_path, managed_root.as_deref())?;
             store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
                 mmcg::store::DEFAULT_SERVE_BUDGET_MS,

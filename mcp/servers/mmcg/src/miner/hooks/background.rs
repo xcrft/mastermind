@@ -1102,6 +1102,14 @@ impl Runtime {
         Ok(())
     }
 
+    fn refresh_profile(&mut self) -> Result<(), Error> {
+        let reason = refresh_profile(&self.config.project_root, &self.config.client);
+        if reason.is_some() || self.state.reason.as_deref() == Some("profile_refresh_failed") {
+            self.state.reason = reason.map(str::to_owned);
+        }
+        self.record()
+    }
+
     fn halt(&self, reason: &str) -> Error {
         set_reason(&self.reason, reason);
         worker::request_stop();
@@ -1419,7 +1427,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
         let mut last_pass = Instant::now();
         let mut last_admission = Instant::now() - HEARTBEAT;
         let mut failures = 0_u32;
-        refresh_profile(&runtime.config);
+        runtime.refresh_profile()?;
         'poll: while !worker::interrupted() {
             if last_admission.elapsed() >= HEARTBEAT {
                 runtime.admission()?;
@@ -1473,7 +1481,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
                     if runtime.state.completed > completed_before {
                         failures = 0;
                         runtime.state.reason = None;
-                        refresh_profile(&runtime.config);
+                        runtime.refresh_profile()?;
                     }
                     if report["failed"] == true {
                         failures += 1;
@@ -1541,18 +1549,160 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
     Ok(json!({"schema":1,"worker_id":id,"run":runtime.state,"autostart":false}))
 }
 
-fn refresh_profile(config: &Config) {
+fn refresh_profile(root: &Path, client: &str) -> Option<&'static str> {
     // History scans belong in the supervised background process, outside the
     // three-second capture hook. Reader grants are checked by the refresh too.
-    let result =
-        super::configured_profile_client(&config.project_root, &config.client).map(|reader| {
-            reader
-                .and_then(|reader| super::refresh_task_profile(&config.project_root, Some(&reader)))
-        });
-    if result.is_err() {
+    let result = super::configured_profile_client(root, client)
+        .map(|reader| reader.and_then(|reader| super::refresh_task_profile(root, Some(&reader))));
+    if result.as_ref().map_or(true, |result| {
+        result.as_ref().is_some_and(|result| {
+            !crate::miner::profile::task_refresh_completed(result)
+                && result["status"] != "access_denied"
+        })
+    }) {
         eprintln!(
             "{}",
             json!({"profile_refresh":"degraded","reason":"git_or_profile_unavailable"})
+        );
+        return Some("profile_refresh_failed");
+    }
+    None
+}
+
+#[cfg(test)]
+mod profile_refresh_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn runtime(root: &Path) -> Runtime {
+        let (id, project_root) = slot("codex", root).unwrap();
+        let store = Store::prepare(&id).unwrap();
+        let config: Config = serde_json::from_value(json!({
+            "schema":1,"worker_id":id,"client":"codex","project_root":project_root,
+            "capture_generation":1,"processor":{"synthetic":true},
+            "settings":{"processor":root.join("synthetic-processor"),"provider":null,"args":[],
+                "timeout":1,"limit":1,"max_calls":2,"max_runtime":60}
+        }))
+        .unwrap();
+        let state: State = serde_json::from_value(json!({
+            "schema":1,"worker_id":id,"run_id":"a".repeat(32),"config_revision":revision(&config).unwrap(),
+            "status":"running","reason":null,"pid":std::process::id(),
+            "started_at_ms":now().unwrap(),"updated_at_ms":now().unwrap(),
+            "attempts":0,"completed":0,"drafts":0,"next_after":null
+        }))
+        .unwrap();
+        let config_identity = store.write("config.json", &config, None).unwrap();
+        let state_identity = store.write("state.json", &state, None).unwrap();
+        Runtime {
+            store,
+            config,
+            config_identity,
+            state,
+            state_identity,
+            deadline: Instant::now() + Duration::from_secs(60),
+            reason: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn optional_refresh_reports_failure_without_failing_background_work() {
+        const CHILD_ROOT: &str = "MASTERMIND_PROFILE_REFRESH_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            assert_eq!(
+                crate::miner::profile::refresh_for_task(&root, "codex").unwrap()["status"],
+                "access_denied"
+            );
+            assert_eq!(refresh_profile(&root, "codex"), None);
+            let mut settings = crate::onboarding::Settings::local(&root);
+            settings.clients = vec!["codex".into()];
+            settings.profile_access = true;
+            crate::onboarding::Session::begin(&root)
+                .unwrap()
+                .save(&settings)
+                .unwrap();
+            crate::miner::access::configure(&root, "codex", true).unwrap();
+            let receipt = super::super::refresh_task_profile(&root, Some("codex")).unwrap();
+            assert_eq!(receipt["status"], "failed");
+            assert_eq!(receipt["reason"], "local_profile_refresh_unavailable");
+            let mut runtime = runtime(&root);
+            let _owner = bounded_fs::try_locked_regular_file_with_capability(
+                &runtime.store.root,
+                &runtime.store.path("owner.lock"),
+            )
+            .unwrap();
+            runtime.refresh_profile().unwrap();
+            let report = status_at(&runtime.store, &runtime.config.worker_id).unwrap();
+            assert_eq!(report["status"], "running");
+            assert_eq!(report["run"]["reason"], "profile_refresh_failed");
+            assert_eq!(report["run"]["attempts"], 0);
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.name", "Profile Reader"],
+                vec!["config", "user.email", "reader@example.test"],
+                vec![
+                    "-c",
+                    "user.name=Other Author",
+                    "-c",
+                    "user.email=other@example.test",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "Synthetic history",
+                ],
+            ] {
+                let output = Command::new("git")
+                    .current_dir(&root)
+                    .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath="])
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "git {args:?}: {output:?}");
+            }
+            let receipt = super::super::refresh_task_profile(&root, Some("codex")).unwrap();
+            assert_eq!(receipt["status"], "no_authored_commits");
+            runtime.refresh_profile().unwrap();
+            let report = status_at(&runtime.store, &runtime.config.worker_id).unwrap();
+            assert_eq!(report["status"], "running");
+            assert!(report["run"]["reason"].is_null());
+            runtime.state.reason = Some("worker_processor_retry_pending".into());
+            runtime.refresh_profile().unwrap();
+            let report = status_at(&runtime.store, &runtime.config.worker_id).unwrap();
+            assert_eq!(report["run"]["reason"], "worker_processor_retry_pending");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let home = temp.path().join("home");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                child.env_remove(name);
+            }
+        }
+        let output = child.args([
+                "--exact",
+                "miner::hooks::background::profile_refresh_tests::optional_refresh_reports_failure_without_failing_background_work",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, root.canonicalize().unwrap())
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", temp.path().join("unused-git-config"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let reports: Vec<Value> = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            reports,
+            vec![json!({"profile_refresh":"degraded","reason":"git_or_profile_unavailable"})]
         );
     }
 }

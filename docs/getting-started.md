@@ -38,7 +38,10 @@ Restart the client after setup. Complete any trust prompt in that client.
 Mastermind does not grant native client trust.
 
 An incomplete setup reports failed components. Fix the reported issue and repeat
-`init`. Existing `CONTEXT.md` and `CLAUDE.md` are preserved unless `--force` is used.
+`init`. An optional `profile.git` refresh failure is reported as `degraded` and
+does not fail otherwise successful setup. Its detail explains why Git
+observations were unavailable. Existing `CONTEXT.md` and `CLAUDE.md` are preserved
+unless `--force` is used.
 Use `status --json` to inspect configuration, observed sessions and missing
 evidence. Saved configuration alone does not establish a live client connection.
 

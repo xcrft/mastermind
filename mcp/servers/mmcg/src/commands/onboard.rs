@@ -459,13 +459,18 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
     }
     if settings.profile_access && !options.no_seed_style {
         if let Some(reader) = settings.clients.first() {
-            let detail = mmcg::miner::profile::refresh_for_task(&root, reader).unwrap_or_else(
+            let result = mmcg::miner::profile::refresh_for_task(&root, reader);
+            let status = if result.is_ok() { "ok" } else { "degraded" };
+            let detail = result.unwrap_or_else(
                 |error| json!({"status":"unavailable","reason":error.to_string(),"model":false}),
             );
-            steps.push(json!({"component":"profile.git","status":"ok","detail":detail}));
+            steps.push(json!({"component":"profile.git","status":status,"detail":detail}));
         }
     }
-    let success = steps.iter().all(|step| step["status"] == "ok");
+    let success = steps.iter().all(|step| {
+        step["status"] == "ok"
+            || (step["component"] == "profile.git" && step["status"] == "degraded")
+    });
     let observed = status_report(&root, index_override)?;
     emit(
         &json!({"schema_version":1,"status":if success {"configured"} else {"incomplete"},

@@ -473,6 +473,7 @@ fn prior_record(
 
 fn valid_text(value: &str, max: usize) -> bool {
     let value = value.trim();
+    let placeholder = value.starts_with('<') && value.ends_with('>');
     !value.is_empty()
         && value.len() <= max
         && !value
@@ -482,7 +483,7 @@ fn valid_text(value: &str, max: usize) -> bool {
             value.to_ascii_lowercase().as_str(),
             "pending" | "todo" | "tbd" | "semantic review required"
         )
-        && !(value.starts_with('<') && value.ends_with('>'))
+        && !placeholder
 }
 
 fn validate_assessment(

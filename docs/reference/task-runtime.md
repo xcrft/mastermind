@@ -272,6 +272,15 @@ acceptance:
 Preparation and probes have separate bounded deadlines. Executor and reviewer
 share Unix process-group supervision. Windows is unsupported.
 
+On Windows, native execution and native review refuse before changing task
+approval, iteration, review pins or execution requirements. Manual preflight
+with `--exec --pre-only` remains available. A failed native probe on a supported
+platform still invalidates the old approval before preparing a new attempt.
+
+Tasks already recorded as requiring native execution keep that requirement.
+Continue them on a supported platform or restore a known valid task backup.
+Do not delete task state to reset its baseline or iteration budget.
+
 | Boundary | Limit |
 |---|---|
 | Inherited MCP, hooks, authentication, model selection and configuration | Not independently verified |

@@ -23,6 +23,14 @@ pub fn guard_hook(manifest: &Path) -> Result<bool, String> {
     guard::hook(manifest)
 }
 
+pub(crate) fn require_native_runtime() -> Result<(), String> {
+    if cfg!(unix) {
+        Ok(())
+    } else {
+        Err("invocation_runtime_unsupported_platform".into())
+    }
+}
+
 const RECEIPT_LIMIT: u64 = 128 * 1024;
 const SPEC_LIMIT: u64 = 4 * 1024 * 1024;
 #[cfg(unix)]

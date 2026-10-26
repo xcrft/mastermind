@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-10-26
+
 ### Added
 
 - `mastermind init --exec-max-turns N`, `--exec-timeout N` and
@@ -24,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalid field or value at line L column C`, without quoting report text.
   `review-task prepare` lists the allowed statuses, reviewer kinds and history
   decisions. Accepted and rejected reports are unchanged.
+- Refresh repository-owned Windows indexes through default CLI and MCP queries,
+  including concept queries. External custom indexes remain read-only.
+- Subscribe before the initial watcher scan, retain failed refresh work and retry
+  without another file edit. Queue overflow and exhausted retries are reported.
+- Reject unsupported native execution and review on Windows before changing task
+  approval, source pins or iteration.
+- Report optional Git profile refresh failures in background worker status and
+  onboarding output while preserving otherwise successful project setup.
 
 ## [3.4.1] - 2026-10-22
 
@@ -269,7 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.4.1...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.4.2...HEAD
+[3.4.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.2
 [3.4.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.1
 [3.4.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.0
 [3.3.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.3.1

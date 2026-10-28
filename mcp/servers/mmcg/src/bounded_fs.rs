@@ -1897,29 +1897,22 @@ pub(crate) fn copy_regular_file_with_capability(
     }
     let mut copied = 0_u64;
     let mut buffer = [0_u8; READ_CHUNK_BYTES];
-    loop {
+    while copied < metadata.len() {
         control.check()?;
-        let count = file.read(&mut buffer).map_err(BoundedReadError::Io)?;
+        let remaining = (metadata.len() - copied).min(buffer.len() as u64) as usize;
+        let count = file
+            .read(&mut buffer[..remaining])
+            .map_err(BoundedReadError::Io)?;
         if count == 0 {
-            break;
-        }
-        copied = copied
-            .checked_add(count as u64)
-            .ok_or(BoundedReadError::TooLarge {
-                size: u64::MAX,
-                limit: max_bytes,
-            })?;
-        if copied > max_bytes {
-            return Err(BoundedReadError::TooLarge {
-                size: copied,
-                limit: max_bytes,
-            });
+            return Err(BoundedReadError::SnapshotChanged);
         }
         destination
             .write_all(&buffer[..count])
             .map_err(BoundedReadError::Io)?;
+        copied += count as u64;
     }
-    if copied != metadata.len() {
+    control.check()?;
+    if file.read(&mut buffer[..1]).map_err(BoundedReadError::Io)? != 0 {
         return Err(BoundedReadError::SnapshotChanged);
     }
     control.check()?;
@@ -2087,7 +2080,7 @@ mod tests {
     fn deletion_replacement_and_growth_during_reads_fail_closed() {
         use std::cell::Cell;
         for copying in [false, true] {
-            for mutation in ["delete", "replace", "grow"] {
+            for mutation in ["delete", "replace", "grow", "shrink", "symlink"] {
                 let root = tempfile::tempdir().unwrap();
                 let path = root.path().join("file.txt");
                 std::fs::write(&path, b"safe").unwrap();
@@ -2104,6 +2097,11 @@ mod tests {
                                 std::fs::rename(replacement, &path).unwrap();
                             }
                             "grow" => std::fs::write(&path, b"larger than the byte limit").unwrap(),
+                            "shrink" => std::fs::write(&path, b"s").unwrap(),
+                            "symlink" => {
+                                std::fs::remove_file(&path).unwrap();
+                                std::os::unix::fs::symlink("target.txt", &path).unwrap();
+                            }
                             _ => unreachable!(),
                         }
                     }
@@ -2140,6 +2138,71 @@ mod tests {
                     "{mutation}, copying={copying}: {result:?}"
                 );
                 assert!(destination.len() <= 4);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_copy_honors_controls_and_never_writes_past_its_original_extent() {
+        use std::cell::Cell;
+        for mode in ["cancel", "deadline", "grow", "shrink", "reopen", "success"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("input");
+            let bytes = vec![b'x'; READ_CHUNK_BYTES + 7];
+            std::fs::write(&path, &bytes).unwrap();
+            let root = RootCapability::open(directory.path()).unwrap();
+            let identity = read_regular_file_with_capability(
+                &root,
+                &path,
+                bytes.len() as u64,
+                0,
+                ReadControl::default(),
+            )
+            .unwrap()
+            .identity;
+            if mode == "reopen" {
+                let replacement = directory.path().join("replacement");
+                std::fs::write(&replacement, &bytes).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            let checks = Cell::new(0);
+            let interrupt = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 3 {
+                    match mode {
+                        "grow" => std::fs::write(&path, vec![b'y'; bytes.len() + READ_CHUNK_BYTES])
+                            .unwrap(),
+                        "shrink" => std::fs::File::create(&path).unwrap().set_len(0).unwrap(),
+                        _ => (),
+                    }
+                }
+                mode == "cancel" && checks.get() == 3
+            };
+            let control = ReadControl {
+                interrupted: Some(&interrupt),
+                deadline: (mode == "deadline").then(Instant::now),
+            };
+            let mut destination = Vec::new();
+            let result = copy_regular_file_with_capability(
+                &root,
+                &path,
+                bytes.len() as u64 + 1024 * 1024,
+                control,
+                Some(identity),
+                &mut destination,
+            );
+            assert!(destination.len() <= bytes.len(), "{mode}");
+            match mode {
+                "cancel" => assert!(matches!(result, Err(BoundedReadError::Interrupted))),
+                "deadline" => assert!(matches!(result, Err(BoundedReadError::DeadlineExceeded))),
+                "grow" | "shrink" | "reopen" => {
+                    assert!(matches!(result, Err(BoundedReadError::SnapshotChanged)))
+                }
+                "success" => {
+                    assert!(result.unwrap().bytes.is_empty());
+                    assert_eq!(destination, bytes);
+                }
+                _ => unreachable!(),
             }
         }
     }

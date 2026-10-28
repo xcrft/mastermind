@@ -18,7 +18,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -358,12 +358,15 @@ pub const DEPENDENCY_CYCLE_PAIR_LIMIT: usize = 50_000;
 const DEPENDENCY_CYCLE_FILE_LIMIT: usize = DEPENDENCY_CYCLE_PAIR_LIMIT + 1;
 const DEPENDENCY_CYCLE_PATH_BYTES: usize = 8 * 1024 * 1024;
 
+type CppReverseLookup = BTreeMap<Rc<str>, Vec<(Rc<str>, Rc<str>)>>;
+
 #[derive(Default)]
 struct CycleSearch {
     paths: BTreeSet<Rc<str>>,
     path_bytes: usize,
     work: usize,
     incomplete: bool,
+    cpp_reverse: Option<CppReverseLookup>,
 }
 
 impl CycleSearch {
@@ -7772,7 +7775,18 @@ impl Store {
                     deadline: Some(Duration::from_secs(10)),
                     op_ticks: Some(250_000),
                 },
-                || self.dependency_cycle_members_inner(files),
+                || {
+                    let transaction = if self.conn.is_autocommit() {
+                        Some(self.conn.unchecked_transaction()?)
+                    } else {
+                        None
+                    };
+                    let result = self.dependency_cycle_members_inner(files);
+                    if let Some(transaction) = transaction {
+                        transaction.rollback()?;
+                    }
+                    result
+                },
             )
         });
         match result {
@@ -7903,31 +7917,48 @@ impl Store {
         if !is_cpp {
             return Ok(());
         }
-        // Reverse includes cannot be filtered by raw basename: normalization
-        // and source-relative resolution can change the encoded include path.
-        let cpp_sql = if reverse {
-            "SELECT DISTINCT source.file_path, e.to_path
-             FROM symbols source
-             CROSS JOIN edges e INDEXED BY idx_edges_from
-             WHERE e.from_id = source.id AND source.language = 'cpp'
-               AND e.kind = 'imports' AND e.to_name != '*'
-               AND e.to_path IS NOT NULL AND e.to_path LIKE '%::*'
-             ORDER BY source.file_path, e.to_path"
-        } else {
-            "SELECT DISTINCT source.file_path, e.to_path
+        if reverse {
+            self.dependency_cycle_reverse_includes(search)?;
+            if search.incomplete {
+                return Ok(());
+            }
+            let basename = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
+            let candidates = search
+                .cpp_reverse
+                .as_ref()
+                .and_then(|lookup| lookup.get(basename.as_str()))
+                .cloned()
+                .unwrap_or_default();
+            for (source, encoded) in candidates {
+                if self.work_interrupted() {
+                    return Err(Self::interrupted_error());
+                }
+                if !search.step()
+                    || self.dependency_cycle_include_targets(
+                        &source,
+                        &encoded,
+                        search,
+                        &mut |target, state| {
+                            target == file
+                                && source.as_ref() != target
+                                && state.visit(&source, visit)
+                        },
+                    )?
+                {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+        let cpp_sql = "SELECT DISTINCT source.file_path, e.to_path
              FROM symbols source INDEXED BY idx_symbols_file
              CROSS JOIN edges e INDEXED BY idx_edges_from
              WHERE source.file_path = ?1 AND e.from_id = source.id
                AND source.language = 'cpp' AND e.kind = 'imports'
                AND e.to_name != '*' AND e.to_path IS NOT NULL AND e.to_path LIKE '%::*'
-             ORDER BY source.file_path, e.to_path"
-        };
+             ORDER BY source.file_path, e.to_path";
         let mut statement = self.conn.prepare_cached(cpp_sql)?;
-        let mut rows = if reverse {
-            statement.query([])?
-        } else {
-            statement.query(params![file])?
-        };
+        let mut rows = statement.query(params![file])?;
         while let Some(row) = rows.next()? {
             if self.work_interrupted() {
                 return Err(Self::interrupted_error());
@@ -7942,16 +7973,73 @@ impl Store {
                 source,
                 encoded,
                 search,
-                &mut |target, state| {
-                    if source == target || (reverse && target != file) {
-                        return false;
-                    }
-                    state.visit(if reverse { source } else { target }, visit)
-                },
+                &mut |target, state| source != target && state.visit(target, visit),
             )? {
                 return Ok(());
             }
         }
+        Ok(())
+    }
+
+    fn dependency_cycle_reverse_includes(&self, search: &mut CycleSearch) -> SqlResult<()> {
+        if search.cpp_reverse.is_some() {
+            return Ok(());
+        }
+        let mut lookup = CppReverseLookup::new();
+        let mut statement = self.conn.prepare_cached(
+            "SELECT DISTINCT source.file_path, e.to_path
+             FROM symbols source
+             CROSS JOIN edges e INDEXED BY idx_edges_from
+             WHERE e.from_id = source.id AND source.language = 'cpp'
+               AND e.kind = 'imports' AND e.to_name != '*'
+               AND e.to_path IS NOT NULL AND e.to_path LIKE '%::*'
+             ORDER BY source.file_path, e.to_path",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            if self.work_interrupted() {
+                return Err(Self::interrupted_error());
+            }
+            if !search.step() {
+                return Ok(());
+            }
+            let Some(source) = search.retain(row_text(row, 0)?) else {
+                return Ok(());
+            };
+            let Some(encoded) = search.retain(row_text(row, 1)?) else {
+                return Ok(());
+            };
+            let include = encoded
+                .strip_suffix("::*")
+                .unwrap_or(&encoded)
+                .replace('\\', "/");
+            // Normalization may change the basename, so index exact and suffix candidates.
+            let mut names = BTreeSet::new();
+            for candidate in cpp_include_exact_candidates(&source, &include)
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .chain(std::iter::once(include.as_str()))
+            {
+                names.insert(
+                    candidate
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(candidate)
+                        .to_ascii_lowercase(),
+                );
+            }
+            for name in names {
+                let Some(key) = search.retain(&name) else {
+                    return Ok(());
+                };
+                lookup
+                    .entry(key)
+                    .or_default()
+                    .push((source.clone(), encoded.clone()));
+            }
+        }
+        search.cpp_reverse = Some(lookup);
         Ok(())
     }
 
@@ -10951,6 +11039,36 @@ mod tests {
     }
 
     #[test]
+    fn cpp_cycle_members_do_not_rescan_unrelated_includes_for_each_reverse_step() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("cycles.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "BEGIN;
+             WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 20000)
+             INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end)
+             SELECT n, 'decoy', 'module', 'decoys/' || n || '.h', 'cpp', 1, 1 FROM ids;
+             INSERT INTO edges(from_id, to_name, to_path, kind, line)
+             SELECT id, 'missing.h', 'missing.h::*', 'imports', 1 FROM symbols;
+             WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 12)
+             INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end)
+             SELECT n + 20000, 'chain', 'module', 'chain/' || n || '.h', 'cpp', 1, 1 FROM ids;
+             INSERT INTO edges(from_id, to_name, to_path, kind, line)
+             SELECT id, (id - 19999) || '.h', 'chain/' || (id - 19999) || '.h::*', 'imports', 1
+             FROM symbols WHERE id > 20000 AND id < 20012;
+             COMMIT;",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .dependency_cycle_members(&["chain/6.h".into()])
+                .unwrap(),
+            (vec![], false)
+        );
+    }
+
+    #[test]
     fn dependency_cycle_members_keep_reachability_separate_for_each_root() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("cycles.db")).unwrap();
@@ -10988,10 +11106,14 @@ mod tests {
                  (6, 'decoy', 'module', 'three/Pkg/axb.h', 'cpp', 1, 1),
                  (7, 'decoy', 'module', 'four/Pkg/a_x.h', 'cpp', 1, 1),
                  (8, 'using_target', 'module', 'using.h', 'cpp', 1, 1),
-                 (9, 'exact_decoy', 'module', 'other/b.h', 'cpp', 1, 1);
+                 (9, 'exact_decoy', 'module', 'other/b.h', 'cpp', 1, 1),
+                 (10, 'duplicate', 'module', 'src/a.h', 'cpp', 1, 1);
              INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES
                  (1, 'b.h', 'b.h::*', 'imports', 1),
                  (3, 'a.h', '../src/./a.h::*', 'imports', 1),
+                 (3, '.', '../src/a.h/.::*', 'imports', 1),
+                 (3, 'a.h', '..\\src\\a.h::*', 'imports', 1),
+                 (10, 'b.h', 'b.h::*', 'imports', 1),
                  (1, 'a_%.h', 'Pkg/a_%.h::*', 'imports', 1),
                  (4, 'a.h', '../../src/a.h::*', 'imports', 1),
                  (1, 'using_target', 'name::using_target', 'imports', 1),
@@ -11054,6 +11176,64 @@ mod tests {
             store.dependency_cycle_members(&files).unwrap(),
             (members.into_iter().collect(), false)
         );
+    }
+
+    #[test]
+    fn reverse_cpp_lookup_obeys_shared_work_and_retained_string_budgets() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("cycles.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end)
+             VALUES (1, 'source', 'module', 'source.h', 'cpp', 1, 1);
+             INSERT INTO edges(from_id, to_name, to_path, kind, line)
+             VALUES (1, 'missing.h', 'missing.h::*', 'imports', 1);",
+            )
+            .unwrap();
+        for (work, path_bytes) in [
+            (DEPENDENCY_CYCLE_PAIR_LIMIT, 0),
+            (0, DEPENDENCY_CYCLE_PATH_BYTES),
+        ] {
+            let mut search = CycleSearch {
+                work,
+                path_bytes,
+                ..CycleSearch::default()
+            };
+            store
+                .dependency_cycle_reverse_includes(&mut search)
+                .unwrap();
+            assert!(search.incomplete);
+            assert!(search.cpp_reverse.is_none());
+        }
+    }
+
+    #[test]
+    fn cycle_lookup_releases_owned_read_transactions_and_preserves_the_callers_transaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("cycles.db")).unwrap();
+        let files = ["source.h".into()];
+        assert_eq!(
+            store.dependency_cycle_members(&files).unwrap(),
+            (vec![], false)
+        );
+        assert!(store.conn.is_autocommit());
+        let transaction = store.conn.unchecked_transaction().unwrap();
+        assert_eq!(
+            store.dependency_cycle_members(&files).unwrap(),
+            (vec![], false)
+        );
+        assert!(!store.conn.is_autocommit());
+        transaction.rollback().unwrap();
+        store.conn.execute_batch("DROP TABLE edges").unwrap();
+        assert!(store.dependency_cycle_members(&files).is_err());
+        assert!(store.conn.is_autocommit());
+
+        let transaction = store.conn.unchecked_transaction().unwrap();
+        assert!(store.dependency_cycle_members(&files).is_err());
+        assert!(!store.conn.is_autocommit());
+        transaction.rollback().unwrap();
+        assert!(store.conn.is_autocommit());
     }
 
     #[test]

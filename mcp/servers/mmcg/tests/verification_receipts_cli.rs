@@ -583,6 +583,58 @@ exec /usr/bin/git "$@"
     }
 
     #[test]
+    fn large_tracked_worktree_bytes_are_observed_and_mutations_change_the_snapshot() {
+        let fixture = Fixture::new("success", 30);
+        let path = fixture.path("large.bin");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        assert!(Fixture::git_command(fixture.root())
+            .args(["add", "large.bin"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Fixture::git_command(fixture.root())
+            .args(["commit", "-qm", "large baseline"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Fixture::git_command(fixture.root())
+            .args(["tag", "-f", "baseline"])
+            .status()
+            .unwrap()
+            .success());
+        fixture.prepare();
+        let (output, receipt) = fixture.verify();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(receipt["status"], "passed");
+        fixture.write_report();
+        assert_eq!(fixture.audit().1["verdict"], "held");
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"x").unwrap();
+        let (output, changed) = fixture.verify();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(changed["status"], "passed");
+        assert_eq!(changed["snapshot_before"], changed["snapshot_after"]);
+        assert_ne!(changed["snapshot_before"], receipt["snapshot_before"]);
+        let audit = fixture.run(&[
+            "audit-spec",
+            SPEC,
+            "--since",
+            "baseline",
+            "--executor-report",
+            REPORT,
+            "--json",
+        ]);
+        assert!(!audit.status.success());
+        assert!(
+            String::from_utf8_lossy(&audit.stderr).contains("index_stale"),
+            "{audit:?}"
+        );
+    }
+
+    #[test]
     fn unsupported_observed_inputs_are_rejected_before_handoff() {
         for case in ["unsafe-link", "submodule", "large-file"] {
             let fixture = Fixture::new("success", 10);
@@ -613,7 +665,10 @@ exec /usr/bin/git "$@"
                     "verification_snapshot_unsupported_git_entry"
                 }
                 "large-file" => {
-                    fs::write(fixture.path("large.bin"), vec![0; 4 * 1024 * 1024 + 1]).unwrap();
+                    fs::File::create(fixture.path("large.bin"))
+                        .unwrap()
+                        .set_len(128 * 1024 * 1024 + 1)
+                        .unwrap();
                     assert!(Fixture::git_command(fixture.root())
                         .args(["add", "large.bin"])
                         .status()

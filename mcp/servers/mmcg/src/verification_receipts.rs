@@ -938,8 +938,23 @@ fn snapshot(
     spec: &ParsedSpec,
     deadline: Instant,
 ) -> Result<String, SnapshotFailure> {
-    let first = snapshot_once(root, baseline, spec, deadline)?;
-    if snapshot_once(root, baseline, spec, deadline)? != first {
+    let first = snapshot_once(
+        root,
+        baseline,
+        spec,
+        deadline,
+        SNAPSHOT_FILE_LIMIT,
+        SNAPSHOT_TOTAL_LIMIT,
+    )?;
+    if snapshot_once(
+        root,
+        baseline,
+        spec,
+        deadline,
+        SNAPSHOT_FILE_LIMIT,
+        SNAPSHOT_TOTAL_LIMIT,
+    )? != first
+    {
         return Err(SnapshotFailure::changed("verification_snapshot_changed"));
     }
     Ok(first)
@@ -950,6 +965,8 @@ fn snapshot_once(
     baseline: &str,
     spec: &ParsedSpec,
     deadline: Instant,
+    file_limit: u64,
+    total_limit: u64,
 ) -> Result<String, SnapshotFailure> {
     let repo = root.canonical_root();
     let baseline_commit = git(
@@ -1007,6 +1024,7 @@ fn snapshot_once(
     for args in [
         vec![
             "diff",
+            "--cached",
             "--name-only",
             "-z",
             "--no-ext-diff",
@@ -1043,11 +1061,11 @@ fn snapshot_once(
     if paths.len() > MAX_SNAPSHOT_FILES {
         return Err("verification_snapshot_file_limit".into());
     }
-    let mut remaining = SNAPSHOT_TOTAL_LIMIT;
+    let mut remaining = total_limit;
     for path in paths {
         digest.update(path.as_bytes());
         digest.update([0]);
-        let limit = remaining.min(SNAPSHOT_FILE_LIMIT);
+        let limit = remaining.min(file_limit);
         if symlinks.contains(&path) {
             let target = match bounded_fs::read_internal_symlink_with_capability(
                 root,
@@ -1109,7 +1127,7 @@ fn snapshot_once(
             }
             Err(error) => {
                 let reason = if matches!(&error, bounded_fs::BoundedReadError::TooLarge { .. }) {
-                    if remaining < SNAPSHOT_FILE_LIMIT {
+                    if remaining < file_limit {
                         "verification_snapshot_total_byte_limit"
                     } else {
                         "verification_snapshot_file_byte_limit"
@@ -1715,22 +1733,149 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_enumeration_keeps_git_index_unchanged_and_covers_worktree_inputs() {
+        let (directory, spec, context, _) = repair_fixture();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("/usr/bin/git")
+                .current_dir(root)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.join(".mastermind"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            output.stdout
+        };
+        std::fs::write(
+            root.join(".gitignore"),
+            ".mastermind/\nverification/\ndeleted.txt\nold-name.txt\n",
+        )
+        .unwrap();
+        for path in ["deleted.txt", "old-name.txt"] {
+            std::fs::write(root.join(path), "baseline\n").unwrap();
+        }
+        git(&["add", "-f", ".gitignore", "deleted.txt", "old-name.txt"]);
+        git(&[
+            "-c",
+            "user.name=Snapshot Test",
+            "-c",
+            "user.email=snapshot@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline inputs",
+        ]);
+        let baseline = String::from_utf8(git(&["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(&["config", "diff.autoRefreshIndex", "true"]);
+        std::fs::File::open(root.join("source.txt"))
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+            )
+            .unwrap();
+        let index_before = std::fs::read(root.join(".git/index")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let snapshot = || {
+            snapshot_once(
+                &context.root,
+                &baseline,
+                &spec,
+                deadline,
+                SNAPSHOT_FILE_LIMIT,
+                SNAPSHOT_TOTAL_LIMIT,
+            )
+            .unwrap()
+        };
+        snapshot();
+        assert_eq!(
+            std::fs::read(root.join(".git/index")).unwrap(),
+            index_before
+        );
+
+        git(&["rm", "--cached", "--quiet", "deleted.txt"]);
+        git(&["mv", "old-name.txt", "new-name.txt"]);
+        // Baseline-only paths stay bound even when untracked enumeration ignores them.
+        for path in ["deleted.txt", "old-name.txt", "source.txt", "untracked.txt"] {
+            std::fs::write(root.join(path), "before\n").unwrap();
+            let before = snapshot();
+            std::fs::write(root.join(path), "after!\n").unwrap();
+            assert_ne!(snapshot(), before, "unobserved snapshot input: {path}");
+        }
+    }
+
+    #[test]
+    fn snapshot_production_byte_limits_remain_fixed() {
+        assert_eq!(SNAPSHOT_FILE_LIMIT, 128 * 1024 * 1024);
+        assert_eq!(SNAPSHOT_TOTAL_LIMIT, 512 * 1024 * 1024);
+    }
+
+    #[test]
     fn streamed_snapshot_enforces_the_aggregate_io_budget() {
         let (directory, spec, context, _) = repair_fixture();
-        for index in 0..4 {
-            std::fs::File::create(directory.path().join(format!("large-{index}")))
+        let file_limit = 64;
+        let fixture_bytes: u64 = [".gitignore", "source.txt"]
+            .iter()
+            .map(|path| {
+                std::fs::metadata(directory.path().join(path))
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        for index in 0..2 {
+            std::fs::File::create(directory.path().join(format!("budget-{index}")))
                 .unwrap()
-                .set_len(SNAPSHOT_FILE_LIMIT)
+                .set_len(file_limit)
                 .unwrap();
         }
-        let failure = snapshot_once(
+        let total_limit = fixture_bytes + 2 * file_limit;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let snapshot = || {
+            snapshot_once(
+                &context.root,
+                &context.binding.baseline_oid,
+                &spec,
+                deadline,
+                file_limit,
+                total_limit,
+            )
+        };
+        let exact = snapshot();
+        let production = super::snapshot(
             &context.root,
             &context.binding.baseline_oid,
             &spec,
-            Instant::now() + Duration::from_secs(180),
+            deadline,
         )
-        .unwrap_err();
-        assert_eq!(failure.reason, "verification_snapshot_total_byte_limit");
+        .unwrap();
+        let last = std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.path().join("budget-1"))
+            .unwrap();
+        last.set_len(file_limit + 1).unwrap();
+        let file_reason = snapshot().err().map(|failure| failure.reason);
+        last.set_len(file_limit).unwrap();
+        std::fs::write(directory.path().join("source.txt"), "original\n!").unwrap();
+        let total_reason = snapshot().err().map(|failure| failure.reason);
+        assert_eq!(exact.unwrap(), production);
+        assert_eq!(
+            (file_reason.as_deref(), total_reason.as_deref()),
+            (
+                Some("verification_snapshot_file_byte_limit"),
+                Some("verification_snapshot_total_byte_limit")
+            )
+        );
     }
 
     fn receipt_fixture() -> (tempfile::TempDir, Context, Receipt) {

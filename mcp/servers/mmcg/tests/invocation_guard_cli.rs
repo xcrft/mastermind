@@ -14,13 +14,18 @@ const RECEIPT: &str = ".mastermind/tasks/001-guard/invocation.json";
 const MANIFEST: &str = ".mastermind/tasks/001-guard/invocation.guard.json";
 const LEDGER: &str = ".mastermind/tasks/001-guard/invocation.guard-decisions.json";
 
+const FAKE_LAUNCHER: &str = r#"#!/bin/sh
+set -eu
+case "$#:${1-}" in
+  1:--version) printf '%s\n' '2.1.267 (Claude Code)' ;;
+  1:--help) printf '%s\n' '--input-format text --output-format stream-json --verbose --tools --permission-mode acceptEdits dontAsk --permission-prompts none --no-session-persistence --no-chrome --restricted --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --session-id' ;;
+  *) exec /usr/bin/python3 "$HARNESS/client.py" "$@" ;;
+esac
+"#;
+
 const FAKE: &str = r#"#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys
 args = sys.argv[1:]
-if args == ['--version']:
-    print('2.1.267 (Claude Code)'); sys.exit(0)
-if args == ['--help']:
-    print('--input-format text --output-format stream-json --verbose --tools --permission-mode acceptEdits dontAsk --permission-prompts none --no-session-persistence --no-chrome --restricted --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --session-id'); sys.exit(0)
 h = pathlib.Path(os.environ['HARNESS'])
 mode = (h / 'mode').read_text()
 raw = sys.stdin.read()
@@ -184,8 +189,9 @@ impl Fixture {
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        fs::write(f.bin.join("claude"), FAKE).unwrap();
+        fs::write(f.bin.join("claude"), FAKE_LAUNCHER).unwrap();
         fs::set_permissions(f.bin.join("claude"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(f.harness.join("client.py"), FAKE).unwrap();
         fs::write(f.harness.join("mode"), mode).unwrap();
         fs::write(f.harness.join("victim.py"), "PRIVATE_VICTIM_UNCHANGED").unwrap();
         f.write(

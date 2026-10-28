@@ -15,7 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RECEIPT_LIMIT: u64 = 128 * 1024;
 const FILE_LIMIT: u64 = 4 * 1024 * 1024;
-const TOTAL_FILE_LIMIT: u64 = 64 * 1024 * 1024;
+const SNAPSHOT_FILE_LIMIT: u64 = 128 * 1024 * 1024;
+const SNAPSHOT_TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
 const GIT_LIMIT: usize = 8 * 1024 * 1024;
 const EXECUTABLE_LIMIT: u64 = 128 * 1024 * 1024;
 #[cfg(unix)]
@@ -1042,11 +1043,11 @@ fn snapshot_once(
     if paths.len() > MAX_SNAPSHOT_FILES {
         return Err("verification_snapshot_file_limit".into());
     }
-    let mut remaining = TOTAL_FILE_LIMIT;
+    let mut remaining = SNAPSHOT_TOTAL_LIMIT;
     for path in paths {
         digest.update(path.as_bytes());
         digest.update([0]);
-        let limit = remaining.min(FILE_LIMIT);
+        let limit = remaining.min(SNAPSHOT_FILE_LIMIT);
         if symlinks.contains(&path) {
             let target = match bounded_fs::read_internal_symlink_with_capability(
                 root,
@@ -1093,23 +1094,14 @@ fn snapshot_once(
             digest.update([0]);
             continue;
         }
-        match bounded_fs::read_regular_file_with_capability(
+        match snapshot_file(
             root,
             &root.requested_root().join(&path),
             limit,
-            limit,
-            ReadControl {
-                deadline: Some(deadline),
-                interrupted: Some(&interrupted),
-            },
+            deadline,
+            &mut digest,
         ) {
-            Ok(file) => {
-                remaining -= file.declared_len;
-                digest.update(b"file\0");
-                digest.update(file.declared_len.to_le_bytes());
-                digest.update(file.identity.attributes().to_le_bytes());
-                digest.update(file.bytes);
-            }
+            Ok(length) => remaining -= length,
             Err(bounded_fs::BoundedReadError::Io(e))
                 if e.kind() == std::io::ErrorKind::NotFound && !inputs.contains(&path) =>
             {
@@ -1117,7 +1109,7 @@ fn snapshot_once(
             }
             Err(error) => {
                 let reason = if matches!(&error, bounded_fs::BoundedReadError::TooLarge { .. }) {
-                    if remaining < FILE_LIMIT {
+                    if remaining < SNAPSHOT_FILE_LIMIT {
                         "verification_snapshot_total_byte_limit"
                     } else {
                         "verification_snapshot_file_byte_limit"
@@ -1133,6 +1125,52 @@ fn snapshot_once(
     root.verify()
         .map_err(|error| SnapshotFailure::read(error, "verification_snapshot_root_unavailable"))?;
     Ok(crate::hex::encode(&digest.finalize()))
+}
+
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for DigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn snapshot_file(
+    root: &RootCapability,
+    path: &Path,
+    limit: u64,
+    deadline: Instant,
+    digest: &mut Sha256,
+) -> Result<u64, bounded_fs::BoundedReadError> {
+    let control = ReadControl {
+        deadline: Some(deadline),
+        interrupted: Some(&interrupted),
+    };
+    let header = bounded_fs::read_regular_file_with_capability(root, path, limit, 0, control)?;
+    digest.update(b"file\0");
+    digest.update(header.declared_len.to_le_bytes());
+    digest.update(header.identity.attributes().to_le_bytes());
+    let file = bounded_fs::copy_regular_file_with_capability(
+        root,
+        path,
+        limit,
+        control,
+        Some(header.identity),
+        &mut DigestWriter(digest),
+    )
+    .map_err(|error| match error {
+        bounded_fs::BoundedReadError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
+            bounded_fs::BoundedReadError::SnapshotChanged
+        }
+        bounded_fs::BoundedReadError::NotRegular => bounded_fs::BoundedReadError::SnapshotChanged,
+        other => other,
+    })?;
+    Ok(file.declared_len)
 }
 
 fn snapshot_path(bytes: &[u8]) -> Result<String, String> {
@@ -1636,6 +1674,64 @@ impl Drop for Cancellation {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_file_digest_keeps_the_v1_fields_and_exact_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RootCapability::open(directory.path()).unwrap();
+        let path = directory.path().join("input");
+        let bytes: Vec<u8> = (0..64 * 1024 + 7).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = bounded_fs::read_regular_file_with_capability(
+            &root,
+            &path,
+            SNAPSHOT_FILE_LIMIT,
+            SNAPSHOT_FILE_LIMIT,
+            ReadControl::default(),
+        )
+        .unwrap();
+        let mut legacy = Sha256::new();
+        legacy.update(b"file\0");
+        legacy.update((bytes.len() as u64).to_le_bytes());
+        legacy.update(file.identity.attributes().to_le_bytes());
+        legacy.update(&bytes);
+        let mut streamed = Sha256::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        assert_eq!(
+            snapshot_file(&root, &path, bytes.len() as u64, deadline, &mut streamed).unwrap(),
+            bytes.len() as u64
+        );
+        assert_eq!(streamed.finalize(), legacy.finalize());
+        assert!(matches!(
+            snapshot_file(
+                &root,
+                &path,
+                bytes.len() as u64 - 1,
+                deadline,
+                &mut Sha256::new()
+            ),
+            Err(bounded_fs::BoundedReadError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn streamed_snapshot_enforces_the_aggregate_io_budget() {
+        let (directory, spec, context, _) = repair_fixture();
+        for index in 0..4 {
+            std::fs::File::create(directory.path().join(format!("large-{index}")))
+                .unwrap()
+                .set_len(SNAPSHOT_FILE_LIMIT)
+                .unwrap();
+        }
+        let failure = snapshot_once(
+            &context.root,
+            &context.binding.baseline_oid,
+            &spec,
+            Instant::now() + Duration::from_secs(180),
+        )
+        .unwrap_err();
+        assert_eq!(failure.reason, "verification_snapshot_total_byte_limit");
+    }
 
     fn receipt_fixture() -> (tempfile::TempDir, Context, Receipt) {
         let directory = tempfile::tempdir().unwrap();

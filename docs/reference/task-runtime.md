@@ -45,11 +45,22 @@ limit. An unindexed new file has no indexed import edges.
 
 | Boundary | Contract |
 |---|---|
-| Shared search work | 50,000 neighbor visits, including C++ include resolution work |
-| Retained paths | 50,001 unique paths and 8 MiB of UTF-8 path bytes |
+| Shared search work | 50,000 neighbor visits, raw C++ includes and include resolution steps |
+| Retained paths and C++ lookup strings | 50,001 unique strings and 8 MiB of UTF-8 bytes |
 | Query budget | At most 10 seconds and 250,000 SQLite progress ticks, subject to a tighter caller budget |
 | Incomplete search | Discards partial membership and fails preflight as unknown risk |
 | SQL failure or cancellation | Fails preflight without approving an empty risk report |
+
+Reverse C++ lookup visits matching candidates while scanning raw include records.
+A cycle witness stops the scan and discards the partial lookup. Later task roots
+may restart that scan within the shared work budget. A completed lookup is reused
+for subsequent reverse steps, selecting possible exact and suffix basenames before
+applying the same exact-before-suffix resolver as forward traversal. Cached steps
+copy only the candidate being visited. If cache storage reaches the shared string
+or byte limit, cache-only strings are released and the scan continues without
+caching. Traversal paths keep their ownership and limits. An evicted lookup falls
+back to scanning within the remaining work and query budgets. All lookups share
+one SQLite read snapshot. The lookup is discarded with the search.
 
 The result describes syntactic indexed imports. It does not establish runtime
 cycles or source freshness. C++ suffix resolution can include multiple candidate
@@ -162,12 +173,25 @@ Running a check neither requires nor modifies the executor report.
 | Input | Limit |
 |---|---|
 | Observed files | 100,000 |
-| Individual / total file bytes | 4 MiB / 64 MiB |
+| Individual / total snapshot file bytes per pass | 128 MiB / 512 MiB |
+| Retained snapshot file content | One 64 KiB streaming buffer |
+| Verification spec reads | 4 MiB |
 | Git response | 8 MiB |
 | Executable | 128 MiB |
 | Receipt JSON | 128 KiB |
 | Verification kit entries | 1,024 files and directories per task |
 | Additional inputs | 128 unique files per check |
+
+Each snapshot compares two complete passes. Preflight reads at most 1 GiB of
+file content, and command verification takes snapshots before and after execution
+for at most 2 GiB. Each regular file also receives a one-byte EOF probe per pass.
+All reads share the operation deadline and cancellation signal. Growth, shrinkage,
+replacement and unreadable inputs fail the snapshot. File content streams into
+the unchanged version-1 digest, so previously admitted inputs keep their digest.
+The caps bound I/O separately from the streaming buffer and do not change parser
+or configuration limits. The separate working-tree diff reader keeps its 5 MiB
+per-file cap. Changing a larger file can still make `audit-spec` fail closed with
+`index_stale`. Larger snapshot coverage does not waive the diff requirement.
 
 | Change or limitation | Effect |
 |---|---|

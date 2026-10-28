@@ -7918,33 +7918,39 @@ impl Store {
             return Ok(());
         }
         if reverse {
-            self.dependency_cycle_reverse_includes(search)?;
-            if search.incomplete {
-                return Ok(());
+            if search.cpp_reverse.is_none() {
+                return self.dependency_cycle_reverse_includes(file, search, visit);
             }
             let basename = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
             let candidates = search
                 .cpp_reverse
                 .as_ref()
                 .and_then(|lookup| lookup.get(basename.as_str()))
-                .cloned()
-                .unwrap_or_default();
-            for (source, encoded) in candidates {
+                .map_or(0, Vec::len);
+            for index in 0..candidates {
                 if self.work_interrupted() {
                     return Err(Self::interrupted_error());
                 }
-                if !search.step()
-                    || self.dependency_cycle_include_targets(
-                        &source,
-                        &encoded,
-                        search,
-                        &mut |target, state| {
-                            target == file
-                                && source.as_ref() != target
-                                && state.visit(&source, visit)
-                        },
-                    )?
-                {
+                if !search.step() {
+                    return Ok(());
+                }
+                let Some((source, encoded)) = search
+                    .cpp_reverse
+                    .as_ref()
+                    .and_then(|lookup| lookup.get(basename.as_str()))
+                    .and_then(|bucket| bucket.get(index))
+                    .cloned()
+                else {
+                    break;
+                };
+                if self.dependency_cycle_include_targets(
+                    &source,
+                    &encoded,
+                    search,
+                    &mut |target, state| {
+                        target == file && source.as_ref() != target && state.visit(&source, visit)
+                    },
+                )? {
                     return Ok(());
                 }
             }
@@ -7981,10 +7987,13 @@ impl Store {
         Ok(())
     }
 
-    fn dependency_cycle_reverse_includes(&self, search: &mut CycleSearch) -> SqlResult<()> {
-        if search.cpp_reverse.is_some() {
-            return Ok(());
-        }
+    fn dependency_cycle_reverse_includes(
+        &self,
+        file: &str,
+        search: &mut CycleSearch,
+        visit: &mut impl FnMut(Rc<str>) -> bool,
+    ) -> SqlResult<()> {
+        let basename = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
         let mut lookup = CppReverseLookup::new();
         let mut statement = self.conn.prepare_cached(
             "SELECT DISTINCT source.file_path, e.to_path
@@ -8029,6 +8038,7 @@ impl Store {
                         .to_ascii_lowercase(),
                 );
             }
+            let matches = names.contains(&basename);
             for name in names {
                 let Some(key) = search.retain(&name) else {
                     return Ok(());
@@ -8037,6 +8047,19 @@ impl Store {
                     .entry(key)
                     .or_default()
                     .push((source.clone(), encoded.clone()));
+            }
+            // A witness may end this scan early. Only a complete lookup is reused.
+            if matches
+                && self.dependency_cycle_include_targets(
+                    &source,
+                    &encoded,
+                    search,
+                    &mut |target, state| {
+                        target == file && source.as_ref() != target && state.visit(&source, visit)
+                    },
+                )?
+            {
+                return Ok(());
             }
         }
         search.cpp_reverse = Some(lookup);
@@ -11039,6 +11062,36 @@ mod tests {
     }
 
     #[test]
+    fn cpp_cycle_members_find_early_witnesses_before_unrelated_include_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("cycles.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "BEGIN;
+             INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end) VALUES
+                 (1, 'a', 'module', 'a.h', 'cpp', 1, 1),
+                 (2, 'b', 'module', 'b.h', 'cpp', 1, 1);
+             INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES
+                 (1, 'b.h', 'b.h::*', 'imports', 1),
+                 (2, 'a.h', 'a.h::*', 'imports', 1);
+             WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 50000)
+             INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end)
+             SELECT n + 2, 'decoy', 'module', 'z/' || n || '.h', 'cpp', 1, 1 FROM ids;
+             INSERT INTO edges(from_id, to_name, to_path, kind, line)
+             SELECT id, 'missing.h', 'missing.h::*', 'imports', 1 FROM symbols WHERE id > 2;
+             COMMIT;",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .dependency_cycle_members(&["a.h".into(), "b.h".into()])
+                .unwrap(),
+            (vec!["a.h".into(), "b.h".into()], false)
+        );
+    }
+
+    #[test]
     fn cpp_cycle_members_do_not_rescan_unrelated_includes_for_each_reverse_step() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("cycles.db")).unwrap();
@@ -11057,14 +11110,20 @@ mod tests {
              INSERT INTO edges(from_id, to_name, to_path, kind, line)
              SELECT id, (id - 19999) || '.h', 'chain/' || (id - 19999) || '.h::*', 'imports', 1
              FROM symbols WHERE id > 20000 AND id < 20012;
+             INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end) VALUES
+                 (20013, 'a', 'module', 'a.h', 'cpp', 1, 1),
+                 (20014, 'b', 'module', 'b.h', 'cpp', 1, 1);
+             INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES
+                 (20013, 'b.h', 'b.h::*', 'imports', 1),
+                 (20014, 'a.h', 'a.h::*', 'imports', 1);
              COMMIT;",
             )
             .unwrap();
         assert_eq!(
             store
-                .dependency_cycle_members(&["chain/6.h".into()])
+                .dependency_cycle_members(&["a.h".into(), "b.h".into(), "chain/6.h".into()])
                 .unwrap(),
-            (vec![], false)
+            (vec!["a.h".into(), "b.h".into()], false)
         );
     }
 
@@ -11201,7 +11260,7 @@ mod tests {
                 ..CycleSearch::default()
             };
             store
-                .dependency_cycle_reverse_includes(&mut search)
+                .dependency_cycle_reverse_includes("source.h", &mut search, &mut |_| false)
                 .unwrap();
             assert!(search.incomplete);
             assert!(search.cpp_reverse.is_none());

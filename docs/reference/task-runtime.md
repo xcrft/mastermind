@@ -51,9 +51,12 @@ limit. An unindexed new file has no indexed import edges.
 | Incomplete search | Discards partial membership and fails preflight as unknown risk |
 | SQL failure or cancellation | Fails preflight without approving an empty risk report |
 
-Reverse C++ lookup scans raw include records once per search. Its bounded lookup
-selects possible exact and suffix basenames, then applies the same exact-before-
-suffix resolver as forward traversal. All lookups share one SQLite read snapshot.
+Reverse C++ lookup visits matching candidates while scanning raw include records.
+A cycle witness stops the scan and discards the partial lookup. Later task roots
+may restart that scan within the shared work budget. A completed lookup is reused
+for subsequent reverse steps, selecting possible exact and suffix basenames before
+applying the same exact-before-suffix resolver as forward traversal. Cached steps
+copy only the candidate being visited. All lookups share one SQLite read snapshot.
 The lookup is discarded with the search.
 
 The result describes syntactic indexed imports. It does not establish runtime

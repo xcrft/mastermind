@@ -1024,6 +1024,7 @@ fn snapshot_once(
     for args in [
         vec![
             "diff",
+            "--cached",
             "--name-only",
             "-z",
             "--no-ext-diff",
@@ -1729,6 +1730,89 @@ mod tests {
             ),
             Err(bounded_fs::BoundedReadError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn snapshot_enumeration_keeps_git_index_unchanged_and_covers_worktree_inputs() {
+        let (directory, spec, context, _) = repair_fixture();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("/usr/bin/git")
+                .current_dir(root)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.join(".mastermind"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            output.stdout
+        };
+        std::fs::write(
+            root.join(".gitignore"),
+            ".mastermind/\nverification/\ndeleted.txt\nold-name.txt\n",
+        )
+        .unwrap();
+        for path in ["deleted.txt", "old-name.txt"] {
+            std::fs::write(root.join(path), "baseline\n").unwrap();
+        }
+        git(&["add", "-f", ".gitignore", "deleted.txt", "old-name.txt"]);
+        git(&[
+            "-c",
+            "user.name=Snapshot Test",
+            "-c",
+            "user.email=snapshot@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline inputs",
+        ]);
+        let baseline = String::from_utf8(git(&["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(&["config", "diff.autoRefreshIndex", "true"]);
+        std::fs::File::open(root.join("source.txt"))
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+            )
+            .unwrap();
+        let index_before = std::fs::read(root.join(".git/index")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let snapshot = || {
+            snapshot_once(
+                &context.root,
+                &baseline,
+                &spec,
+                deadline,
+                SNAPSHOT_FILE_LIMIT,
+                SNAPSHOT_TOTAL_LIMIT,
+            )
+            .unwrap()
+        };
+        snapshot();
+        assert_eq!(
+            std::fs::read(root.join(".git/index")).unwrap(),
+            index_before
+        );
+
+        git(&["rm", "--cached", "--quiet", "deleted.txt"]);
+        git(&["mv", "old-name.txt", "new-name.txt"]);
+        // Baseline-only paths stay bound even when untracked enumeration ignores them.
+        for path in ["deleted.txt", "old-name.txt", "source.txt", "untracked.txt"] {
+            std::fs::write(root.join(path), "before\n").unwrap();
+            let before = snapshot();
+            std::fs::write(root.join(path), "after!\n").unwrap();
+            assert_ne!(snapshot(), before, "unobserved snapshot input: {path}");
+        }
     }
 
     #[test]

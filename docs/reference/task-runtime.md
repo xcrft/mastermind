@@ -56,8 +56,11 @@ A cycle witness stops the scan and discards the partial lookup. Later task roots
 may restart that scan within the shared work budget. A completed lookup is reused
 for subsequent reverse steps, selecting possible exact and suffix basenames before
 applying the same exact-before-suffix resolver as forward traversal. Cached steps
-copy only the candidate being visited. All lookups share one SQLite read snapshot.
-The lookup is discarded with the search.
+copy only the candidate being visited. If cache storage reaches the shared string
+or byte limit, cache-only strings are released and the scan continues without
+caching. Traversal paths keep their ownership and limits. An evicted lookup falls
+back to scanning within the remaining work and query budgets. All lookups share
+one SQLite read snapshot. The lookup is discarded with the search.
 
 The result describes syntactic indexed imports. It does not establish runtime
 cycles or source freshness. C++ suffix resolution can include multiple candidate

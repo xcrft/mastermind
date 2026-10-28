@@ -364,6 +364,9 @@ type CppReverseLookup = BTreeMap<Rc<str>, Vec<(Rc<str>, Rc<str>)>>;
 struct CycleSearch {
     paths: BTreeSet<Rc<str>>,
     path_bytes: usize,
+    cache_paths: BTreeSet<Rc<str>>,
+    cache_bytes: usize,
+    cache_disabled: bool,
     work: usize,
     incomplete: bool,
     cpp_reverse: Option<CppReverseLookup>,
@@ -379,19 +382,56 @@ impl CycleSearch {
         true
     }
 
+    fn has_capacity(&self, path: &str) -> bool {
+        self.paths.len() + self.cache_paths.len() < DEPENDENCY_CYCLE_FILE_LIMIT
+            && path.len() <= DEPENDENCY_CYCLE_PATH_BYTES - self.path_bytes - self.cache_bytes
+    }
+
+    fn discard_cache(&mut self) {
+        self.cpp_reverse = None;
+        self.cache_paths.clear();
+        self.cache_bytes = 0;
+    }
+
     fn retain(&mut self, path: &str) -> Option<Rc<str>> {
         if let Some(path) = self.paths.get(path) {
             return Some(path.clone());
         }
-        if self.paths.len() == DEPENDENCY_CYCLE_FILE_LIMIT
-            || path.len() > DEPENDENCY_CYCLE_PATH_BYTES - self.path_bytes
-        {
+        if let Some(path) = self.cache_paths.take(path) {
+            self.cache_bytes -= path.len();
+            self.path_bytes += path.len();
+            self.paths.insert(path.clone());
+            return Some(path);
+        }
+        if !self.has_capacity(path) {
+            self.discard_cache();
+            self.cache_disabled = true;
+        }
+        if !self.has_capacity(path) {
             self.incomplete = true;
             return None;
         }
         let path = Rc::<str>::from(path);
         self.path_bytes += path.len();
         self.paths.insert(path.clone());
+        Some(path)
+    }
+
+    fn cache_retain(&mut self, path: &str) -> Option<Rc<str>> {
+        if self.cache_disabled {
+            return None;
+        }
+        if let Some(path) = self.paths.get(path).or_else(|| self.cache_paths.get(path)) {
+            return Some(path.clone());
+        }
+        if !self.has_capacity(path) {
+            self.discard_cache();
+            self.cache_disabled = true;
+            return None;
+        }
+        let path = Rc::<str>::from(path);
+        self.cache_bytes += path.len();
+        self.cache_paths.insert(path.clone());
         Some(path)
     }
 
@@ -7941,7 +7981,7 @@ impl Store {
                     .and_then(|bucket| bucket.get(index))
                     .cloned()
                 else {
-                    break;
+                    return self.dependency_cycle_reverse_includes(file, search, visit);
                 };
                 if self.dependency_cycle_include_targets(
                     &source,
@@ -7952,6 +7992,10 @@ impl Store {
                     },
                 )? {
                     return Ok(());
+                }
+                if search.cpp_reverse.is_none() {
+                    // Cache eviction must not skip the remaining neighbors.
+                    return self.dependency_cycle_reverse_includes(file, search, visit);
                 }
             }
             return Ok(());
@@ -7994,7 +8038,9 @@ impl Store {
         visit: &mut impl FnMut(Rc<str>) -> bool,
     ) -> SqlResult<()> {
         let basename = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
-        let mut lookup = CppReverseLookup::new();
+        if !search.cache_disabled {
+            search.cpp_reverse = Some(CppReverseLookup::new());
+        }
         let mut statement = self.conn.prepare_cached(
             "SELECT DISTINCT source.file_path, e.to_path
              FROM symbols source
@@ -8010,21 +8056,23 @@ impl Store {
                 return Err(Self::interrupted_error());
             }
             if !search.step() {
+                search.discard_cache();
                 return Ok(());
             }
-            let Some(source) = search.retain(row_text(row, 0)?) else {
+            let source = row_text(row, 0)?;
+            let encoded = row_text(row, 1)?;
+            if source.len().saturating_add(encoded.len()) > DEPENDENCY_CYCLE_PATH_BYTES {
+                search.incomplete = true;
+                search.discard_cache();
                 return Ok(());
-            };
-            let Some(encoded) = search.retain(row_text(row, 1)?) else {
-                return Ok(());
-            };
+            }
             let include = encoded
                 .strip_suffix("::*")
-                .unwrap_or(&encoded)
+                .unwrap_or(encoded)
                 .replace('\\', "/");
             // Normalization may change the basename, so index exact and suffix candidates.
             let mut names = BTreeSet::new();
-            for candidate in cpp_include_exact_candidates(&source, &include)
+            for candidate in cpp_include_exact_candidates(source, &include)
                 .iter()
                 .flatten()
                 .map(String::as_str)
@@ -8039,30 +8087,36 @@ impl Store {
                 );
             }
             let matches = names.contains(&basename);
-            for name in names {
-                let Some(key) = search.retain(&name) else {
-                    return Ok(());
-                };
-                lookup
-                    .entry(key)
-                    .or_default()
-                    .push((source.clone(), encoded.clone()));
+            if let (Some(source), Some(encoded)) =
+                (search.cache_retain(source), search.cache_retain(encoded))
+            {
+                for name in names {
+                    let Some(key) = search.cache_retain(&name) else {
+                        break;
+                    };
+                    if let Some(lookup) = search.cpp_reverse.as_mut() {
+                        lookup
+                            .entry(key)
+                            .or_default()
+                            .push((source.clone(), encoded.clone()));
+                    }
+                }
             }
             // A witness may end this scan early. Only a complete lookup is reused.
             if matches
                 && self.dependency_cycle_include_targets(
-                    &source,
-                    &encoded,
+                    source,
+                    encoded,
                     search,
                     &mut |target, state| {
-                        target == file && source.as_ref() != target && state.visit(&source, visit)
+                        target == file && source != target && state.visit(source, visit)
                     },
                 )?
             {
+                search.discard_cache();
                 return Ok(());
             }
         }
-        search.cpp_reverse = Some(lookup);
         Ok(())
     }
 
@@ -11092,6 +11146,49 @@ mod tests {
     }
 
     #[test]
+    fn cpp_cycle_members_find_late_witness_after_cache_count_or_byte_capacity() {
+        let mut outcomes = Vec::new();
+        for (count, padding) in [(17_000, String::new()), (2_200, "x".repeat(1_400))] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().join("cycles.db")).unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "BEGIN;
+                 INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end) VALUES
+                     (1, 'a', 'module', 'a.h', 'cpp', 1, 1),
+                     (2, 'b', 'module', 'z/b.h', 'cpp', 1, 1);
+                 INSERT INTO edges(from_id, to_name, to_path, kind, line) VALUES
+                     (1, 'b.h', 'z/b.h::*', 'imports', 1),
+                     (2, 'a.h', 'a.h::*', 'imports', 1);",
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "WITH RECURSIVE ids(n) AS
+                     (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?1)
+                 INSERT INTO symbols(id, name, kind, file_path, language, line_start, line_end)
+                 SELECT n + 2, 'decoy', 'module', 'd/' || ?2 || n || '.cc', 'cpp', 1, 1 FROM ids",
+                    params![count, padding],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO edges(from_id, to_name, to_path, kind, line)
+                 SELECT id, 'missing.h', 'h/' || ?1 || (id - 2) || '.h::*', 'imports', 1
+                 FROM symbols WHERE id > 2",
+                    params![padding],
+                )
+                .unwrap();
+            store.conn.execute_batch("COMMIT").unwrap();
+            outcomes.push(store.dependency_cycle_members(&["a.h".into()]).unwrap());
+        }
+        assert_eq!(outcomes, vec![(vec!["a.h".into()], false); 2]);
+    }
+
+    #[test]
     fn cpp_cycle_members_do_not_rescan_unrelated_includes_for_each_reverse_step() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("cycles.db")).unwrap();
@@ -11238,7 +11335,7 @@ mod tests {
     }
 
     #[test]
-    fn reverse_cpp_lookup_obeys_shared_work_and_retained_string_budgets() {
+    fn cpp_cycle_reverse_lookup_keeps_work_limits_hard_and_cache_capacity_soft() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("cycles.db")).unwrap();
         store
@@ -11250,21 +11347,54 @@ mod tests {
              VALUES (1, 'missing.h', 'missing.h::*', 'imports', 1);",
             )
             .unwrap();
-        for (work, path_bytes) in [
-            (DEPENDENCY_CYCLE_PAIR_LIMIT, 0),
-            (0, DEPENDENCY_CYCLE_PATH_BYTES),
-        ] {
-            let mut search = CycleSearch {
-                work,
-                path_bytes,
-                ..CycleSearch::default()
-            };
-            store
-                .dependency_cycle_reverse_includes("source.h", &mut search, &mut |_| false)
-                .unwrap();
-            assert!(search.incomplete);
-            assert!(search.cpp_reverse.is_none());
-        }
+        let mut search = CycleSearch {
+            work: DEPENDENCY_CYCLE_PAIR_LIMIT,
+            ..CycleSearch::default()
+        };
+        store
+            .dependency_cycle_reverse_includes("source.h", &mut search, &mut |_| false)
+            .unwrap();
+        assert!(search.incomplete);
+        assert!(search.cpp_reverse.is_none());
+
+        let mut search = CycleSearch::default();
+        let exact = "é".repeat(DEPENDENCY_CYCLE_PATH_BYTES / 2);
+        assert!(search.retain(&exact).is_some());
+        store
+            .dependency_cycle_reverse_includes("source.h", &mut search, &mut |_| false)
+            .unwrap();
+        assert!(!search.incomplete);
+        assert!(search.cache_disabled);
+        assert!(search.cpp_reverse.is_none());
+        assert!(search.paths.contains(exact.as_str()));
+        assert!(search.retain("over-limit").is_none());
+        assert!(search.incomplete);
+    }
+
+    #[test]
+    fn cycle_cache_promotions_survive_eviction_for_traversal_capacity() {
+        let mut search = CycleSearch::default();
+        let promoted = search.cache_retain("promoted.h").unwrap();
+        assert!(Rc::ptr_eq(&promoted, &search.retain("promoted.h").unwrap()));
+        let filling = "x".repeat(DEPENDENCY_CYCLE_PATH_BYTES - promoted.len());
+        let cached = search.cache_retain(&filling).unwrap();
+        search.cpp_reverse = Some(BTreeMap::from([(
+            cached.clone(),
+            vec![(cached.clone(), cached)],
+        )]));
+        assert!(search.retain("new-traversal.h").is_some());
+        assert!(!search.incomplete);
+        assert!(search.cache_disabled);
+        assert!(search.cpp_reverse.is_none());
+        assert!(search.cache_paths.is_empty());
+        assert_eq!(search.cache_bytes, 0);
+        assert!(search.paths.contains("promoted.h"));
+        assert!(search.paths.contains("new-traversal.h"));
+        assert_eq!(
+            search.path_bytes,
+            "promoted.h".len() + "new-traversal.h".len()
+        );
+        assert!(search.cache_retain("cannot-restart").is_none());
     }
 
     #[test]

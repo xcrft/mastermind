@@ -123,6 +123,7 @@ enum HandlerError {
     SchemaIncompatible,
     SnapshotChanged,
     WorkLimitExceeded,
+    RebuildRequired,
     BudgetTooSmall {
         minimum_tokens: u32,
     },
@@ -332,16 +333,6 @@ pub(crate) fn workflow_tool_schemas() -> Vec<(&'static str, Value)> {
         .iter()
         .map(|tool| (tool.name, (tool.schema)()))
         .collect()
-}
-
-/// Structural graph answers are trustworthy only while the index matches the
-/// repository. A small set of diagnostic, revision-bound, and additive tools
-/// remains available so clients can inspect or recover from stale state.
-fn tool_requires_fresh_index(name: &str) -> bool {
-    TOOLS
-        .iter()
-        .find(|tool| tool.name == name)
-        .is_none_or(|tool| tool.behavior == ToolBehavior::RefreshableQuery)
 }
 
 /// `Stdin` itself is `Send + 'static` (unlike its lock guard) — wrapping it
@@ -639,13 +630,18 @@ where
                     let _ = store.push_work_budget(budget);
                 }
                 let response = handle_line(&mut state, store, trimmed);
+                // A tool call interrupted inside its handler already answers
+                // with the matching structured error, including the rebuild
+                // case. Only an interrupt during encoding needs a substitute.
+                let handled_interrupt =
+                    outer_budget.is_some() && store.interrupt_source().is_some();
 
                 // Encode while the tool request's outer budget is still
                 // active. A cancel or deadline reached during serde's writes
                 // becomes the same structured tool result as an interrupt in
                 // the handler rather than escaping as a partial JSON frame.
                 let mut encoded = response.as_ref().map(|response| {
-                    if outer_budget.is_some() {
+                    if outer_budget.is_some() && !handled_interrupt {
                         encode_response_controlled(store, response)
                     } else {
                         encode_response(response)
@@ -668,9 +664,12 @@ where
                     *guard = None;
                     if let Some(budget) = outer_budget {
                         store.pop_work_budget();
-                        if let (Some(id), Some(version), Some(interrupt)) =
-                            (request_id.clone(), tool_version, interrupt)
-                        {
+                        if let (false, Some(id), Some(version), Some(interrupt)) = (
+                            handled_interrupt,
+                            request_id.clone(),
+                            tool_version,
+                            interrupt,
+                        ) {
                             encoded = Some(encode_response(&interrupted_tool_response(
                                 id, version, interrupt, budget,
                             )));
@@ -1281,7 +1280,7 @@ fn handle_tools_call_inner(
     let owns_request_guard = store.work_budget_depth() == 0;
     let budget = store.default_work_budget();
     let already_expired = store.push_work_budget(budget);
-    let mut handled = if already_expired {
+    let handled = if already_expired {
         None
     } else {
         Some(
@@ -1291,73 +1290,9 @@ fn handle_tools_call_inner(
         )
     };
 
-    // Argument parsing happens before each structural handler checks
-    // freshness, preserving precise invalid-argument errors without indexing.
-    // A validated stale call gets one refresh outside the narrow query budget,
-    // then one retry. The request watchdog and client cancellation still bound
-    // both indexing and the retried query.
-    let stale_index = if store.interrupt_source().is_none()
-        && tool_requires_fresh_index(tool_name)
-        && !matches!(
-            tool_name,
-            "mmcg_concept" | "mmcg_concept_prepare" | "mmcg_concept_finish" | "mmcg_brief"
-        ) {
-        match handled.as_ref() {
-            Some(Err(HandlerError::IndexStale {
-                stale_files,
-                stale_files_truncated,
-                freshness_error,
-                extractor_contract_current,
-                concept_contract_current,
-                refresh_attempted: false,
-                ..
-            })) => Some((
-                *stale_files,
-                *stale_files_truncated,
-                *freshness_error,
-                *extractor_contract_current,
-                *concept_contract_current,
-            )),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let mut refresh_completed = false;
-    if let Some((
-        stale_files,
-        stale_files_truncated,
-        freshness_error,
-        extractor_contract_current,
-        concept_contract_current,
-    )) = stale_index
-    {
-        let refresh = refresh_stale_index(
-            store,
-            stale_files,
-            stale_files_truncated,
-            freshness_error,
-            extractor_contract_current,
-            concept_contract_current,
-        );
-        if store.interrupt_source().is_none() {
-            match refresh {
-                Ok(()) => {
-                    refresh_completed = true;
-                    handled = Some(invoke_tool(
-                        version,
-                        tool,
-                        tool_name,
-                        store,
-                        &arguments,
-                        impact_engine,
-                    ));
-                }
-                Err(error) => handled = Some(Err(error)),
-            }
-        }
-    }
-
+    // The expired deadline that stopped a forced rebuild stays expired, so the
+    // budget check below would replace the more specific rebuild guidance.
+    let rebuild_required = matches!(handled, Some(Err(HandlerError::RebuildRequired)));
     let mut result = match handled {
         Some(Ok(payload)) => tool_result(version, payload, false),
         Some(Err(handler_error)) => match handler_error {
@@ -1383,7 +1318,7 @@ fn handle_tools_call_inner(
                     freshness_error,
                     extractor_contract_current,
                     concept_contract_current,
-                    refresh_attempted || refresh_completed,
+                    refresh_attempted,
                     stale_reason,
                 ),
                 true,
@@ -1394,7 +1329,12 @@ fn handle_tools_call_inner(
             HandlerError::SchemaIncompatible => {
                 tool_result(version, schema_incompatible_payload(), true)
             }
-            HandlerError::SnapshotChanged => tool_result(version, snapshot_changed_payload(), true),
+            HandlerError::SnapshotChanged => {
+                tool_result(version, snapshot_changed_payload(store), true)
+            }
+            HandlerError::RebuildRequired => {
+                tool_result(version, rebuild_required_payload(budget), true)
+            }
             HandlerError::WorkLimitExceeded => {
                 tool_result(version, work_limit_payload(budget), true)
             }
@@ -1409,11 +1349,12 @@ fn handle_tools_call_inner(
     if store.interrupt_source().is_none() {
         let _ = store.work_interrupted();
     }
-    if let Some(interrupt) = store.interrupt_source() {
-        result = match interrupt {
-            InterruptSource::Cancel => tool_result(version, cancelled_payload(), true),
-            InterruptSource::Budget => tool_result(version, work_limit_payload(budget), true),
-        };
+    match store.interrupt_source() {
+        Some(InterruptSource::Cancel) => result = tool_result(version, cancelled_payload(), true),
+        Some(InterruptSource::Budget) if !rebuild_required => {
+            result = tool_result(version, work_limit_payload(budget), true)
+        }
+        _ => {}
     }
     store.pop_work_budget();
     if owns_request_guard {
@@ -1524,13 +1465,14 @@ fn safe_index_status(store: &Store) -> Result<queries::StatusResponse, HandlerEr
     crate::query_service::index_status(store).map_err(|error| map_query_error(store, error))
 }
 
-fn ensure_fresh_index(store: &Store) -> Result<(), HandlerError> {
-    ensure_schema_compatible(store)?;
-    let status = safe_index_status(store)?;
-    if status.stale_files > 0 || !status.extractor_contract_current {
-        return Err(index_stale_error_from_status(&status, false));
-    }
-    Ok(())
+/// Structural handlers call this after argument validation, so invalid
+/// arguments never trigger indexing. A stale managed index is refreshed once.
+fn ensure_fresh_index(store: &mut Store) -> Result<(), HandlerError> {
+    crate::query_service::with_fresh_index(store, |store| {
+        crate::query_service::admission(store, false, crate::indexer::IndexLimits::AUTO_REFRESH)
+    })
+    .map(|_| ())
+    .map_err(|error| map_query_error(store, error))
 }
 
 fn ensure_schema_compatible(store: &Store) -> Result<(), HandlerError> {
@@ -1539,36 +1481,6 @@ fn ensure_schema_compatible(store: &Store) -> Result<(), HandlerError> {
         Ok(false) => Err(HandlerError::SchemaIncompatible),
         Err(error) => Err(HandlerError::internal("schema_compatibility_query", error)),
     }
-}
-
-fn refresh_stale_index(
-    store: &mut Store,
-    stale_files: usize,
-    stale_files_truncated: bool,
-    freshness_error: Option<&'static str>,
-    extractor_contract_current: bool,
-    concept_contract_current: bool,
-) -> Result<(), HandlerError> {
-    crate::query_service::refresh(
-        store,
-        crate::query_service::StaleIndex {
-            status: queries::StatusResponse {
-                db_path: queries::database_path_identity(store),
-                db_path_error: None,
-                symbol_count: 0,
-                file_count: 0,
-                freshness_basis: "path_and_mtime",
-                stale_files,
-                stale_files_truncated,
-                freshness_error,
-                extractor_contract_current,
-                concept_contract_current,
-            },
-            reason: crate::query_service::StaleReason::Structural,
-            refresh_attempted: false,
-        },
-    )
-    .map_err(|error| map_query_error(store, error))
 }
 
 /// Structured `work_limit_exceeded` tool error — mirrors the `change_impact`
@@ -1591,10 +1503,26 @@ fn cancelled_payload() -> Value {
     })
 }
 
-fn snapshot_changed_payload() -> Value {
+fn snapshot_changed_payload(store: &Store) -> Value {
+    // A read-only snapshot never reloads. Once its source database changed,
+    // every retry sees the same mismatch until the server restarts.
+    if matches!(store.source_snapshot_unchanged(), Ok(false)) {
+        return json!({
+            "code": "index_replaced",
+            "guidance": "the index file changed after this server opened its snapshot; restart the MCP server to load the new index"
+        });
+    }
     json!({
         "code": "snapshot_changed",
-        "guidance": "repository or index state changed while the brief was being built; retry"
+        "guidance": "repository or index state changed while the request ran; retry"
+    })
+}
+
+fn rebuild_required_payload(budget: WorkBudget) -> Value {
+    json!({
+        "code": "index_rebuild_required",
+        "budget_ms": budget.deadline.map(|d| d.as_millis() as u64),
+        "guidance": "the index needs a full rebuild that does not fit the request budget; run `mastermind index .` or raise MMCG_QUERY_BUDGET_MS"
     })
 }
 
@@ -3307,14 +3235,14 @@ fn impact_arguments(
 }
 
 fn run_change_impact(
-    store: &Store,
+    store: &mut Store,
     args: &Value,
 ) -> Result<queries::ChangeImpactResponse, HandlerError> {
     run_change_impact_with_engine(store, args, &queries::change_impact)
 }
 
 fn run_change_impact_with_engine(
-    store: &Store,
+    store: &mut Store,
     args: &Value,
     impact_engine: &queries::ImpactEngine<'_>,
 ) -> Result<queries::ChangeImpactResponse, HandlerError> {
@@ -3384,6 +3312,7 @@ fn map_query_error(store: &Store, error: crate::query_service::Error) -> Handler
         Error::SchemaIncompatible => HandlerError::SchemaIncompatible,
         Error::SnapshotChanged => HandlerError::SnapshotChanged,
         Error::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
+        Error::RebuildRequired => HandlerError::RebuildRequired,
         Error::RefreshLimit { dimension, cap } => HandlerError::RefreshLimit { dimension, cap },
         Error::Internal { class } => HandlerError::Internal { class },
         Error::Brief(error) => map_brief_error(store, error),
@@ -7962,6 +7891,38 @@ mod checks {
     }
 
     #[test]
+    fn external_index_rebuilt_after_serve_start_asks_for_a_restart() {
+        let (root, managed_store) = impact_fixture("external-index-replaced");
+        drop(managed_store);
+        let external_dir = tempfile::tempdir().unwrap();
+        let path = external_dir.path().join("index.db");
+        let mut writer = crate::store::Store::open(&path).unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut writer, true)
+            .unwrap();
+        let mut store = crate::store::Store::open_for_serve(&path, None).unwrap();
+
+        // The documented recovery for an external index is a manual rebuild.
+        std::fs::write(root.join("src/added.py"), "def added():\n    return 1\n").unwrap();
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut writer, false)
+            .unwrap();
+        drop(writer);
+
+        for _ in 0..2 {
+            let replaced = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({ "name": "mmcg_search", "arguments": { "name": "added" } }),
+            )
+            .unwrap();
+            assert_eq!(replaced["isError"], true);
+            assert_eq!(unwrap_content(&replaced)["code"], "index_replaced");
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn external_incompatible_index_is_byte_preserved_and_has_no_sidecars() {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("repository/.mastermind");
@@ -8025,7 +7986,7 @@ mod checks {
 
         for tool in TOOLS
             .iter()
-            .filter(|tool| tool_requires_fresh_index(tool.name))
+            .filter(|tool| tool.behavior == ToolBehavior::RefreshableQuery)
         {
             let arguments = match tool.name {
                 "mmcg_search" | "mmcg_callers" | "mmcg_callees" | "mmcg_impact" => {
@@ -8092,16 +8053,12 @@ mod checks {
             "mmcg_concept_finish",
         ];
         for tool in TOOLS {
-            assert_eq!(
-                tool_requires_fresh_index(tool.name),
-                !exempt.contains(&tool.name),
-                "unexpected freshness policy for {}",
-                tool.name
-            );
+            // Only diagnostic, revision-bound and additive tools may answer
+            // from a stale index, so clients can inspect or recover from it.
             assert_eq!(
                 tool.behavior == ToolBehavior::RefreshableQuery,
-                tool_requires_fresh_index(tool.name),
-                "freshness and MCP behavior drifted for {}",
+                !exempt.contains(&tool.name),
+                "unexpected freshness policy for {}",
                 tool.name
             );
         }
@@ -8231,6 +8188,83 @@ mod checks {
     const INITIALIZE_LINE: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
     const INITIALIZED_LINE: &str =
         r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+
+    #[test]
+    fn serve_io_reports_a_forced_rebuild_that_outruns_the_budget() {
+        let (root, mut store) = impact_fixture("forced-rebuild-budget");
+        // Enough files that the rebuild spans many SQLite progress ticks.
+        for index in 0..300 {
+            std::fs::write(
+                root.join(format!("src/module_{index}.py")),
+                format!("def function_{index}():\n    return {index}\n"),
+            )
+            .unwrap();
+        }
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, true)
+            .unwrap();
+        let search = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_search","arguments":{"name":"value"}}}"#;
+        let mut codes = std::collections::BTreeSet::new();
+        // Operation budgets are deterministic for a fixed fixture. The sweep
+        // spans budgets that stop before, during and after the forced rebuild.
+        for op_ticks in (0..12).map(|step| 1_u64 << step) {
+            store
+                .set_meta(
+                    crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                    "outdated-contract",
+                )
+                .unwrap();
+            store.set_default_work_budget(WorkBudget {
+                deadline: None,
+                op_ticks: Some(op_ticks),
+            });
+            let input = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{search}\n");
+            let mut output = Vec::new();
+            serve_io(&mut store, std::io::Cursor::new(input), &mut output).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+            let content = unwrap_content(&response["result"]);
+            let code = content["code"].as_str().unwrap_or("ok").to_string();
+            store.set_default_work_budget(WorkBudget::UNLIMITED);
+            // While the contract is still outdated, the next request needs the
+            // same full rebuild, so a plain retry hint would loop forever.
+            if !store.extractor_contract_current().unwrap() {
+                assert_eq!(
+                    code, "index_rebuild_required",
+                    "op_ticks {op_ticks}: {content}"
+                );
+            }
+            codes.insert(code);
+        }
+        assert!(codes.contains("index_rebuild_required"), "{codes:?}");
+        assert!(codes.contains("ok"), "{codes:?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn serve_io_reports_a_plain_budget_overrun_while_only_concepts_are_outdated() {
+        let (root, mut store) = impact_fixture("concept-drift-budget");
+        crate::indexer::Indexer::new(&root)
+            .index_all(&mut store, true)
+            .unwrap();
+        // Structural tools do not rebuild for concept drift, so running out of
+        // budget here is the query's own cost, not a pending rebuild.
+        store.mark_concept_contract_dirty().unwrap();
+        store.set_default_work_budget(WorkBudget {
+            deadline: Some(std::time::Duration::ZERO),
+            op_ticks: None,
+        });
+        let search = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mmcg_search","arguments":{"name":"value"}}}"#;
+        let input = format!("{INITIALIZE_LINE}\n{INITIALIZED_LINE}\n{search}\n");
+        let mut output = Vec::new();
+        serve_io(&mut store, std::io::Cursor::new(input), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        let content = unwrap_content(&response["result"]);
+        assert_eq!(content["code"], "work_limit_exceeded", "{content}");
+        assert!(store.extractor_contract_current().unwrap());
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn serve_io_cancel_interrupts_inflight_request() {

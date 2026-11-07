@@ -526,6 +526,8 @@ fn executor_public_audit_rejects_stale_additions_calls_and_unindexed_competitors
         };
         let path = fixture.spec(&touches);
         let er_path = fixture.executor_file(&path, &[claim]);
+        // The standalone command refuses an index that no longer matches the
+        // files before any claim is weighed.
         let output = fixture.command(&[
             "audit-spec",
             path.to_str().unwrap(),
@@ -536,18 +538,25 @@ fn executor_public_audit_rejects_stale_additions_calls_and_unindexed_competitors
             "--json",
         ]);
         assert!(!output.status.success(), "{output:?}");
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            report["claim_checks"][0]["status"], "unresolved",
-            "{report}"
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("index is not current"),
+            "{output:?}"
         );
+        // Callers that pass their own store still get per-claim evidence.
+        let executor = mmcg::executor_report::parse_file(&er_path).unwrap();
+        let report = fixture.audit(&path, Some(&executor));
+        let claim_checks = checks(&report);
+        assert_eq!(claim_checks[0]["status"], "unresolved", "{claim_checks}");
         let expected = if mode == "competitor" {
             "index_content_unavailable"
         } else {
             "index_source_mismatch"
         };
-        assert_eq!(report["claim_checks"][0]["finding"]["reason"], expected);
-        assert_eq!(report["verdict"], "broken");
+        assert_eq!(claim_checks[0]["finding"]["reason"], expected);
+        assert_eq!(
+            Bundle::from_report_full(&report, Some(&executor), None, None, None).verdict,
+            "broken"
+        );
     }
 }
 

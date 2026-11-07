@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -4679,24 +4679,25 @@ pub(crate) fn scan_index_freshness(
     let concept_contract_current = store
         .concept_contract_current()
         .map_err(|error| format!("cannot query concept contract: {error}"))?;
-    let (stale_count, stale_count_truncated, freshness_error) = match stale_paths_controlled(
-        store,
-        root,
-        STATUS_STALE_FILE_PROBE_LIMIT,
-        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-        crate::bounded_fs::ReadControl {
-            deadline: Some(deadline),
-            interrupted: None,
-        },
-    ) {
-        Ok(paths) => (
-            paths.len().min(STATUS_STALE_FILE_LIMIT),
-            paths.len() > STATUS_STALE_FILE_LIMIT,
-            None,
-        ),
-        Err(error) => (0, false, Some(error.to_string())),
-    };
+    let (stale_count, stale_count_truncated, freshness_error) =
+        match crate::indexer::stale_paths_controlled(
+            store,
+            root,
+            STATUS_STALE_FILE_PROBE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl {
+                deadline: Some(deadline),
+                interrupted: None,
+            },
+        ) {
+            Ok(paths) => (
+                paths.len().min(STATUS_STALE_FILE_LIMIT),
+                paths.len() > STATUS_STALE_FILE_LIMIT,
+                None,
+            ),
+            Err(error) => (0, false, Some(error.to_string())),
+        };
     let (history_freshness, history_freshness_error) = match crate::indexer::Indexer::new(root)
         .project_history_freshness_controlled(
             store,
@@ -4726,165 +4727,6 @@ pub(crate) fn scan_index_freshness(
         history_freshness,
         history_freshness_error,
     })
-}
-
-pub(crate) fn stale_paths_controlled(
-    store: &crate::store::Store,
-    root: &Path,
-    cap: usize,
-    source_cap: usize,
-    source_bytes_cap: u64,
-    control: crate::bounded_fs::ReadControl<'_>,
-) -> Result<Vec<String>, crate::indexer::IndexError> {
-    if cap == 0 {
-        return Ok(Vec::new());
-    }
-    control
-        .check()
-        .map_err(crate::indexer::index_error_from_read)?;
-    let root_capability = crate::bounded_fs::RootCapability::open(root)
-        .map_err(crate::indexer::index_error_from_read)?;
-    let indexed_entries = store
-        .file_mtimes_bounded(source_cap)
-        .map_err(|error| crate::indexer::IndexError::Other(error.to_string()))?
-        .ok_or(crate::indexer::IndexError::LimitExceeded {
-            dimension: "source_candidates",
-            cap: source_cap as u64,
-        })?;
-    let indexed: HashMap<String, i64> = indexed_entries.into_iter().collect();
-    let candidates =
-        crate::indexer::source_candidates_bounded(&root_capability, source_cap, control)?;
-    let mut declared_bytes = 0_u64;
-    let mut seen = HashSet::new();
-    let mut stale = Vec::new();
-    let mut absent_candidates = Vec::new();
-    for path in candidates {
-        control
-            .check()
-            .map_err(crate::indexer::index_error_from_read)?;
-        if crate::indexer::extractor_for_path(&path).is_none() {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root_capability.canonical_root())
-            .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?;
-        let relative = crate::bounded_fs::normalize_repository_relative_path(relative)
-            .map_err(crate::indexer::index_error_from_read)?;
-        let admitted = match crate::indexer::source_admission_with_capability(
-            &root_capability,
-            &path,
-            control,
-        ) {
-            Ok(file) => file,
-            Err(crate::indexer::IndexError::Skipped(_)) => continue,
-            Err(crate::indexer::IndexError::Missing) => {
-                let absence =
-                    crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
-                        .map_err(crate::indexer::index_error_from_read)?
-                        .ok_or(crate::indexer::IndexError::SnapshotChanged)?;
-                absent_candidates.push((path, absence));
-                seen.insert(relative.clone());
-                if indexed.contains_key(&relative) {
-                    stale.push(relative);
-                    if stale.len() >= cap {
-                        break;
-                    }
-                }
-                continue;
-            }
-            Err(crate::indexer::IndexError::Cancelled) => {
-                return Err(crate::indexer::IndexError::Cancelled)
-            }
-            Err(crate::indexer::IndexError::DeadlineExceeded) => {
-                return Err(crate::indexer::IndexError::DeadlineExceeded)
-            }
-            Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
-                return Err(crate::indexer::IndexError::LimitExceeded { dimension, cap })
-            }
-            Err(_) => {
-                stale.push(relative.clone());
-                seen.insert(relative);
-                if stale.len() >= cap {
-                    break;
-                }
-                continue;
-            }
-        };
-        declared_bytes = declared_bytes.checked_add(admitted.declared_len).ok_or(
-            crate::indexer::IndexError::LimitExceeded {
-                dimension: "source_declared_bytes",
-                cap: source_bytes_cap,
-            },
-        )?;
-        if declared_bytes > source_bytes_cap {
-            return Err(crate::indexer::IndexError::LimitExceeded {
-                dimension: "source_declared_bytes",
-                cap: source_bytes_cap,
-            });
-        }
-        // Parsing rejects NUL bytes anywhere in a source file. Admission only
-        // sniffs the prefix, so verify the whole file for paths the index omitted.
-        if !indexed.contains_key(&relative)
-            && crate::indexer::source_is_binary_after_admission(
-                &root_capability,
-                &path,
-                admitted.identity,
-                control,
-            )?
-        {
-            seen.insert(relative);
-            continue;
-        }
-        seen.insert(relative.clone());
-        if indexed
-            .get(&relative)
-            .is_none_or(|stored| admitted.modified_millis != *stored)
-        {
-            stale.push(relative);
-            if stale.len() >= cap {
-                break;
-            }
-        }
-    }
-    if stale.len() < cap {
-        for indexed_path in indexed.keys() {
-            control
-                .check()
-                .map_err(crate::indexer::index_error_from_read)?;
-            if seen.contains(indexed_path) {
-                continue;
-            }
-            let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
-                &root_capability,
-                Path::new(indexed_path),
-                u64::MAX,
-                0,
-                control,
-            )
-            .is_ok();
-            if !remains_regular {
-                stale.push(indexed_path.clone());
-                if stale.len() >= cap {
-                    break;
-                }
-            }
-        }
-    }
-    root_capability
-        .verify()
-        .map_err(crate::indexer::index_error_from_read)?;
-    for (path, expected) in absent_candidates {
-        let observed = crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
-            .map_err(crate::indexer::index_error_from_read)?;
-        if observed
-            .as_ref()
-            .is_none_or(|observed| !expected.matches(observed))
-        {
-            return Err(crate::indexer::IndexError::SnapshotChanged);
-        }
-    }
-    stale.sort();
-    Ok(stale)
 }
 
 fn scan_install(root: &Path) -> InstallInfo {
@@ -7458,205 +7300,6 @@ mod tests {
             .render_resume_text(None)
             .contains("selected index is unavailable"));
         assert_eq!(fs::read(&db).unwrap(), before);
-    }
-
-    #[test]
-    fn stale_paths_compare_each_file_to_its_stored_mtime() {
-        let root = std::env::temp_dir().join(format!(
-            "mmcg-status-wal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        init_git_repository(&root);
-        let db = root.join("mmcg.db");
-        let source = root.join("src/lib.rs");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, b"fn current() {}\n").unwrap();
-        let store = crate::store::Store::open(&db).unwrap();
-        store.upsert_file("src/lib.rs", 10, 1).unwrap();
-        drop(store);
-        let newer = std::time::UNIX_EPOCH + std::time::Duration::from_secs(20);
-        fs::File::options()
-            .write(true)
-            .open(&source)
-            .unwrap()
-            .set_modified(newer)
-            .unwrap();
-
-        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
-        let stale = stale_paths_controlled(
-            &snapshot,
-            &root,
-            10,
-            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .unwrap();
-        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
-        assert!(snapshot.source_snapshot_unchanged().unwrap());
-        drop(snapshot);
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn stale_paths_ignore_binary_source_with_nul_after_admission_prefix() {
-        let root = tempfile::tempdir().unwrap();
-        init_git_repository(root.path());
-        let source = root.path().join("late_nul.rs");
-        let mut bytes = vec![b'a'; 9_000];
-        bytes.push(0);
-        fs::write(&source, bytes).unwrap();
-        let output = Command::new("git")
-            .args(["add", "late_nul.rs"])
-            .current_dir(root.path())
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let db = root.path().join("mmcg.db");
-        let mut store = crate::store::Store::open(&db).unwrap();
-        let stats = crate::indexer::Indexer::new(root.path())
-            .index_all(&mut store, false)
-            .unwrap();
-        assert_eq!(stats.files_skipped_binary, 1);
-        assert!(stale_paths_controlled(
-            &store,
-            root.path(),
-            10,
-            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .unwrap()
-        .is_empty());
-        assert!(crate::lens::validate_index_snapshot(
-            &store,
-            &root.path().canonicalize().unwrap(),
-            None,
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn stale_paths_treat_a_stably_deleted_tracked_source_as_current_after_purge() {
-        let root = tempfile::tempdir().unwrap();
-        init_git_repository(root.path());
-        let source = root.path().join("src/lib.rs");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, b"fn removed() {}\n").unwrap();
-        let output = Command::new("git")
-            .args(["add", "src/lib.rs"])
-            .current_dir(root.path())
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        fs::remove_file(&source).unwrap();
-
-        let db = root.path().join("mmcg.db");
-        let store = crate::store::Store::open(&db).unwrap();
-        let scan = || {
-            stale_paths_controlled(
-                &store,
-                root.path(),
-                10,
-                crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-                crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-                crate::bounded_fs::ReadControl::default(),
-            )
-            .unwrap()
-        };
-        assert!(scan().is_empty());
-        store.upsert_file("src/lib.rs", 1, 1).unwrap();
-        assert_eq!(scan(), vec!["src/lib.rs".to_string()]);
-    }
-
-    #[test]
-    fn stale_paths_detect_an_older_source_mtime() {
-        let root = std::env::temp_dir().join(format!(
-            "mmcg-status-older-mtime-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(root.join("src")).unwrap();
-        init_git_repository(&root);
-        let db = root.join("mmcg.db");
-        let source = root.join("src/lib.rs");
-        fs::write(&source, b"fn restored() {}\n").unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&source)
-            .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5))
-            .unwrap();
-        let store = crate::store::Store::open(&db).unwrap();
-        store.upsert_file("src/lib.rs", 10, 1).unwrap();
-        drop(store);
-
-        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
-        let stale = stale_paths_controlled(
-            &snapshot,
-            &root,
-            10,
-            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .unwrap();
-        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
-        assert!(snapshot.source_snapshot_unchanged().unwrap());
-        drop(snapshot);
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn stale_paths_reads_current_file_rows_from_wal() {
-        let root = std::env::temp_dir().join(format!(
-            "mmcg-status-live-wal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join("src/lib.rs");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        init_git_repository(&root);
-        fs::write(&source, b"fn current() {}\n").unwrap();
-        let mtime = source
-            .metadata()
-            .unwrap()
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let db = root.join("mmcg.db");
-        let store = crate::store::Store::open(&db).unwrap();
-        store.upsert_file("src/lib.rs", mtime, 1).unwrap();
-
-        assert!(root.join("mmcg.db-wal").is_file());
-        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
-        let stale = stale_paths_controlled(
-            &snapshot,
-            &root,
-            10,
-            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-            crate::bounded_fs::ReadControl::default(),
-        )
-        .unwrap();
-        assert!(stale.is_empty());
-        assert!(snapshot.source_snapshot_unchanged().unwrap());
-        drop(snapshot);
-        drop(store);
-        fs::remove_dir_all(root).ok();
     }
 
     #[test]

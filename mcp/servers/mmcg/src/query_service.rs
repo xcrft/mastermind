@@ -32,8 +32,17 @@ pub(crate) enum Error {
     SchemaIncompatible,
     SnapshotChanged,
     WorkLimitExceeded,
-    RefreshLimit { dimension: &'static str, cap: u64 },
-    Internal { class: &'static str },
+    /// A forced full rebuild (changed extractor or concept contract) ran out of
+    /// request budget. A forced rebuild restarts from zero on every attempt, so
+    /// only a manual `mastermind index .` or a larger budget converges.
+    RebuildRequired,
+    RefreshLimit {
+        dimension: &'static str,
+        cap: u64,
+    },
+    Internal {
+        class: &'static str,
+    },
     Brief(queries::BriefError),
     Concept(queries::ConceptError),
     Review(String),
@@ -48,7 +57,7 @@ impl Error {
             Self::Brief(error) => error,
             Self::SchemaIncompatible => queries::BriefError::SchemaIncompatible,
             Self::SnapshotChanged => queries::BriefError::SnapshotChanged,
-            Self::WorkLimitExceeded | Self::RefreshLimit { .. } => {
+            Self::WorkLimitExceeded | Self::RebuildRequired | Self::RefreshLimit { .. } => {
                 queries::BriefError::WorkLimitExceeded
             }
             _ => queries::BriefError::IndexStale,
@@ -59,7 +68,7 @@ impl Error {
             Self::Concept(error) => error,
             Self::SchemaIncompatible => queries::ConceptError::SchemaIncompatible,
             Self::SnapshotChanged => queries::ConceptError::SnapshotChanged,
-            Self::WorkLimitExceeded | Self::RefreshLimit { .. } => {
+            Self::WorkLimitExceeded | Self::RebuildRequired | Self::RefreshLimit { .. } => {
                 queries::ConceptError::WorkLimitExceeded
             }
             _ => queries::ConceptError::IndexStale,
@@ -78,7 +87,16 @@ thread_local! {
     pub(crate) static REFRESH_TEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Freshness under the auto-refresh inventory caps, as MCP refresh can only
+/// repair an index within them.
 pub(crate) fn index_status(store: &Store) -> Result<queries::StatusResponse, Error> {
+    index_status_with_limits(store, crate::indexer::IndexLimits::AUTO_REFRESH)
+}
+
+fn index_status_with_limits(
+    store: &Store,
+    limits: crate::indexer::IndexLimits,
+) -> Result<queries::StatusResponse, Error> {
     let db_path = queries::database_path_identity(store);
     let db_path_error = db_path.is_none().then_some("non_utf8_path");
     let symbol_count = store
@@ -109,12 +127,13 @@ pub(crate) fn index_status(store: &Store) -> Result<queries::StatusResponse, Err
             }
             Ok(root) => {
                 let interrupted = || store.work_interrupted();
-                match crate::workflow_status::stale_paths_controlled(
+                let (source_cap, source_bytes_cap) = limits.source_caps();
+                match crate::indexer::stale_paths_controlled(
                     store,
                     &root,
                     queries::STATUS_STALE_FILE_PROBE_LIMIT,
-                    crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-                    crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                    source_cap,
+                    source_bytes_cap,
                     crate::bounded_fs::ReadControl {
                         deadline: store.request_deadline(),
                         interrupted: Some(&interrupted),
@@ -164,37 +183,83 @@ pub(crate) fn index_status(store: &Store) -> Result<queries::StatusResponse, Err
     })
 }
 
-/// Only a Store opened with managed repository authority may refresh.
-pub(crate) fn refresh(store: &mut Store, mut stale: StaleIndex) -> Result<(), Error> {
+/// The one rule for whether structural answers may be trusted: every
+/// indexable path matches the index and the extractor contract is current.
+/// A failed freshness scan reports `stale_files: 1`, so it counts as stale.
+pub(crate) fn structurally_fresh(status: &queries::StatusResponse) -> bool {
+    status.stale_files == 0 && status.freshness_error.is_none() && status.extractor_contract_current
+}
+
+enum Refresh {
+    /// The store has no managed repository authority, so nothing ran.
+    Unavailable,
+    Completed,
+    /// Indexing ran but left failed files; the index is still not fresh.
+    Incomplete,
+}
+
+fn refresh(store: &mut Store) -> Result<Refresh, Error> {
     let Some(root) = store.managed_root().map(Path::to_path_buf) else {
-        return Err(Error::Stale(stale));
+        return Ok(Refresh::Unavailable);
     };
-    stale.refresh_attempted = true;
     #[cfg(test)]
     REFRESH_TEST_CALLS.with(|calls| calls.set(calls.get() + 1));
-    match crate::indexer::Indexer::new(root).index_all_with_limits(
+    let forced = !store.extractor_contract_current().unwrap_or(false)
+        || !store.concept_contract_current().unwrap_or(false);
+    let indexed = crate::indexer::Indexer::new(root).index_all_with_limits(
         store,
         false,
         crate::indexer::IndexLimits::AUTO_REFRESH,
-    ) {
-        Ok(stats) if stats.files_failed == 0 => Ok(()),
+    );
+    // The deadline can stop indexing inside a SQLite write, which surfaces as
+    // a generic error, so the budget marker decides, not the error variant.
+    let out_of_budget = matches!(
+        store.interrupt_source(),
+        Some(crate::store::InterruptSource::Budget)
+    );
+    match indexed {
+        Ok(stats) if stats.files_failed == 0 => Ok(Refresh::Completed),
         Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
             Err(Error::RefreshLimit { dimension, cap })
         }
+        _ if forced && out_of_budget => Err(Error::RebuildRequired),
         Err(crate::indexer::IndexError::Cancelled)
         | Err(crate::indexer::IndexError::DeadlineExceeded) => Err(Error::WorkLimitExceeded),
-        _ => Err(Error::Stale(stale)),
+        _ => Ok(Refresh::Incomplete),
     }
 }
 
-fn admission(store: &Store, concept: bool) -> Result<queries::StatusResponse, Error> {
+/// Run `attempt`; when it reports a stale index, refresh a managed index once
+/// and run it again. This is the only refresh-and-retry loop for CLI and MCP.
+pub(crate) fn with_fresh_index<T>(
+    store: &mut Store,
+    mut attempt: impl FnMut(&mut Store) -> Result<T, Error>,
+) -> Result<T, Error> {
+    match attempt(store) {
+        Err(Error::Stale(mut stale)) if !stale.refresh_attempted => match refresh(store)? {
+            Refresh::Unavailable => Err(Error::Stale(stale)),
+            Refresh::Incomplete => {
+                stale.refresh_attempted = true;
+                Err(Error::Stale(stale))
+            }
+            Refresh::Completed => attempt(store).map_err(attempted),
+        },
+        result => result,
+    }
+}
+
+pub(crate) fn admission(
+    store: &Store,
+    concept: bool,
+    limits: crate::indexer::IndexLimits,
+) -> Result<queries::StatusResponse, Error> {
     match store.schema_current() {
         Ok(true) => {}
         Ok(false) => return Err(Error::SchemaIncompatible),
         Err(error) => return Err(Error::internal("schema_compatibility_query", error)),
     }
-    let status = index_status(store)?;
-    let reason = if status.stale_files > 0 || !status.extractor_contract_current {
+    let status = index_status_with_limits(store, limits)?;
+    let reason = if !structurally_fresh(&status) {
         Some(StaleReason::Structural)
     } else if concept && !status.concept_contract_current {
         Some(StaleReason::Concept)
@@ -211,6 +276,41 @@ fn admission(store: &Store, concept: bool) -> Result<queries::StatusResponse, Er
     }
 }
 
+/// CLI view of the same decision: `None` when structural answers are current,
+/// otherwise a sentence saying why they are not. The CLI checks the whole
+/// inventory, as `mastermind index .` indexes it without caps.
+pub fn stale_index_reason(store: &Store) -> Option<String> {
+    match admission(store, false, crate::indexer::IndexLimits::MANUAL) {
+        Ok(_) => None,
+        Err(Error::Stale(stale)) => Some(describe_stale(&stale.status)),
+        Err(Error::SchemaIncompatible) => Some("index schema is missing or outdated".into()),
+        Err(Error::SnapshotChanged) => Some("index changed while its freshness was checked".into()),
+        Err(Error::RefreshLimit { dimension, cap }) => Some(format!(
+            "freshness could not be checked: {dimension} exceeds {cap}"
+        )),
+        Err(Error::Internal { class }) => Some(format!("freshness could not be checked ({class})")),
+        Err(_) => Some("freshness could not be checked".into()),
+    }
+}
+
+fn describe_stale(status: &queries::StatusResponse) -> String {
+    if let Some(error) = status.freshness_error {
+        return format!("freshness could not be established ({error})");
+    }
+    if status.stale_files > 0 {
+        let more = if status.stale_files_truncated {
+            "+"
+        } else {
+            ""
+        };
+        return format!(
+            "{}{more} indexable files changed since the last index",
+            status.stale_files
+        );
+    }
+    "the index was built by an older extractor".into()
+}
+
 fn attempted(error: Error) -> Error {
     match error {
         Error::Stale(mut stale) => {
@@ -223,18 +323,12 @@ fn attempted(error: Error) -> Error {
 
 fn concept_admission(store: &Store) -> Result<u64, Error> {
     let version = store.data_version().map_err(|_| Error::SnapshotChanged)?;
-    admission(store, true)?;
+    admission(store, true, crate::indexer::IndexLimits::AUTO_REFRESH)?;
     Ok(version)
 }
 
 fn current_concept_admission(store: &mut Store) -> Result<u64, Error> {
-    match concept_admission(store) {
-        Err(Error::Stale(stale)) => {
-            refresh(store, stale)?;
-            concept_admission(store).map_err(attempted)
-        }
-        result => result,
-    }
+    with_fresh_index(store, |store| concept_admission(store))
 }
 
 pub(crate) fn concept_current(
@@ -285,7 +379,7 @@ fn brief_attempt(
     budget_tokens: u32,
     sizer: &queries::BriefEnvelopeSizer<'_>,
 ) -> Result<queries::BriefPacket, Error> {
-    let status = admission(store, false)?;
+    let status = admission(store, false, crate::indexer::IndexLimits::AUTO_REFRESH)?;
     queries::brief_detailed(store, root, since, role, budget_tokens, sizer).map_err(|error| {
         match error {
             queries::BriefFailure::HistoryStale => Error::Stale(StaleIndex {
@@ -348,13 +442,9 @@ pub(crate) fn brief_current(
             crate::diff::WorkingTreeDiffError::IndexStale => queries::BriefError::IndexStale,
         })
     })?;
-    match brief_attempt(store, &root, since, role, budget_tokens, sizer) {
-        Err(Error::Stale(stale)) => {
-            refresh(store, stale)?;
-        }
-        result => return result,
-    }
-    brief_attempt(store, &root, since, role, budget_tokens, sizer).map_err(attempted)
+    with_fresh_index(store, |store| {
+        brief_attempt(store, &root, since, role, budget_tokens, sizer)
+    })
 }
 
 pub fn build_brief_current(
@@ -418,11 +508,7 @@ pub(crate) fn review_finish_current(
 fn review_still_current(store: &Store) -> Result<(), Error> {
     let status = index_status(store)
         .map_err(|_| Error::Review("concept_review_freshness_unavailable".into()))?;
-    if status.stale_files > 0
-        || status.freshness_error.is_some()
-        || !status.extractor_contract_current
-        || !status.concept_contract_current
-    {
+    if !structurally_fresh(&status) || !status.concept_contract_current {
         return Err(Error::Review("concept_review_source_changed".into()));
     }
     Ok(())

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify-spec` no longer evaluates index checks against an index that no
+  longer matches the files. It reports `not_evaluated`, and `--require-index`
+  fails. Standalone `audit-spec` refuses such an index instead of holding.
+- CLI `query`, `map`, `repo-map` and `impact` warn on stderr when the index is
+  not current. MCP tools use the same freshness rule.
+- `mmcg index`, automatic refresh and the freshness check share one source
+  inventory: Git inside a worktree, a walk outside it or when `git` is not on
+  `PATH`. Before, `.ignore` files,
+  parent `.gitignore` files and nested repositories made the manual index
+  differ, so it never became current. `.ignore` files are no longer read.
+- A directory outside Git can now be checked for freshness and refreshed by MCP
+  tools. It used to report `index_stale` on every structural query.
+- MCP tools return `index_rebuild_required` instead of `work_limit_exceeded`
+  when a forced full rebuild does not fit the request budget.
+- `serve` with an external `--index` returns `index_replaced` after the file
+  is rebuilt, instead of a `snapshot_changed` that retrying never cleared.
 - `verify-spec`, `audit-spec` and `run-task` read `## Pre-edit Snapshot`, the
   heading the spec templates write. The section was ignored before, so symbol,
   caller and signature checks did not run on it. Existing specs with a filled

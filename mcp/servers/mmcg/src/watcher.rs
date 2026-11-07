@@ -435,10 +435,7 @@ fn rename_event_path_is_old(mode: &RenameMode, position: usize) -> bool {
 }
 
 fn is_ignore_config(path: &Path, root: &Path) -> bool {
-    if path
-        .file_name()
-        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
-    {
+    if path.file_name().is_some_and(|name| name == ".gitignore") {
         return path.starts_with(root);
     }
     path == root.join(".git/info/exclude")

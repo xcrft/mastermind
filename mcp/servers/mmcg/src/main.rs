@@ -2324,6 +2324,7 @@ fn run_cli_inner(
             let response = if expired {
                 Err(mmcg::queries::ChangeImpactError::GitTimeout)
             } else {
+                commands::query::warn_if_stale(&store);
                 impact_engine(&store, &root, &since, depth, top)
             };
             let interrupted = store.take_interrupt_source();

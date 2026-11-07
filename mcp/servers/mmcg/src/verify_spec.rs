@@ -205,7 +205,7 @@ impl Report {
                 out.push_str("  index-backed checks: evaluated\n\n");
             }
             IndexCheckStatus::NotEvaluated => out.push_str(
-                "  index-backed checks: not evaluated (no populated index; symbol existence, snapshots, and blast radius were skipped)\n\n",
+                "  index-backed checks: not evaluated (no populated, current index; symbol existence, snapshots, and blast radius were skipped)\n\n",
             ),
         }
         for e in &self.errors {
@@ -1337,7 +1337,7 @@ expected_docs:
         assert_eq!(r.verdict, Verdict::Pass);
         assert_eq!(r.index_checks, IndexCheckStatus::NotEvaluated);
         assert!(r.render_text().contains(
-            "index-backed checks: not evaluated (no populated index; symbol existence, snapshots, and blast radius were skipped)"
+            "index-backed checks: not evaluated (no populated, current index; symbol existence, snapshots, and blast radius were skipped)"
         ));
         fs::remove_dir_all(&root).ok();
     }

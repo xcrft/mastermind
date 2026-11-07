@@ -197,7 +197,7 @@ for Claude Code, Codex, Cursor, Continue and generic MCP clients.
 | Imported facts | Source and revision metadata, no executable plugin loading |
 | Unreferenced symbols | Candidates for review, no proof of runtime unreachability |
 | Candidate tests | Suggested coverage, no observed test result |
-| Stale inputs, omissions and work limits | Reported in the result, source-current evidence still needs interpretation |
+| Stale inputs, omissions and work limits | Reported in the result. CLI `query`, `map`, `repo-map` and `impact` print a stale-index warning on stderr. Source-current evidence still needs interpretation |
 
 Indexing, queries and Lens run locally. Explicit model-backed commands such as
 native execution, review or persona analysis use the selected client/provider.

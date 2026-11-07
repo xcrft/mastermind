@@ -5,10 +5,11 @@ fn exact_path<'a>(path: &'a Path, label: &str) -> Result<&'a str, Box<dyn std::e
         .ok_or_else(|| format!("{label} path must have an exact UTF-8 representation").into())
 }
 
+/// A store that index-backed spec checks may use, or the reason they may not.
 fn open_validated_index(
     index_path: &Path,
     root: &Path,
-) -> Result<Option<mmcg::store::Store>, Box<dyn std::error::Error>> {
+) -> Result<Result<mmcg::store::Store, String>, Box<dyn std::error::Error>> {
     match std::fs::symlink_metadata(index_path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
@@ -18,7 +19,12 @@ fn open_validated_index(
             )
             .into());
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Err(format!(
+                "no index at `{}`; run `mastermind index .`",
+                index_path.display()
+            )))
+        }
         Err(error) => {
             return Err(format!("cannot inspect index `{}`: {error}", index_path.display()).into());
         }
@@ -33,9 +39,21 @@ fn open_validated_index(
     }
     mmcg::indexer::validate_index_root(&store, root)
         .map_err(|error| format!("index/root mismatch: {error}"))?;
-    let populated = store.symbol_count()? > 0;
+    if store.symbol_count()? == 0 {
+        return Ok(Err(format!(
+            "index at `{}` is empty; run `mastermind index .`",
+            index_path.display()
+        )));
+    }
+    // Snapshots, caller counts and removals compare the spec with the index,
+    // so an index that no longer matches the files cannot back these checks.
+    if let Some(reason) = mmcg::query_service::stale_index_reason(&store) {
+        return Ok(Err(format!(
+            "index is not current ({reason}); run `mastermind index .`"
+        )));
+    }
     store.ensure_source_snapshot_current()?;
-    Ok(populated.then_some(store))
+    Ok(Ok(store))
 }
 
 pub fn verify(
@@ -56,16 +74,22 @@ pub fn verify(
             .frontmatter
             .as_ref()
             .is_some_and(|frontmatter| frontmatter.mode.as_deref() == Some("strict"));
-    let store = open_validated_index(index_path, &root)?;
+    let (store, unavailable) = match open_validated_index(index_path, &root)? {
+        Ok(store) => (Some(store), None),
+        Err(reason) => (None, Some(reason)),
+    };
     let mut report = mmcg::verify_spec::run(&parsed, store.as_ref(), &root);
     if let Some(store) = &store {
         store.ensure_source_snapshot_current()?;
     }
-    if (strict || require_index) && store.is_none() {
-        report.push_error(mmcg::verify_spec::Finding::StrictViolation {
-            reason: "no index — run `mastermind index .` (required by --strict / --require-index)"
-                .into(),
-        });
+    if let Some(reason) = unavailable {
+        if strict || require_index {
+            report.push_error(mmcg::verify_spec::Finding::StrictViolation {
+                reason: format!("{reason} (required by --strict / --require-index)"),
+            });
+        } else {
+            eprintln!("warning: index-backed checks skipped: {reason}");
+        }
     }
     if strict {
         for f in mmcg::verify_spec::strict_check(&parsed) {
@@ -101,12 +125,7 @@ pub fn audit(
     let executor_report_path_str = executor_report_path
         .map(|path| exact_path(path, "executor report"))
         .transpose()?;
-    let store = open_validated_index(index_path, &root)?.ok_or_else(|| {
-        format!(
-            "no populated index at `{}`; run `mastermind index .`",
-            index_path.display()
-        )
-    })?;
+    let store = open_validated_index(index_path, &root)??;
 
     let executor_report = executor_report_path
         .map(mmcg::executor_report::parse_file)
@@ -164,7 +183,7 @@ mod tests {
         let root = root.path().canonicalize().unwrap();
         let index_path = root.join("missing/index.db");
 
-        assert!(open_validated_index(&index_path, &root).unwrap().is_none());
+        assert!(open_validated_index(&index_path, &root).unwrap().is_err());
         assert!(!index_path.exists());
         assert!(!root.join("missing").exists());
     }
@@ -200,7 +219,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        assert!(open_validated_index(&index_path, &root).unwrap().is_none());
+        assert!(open_validated_index(&index_path, &root).unwrap().is_err());
     }
 
     #[cfg(unix)]

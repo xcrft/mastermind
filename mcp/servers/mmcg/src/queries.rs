@@ -5282,68 +5282,8 @@ pub fn api_surface(
     })
 }
 
-pub fn status(store: &Store) -> rusqlite::Result<StatusResponse> {
-    let db_path = database_path_identity(store);
-    let db_path_error = db_path.is_none().then_some("non_utf8_path");
-    let (stale_files, stale_files_truncated, freshness_error) = store
-        .meta_value("index_root")?
-        .map(|root| stale_count(store, std::path::Path::new(&root)))
-        .unwrap_or((1, false, Some("index_root_missing")));
-    Ok(StatusResponse {
-        db_path,
-        db_path_error,
-        symbol_count: store.symbol_count()?,
-        file_count: store.file_count()?,
-        freshness_basis: "path_and_mtime",
-        stale_files,
-        stale_files_truncated,
-        freshness_error,
-        extractor_contract_current: store.extractor_contract_current()?,
-        concept_contract_current: store.concept_contract_current()?,
-    })
-}
-
 pub(crate) fn database_path_identity(store: &Store) -> Option<String> {
     store.db_path().to_str().map(str::to_owned)
-}
-
-/// Best-effort count of source files that differ from their stored index mtime
-/// (capped). Returns 1 when freshness cannot be read so `status` does not claim
-/// that a damaged index is current.
-/// The repository root comes from the index binding rather than the DB location
-/// because `--index` may place SQLite anywhere. Reuse the caller's exact Store
-/// snapshot so status cannot silently mix rows from two index revisions.
-fn stale_count(store: &Store, index_root: &std::path::Path) -> (usize, bool, Option<&'static str>) {
-    let Ok(root) = index_root.canonicalize() else {
-        return (1, false, Some("index_root_unavailable"));
-    };
-    let hard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let deadline = store
-        .request_deadline()
-        .map_or(hard_deadline, |deadline| deadline.min(hard_deadline));
-    let interrupted = || store.work_interrupted();
-    match crate::workflow_status::stale_paths_controlled(
-        store,
-        &root,
-        STATUS_STALE_FILE_PROBE_LIMIT,
-        crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
-        crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
-        crate::bounded_fs::ReadControl {
-            deadline: Some(deadline),
-            interrupted: Some(&interrupted),
-        },
-    ) {
-        Ok(paths) => match store.source_snapshot_unchanged() {
-            Ok(true) => (
-                paths.len().min(STATUS_STALE_FILE_LIMIT),
-                paths.len() > STATUS_STALE_FILE_LIMIT,
-                None,
-            ),
-            Ok(false) => (1, false, Some("snapshot_changed")),
-            Err(_) => (1, false, Some("snapshot_check_failed")),
-        },
-        Err(_) => (1, false, Some("freshness_scan_failed")),
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -9986,7 +9926,7 @@ mod tests {
         let store = index_impact(&root, "status_external_db");
         assert!(!store.db_path().starts_with(&root));
 
-        let response = status(&store).unwrap();
+        let response = crate::query_service::index_status(&store).unwrap();
         assert_eq!(response.db_path.as_deref(), store.db_path().to_str());
         assert_eq!(response.db_path_error, None);
         assert_eq!(response.stale_files, 0);
@@ -10002,7 +9942,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path().join("mmcg.db")).unwrap();
 
-        let response = status(&store).unwrap();
+        let response = crate::query_service::index_status(&store).unwrap();
         assert_eq!(response.stale_files, 1);
         assert!(!response.stale_files_truncated);
         assert_eq!(response.freshness_error, Some("index_root_missing"));
@@ -10022,7 +9962,7 @@ mod tests {
             .join(std::ffi::OsString::from_vec(b"mmcg-\xff.db".to_vec()));
         let store = Store::open(&path).unwrap();
 
-        let response = status(&store).unwrap();
+        let response = crate::query_service::index_status(&store).unwrap();
 
         assert_eq!(response.db_path, None);
         assert_eq!(response.db_path_error, Some("non_utf8_path"));

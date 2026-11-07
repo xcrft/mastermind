@@ -30,10 +30,28 @@ pub(crate) fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::
     Ok(store)
 }
 
+/// CLI queries answer from whatever the index holds. They do not block on a
+/// stale index, but they say so on stderr using the rule MCP enforces. Call it
+/// inside the command's work budget so the scan counts against
+/// `MMCG_QUERY_BUDGET_MS`.
+pub(crate) fn warn_if_stale(store: &Store) {
+    if let Some(reason) = mmcg::query_service::stale_index_reason(store) {
+        eprintln!(
+            "warning: index is not current ({reason}); results may be outdated, run `mastermind index .`"
+        );
+    }
+}
+
 pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_query_store(index_path)?;
+    store.push_work_budget(WorkBudget::from_millis(query_budget_ms_from_env(
+        DEFAULT_CLI_BUDGET_MS,
+    )));
+    let budget_scope = WorkBudgetScope(&store);
+    warn_if_stale(&store);
     let is_explain = matches!(q, QueryCmd::Explain { .. });
     let result = execute(&store, q)?;
+    drop(budget_scope);
     store.ensure_source_snapshot_current()?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     if is_explain {
@@ -68,6 +86,7 @@ pub fn dispatch_map(
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));
     let _budget_scope = WorkBudgetScope(&store);
+    warn_if_stale(&store);
     let map = queries::project_map_with_options(&store, path, depth, top, production_only)?;
     store.ensure_source_snapshot_current()?;
     match format {
@@ -94,6 +113,7 @@ pub fn dispatch_repo_map(
     let (symbols, graph) = store.with_work_budget(
         WorkBudget::from_millis(query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS)),
         || {
+            warn_if_stale(&store);
             let symbols = store.repo_map_symbols()?;
             let graph = if matches!(ranking, crate::RepoMapRanking::Graph)
                 && symbols.len() <= mmcg::repo_map::MAX_SYMBOLS

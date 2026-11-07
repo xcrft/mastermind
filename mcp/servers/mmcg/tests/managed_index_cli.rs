@@ -118,6 +118,33 @@ impl Fixture {
     }
 }
 
+#[test]
+fn index_without_git_on_path_walks_the_directory_and_stays_current() {
+    let directory = tempfile::tempdir().unwrap();
+    let no_git = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("app.py"),
+        "def app():\n    return 1\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(directory.path())
+            .env("PATH", no_git.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert_success(&run(&["index", "."]));
+    let search = run(&["query", "search", "app"]);
+    assert_success(&search);
+    let results: Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(results["count"], 1, "{results}");
+    let stderr = String::from_utf8_lossy(&search.stderr);
+    assert!(!stderr.contains("not current"), "{stderr}");
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -192,4 +219,72 @@ fn explicit_custom_index_refuses_refresh_without_changing_database_bytes() {
     assert_eq!(result["structuredContent"]["code"], "index_stale");
     assert_eq!(result["structuredContent"]["refresh_attempted"], false);
     assert_eq!(fs::read(&custom).unwrap(), before);
+}
+
+#[test]
+fn stale_index_is_refused_by_spec_gates_and_flagged_by_cli_queries() {
+    let fixture = Fixture::new();
+    fixture.index(None);
+    let spec = fixture.root.join(".mastermind/tasks/001-stale/spec.md");
+    fs::create_dir_all(spec.parent().unwrap()).unwrap();
+    fs::write(
+        &spec,
+        "---\nmode: lite\ntouches:\n  - file: probe.py\n    language: python\n    symbols:\n      - original_refresh\n---\n# Stale index\n## Goals\nEdit the probe.\n\n## Pre-edit symbol snapshot\n- `original_refresh` — signature `def original_refresh()`\n",
+    )
+    .unwrap();
+    // The snapshotted symbol disappears from disk but stays in the index.
+    fixture.source("updated_refresh", 1);
+
+    let verify = fixture
+        .command()
+        .arg("verify-spec")
+        .arg(&spec)
+        .args(["--require-index", "--json"])
+        .output()
+        .unwrap();
+    assert!(!verify.status.success(), "{verify:?}");
+    let report: Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(report["index_checks"], "not_evaluated", "{report}");
+    assert!(
+        report["errors"]
+            .to_string()
+            .contains("index is not current"),
+        "{report}"
+    );
+
+    let audit = fixture
+        .command()
+        .arg("audit-spec")
+        .arg(&spec)
+        .args(["--since", "main", "--json"])
+        .output()
+        .unwrap();
+    assert!(!audit.status.success(), "{audit:?}");
+    assert!(
+        String::from_utf8_lossy(&audit.stderr).contains("index is not current"),
+        "{audit:?}"
+    );
+
+    let query = fixture
+        .command()
+        .args(["query", "search", "original_refresh"])
+        .output()
+        .unwrap();
+    assert_success(&query);
+    assert!(
+        String::from_utf8_lossy(&query.stderr).contains("index is not current"),
+        "{query:?}"
+    );
+
+    fixture.index(None);
+    let query = fixture
+        .command()
+        .args(["query", "search", "updated_refresh"])
+        .output()
+        .unwrap();
+    assert_success(&query);
+    assert!(
+        !String::from_utf8_lossy(&query.stderr).contains("index is not current"),
+        "{query:?}"
+    );
 }

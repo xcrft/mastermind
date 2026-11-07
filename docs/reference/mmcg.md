@@ -84,8 +84,15 @@ Extraction coverage and known gaps:
 | C++ using | `using std::vector` or `using namespace ns` | `vector` / `std::vector` or `*` / `ns::*` |
 | Call target | `obj.foo()` | Literal `obj.foo`, without type resolution |
 
-Source discovery honors repository, parent, global, and `.git/info/exclude`
-Git ignore rules even outside a Git worktree. `.ignore` files are honored too.
+Manual indexing, automatic refresh and the freshness check use one source
+inventory. Inside a Git worktree it is `git ls-files --cached --others
+--exclude-standard`, so Git decides which ignore rules apply. Outside a Git
+worktree, or when `git` is not on `PATH`, a walk applies repository, parent,
+global, and `.git/info/exclude` Git ignore rules. `.ignore` files are not read
+in either case. Untracked files whose names are not valid UTF-8 are skipped
+unless their extension is a supported language, which fails the run instead.
+Git's path list is capped at 64 MiB, about a million paths. Past that, indexing
+fails with `source_inventory_bytes`.
 Files already tracked by Git remain index candidates even if a broad ignore
 rule now matches them. Ignore rules still exclude untracked files. Supported
 extensions are matched case-insensitively, Python type stubs (`.pyi`) are
@@ -239,10 +246,10 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only
 
 | Command | Contract |
 |---|---|
-| `verify-spec` | Checks the pre-edit contract. `--strict` forces strict checks. `--require-index` rejects missing index evidence. Without it, skipped checks are explicitly `not_evaluated`. |
+| `verify-spec` | Checks the pre-edit contract. `--strict` forces strict checks. `--require-index` rejects a missing, empty or stale index. Without it, skipped checks are explicitly `not_evaluated` and the reason is printed on stderr. |
 | `verification run` | Explicitly executes one declared `verify[].run` after preflight. Records task/file-bound observations on macOS/Linux. Every result except pass exits nonzero. |
 | `acceptance status` | Read-only criterion → declared check → current receipt projection. Exit 0 means `requirements_satisfied`. An absent contract is `not_declared`. |
-| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files. A broken verdict exits nonzero. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. |
+| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files. A broken verdict exits nonzero. An index that does not match the files is refused. Run `mastermind index .` first. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. |
 | `run-task` | Persists preflight, consumes the executor report, audits, then closes only through the applicable review and final evidence gates. |
 
 The [workflow guide](../workflow.md) describes the sequence and report files.
@@ -771,6 +778,7 @@ mmcg --index /path/to/index.db index /path/to/repository --force
 ```
 
 Stable query failures also include `invalid_arguments`, `snapshot_changed`,
+`index_replaced`, `index_rebuild_required`,
 `work_limit_exceeded`, `cancelled`, and `internal_error`.
 
 This is deterministic local retrieval, not semantic inference: no embeddings,
@@ -842,7 +850,7 @@ When you run `mmcg index`, mmcg compares each file's filesystem mtime against th
 
 | File condition | Index action |
 |---|---|
-| Untracked and excluded by Git or `.ignore` | Do not scan |
+| Untracked and excluded by Git | Do not scan |
 | Tracked but now matches an ignore rule | Keep as an index candidate |
 | Mtime differs in either direction | Reparse and commit, counted as `indexed` |
 | Mtime matches | Skip parsing, counted as `unchanged` |
@@ -855,7 +863,7 @@ parser, extractor, or concept-normalization semantics change, the next ordinary
 `index` run automatically performs the required rebuild even when file mtimes
 are unchanged. `status`, `doctor`, and `mmcg_status` expose contract drift so
 agents do not trust stale derived data. `mastermind status` also checks the live
-durable-history inventory under the same ten-second deadline as source
+durable-history inventory under the same 30-second deadline as source
 freshness. It reports the index as up to date only when all four checks pass.
 `mastermind doctor` uses that same scan for its `index freshness` check and
 returns a warning if any structural, concept, or durable-history input is stale,
@@ -1680,11 +1688,17 @@ when source files or the extractor contract drift. The repository root is
 derived from the canonical database path and checked against the stored index
 identity before any refresh. Automatic refresh admits at most 100,000 source
 candidates and 512 MiB of declared source bytes. Exceeding either cap returns
-`refresh_limit_exceeded` without a partial refresh. Status freshness scans have
-a 30-second deadline. A custom external `--index`
+`refresh_limit_exceeded` without a partial refresh. A changed extractor or
+concept contract forces a full rebuild. A full rebuild that does not fit the
+request budget starts from zero on the next call, so it returns
+`index_rebuild_required`: run `mastermind index .` or raise
+`MMCG_QUERY_BUDGET_MS`. The `mmcg_status` freshness scan runs under the request
+budget. A custom external `--index`
 is opened read-only by `serve`: it remains query-compatible when fresh, requires
 an explicit `mmcg index` when stale, and is never created, migrated, truncated,
-or given a WAL by the server. Reading an existing active WAL may create or
+or given a WAL by the server. `serve` reads a private snapshot taken at start.
+After `mmcg index` rewrites the external file, tools return `index_replaced`
+until the server is restarted. Reading an existing active WAL may create or
 update its SHM coordination file. Incompatible custom schemas return
 `schema_incompatible`. Reverse freshness checks retain missing and non-regular
 Git-tracked source paths so they cannot disappear from index coverage. A
@@ -1692,12 +1706,11 @@ tracked deletion is fresh only when the path is absent from both the worktree
 and the index and remains absent through the check. Non-regular and non-UTF-8
 tracked paths make the inventory incomplete. These and other failed or
 unavailable refreshes return `index_stale`.
-Concept queries, review preparation/completion and brief queries share one
-freshness owner across CLI and MCP. Each managed operation makes at most one
+Structural tools, concept queries, review preparation/completion and brief
+queries share one freshness owner across CLI and MCP. Each managed operation makes at most one
 refresh attempt under its original deadline. Review completion reconstructs the
 packet after admission and rejects changed source bindings. The stale payload
-retains its existing code and coverage fields. For these operations,
-`stale_reason` identifies `structural`, `concept` or `history` drift. History-only
+retains its existing code and coverage fields. `stale_reason` identifies `structural`, `concept` or `history` drift. History-only
 failures also include `history_freshness: stale`, even when `stale_files` is zero.
 
 
@@ -2205,9 +2218,10 @@ The default `serve`, `concept` and `concept-review` index is
 `serve --root PATH`, the default index belongs to that root. Explicit external
 indexes remain read-only and require a separate `mastermind index` refresh.
 
-Bounded freshness checks require a Git worktree and available Git. A directory
-without Git can be indexed manually, but structural MCP queries return
-`index_stale` because source freshness cannot be established.
+Outside a Git worktree, freshness checks and automatic refresh walk the
+directory with the same rules as manual indexing. The CLI stale-index warning
+checks the whole inventory without the MCP refresh caps. It runs inside the
+command's `MMCG_QUERY_BUDGET_MS` budget.
 
 ## Env vars
 

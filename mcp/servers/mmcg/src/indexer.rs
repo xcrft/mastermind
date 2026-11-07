@@ -586,6 +586,14 @@ impl IndexLimits {
         source_candidates: Some(AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT),
         source_declared_bytes: Some(AUTO_REFRESH_SOURCE_AGGREGATE_BYTES),
     };
+
+    /// Candidate and declared-byte caps, unbounded for manual indexing.
+    pub(crate) fn source_caps(self) -> (usize, u64) {
+        (
+            self.source_candidates.unwrap_or(usize::MAX),
+            self.source_declared_bytes.unwrap_or(u64::MAX),
+        )
+    }
 }
 
 impl Indexer {
@@ -709,7 +717,7 @@ impl Indexer {
             };
             match (root_capability.as_ref(), limits.source_candidates) {
                 (Some(root), Some(limit)) => source_candidates_bounded(root, limit, control)?,
-                _ => source_candidates_controlled(&self.root, None, control)?,
+                _ => source_candidates(&self.root, control)?,
             }
         };
         ensure_indexing_active(store)?;
@@ -1617,7 +1625,19 @@ fn git_relative_path(raw: &[u8]) -> Result<PathBuf, IndexError> {
 
 fn unportable_non_source_git_path(raw: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(raw) else {
-        return false;
+        // A non-UTF-8 name cannot be stored. Skip it unless its extension
+        // names a supported language, which must fail instead of vanishing.
+        let name = raw.rsplit(|byte| *byte == b'/').next().unwrap_or(raw);
+        let extension = name
+            .iter()
+            .rposition(|byte| *byte == b'.')
+            .filter(|dot| *dot > 0)
+            .map(|dot| &name[dot + 1..]);
+        return !extension
+            .and_then(|extension| std::str::from_utf8(extension).ok())
+            .is_some_and(|extension| {
+                extractor_for_path(Path::new(&format!("source.{extension}"))).is_some()
+            });
     };
     let path = Path::new(text);
     text.contains('\\')
@@ -1630,34 +1650,25 @@ fn unportable_non_source_git_path(raw: &[u8]) -> bool {
 
 /// Tracked files remain source-of-truth even when a later or overly broad
 /// ignore rule matches them. Git itself applies ignore rules to untracked
-/// discovery, not to entries already present in the index. Failure to query Git
-/// is non-fatal: the ordinary ignore-aware filesystem walk remains available
-/// outside repositories and when Git is unavailable.
+/// discovery, not to entries already present in the index. The watcher uses
+/// this with the walk rules, so a Git failure leaves it with the walk alone.
 fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
     tracked_relative_paths(root).unwrap_or_default()
 }
 
 /// Existing tracked files, bounded by the same subprocess timeout and output
-/// cap used during indexing. Indexing can fall back to the ignore-aware walk
-/// when Git is unavailable; fail-closed readers such as Lens use the `Result`
+/// cap used during indexing. Fail-closed readers such as Lens use the `Result`
 /// to avoid treating an incomplete tracked-file inventory as fresh.
 pub(crate) fn tracked_relative_paths(
     root: &Path,
-) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
-    tracked_relative_paths_controlled(root, ReadControl::default())
-}
-
-fn tracked_relative_paths_controlled(
-    root: &Path,
-    control: ReadControl<'_>,
 ) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
     let output = crate::diff::run_bounded_git_with_control(
         root,
         &["ls-files", "--cached", "-z", "--"],
         None,
         GIT_TRACKED_PATH_OUTPUT_LIMIT,
-        control.deadline,
-        control.interrupted,
+        None,
+        None,
     )?;
     if !output.success {
         return Err(crate::diff::WorkingTreeDiffError::GitUnavailable);
@@ -1685,10 +1696,16 @@ fn tracked_relative_paths_controlled(
     Ok(paths)
 }
 
+// Outside Git the walk is the inventory, so it must not read `.ignore`, which
+// Git never reads. The watcher filters events with these rules in every root.
+// ponytail: inside a work tree they can drop events for files that only a
+// `.gitignore` above the work tree excludes. MCP admission still refreshes on
+// the next query; ask Git per event if watch mode must catch them.
 fn source_walk_builder(root: &Path) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
+        .ignore(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
@@ -1719,21 +1736,19 @@ pub(crate) fn source_candidates_bounded(
         GIT_TRACKED_PATH_OUTPUT_LIMIT,
         control.deadline,
         control.interrupted,
-    )
-    .map_err(|error| match error {
-        crate::diff::WorkingTreeDiffError::GitTimeout
-            if control.interrupted.is_some_and(|check| check()) =>
-        {
-            IndexError::Cancelled
+    );
+    let output = match output {
+        // Without a Git binary nothing can say which files Git would list,
+        // so the walk with Git's ignore rules is the inventory.
+        Err(crate::diff::WorkingTreeDiffError::GitUnavailable) => {
+            return walked_source_candidates(root, limit, control);
         }
-        crate::diff::WorkingTreeDiffError::GitTimeout => IndexError::DeadlineExceeded,
-        crate::diff::WorkingTreeDiffError::GitOutputLimit => IndexError::LimitExceeded {
-            dimension: "source_candidates",
-            cap: limit as u64,
-        },
-        error => IndexError::Other(error.to_string()),
-    })?;
+        output => output.map_err(|error| git_inventory_error(error, control))?,
+    };
     if !output.success {
+        if !inside_git_work_tree(root, control)? {
+            return walked_source_candidates(root, limit, control);
+        }
         return Err(IndexError::Other("git source inventory unavailable".into()));
     }
     let mut paths = BTreeSet::new();
@@ -1761,44 +1776,52 @@ pub(crate) fn source_candidates_bounded(
     Ok(paths.into_iter().collect())
 }
 
-fn source_candidates_controlled(
-    root: &Path,
-    limit: Option<usize>,
+fn git_inventory_error(
+    error: crate::diff::WorkingTreeDiffError,
     control: ReadControl<'_>,
-) -> Result<Vec<PathBuf>, IndexError> {
-    if let Some(limit) = limit {
-        let root = RootCapability::open(root).map_err(index_error_from_read)?;
-        return source_candidates_bounded(&root, limit, control);
-    }
-    control.check().map_err(index_error_from_read)?;
-    let tracked = match tracked_relative_paths_controlled(root, control) {
-        Ok(paths) => paths,
-        Err(crate::diff::WorkingTreeDiffError::IndexStale) => {
-            return Err(IndexError::SnapshotChanged)
-        }
-        Err(_) if limit.is_none() => Vec::new(),
-        Err(crate::diff::WorkingTreeDiffError::GitTimeout)
+) -> IndexError {
+    match error {
+        crate::diff::WorkingTreeDiffError::GitTimeout
             if control.interrupted.is_some_and(|check| check()) =>
         {
-            return Err(IndexError::Cancelled);
+            IndexError::Cancelled
         }
-        Err(crate::diff::WorkingTreeDiffError::GitTimeout) => {
-            return Err(IndexError::DeadlineExceeded);
-        }
-        Err(error) => return Err(IndexError::Other(error.to_string())),
-    };
-    let mut paths = BTreeSet::new();
-    for relative in tracked {
-        control.check().map_err(index_error_from_read)?;
-        paths.insert(root.join(relative));
-        if limit.is_some_and(|cap| paths.len() > cap) {
-            return Err(IndexError::LimitExceeded {
-                dimension: "source_candidates",
-                cap: limit.unwrap_or(usize::MAX) as u64,
-            });
-        }
+        crate::diff::WorkingTreeDiffError::GitTimeout => IndexError::DeadlineExceeded,
+        // The path list is capped in bytes, which also bounds manual indexing.
+        crate::diff::WorkingTreeDiffError::GitOutputLimit => IndexError::LimitExceeded {
+            dimension: "source_inventory_bytes",
+            cap: GIT_TRACKED_PATH_OUTPUT_LIMIT as u64,
+        },
+        error => IndexError::Other(error.to_string()),
     }
-    for entry in source_walk_builder(root).build() {
+}
+
+fn inside_git_work_tree(
+    root: &RootCapability,
+    control: ReadControl<'_>,
+) -> Result<bool, IndexError> {
+    match crate::diff::run_bounded_git_with_control(
+        root.canonical_root(),
+        &["rev-parse", "--is-inside-work-tree"],
+        None,
+        64,
+        control.deadline,
+        control.interrupted,
+    ) {
+        Ok(output) => Ok(output.success && output.stdout.trim_ascii() == b"true"),
+        Err(crate::diff::WorkingTreeDiffError::GitUnavailable) => Ok(false),
+        Err(error) => Err(git_inventory_error(error, control)),
+    }
+}
+
+/// Inventory for a root outside any Git work tree, with Git's ignore rules.
+fn walked_source_candidates(
+    root: &RootCapability,
+    limit: usize,
+    control: ReadControl<'_>,
+) -> Result<Vec<PathBuf>, IndexError> {
+    let mut paths = BTreeSet::new();
+    for entry in source_walk_builder(root.canonical_root()).build() {
         control.check().map_err(index_error_from_read)?;
         let Ok(entry) = entry else {
             continue;
@@ -1807,14 +1830,182 @@ fn source_candidates_controlled(
             continue;
         }
         paths.insert(entry.into_path());
-        if limit.is_some_and(|cap| paths.len() > cap) {
+        if paths.len() > limit {
             return Err(IndexError::LimitExceeded {
                 dimension: "source_candidates",
-                cap: limit.unwrap_or(usize::MAX) as u64,
+                cap: limit as u64,
             });
         }
     }
+    root.verify().map_err(index_error_from_read)?;
     Ok(paths.into_iter().collect())
+}
+
+/// The one source inventory for manual indexing, auto-refresh and freshness:
+/// `git ls-files --cached --others --exclude-standard` inside a Git work
+/// tree, otherwise a walk with the same ignore rules.
+fn source_candidates(root: &Path, control: ReadControl<'_>) -> Result<Vec<PathBuf>, IndexError> {
+    let root = RootCapability::open(root).map_err(index_error_from_read)?;
+    source_candidates_bounded(&root, usize::MAX, control)
+}
+
+pub(crate) fn stale_paths_controlled(
+    store: &crate::store::Store,
+    root: &Path,
+    cap: usize,
+    source_cap: usize,
+    source_bytes_cap: u64,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<Vec<String>, crate::indexer::IndexError> {
+    if cap == 0 {
+        return Ok(Vec::new());
+    }
+    control
+        .check()
+        .map_err(crate::indexer::index_error_from_read)?;
+    let root_capability = crate::bounded_fs::RootCapability::open(root)
+        .map_err(crate::indexer::index_error_from_read)?;
+    let indexed_entries = store
+        .file_mtimes_bounded(source_cap)
+        .map_err(|error| crate::indexer::IndexError::Other(error.to_string()))?
+        .ok_or(crate::indexer::IndexError::LimitExceeded {
+            dimension: "source_candidates",
+            cap: source_cap as u64,
+        })?;
+    let indexed: HashMap<String, i64> = indexed_entries.into_iter().collect();
+    let candidates =
+        crate::indexer::source_candidates_bounded(&root_capability, source_cap, control)?;
+    let mut declared_bytes = 0_u64;
+    let mut seen = HashSet::new();
+    let mut stale = Vec::new();
+    let mut absent_candidates = Vec::new();
+    for path in candidates {
+        control
+            .check()
+            .map_err(crate::indexer::index_error_from_read)?;
+        if crate::indexer::extractor_for_path(&path).is_none() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root_capability.canonical_root())
+            .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?;
+        let relative = crate::bounded_fs::normalize_repository_relative_path(relative)
+            .map_err(crate::indexer::index_error_from_read)?;
+        let admitted = match crate::indexer::source_admission_with_capability(
+            &root_capability,
+            &path,
+            control,
+        ) {
+            Ok(file) => file,
+            Err(crate::indexer::IndexError::Skipped(_)) => continue,
+            Err(crate::indexer::IndexError::Missing) => {
+                let absence =
+                    crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
+                        .map_err(crate::indexer::index_error_from_read)?
+                        .ok_or(crate::indexer::IndexError::SnapshotChanged)?;
+                absent_candidates.push((path, absence));
+                seen.insert(relative.clone());
+                if indexed.contains_key(&relative) {
+                    stale.push(relative);
+                    if stale.len() >= cap {
+                        break;
+                    }
+                }
+                continue;
+            }
+            Err(crate::indexer::IndexError::Cancelled) => {
+                return Err(crate::indexer::IndexError::Cancelled)
+            }
+            Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                return Err(crate::indexer::IndexError::DeadlineExceeded)
+            }
+            Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+                return Err(crate::indexer::IndexError::LimitExceeded { dimension, cap })
+            }
+            Err(_) => {
+                stale.push(relative.clone());
+                seen.insert(relative);
+                if stale.len() >= cap {
+                    break;
+                }
+                continue;
+            }
+        };
+        declared_bytes = declared_bytes.checked_add(admitted.declared_len).ok_or(
+            crate::indexer::IndexError::LimitExceeded {
+                dimension: "source_declared_bytes",
+                cap: source_bytes_cap,
+            },
+        )?;
+        if declared_bytes > source_bytes_cap {
+            return Err(crate::indexer::IndexError::LimitExceeded {
+                dimension: "source_declared_bytes",
+                cap: source_bytes_cap,
+            });
+        }
+        // Parsing rejects NUL bytes anywhere in a source file. Admission only
+        // sniffs the prefix, so verify the whole file for paths the index omitted.
+        if !indexed.contains_key(&relative)
+            && crate::indexer::source_is_binary_after_admission(
+                &root_capability,
+                &path,
+                admitted.identity,
+                control,
+            )?
+        {
+            seen.insert(relative);
+            continue;
+        }
+        seen.insert(relative.clone());
+        if indexed
+            .get(&relative)
+            .is_none_or(|stored| admitted.modified_millis != *stored)
+        {
+            stale.push(relative);
+            if stale.len() >= cap {
+                break;
+            }
+        }
+    }
+    if stale.len() < cap {
+        for indexed_path in indexed.keys() {
+            control
+                .check()
+                .map_err(crate::indexer::index_error_from_read)?;
+            if seen.contains(indexed_path) {
+                continue;
+            }
+            let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
+                &root_capability,
+                Path::new(indexed_path),
+                u64::MAX,
+                0,
+                control,
+            )
+            .is_ok();
+            if !remains_regular {
+                stale.push(indexed_path.clone());
+                if stale.len() >= cap {
+                    break;
+                }
+            }
+        }
+    }
+    root_capability
+        .verify()
+        .map_err(crate::indexer::index_error_from_read)?;
+    for (path, expected) in absent_candidates {
+        let observed = crate::bounded_fs::inspect_absent_path(&root_capability, &path, control)
+            .map_err(crate::indexer::index_error_from_read)?;
+        if observed
+            .as_ref()
+            .is_none_or(|observed| !expected.matches(observed))
+        {
+            return Err(crate::indexer::IndexError::SnapshotChanged);
+        }
+    }
+    stale.sort();
+    Ok(stale)
 }
 
 /// Stateful ignore matcher for watcher events. It applies the same gitignore
@@ -3693,7 +3884,7 @@ def candidate(value: ImportantType) -> ResultType"#
             Err(crate::diff::WorkingTreeDiffError::IndexStale)
         ));
         assert!(matches!(
-            source_candidates_controlled(&dir, None, ReadControl::default()),
+            source_candidates(&dir, ReadControl::default()),
             Err(IndexError::SnapshotChanged)
         ));
         fs::remove_dir_all(&dir).ok();
@@ -3764,6 +3955,7 @@ def candidate(value: ImportantType) -> ResultType"#
     #[test]
     fn source_walk_and_watcher_matcher_share_gitignore_rules() {
         let (dir, _db) = setup("gitignore");
+        let dir = dir.canonicalize().unwrap();
         let generated = dir.join("generated/ignored.rs");
         let kept = dir.join("src/kept.rs");
         let nested_ignored = dir.join("nested/ignored.rs");
@@ -3778,7 +3970,7 @@ def candidate(value: ImportantType) -> ResultType"#
         fs::write(&nested_ignored, "pub fn ignored() {}\n").unwrap();
         fs::write(&nested_kept, "pub fn kept() {}\n").unwrap();
 
-        let candidates = source_candidates_controlled(&dir, None, ReadControl::default()).unwrap();
+        let candidates = source_candidates(&dir, ReadControl::default()).unwrap();
         assert!(!candidates.contains(&generated));
         assert!(candidates.contains(&kept));
         assert!(!candidates.contains(&nested_ignored));
@@ -4080,5 +4272,310 @@ pub(crate) mod common {
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
         path
+    }
+}
+
+#[cfg(test)]
+mod stale_path_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn init_git_repository(root: &Path) {
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn manual_index_selects_the_files_the_freshness_check_expects() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        init_git_repository(&root);
+        fs::write(root.join("app.py"), "def app():\n    return 1\n").unwrap();
+        // Git does not read `.ignore`, so the freshness inventory lists this file.
+        fs::write(root.join("gen.py"), "def generated():\n    return 1\n").unwrap();
+        fs::write(root.join(".ignore"), "gen.py\n").unwrap();
+        let mut store = crate::store::Store::open(root.join("mmcg.db")).unwrap();
+
+        Indexer::new(&root).index_all(&mut store, false).unwrap();
+
+        assert!(store.file_mtime("gen.py").unwrap().is_some());
+        let stale = stale_paths_controlled(
+            &store,
+            &root,
+            10,
+            AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(stale.is_empty(), "{stale:?}");
+    }
+
+    #[test]
+    fn manual_index_ignores_rules_git_does_not_apply_to_the_work_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path().canonicalize().unwrap();
+        // A parent `.gitignore` outside the work tree, as in a dotfiles home.
+        fs::write(outer.join(".gitignore"), "p*.py\n").unwrap();
+        let root = outer.join("project");
+        fs::create_dir(&root).unwrap();
+        init_git_repository(&root);
+        fs::write(root.join("pnew.py"), "def added():\n    return 1\n").unwrap();
+        let mut store = crate::store::Store::open(outer.join("mmcg.db")).unwrap();
+
+        Indexer::new(&root).index_all(&mut store, false).unwrap();
+
+        assert!(store.file_mtime("pnew.py").unwrap().is_some());
+        let stale = stale_paths_controlled(
+            &store,
+            &root,
+            10,
+            AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(stale.is_empty(), "{stale:?}");
+    }
+
+    #[test]
+    fn non_utf8_git_paths_are_skipped_unless_they_name_a_source_language() {
+        assert!(unportable_non_source_git_path(b"docs/notes-\xff.txt"));
+        assert!(unportable_non_source_git_path(b"assets/\xff"));
+        assert!(!unportable_non_source_git_path(b"src/m\xff.py"));
+    }
+
+    #[test]
+    fn index_outside_git_can_be_checked_for_freshness() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("app.py"), "def app():\n    return 1\n").unwrap();
+        fs::write(root.join(".gitignore"), "skipped.py\n").unwrap();
+        fs::write(root.join("skipped.py"), "def skipped():\n    return 1\n").unwrap();
+        let mut store = crate::store::Store::open(root.join("mmcg.db")).unwrap();
+        Indexer::new(&root).index_all(&mut store, false).unwrap();
+        let check = |store: &crate::store::Store| {
+            stale_paths_controlled(
+                store,
+                &root,
+                10,
+                AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+                AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .unwrap()
+        };
+
+        assert!(check(&store).is_empty());
+        fs::write(root.join("added.py"), "def added():\n    return 1\n").unwrap();
+        assert_eq!(check(&store), vec!["added.py".to_string()]);
+    }
+
+    #[test]
+    fn stale_paths_compare_each_file_to_its_stored_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        init_git_repository(&root);
+        let db = root.join("mmcg.db");
+        let source = root.join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"fn current() {}\n").unwrap();
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", 10, 1).unwrap();
+        drop(store);
+        let newer = std::time::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(newer)
+            .unwrap();
+
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_ignore_binary_source_with_nul_after_admission_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        init_git_repository(root.path());
+        let source = root.path().join("late_nul.rs");
+        let mut bytes = vec![b'a'; 9_000];
+        bytes.push(0);
+        fs::write(&source, bytes).unwrap();
+        let output = Command::new("git")
+            .args(["add", "late_nul.rs"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let db = root.path().join("mmcg.db");
+        let mut store = crate::store::Store::open(&db).unwrap();
+        let stats = crate::indexer::Indexer::new(root.path())
+            .index_all(&mut store, false)
+            .unwrap();
+        assert_eq!(stats.files_skipped_binary, 1);
+        assert!(stale_paths_controlled(
+            &store,
+            root.path(),
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap()
+        .is_empty());
+        assert!(crate::lens::validate_index_snapshot(
+            &store,
+            &root.path().canonicalize().unwrap(),
+            None,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn stale_paths_treat_a_stably_deleted_tracked_source_as_current_after_purge() {
+        let root = tempfile::tempdir().unwrap();
+        init_git_repository(root.path());
+        let source = root.path().join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"fn removed() {}\n").unwrap();
+        let output = Command::new("git")
+            .args(["add", "src/lib.rs"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::remove_file(&source).unwrap();
+
+        let db = root.path().join("mmcg.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        let scan = || {
+            stale_paths_controlled(
+                &store,
+                root.path(),
+                10,
+                crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+                crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+                crate::bounded_fs::ReadControl::default(),
+            )
+            .unwrap()
+        };
+        assert!(scan().is_empty());
+        store.upsert_file("src/lib.rs", 1, 1).unwrap();
+        assert_eq!(scan(), vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn stale_paths_detect_an_older_source_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-older-mtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        init_git_repository(&root);
+        let db = root.join("mmcg.db");
+        let source = root.join("src/lib.rs");
+        fs::write(&source, b"fn restored() {}\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5))
+            .unwrap();
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", 10, 1).unwrap();
+        drop(store);
+
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(stale, vec!["src/lib.rs".to_string()]);
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_paths_reads_current_file_rows_from_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "mmcg-status-live-wal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("src/lib.rs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        init_git_repository(&root);
+        fs::write(&source, b"fn current() {}\n").unwrap();
+        let mtime = source
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let db = root.join("mmcg.db");
+        let store = crate::store::Store::open(&db).unwrap();
+        store.upsert_file("src/lib.rs", mtime, 1).unwrap();
+
+        assert!(root.join("mmcg.db-wal").is_file());
+        let snapshot = crate::store::Store::open_read_only(&db).unwrap();
+        let stale = stale_paths_controlled(
+            &snapshot,
+            &root,
+            10,
+            crate::indexer::AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(stale.is_empty());
+        assert!(snapshot.source_snapshot_unchanged().unwrap());
+        drop(snapshot);
+        drop(store);
+        fs::remove_dir_all(root).ok();
     }
 }

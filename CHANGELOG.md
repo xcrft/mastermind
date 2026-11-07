@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `pulldown-cmark` is updated to 0.13.6 for RUSTSEC-2026-0433. Mastermind
+  does not enable wikilinks, so the quadratic parse was not reachable.
+
 ### Fixed
 
 - `verify-spec` no longer evaluates index checks against an index that no

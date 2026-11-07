@@ -26,6 +26,7 @@ impl Fixture {
         }
     }
 
+    #[cfg(unix)]
     fn mmcg(&self, args: &[&str], input: Option<&str>) -> Output {
         use std::io::Write;
         let mut child = Command::new(env!("CARGO_BIN_EXE_mmcg"))

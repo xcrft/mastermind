@@ -41,7 +41,8 @@ jobs:
 
       - name: Produce and verify audit envelopes
         id: mastermind
-        uses: ./
+        # Pin a reviewed Mastermind commit. A PR cannot change pinned Action code.
+        uses: xcrft/mastermind@d22fa1bb777308deab691687e299b450ca7b0288
         with:
           root: .
           since: ${{ github.event.pull_request.base.sha }}

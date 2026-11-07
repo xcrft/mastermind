@@ -2219,8 +2219,7 @@ def validate_audit_action_security() -> list[Issue]:
         for match in re.finditer(r"uses:\s*([^\s#]+)", text):
             reference = match.group(1)
             if reference == "./":
-                if relative != "docs/examples/mastermind-audit-pr.yml" or not (REPO_ROOT / "action.yml").is_file():
-                    issues.append(Issue(path, "error", "local Action reference is absent or outside the unprivileged PR workflow"))
+                issues.append(Issue(path, "error", "examples are copied into other repositories, so they must pin xcrft/mastermind instead of `uses: ./`"))
                 continue
             if "@" not in reference:
                 issues.append(Issue(path, "error", f"Action reference lacks immutable revision: {reference}"))
@@ -2253,8 +2252,8 @@ def validate_audit_action_security() -> list[Issue]:
             issues.append(Issue(pr_path, "error", "PR audit must not receive OIDC or secrets"))
         if "persist-credentials: false" not in text:
             issues.append(Issue(pr_path, "error", "PR checkout must disable credential persistence"))
-        if "uses: ./" not in text:
-            issues.append(Issue(pr_path, "error", "unprivileged PR workflow must use the present repository Action"))
+        if not re.search(r"uses:\s*xcrft/mastermind@[0-9a-f]{40}\b", text):
+            issues.append(Issue(pr_path, "error", "PR audit must run the Mastermind Action pinned to a full commit SHA"))
         for error in audit_pr_contract_errors(text, pr):
             issues.append(Issue(pr_path, "error", error))
 

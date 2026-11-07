@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.5
+  version: 0.17.6
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -215,7 +215,7 @@ index and diff, writes `audit.md`, and updates the task-local `state.json`.
 - **verified:** deterministic audit plus planner semantic review is sufficient
   when the verdict is held and no high-risk uncertainty remains.
 - **strict:** spawn `mastermind-auditor` for an independent read-only review
-  before completion.
+  before completion. Codex: see [[mastermind-critical-review]].
 - Any drift/broken verdict returns to the planner; do not present it as done.
 
 ### Step 9a — Mechanical audit

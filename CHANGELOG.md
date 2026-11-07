@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pulldown-cmark` is updated to 0.13.6 for RUSTSEC-2026-0433. Mastermind
   does not enable wikilinks, so the quadratic parse was not reachable.
 
+### Changed
+
+- `init` keeps the workflow instructions in a managed block. It appends the
+  block to an existing `CLAUDE.md` instead of skipping the file, refreshes an
+  older block, and writes the same block to `AGENTS.md` for Codex.
+  Text outside the block keeps its bytes, and the block follows CRLF files.
+  `--workflow off` writes no block.
+  `doctor` compares the block in each saved client's file with the current
+  template.
+- The `core` profile now includes `mastermind-runtime-research`,
+  `mastermind-component-research`, `mastermind-frontend-audit` and
+  `mastermind-browser-verification`. The workflow router names them, so a
+  default install used to point at skills it did not have. `frontend` adds
+  `mastermind-design-intake`.
+- The planner names a Strict review that works without subagents, such as in
+  Codex: `mastermind-critical-review` in a fresh child agent.
+
+- The PR audit example pins `xcrft/mastermind` to a commit instead of
+  `uses: ./`, which only worked inside this repository and let a pull request
+  change the audit code. The publication comment shows the envelope verdicts
+  and marks only `held` with ✅.
+- The `.mastermind/.gitignore` that `init` writes carries the lines that commit
+  task contracts and executor reports, commented out. The GitHub audit Action
+  needs them, and the old `!path/to/file` advice did not work.
+
 ### Fixed
 
 - `verify-spec` no longer evaluates index checks against an index that no

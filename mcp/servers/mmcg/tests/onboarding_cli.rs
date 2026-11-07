@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 const CLIENT: &str = r#"#!/bin/sh
-if [ "$1" != mcp ]; then printf 'unexpected provider call\n' >> "$HOME/provider-calls"; exit 91; fi
+if [ "$1" != mcp ]; then printf 'unexpected provider call: %s\n' "$*" >> "$HOME/provider-calls"; exit 91; fi
 if [ "$FIXTURE_FORBID_MCP" = 1 ]; then printf 'unexpected native call\n' >> "$HOME/native-calls"; exit 92; fi
 state=removed
 if [ -f "$0.state" ]; then read -r state < "$0.state" || :; fi
@@ -184,6 +184,124 @@ fn local_init_indexes_source_and_context_and_preserves_existing_documents() {
 }
 
 #[test]
+fn workflow_init_adds_and_refreshes_a_managed_block_in_client_instructions() {
+    const BEGIN: &str = "<!-- mastermind:workflow:begin";
+    let f = Fixture::new();
+    f.client("claude");
+    f.client("codex");
+    fs::write(f.root.join("CLAUDE.md"), "user-owned instructions\n").unwrap();
+    // Without the npm wrapper the global workflow step fails. The project
+    // scaffold that writes instruction files runs before it.
+    let init = || f.run(&["init", "--client", "all", "--workflow", "on", "--json"]);
+
+    init();
+    let claude = fs::read_to_string(f.root.join("CLAUDE.md")).unwrap();
+    assert!(
+        claude.starts_with("user-owned instructions\n\n"),
+        "{claude}"
+    );
+    assert_eq!(claude.matches(BEGIN).count(), 1);
+    let agents = fs::read_to_string(f.root.join("AGENTS.md")).unwrap();
+    assert!(agents.starts_with("# <PROJECT_NAME>"), "{agents}");
+    assert_eq!(agents.matches(BEGIN).count(), 1);
+
+    let stale = format!(
+        "{}tail kept\n",
+        claude.replace("Use the lightest mode", "Use an old mode")
+    );
+    fs::write(f.root.join("CLAUDE.md"), &stale).unwrap();
+    init();
+    assert_eq!(
+        fs::read_to_string(f.root.join("CLAUDE.md")).unwrap(),
+        format!("{claude}tail kept\n")
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("AGENTS.md")).unwrap(),
+        agents
+    );
+
+    let forced = f.run(&[
+        "init",
+        "--client",
+        "all",
+        "--workflow",
+        "on",
+        "--force",
+        "--json",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&forced.stdout).contains("CLAUDE.md replaced (workflow)"),
+        "{forced:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("CLAUDE.md")).unwrap(),
+        agents
+    );
+}
+
+#[test]
+fn template_written_instruction_files_reach_the_draft_and_oversized_ones_warn() {
+    let f = Fixture::new();
+    f.client("claude");
+    f.client("codex");
+    fs::write(f.root.join("CLAUDE.md"), "user-owned instructions\n").unwrap();
+    let agents = fs::File::create(f.root.join("AGENTS.md")).unwrap();
+    agents.set_len(4 * 1024 * 1024 + 1).unwrap();
+    drop(agents);
+
+    let init = f.run(&["init", "--client", "all", "--workflow", "on", "--json"]);
+    let report = String::from_utf8_lossy(&init.stdout);
+    assert!(report.contains("AGENTS.md left unchanged"), "{init:?}");
+    assert!(
+        report.contains("CLAUDE.md workflow block updated"),
+        "{init:?}"
+    );
+
+    fs::remove_file(f.root.join("AGENTS.md")).unwrap();
+    f.run(&[
+        "init",
+        "--client",
+        "all",
+        "--workflow",
+        "on",
+        "--force",
+        "--draft-with",
+        "claude",
+    ]);
+    // The fake client fails the draft call. Its arguments name the files that
+    // still hold template placeholders: the forced CLAUDE.md and the new AGENTS.md.
+    let calls = fs::read_to_string(f.home.join("provider-calls")).unwrap();
+    assert!(
+        calls.contains("CLAUDE.md`: replace the <PLACEHOLDER>"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("AGENTS.md`: replace the <PLACEHOLDER>"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn doctor_checks_the_instruction_files_of_the_saved_clients() {
+    let f = Fixture::new();
+    f.client("claude");
+    fs::write(f.root.join("AGENTS.md"), "# Hand-written Codex rules\n").unwrap();
+    f.run(&["init", "--client", "claude", "--workflow", "on", "--json"]);
+
+    let output = f.run(&["doctor", "--json"]);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = report["checks"].as_array().unwrap();
+    let names: Vec<_> = checks.iter().map(|check| &check["name"]).collect();
+    assert!(names.contains(&&Value::from("CLAUDE.md")), "{names:?}");
+    assert!(!names.contains(&&Value::from("AGENTS.md")), "{names:?}");
+    let claude = checks
+        .iter()
+        .find(|check| check["name"] == "CLAUDE.md")
+        .unwrap();
+    assert_eq!(claude["status"], "ok", "{claude}");
+}
+
+#[test]
 fn explicit_capture_registers_audience_without_claiming_activation_or_profile_access() {
     let f = Fixture::new();
     f.client("codex");
@@ -204,6 +322,7 @@ fn explicit_capture_registers_audience_without_claiming_activation_or_profile_ac
     assert_eq!(client["hooks"]["activation"]["status"], "not_observed");
     assert_eq!(client["profile_access"]["allowed"], false);
     assert!(!f.root.join("CLAUDE.md").exists());
+    assert!(!f.root.join("AGENTS.md").exists());
     let hooks = fs::read(f.root.join(".codex/hooks.json")).unwrap();
     let second = f.success(&["init", "--json"]);
     assert_eq!(first["settings"], second["settings"]);

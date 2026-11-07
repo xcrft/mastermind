@@ -32,6 +32,29 @@ Publication performs no checkout. Before attestation or a comment, it verifies:
 
 Downloaded PR artifacts remain untrusted until all checks pass.
 
+The PR example pins `xcrft/mastermind` to a full commit SHA. Replace it with the
+Mastermind commit you reviewed. A pinned Action runs its own `action.yml` and
+Dockerfile, so a pull request cannot change the audit code.
+
+## Commit task evidence
+
+`mastermind init` keeps `.mastermind/` local. The Action reads task contracts
+and executor reports from Git, so uncomment these lines in
+`.mastermind/.gitignore` and commit the two files of each task:
+
+```gitignore
+*
+!.gitignore
+!tasks/
+!tasks/*/
+!tasks/*/spec.md
+!tasks/*/executor-report.md
+```
+
+The index, setup, audit output and other task records stay ignored. A single
+`!path/to/file` line does not work here, because `*` already ignores the parent
+directories.
+
 ## Provide task evidence
 
 | Task selection | Result |

@@ -40,8 +40,24 @@ Mastermind does not grant native client trust.
 An incomplete setup reports failed components. Fix the reported issue and repeat
 `init`. An optional `profile.git` refresh failure is reported as `degraded` and
 does not fail otherwise successful setup. Its detail explains why Git
-observations were unavailable. Existing `CONTEXT.md` and `CLAUDE.md` are preserved
-unless `--force` is used.
+observations were unavailable. An existing `CONTEXT.md` is preserved unless
+`--force` is used.
+
+With the workflow on, `init` keeps the workflow instructions in a managed block
+between `<!-- mastermind:workflow:begin ... -->` and
+`<!-- mastermind:workflow:end -->`. Claude gets it in `CLAUDE.md`, Codex in
+`AGENTS.md`.
+
+| File state | What `init` does |
+|---|---|
+| Missing | Writes a project header to fill in, then the block |
+| Present, no block | Appends the block. Your text stays |
+| Older block | Replaces only the block. Run `init` after an update |
+| Unmarked `## Mastermind workflow` section from an older `init` | Wraps it when it is unchanged. Otherwise warns and leaves the file. Delete the section and run `init` again |
+| Any state with `--force` | Replaces the whole file and keeps a backup |
+
+`--workflow off` writes no block. `mastermind doctor` checks the file of each
+saved client and warns when the block is missing or from another version.
 Use `status --json` to inspect configuration, observed sessions and missing
 evidence. Saved configuration alone does not establish a live client connection.
 
@@ -211,8 +227,10 @@ For component-level setup, use `mastermind install`, `mastermind setup`, or
 | `~/.mastermind/` | Optional personal profile, capture journal, and worker records |
 | Client configuration | MCP registration and workflow adapters |
 
-`init` creates `.mastermind/.gitignore` for local working data. Preserve that
-ignore policy when sharing project files.
+`init` creates `.mastermind/.gitignore` for local working data. To commit task
+contracts and executor reports, for review or the
+[GitHub audit Action](github-action.md#commit-task-evidence), uncomment its
+`!tasks` lines. Keep the rest ignored.
 
 | Operation | Model access |
 |---|---|
@@ -236,7 +254,7 @@ mastermind uninstall --force
 
 | Removed | Kept |
 |---|---|
-| Hooks, capture grant, worker and profile access of each client in this project | `CONTEXT.md` and `CLAUDE.md` |
+| Hooks, capture grant, worker and profile access of each client in this project | `CONTEXT.md`, `CLAUDE.md` and `AGENTS.md`, including the workflow block |
 | `.mastermind/`, including task records | Workflow skills and agents in `~/.claude` and `~/.codex`, used by other projects |
 | The Claude entry in the project `.mcp.json` | Other clients' MCP entries and `~/.mastermind/` |
 

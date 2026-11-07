@@ -2,7 +2,7 @@
 name: mastermind-critical-review
 description: Stress-test a proposed design, task spec, implementation plan, or executor report for false assumptions, broken contracts, scope creep, missing evidence, and high-risk failure modes. Use before drafting sensitive specs, before approving a plan, or when a critic/auditor needs a compact review rubric.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   authors:
     - mastermind
   tags:
@@ -19,6 +19,12 @@ Challenge a proposed design or completed change before it becomes accepted work.
 
 This is the rubric; the spawnable agent that applies it is the
 `mastermind-critic` subagent in independent context.
+
+A client without subagents, such as Codex, runs this rubric in a fresh
+read-only child agent wherever the workflow names `mastermind-critic`,
+`mastermind-auditor` or `mastermind-security-auditor`. Use the security lens for
+the security auditor. For an auditor, review the executor report and the diff.
+Spawn it as [[mastermind-agent-handoff]] describes.
 
 ## When to use
 

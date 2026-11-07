@@ -127,6 +127,22 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Client instruction files that carry the managed workflow block. None
+    /// while the workflow is off, since the block names its skills.
+    pub fn instruction_files(&self) -> Vec<&'static str> {
+        if !self.workflow {
+            return Vec::new();
+        }
+        self.clients
+            .iter()
+            .filter_map(|client| match client.as_str() {
+                "claude" => Some("CLAUDE.md"),
+                "codex" => Some("AGENTS.md"),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn local(root: &Path) -> Self {
         Self {
             schema_version: 1,

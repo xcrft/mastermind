@@ -282,9 +282,9 @@ test("workflow profiles are bounded and closed over linked skills", () => {
 
     assert.deepEqual(PROFILE_NAMES, ["core", "frontend", "security", "full"]);
     assert.equal(bundle.skills.length, 27);
-    assert.equal(profiles.core.skills.length, 16);
+    assert.equal(profiles.core.skills.length, 20);
     assert.equal(profiles.frontend.skills.length, 21);
-    assert.equal(profiles.security.skills.length, 19);
+    assert.equal(profiles.security.skills.length, 23);
     assert.equal(profiles.full.skills.length, 27);
     assert.deepEqual(profiles.full.skills, bundle.skills);
     assert.deepEqual(profiles.frontend.subagents, bundle.subagents);
@@ -292,6 +292,13 @@ test("workflow profiles are bounded and closed over linked skills", () => {
     for (const skill of profiles.core.skills) {
       assert.equal(profiles.frontend.skills.includes(skill), true, skill);
       assert.equal(profiles.security.skills.includes(skill), true, skill);
+    }
+    const router = fs.readFileSync(
+      path.join(REPO_ROOT, "agents", "claude-md", "mastermind-workflow.md"),
+      "utf8",
+    );
+    for (const [, skill] of router.matchAll(/\[\[([a-z0-9-]+)\]\]/g)) {
+      assert.equal(profiles.core.skills.includes(skill), true, `router links ${skill} outside core`);
     }
 
     fs.appendFileSync(
@@ -317,7 +324,7 @@ test("fresh installs ship the core handoff and doctor resolves both client profi
       const [status] = workflowStatus(options);
 
       assert.equal(result.profile, "core");
-      assert.equal(result.skills, 16);
+      assert.equal(result.skills, 20);
       assert.equal(manifest.schema_version, 2);
       assert.equal(manifest.profile, "core");
       assert.equal(manifest.artifacts.skills.includes("mastermind-agent-handoff"), true);
@@ -398,7 +405,7 @@ test("explicit profile switches reconcile owned skills and preserve user files",
       version: "2.0.0",
       profile: "core",
     });
-    assert.equal(core.skills, 16);
+    assert.equal(core.skills, 20);
     assert.equal(
       fs.existsSync(path.join(f.home, ".claude", "skills", "mastermind-prompt-refiner")),
       false,
@@ -415,7 +422,7 @@ test("explicit profile switches reconcile owned skills and preserve user files",
     assert.equal(frontend.skills, 21);
     assert.equal(
       fs.existsSync(
-        path.join(f.home, ".claude", "skills", "mastermind-browser-verification"),
+        path.join(f.home, ".claude", "skills", "mastermind-design-intake"),
       ),
       true,
     );
@@ -427,11 +434,11 @@ test("explicit profile switches reconcile owned skills and preserve user files",
       version: "4.0.0",
       profile: "security",
     });
-    assert.equal(security.skills, 19);
+    assert.equal(security.skills, 23);
     assert.equal(readManifest(manifestPath(f, "claude")).profile, "security");
     assert.equal(
       fs.existsSync(
-        path.join(f.home, ".claude", "skills", "mastermind-browser-verification"),
+        path.join(f.home, ".claude", "skills", "mastermind-design-intake"),
       ),
       false,
     );
@@ -475,7 +482,7 @@ test("client all preserves each installed profile when no override is given", ()
       results.map(({ client, profile, skills }) => ({ client, profile, skills })),
       [
         { client: "claude", profile: "frontend", skills: 21 },
-        { client: "codex", profile: "security", skills: 19 },
+        { client: "codex", profile: "security", skills: 23 },
       ],
     );
     assert.equal(

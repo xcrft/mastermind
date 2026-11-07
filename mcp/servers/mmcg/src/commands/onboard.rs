@@ -367,7 +367,7 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
             force: options.force,
             index: !options.no_index,
             claude: options.draft_with.is_some(),
-            claude_file: settings.clients.iter().any(|client| client == "claude"),
+            instruction_files: settings.instruction_files(),
             seed_style: options.seed_style && !options.no_seed_style,
         },
     );

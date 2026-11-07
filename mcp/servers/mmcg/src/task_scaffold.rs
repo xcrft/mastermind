@@ -226,6 +226,28 @@ pub fn write_project_file(
     contents: &str,
     force: bool,
 ) -> std::io::Result<ScaffoldFileOutcome> {
+    // Without `force` an existing file is kept unread, whatever its size.
+    rewrite_project_file(repo_root, path, !force, |_| Ok(Some(contents.to_string())))
+}
+
+/// Rewrite one project file from its current text under the scaffold lock.
+/// `compose` receives the current bytes, or `None` for an absent file, and
+/// returns `None` to leave the file unchanged. Replacing a file keeps a backup.
+/// A file over the scaffold limit fails with `InvalidData`.
+pub fn update_project_file(
+    repo_root: &Path,
+    path: &Path,
+    compose: impl FnOnce(Option<&[u8]>) -> std::io::Result<Option<String>>,
+) -> std::io::Result<ScaffoldFileOutcome> {
+    rewrite_project_file(repo_root, path, false, compose)
+}
+
+fn rewrite_project_file(
+    repo_root: &Path,
+    path: &Path,
+    keep_existing: bool,
+    compose: impl FnOnce(Option<&[u8]>) -> std::io::Result<Option<String>>,
+) -> std::io::Result<ScaffoldFileOutcome> {
     let root = RootCapability::open(repo_root).map_err(into_io_error)?;
     let mastermind_dir = root.requested_root().join(".mastermind");
     root.ensure_directory(&mastermind_dir)
@@ -234,15 +256,6 @@ pub fn write_project_file(
     let lock =
         open_locked_regular_file_with_capability(&root, &lock_path).map_err(into_io_error)?;
     let result = (|| {
-        if contents.len() as u64 > SCAFFOLD_FILE_LIMIT {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "generated scaffold has {} bytes, limit is {SCAFFOLD_FILE_LIMIT}",
-                    contents.len()
-                ),
-            ));
-        }
         let relative = root.repository_relative(path).map_err(into_io_error)?;
         if let Some(parent) = relative
             .parent()
@@ -253,7 +266,7 @@ pub fn write_project_file(
         }
         let existing = match inspect_path_kind_with_capability(&root, path, ReadControl::default())
         {
-            Ok(BoundedPathKind::RegularFile) if !force => {
+            Ok(BoundedPathKind::RegularFile) if keep_existing => {
                 return Ok(ScaffoldFileOutcome {
                     written: false,
                     backup: None,
@@ -267,7 +280,12 @@ pub fn write_project_file(
                     SCAFFOLD_FILE_LIMIT,
                     ReadControl::default(),
                 )
-                .map_err(into_io_error)?,
+                .map_err(|error| match error {
+                    BoundedReadError::TooLarge { .. } => {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    }
+                    error => into_io_error(error),
+                })?,
             ),
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -280,6 +298,21 @@ pub fn write_project_file(
             }
             Err(error) => return Err(into_io_error(error)),
         };
+        let Some(contents) = compose(existing.as_ref().map(|file| file.bytes.as_slice()))? else {
+            return Ok(ScaffoldFileOutcome {
+                written: false,
+                backup: None,
+            });
+        };
+        if contents.len() as u64 > SCAFFOLD_FILE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "generated scaffold has {} bytes, limit is {SCAFFOLD_FILE_LIMIT}",
+                    contents.len()
+                ),
+            ));
+        }
         let Some(existing) = existing else {
             create_file_no_clobber(&root, path, contents.as_bytes())?;
             return Ok(ScaffoldFileOutcome {

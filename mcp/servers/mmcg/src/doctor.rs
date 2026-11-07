@@ -15,7 +15,7 @@
 //! | 5 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
 //! | 6 | `index freshness`      | structural, concept, and durable-history data is current |
 //! | 7 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
-//! | 8 | `CLAUDE.md`            | exists and references the workflow                     |
+//! | 8 | `CLAUDE.md`, `AGENTS.md` | managed workflow block matches the template in each saved client's file |
 //! | 9 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
 //! | 10 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
 //! | 11 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
@@ -241,7 +241,7 @@ pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
 pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
     let workflow_audit = crate::workflow_status::audit_workflow_for_doctor(root);
     let index = DoctorIndex::inspect(index_path);
-    let checks = vec![
+    let mut checks = vec![
         check_binary(),
         check_path_entries(),
         check_index_db(index_path, &index),
@@ -249,7 +249,9 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         check_symbols_indexed(&index),
         check_index_freshness(root, &index),
         check_gitignore(root),
-        check_claude_md(root),
+    ];
+    checks.extend(instruction_checks(root));
+    checks.extend([
         check_mcp_config(root),
         check_mcp_handshake(index_path, mmcg_binary, &index),
         check_workflow_mcp_contract(workflow_audit.as_ref()),
@@ -264,7 +266,7 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
             "codex",
             crate::miner::hooks::readiness::report("codex", root),
         ),
-    ];
+    ]);
     Report::from_checks(root, checks)
 }
 
@@ -850,55 +852,80 @@ fn check_gitignore(root: &Path) -> Check {
     }
 }
 
-fn check_claude_md(root: &Path) -> Check {
-    let p = root.join("CLAUDE.md");
-    let body =
-        match read_project_text(root, &p) {
-            Ok(Some(body)) => body,
-            Ok(None) => return Check {
-                name: "CLAUDE.md",
-                status: Status::Warn,
-                message: "not present at project root".into(),
-                hint: Some(
-                    "drop in a workflow template — see `agents/claude-md/mastermind-workflow.md`"
-                        .into(),
-                ),
-            },
-            Err(error) => {
-                return Check {
-                    name: "CLAUDE.md",
-                    status: Status::Warn,
-                    message: format!("cannot safely inspect CLAUDE.md: {error}"),
-                    hint: Some("use a regular UTF-8 CLAUDE.md no larger than 1 MiB".into()),
-                }
+/// Check the instruction files of the saved clients, the ones `init` keeps the
+/// block in. Before the first `init` only CLAUDE.md is checked.
+fn instruction_checks(root: &Path) -> Vec<Check> {
+    match crate::onboarding::load(root) {
+        Ok(None) => vec![check_instructions(root, "CLAUDE.md")],
+        Ok(Some(settings)) => {
+            let files = settings.instruction_files();
+            if files.is_empty() {
+                return vec![Check {
+                    name: "workflow instructions",
+                    status: Status::Ok,
+                    message: "no managed block expected: the workflow is off or no client reads an instructions file".into(),
+                    hint: None,
+                }];
             }
-        };
-    // Canonical markers our templates use. Match any of them so we accept
-    // hand-customized variants that mention the workflow by name.
-    const MARKERS: &[&str] = &[
-        "mastermind-workflow",
-        "mastermind-task-planning",
-        "mastermind-task-executor",
-        ".mastermind/tasks/",
-    ];
-    let found = MARKERS.iter().any(|m| body.contains(m));
-    if found {
-        Check {
-            name: "CLAUDE.md",
-            status: Status::Ok,
-            message: "present + references the mastermind workflow".into(),
-            hint: None,
+            files
+                .into_iter()
+                .map(|name| check_instructions(root, name))
+                .collect()
         }
-    } else {
-        Check {
-            name: "CLAUDE.md",
+        Err(error) => vec![Check {
+            name: "workflow instructions",
             status: Status::Warn,
-            message: "present but no mastermind workflow markers".into(),
-            hint: Some(
-                "append the workflow section — see `agents/claude-md/mastermind-workflow.md`"
-                    .into(),
-            ),
+            message: format!("cannot read .mastermind/setup.json: {error}"),
+            hint: Some("run `mastermind init` to rewrite the project setup".into()),
+        }],
+    }
+}
+
+/// Compare the managed workflow block in a client instructions file with the
+/// template.
+fn check_instructions(root: &Path, name: &'static str) -> Check {
+    const INIT_HINT: &str = "run `mastermind init --workflow on` to add or refresh the managed workflow block; text outside it is kept";
+    let warn = |message: String, hint: &str| Check {
+        name,
+        status: Status::Warn,
+        message,
+        hint: Some(hint.into()),
+    };
+    let ok = |message: &str| Check {
+        name,
+        status: Status::Ok,
+        message: message.into(),
+        hint: None,
+    };
+    let body = match read_project_text(root, &root.join(name)) {
+        Ok(Some(body)) => body,
+        Ok(None) => return warn("not present at project root".into(), INIT_HINT),
+        Err(error) => {
+            return warn(
+                format!("cannot safely inspect {name}: {error}"),
+                &format!("use a regular UTF-8 {name} no larger than 1 MiB"),
+            )
         }
+    };
+    match crate::templates::workflow_block_state(&body) {
+        Ok(crate::templates::WorkflowBlock::Current) => {
+            ok("managed workflow block matches this mastermind version")
+        }
+        Ok(crate::templates::WorkflowBlock::Outdated) => warn(
+            "managed workflow block is from another mastermind version".into(),
+            INIT_HINT,
+        ),
+        Ok(crate::templates::WorkflowBlock::Missing { legacy: true }) => warn(
+            "workflow section has no managed-block markers".into(),
+            "run `mastermind init --workflow on`. It wraps the section when its text is unchanged. Otherwise delete the section first",
+        ),
+        Ok(crate::templates::WorkflowBlock::Missing { legacy: false }) => {
+            warn("no managed mastermind workflow block".into(), INIT_HINT)
+        }
+        Err(error) => warn(
+            format!("cannot read the workflow block: {error}"),
+            "keep one begin and one end marker, then run `mastermind init --workflow on`",
+        ),
     }
 }
 
@@ -1771,25 +1798,31 @@ mod tests {
     }
 
     #[test]
-    fn check_claude_md_detects_workflow_markers() {
+    fn instruction_checks_compare_the_managed_block_with_the_template() {
         let root = tmp();
         assert_eq!(
-            check_claude_md(&root).status,
+            check_instructions(&root, "CLAUDE.md").status,
             Status::Warn,
             "missing file warns"
         );
         fs::write(root.join("CLAUDE.md"), "# Plain readme\n").unwrap();
         assert_eq!(
-            check_claude_md(&root).status,
+            check_instructions(&root, "CLAUDE.md").status,
             Status::Warn,
             "no workflow marker warns"
         );
+        let current = crate::templates::new_instructions_file();
+        fs::write(root.join("CLAUDE.md"), &current).unwrap();
+        assert_eq!(check_instructions(&root, "CLAUDE.md").status, Status::Ok);
         fs::write(
             root.join("CLAUDE.md"),
-            "# project\nUses mastermind-workflow.\n",
+            current.replace("Use the lightest mode", "Use an old mode"),
         )
         .unwrap();
-        assert_eq!(check_claude_md(&root).status, Status::Ok);
+        let outdated = check_instructions(&root, "CLAUDE.md");
+        assert_eq!(outdated.status, Status::Warn);
+        assert!(outdated.message.contains("another mastermind version"));
+        assert!(!outdated.hint.unwrap().contains("--client"));
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1801,14 +1834,18 @@ mod tests {
         let root = tmp();
         let outside = tmp();
         fs::write(outside.join("ignore"), ".mastermind/\n").unwrap();
-        fs::write(outside.join("instructions"), "mastermind-workflow\n").unwrap();
+        fs::write(
+            outside.join("instructions"),
+            crate::templates::workflow_block(),
+        )
+        .unwrap();
         symlink(outside.join("ignore"), root.join(".gitignore")).unwrap();
         symlink(outside.join("instructions"), root.join("CLAUDE.md")).unwrap();
 
         let gitignore = check_gitignore(&root);
         assert_eq!(gitignore.status, Status::Warn);
         assert!(gitignore.message.contains("cannot safely inspect"));
-        let claude = check_claude_md(&root);
+        let claude = check_instructions(&root, "CLAUDE.md");
         assert_eq!(claude.status, Status::Warn);
         assert!(claude.message.contains("cannot safely inspect"));
 
@@ -1825,7 +1862,7 @@ mod tests {
         )
         .unwrap();
 
-        let check = check_claude_md(&root);
+        let check = check_instructions(&root, "CLAUDE.md");
         assert_eq!(check.status, Status::Warn);
         assert!(check.message.contains("limit is"));
         fs::remove_dir_all(root).ok();

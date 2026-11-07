@@ -368,7 +368,8 @@ jobs:
           import hashlib, json, os, pathlib
           envelopes = []
           for path in sorted(pathlib.Path("verified").glob("*.bundle.json")):
-              envelopes.append({"name": path.name, "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()})
+              verdict = json.loads(path.read_bytes())["manifest"]["verdict"]
+              envelopes.append({"name": path.name, "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(), "verdict": verdict})
           statement = {
               "schema_version": 1,
               "meaning": "publication-workflow verification provenance",
@@ -564,8 +565,17 @@ jobs:
           matches=$(jq --arg marker "$marker" '[.[] | select(.user.login == "github-actions[bot]") | select(.body | startswith($marker))]' <<<"$comments")
           count=$(jq length <<<"$matches")
           test "$count" -le 1
+          statement=verified-subject/verified-statement.json
+          verdicts=$(jq -r '[.envelopes[].verdict] | group_by(.) | map("\(length) \(.[0])") | join(", ")' "$statement")
+          if jq -e 'all(.envelopes[]; .verdict == "held")' "$statement" >/dev/null; then
+            heading="## ✅ Mastermind audit held"
+          else
+            heading="## ⚠️ Mastermind audit did not hold"
+          fi
           body="$marker
-          ## ✅ Mastermind audit verified
+          $heading
+
+          Envelope verdicts: $verdicts.
 
           Publication workflow independently verified the sealed envelope policy for head \`$EXPECTED_HEAD\`. The attestation subject is the verified statement/archive; it does not prove the PR analysis ran in a trusted environment or that findings are true."
           if test "$count" -eq 1; then

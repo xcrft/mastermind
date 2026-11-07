@@ -62,6 +62,7 @@ pub mod task_review;
 pub mod task_scaffold;
 pub mod task_worktree;
 pub mod team;
+pub mod templates;
 pub mod temporal;
 mod terminal;
 mod test_scan;

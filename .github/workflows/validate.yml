@@ -87,7 +87,10 @@ jobs:
           git -C "$root" config user.name action-self-test
           git -C "$root" remote add origin https://github.com/xcrft/action-self-test.git
           printf 'def value():\n    return 1\n' >"$root/src/lib.py"
-          printf '.mastermind/mmcg.db*\n.mastermind/audit-output/\n' >"$root/.gitignore"
+          # The ignore rule that docs/github-action.md requires: init's file with
+          # the task lines uncommented.
+          mkdir -p "$root/.mastermind"
+          printf '*\n!.gitignore\n!tasks/\n!tasks/*/\n!tasks/*/spec.md\n!tasks/*/executor-report.md\n' >"$root/.mastermind/.gitignore"
           git -C "$root" add -A
           git -C "$root" commit --quiet -m baseline
           baseline=$(git -C "$root" rev-parse HEAD)

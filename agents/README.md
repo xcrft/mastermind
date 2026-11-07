@@ -32,6 +32,7 @@ delegation runtime.
 | [`mastermind-workflow`](claude-md/mastermind-workflow.md) | `CLAUDE.md` contract for Direct, Verified, and Strict task delivery. |
 | [`mastermind-context`](claude-md/mastermind-context.md) | `CONTEXT.md` template for durable decisions, constraints, glossary terms, and protected areas. |
 
-The npm workflow bundle includes these files. `just validate` checks the
-template mirrors embedded in the Rust crate. See [installation](../docs/getting-started.md)
+The native CLI embeds both templates. `mastermind init` writes the workflow
+section as a managed block in `CLAUDE.md` or `AGENTS.md`. `just validate` checks
+the template mirrors embedded in the Rust crate. See [installation](../docs/getting-started.md)
 and [workflow](../docs/workflow.md) for use.

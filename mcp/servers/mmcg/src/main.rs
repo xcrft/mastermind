@@ -13,7 +13,6 @@
 //!   mastermind query <kind>   — one-shot query from the CLI (handy for debugging)
 
 mod commands;
-mod templates;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mmcg::store::Store;

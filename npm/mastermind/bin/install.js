@@ -20,17 +20,23 @@ const MANIFEST_SCHEMA = 2;
 const LEGACY_MANIFEST_SCHEMA = 1;
 const DEFAULT_PROFILE = "core";
 
+// Core holds every skill the CLAUDE.md router names, so the router never
+// points at a skill the default install lacks.
 const CORE_SKILLS = [
   "mastermind-agent-handoff",
   "mastermind-architecture-review",
+  "mastermind-browser-verification",
   "mastermind-change-impact",
   "mastermind-codegraph-research",
   "mastermind-comment-audit",
+  "mastermind-component-research",
   "mastermind-critical-review",
+  "mastermind-frontend-audit",
   "mastermind-investigation-ledger",
   "mastermind-project-history",
   "mastermind-project-map",
   "mastermind-product-intake",
+  "mastermind-runtime-research",
   "mastermind-structured-report-contract",
   "mastermind-task-executor",
   "mastermind-task-planning",
@@ -40,11 +46,7 @@ const CORE_SKILLS = [
 ];
 const FRONTEND_SKILLS = [
   ...CORE_SKILLS,
-  "mastermind-browser-verification",
-  "mastermind-component-research",
   "mastermind-design-intake",
-  "mastermind-frontend-audit",
-  "mastermind-runtime-research",
 ].sort();
 const SECURITY_SKILLS = [
   ...CORE_SKILLS,

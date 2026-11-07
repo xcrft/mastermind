@@ -9,9 +9,13 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const MAX_FILES: usize = 1024;
-// Concurrent admissions can cross MAX_FILES after their individual pre-scans.
-// Reads then fail closed; explicit recovery has a separate bounded repair cap.
+// One failing grant must not stop capture for other clients and projects, so
+// the admission limit counts only the grant's own markers.
+const MAX_PROJECT_FILES: usize = 1024;
+const MAX_DIRECTORY_FILES: usize = 4096;
+// Concurrent admissions can cross MAX_DIRECTORY_FILES after their individual
+// pre-scans. Reads then fail closed; explicit recovery has a separate bounded
+// repair cap.
 const MAX_RECOVERY_FILES: usize = 8192;
 const SUFFIX: &str = ".pending";
 
@@ -180,7 +184,7 @@ fn check_admission(root: &RootCapability, path: &Path, identity: StableFileIdent
     match bounded_fs::read_directory_names_with_capability(
         root,
         root.canonical_root(),
-        MAX_FILES,
+        MAX_DIRECTORY_FILES,
         ReadControl::default(),
     ) {
         Ok(names) => {
@@ -210,12 +214,24 @@ fn begin_at(directory: &Path, prefix: &str) -> Result<Fence> {
     match bounded_fs::read_directory_names_with_capability(
         &root,
         root.canonical_root(),
-        MAX_FILES,
+        MAX_DIRECTORY_FILES,
         ReadControl::default(),
     ) {
-        Ok(names) if names.len() >= MAX_FILES => {
+        Ok(names) if names.len() >= MAX_DIRECTORY_FILES => {
             return Err(
-                "capture fence limit reached; inspect pending deliveries and recover explicitly"
+                "capture fence directory is full; other projects hold the markers, recover each of them with miner hooks recover"
+                    .into(),
+            );
+        }
+        Ok(names)
+            if names
+                .iter()
+                .filter(|name| name.to_str().is_some_and(|name| name.starts_with(prefix)))
+                .count()
+                >= MAX_PROJECT_FILES =>
+        {
+            return Err(
+                "capture fence limit reached; inspect miner hooks status, then run miner hooks recover"
                     .into(),
             );
         }
@@ -263,11 +279,13 @@ fn pending_at(directory: &Path, prefix: &str) -> Result<bool> {
     let Some(root) = existing(directory)? else {
         return Ok(false);
     };
-    Ok(markers(&root, MAX_FILES)?.iter().any(|(path, _)| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(prefix))
-    }))
+    Ok(markers(&root, MAX_DIRECTORY_FILES)?
+        .iter()
+        .any(|(path, _)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+        }))
 }
 
 fn recover_at(directory: &Path, prefix: &str) -> Result<()> {
@@ -366,6 +384,25 @@ mod tests {
     }
 
     #[test]
+    fn a_project_at_its_limit_does_not_block_other_projects() {
+        let f = Fixture::new();
+        let key = f.key("codex");
+        let other = f.key("claude");
+        let first = begin_at(&f.directory, &key).unwrap();
+        for index in 1..MAX_PROJECT_FILES {
+            std::fs::write(f.directory.join(format!("{key}{index:032x}{SUFFIX}")), b"").unwrap();
+        }
+        let refused = begin_at(&f.directory, &key).err().unwrap().to_string();
+        assert!(refused.contains("miner hooks recover"), "{refused}");
+        assert!(pending_at(&f.directory, &key).unwrap());
+        assert!(!pending_at(&f.directory, &other).unwrap());
+        begin_at(&f.directory, &other).unwrap().clear().unwrap();
+        recover_at(&f.directory, &key).unwrap();
+        assert!(!first.current().unwrap());
+        begin_at(&f.directory, &key).unwrap().clear().unwrap();
+    }
+
+    #[test]
     fn changed_identity_and_nonempty_markers_fail_closed() {
         let f = Fixture::new();
         let key = f.key("codex");
@@ -423,18 +460,28 @@ mod tests {
         let f = Fixture::new();
         let key = f.key("codex");
         begin_at(&f.directory, &key).unwrap().clear().unwrap();
-        for index in 0..MAX_FILES {
+        for index in 0..MAX_PROJECT_FILES {
             std::fs::write(f.directory.join(format!("{key}{index:032x}{SUFFIX}")), b"").unwrap();
         }
         assert!(begin_at(&f.directory, &key).is_err());
-        assert_eq!(std::fs::read_dir(&f.directory).unwrap().count(), MAX_FILES);
+        assert_eq!(
+            std::fs::read_dir(&f.directory).unwrap().count(),
+            MAX_PROJECT_FILES
+        );
         assert!(pending_at(&f.directory, &key).unwrap());
         recover_at(&f.directory, &key).unwrap();
         assert_eq!(std::fs::read_dir(&f.directory).unwrap().count(), 0);
         begin_at(&f.directory, &key).unwrap().clear().unwrap();
-        for index in 0..MAX_FILES + 1 {
+        for index in 0..MAX_DIRECTORY_FILES {
             std::fs::write(f.directory.join(format!("{key}{index:032x}{SUFFIX}")), b"").unwrap();
         }
+        let refused = begin_at(&f.directory, &f.key("claude"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(refused.contains("other projects"), "{refused}");
+        let extra = format!("{key}{MAX_DIRECTORY_FILES:032x}{SUFFIX}");
+        std::fs::write(f.directory.join(extra), b"").unwrap();
         assert!(pending_at(&f.directory, &key).is_err());
         recover_at(&f.directory, &key).unwrap();
         assert!(!pending_at(&f.directory, &key).unwrap());

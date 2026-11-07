@@ -373,6 +373,234 @@ fn local_hook_candidates_require_complete_capture_and_respect_delivery_opt_out()
 }
 
 #[test]
+fn a_failed_journal_write_stops_capture_with_one_marker_until_recovery() {
+    let f = Fixture::new();
+    f.capture("session", "turn");
+    let journal = f.home.join(".mastermind/persona-events.db");
+    let markers = f.home.join(".mastermind/.persona-capture");
+    let refuse_writes = "CREATE TRIGGER refuse_event BEFORE INSERT ON hook_event \
+        BEGIN SELECT RAISE(ABORT,'journal refused the write'); END";
+    rusqlite::Connection::open(&journal)
+        .unwrap()
+        .execute_batch(refuse_writes)
+        .unwrap();
+    let tool = |id: &str| {
+        json!({"session_id":"session","turn_id":"next","hook_event_name":"PreToolUse",
+            "tool_use_id":id,"tool_name":"exec_command","tool_input":{"cmd":"inspect"}})
+    };
+    assert!(!f.native(tool("first")).status.success());
+    for id in ["second", "third"] {
+        let output = f.native(tool(id));
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(fs::read_dir(&markers).unwrap().count(), 1);
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(status["grant"]["gap"], "capture_delivery_failed");
+    assert_eq!(status["grant"]["pending"], 0);
+    assert_eq!(status["readiness"]["capture"]["status"], "incomplete");
+
+    rusqlite::Connection::open(&journal)
+        .unwrap()
+        .execute_batch("DROP TRIGGER refuse_event")
+        .unwrap();
+    f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    assert_eq!(fs::read_dir(&markers).unwrap().count(), 0);
+    f.event("resumed", "", "SessionStart", json!({"source":"startup"}));
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(status["readiness"]["capture"]["status"], "enabled");
+}
+
+#[test]
+fn archiving_drops_tool_receipts_of_ended_sessions_only() {
+    let f = Fixture::new();
+    for session in ["ended", "running"] {
+        f.capture(session, "first");
+        f.event(
+            session,
+            "second",
+            "UserPromptSubmit",
+            json!({"prompt":QUOTE}),
+        );
+        f.event(
+            session,
+            "second",
+            "PreToolUse",
+            json!({"tool_use_id":"tool","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
+        );
+        f.event(
+            session,
+            "second",
+            "PostToolUse",
+            json!({"tool_use_id":"tool","tool_name":"exec_command","tool_response":"done"}),
+        );
+        f.event(session, "second", "Stop", json!({}));
+    }
+    f.event("ended", "", "SessionEnd", json!({}));
+    f.event(
+        "unstarted",
+        "only",
+        "UserPromptSubmit",
+        json!({"prompt":QUOTE}),
+    );
+    let pre =
+        json!({"tool_use_id":"tool","tool_name":"exec_command","tool_input":{"cmd":"inspect"}});
+    f.event("unstarted", "only", "PreToolUse", pre.clone());
+    f.event(
+        "unstarted",
+        "only",
+        "PostToolUse",
+        json!({"tool_use_id":"tool","tool_name":"exec_command","tool_response":"done"}),
+    );
+    f.event("unstarted", "only", "Stop", json!({}));
+    // Archive only the first episodes: the ended session's tool episode stays active.
+    let journal = f.home.join(".mastermind/persona-events.db");
+    let db = rusqlite::Connection::open(&journal).unwrap();
+    db.execute(
+        "UPDATE hook_episode SET data=json_set(data,'$.observed_at','9999999999')
+        WHERE json_extract(data,'$.turn_id')!='first'",
+        [],
+    )
+    .unwrap();
+    f.success(&[
+        "miner",
+        "hooks",
+        "archive",
+        "--project-root",
+        ".",
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(f.receipts("ended", "%ToolUse"), 2);
+    let archive = [
+        "miner",
+        "hooks",
+        "archive",
+        "--project-root",
+        ".",
+        "--limit",
+        "32",
+    ];
+    let result = f.success(&archive);
+    assert!(result["retention"]["database_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(f.receipts("ended", "%ToolUse"), 0);
+    assert_eq!(f.receipts("running", "%ToolUse"), 2);
+    assert_eq!(f.receipts("ended", "SessionStart"), 1);
+    assert_eq!(f.receipts("unstarted", "%ToolUse"), 2);
+    assert_eq!(result["retention"]["archived_episodes"], 3);
+    let replay = f.native(json!({"session_id":"ended","turn_id":"second",
+        "hook_event_name":"PreToolUse","tool_use_id":"tool","tool_name":"exec_command",
+        "tool_input":{"cmd":"inspect"}}));
+    assert!(replay.status.success(), "{replay:?}");
+    let gaps: String = db
+        .query_row(
+            "SELECT json_extract(data,'$.gaps') FROM hook_session
+            WHERE json_extract(data,'$.native_id')='ended'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(gaps, "[]");
+    let episode: Option<String> = db
+        .query_row(
+            "SELECT e.episode FROM hook_event e JOIN hook_session s ON s.id=e.session
+            WHERE json_extract(s.data,'$.native_id')='ended' AND e.kind='PreToolUse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(episode, None);
+}
+
+#[test]
+fn recovery_releases_sessions_cut_off_by_a_capture_stop() {
+    let f = Fixture::new();
+    f.capture("cut-off", "first");
+    f.event(
+        "cut-off",
+        "second",
+        "UserPromptSubmit",
+        json!({"prompt":QUOTE}),
+    );
+    f.event(
+        "cut-off",
+        "second",
+        "PreToolUse",
+        json!({"tool_use_id":"tool","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
+    );
+    f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    let result = f.success(&[
+        "miner",
+        "hooks",
+        "archive",
+        "--project-root",
+        ".",
+        "--limit",
+        "32",
+    ]);
+    assert_eq!(result["retention"]["active_episodes"], 0);
+    assert_eq!(f.receipts("cut-off", "%ToolUse"), 0);
+}
+
+#[test]
+fn archiving_frees_a_journal_that_reached_its_byte_limit() {
+    let f = Fixture::new();
+    f.capture("ended", "first");
+    f.event(
+        "ended",
+        "second",
+        "UserPromptSubmit",
+        json!({"prompt":QUOTE}),
+    );
+    f.event(
+        "ended",
+        "second",
+        "PreToolUse",
+        json!({"tool_use_id":"tool","tool_name":"exec_command","tool_input":{"cmd":"inspect"}}),
+    );
+    f.event("ended", "second", "Stop", json!({}));
+    f.event("ended", "", "SessionEnd", json!({}));
+    let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
+    db.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+        INSERT INTO hook_event(id,session,native_key,digest,tool_id,kind)
+        SELECT hex(randomblob(32)),(SELECT session FROM hook_event LIMIT 1),'key',
+            hex(randomblob(32)),hex(randomblob(16)),'PreToolUse' FROM n",
+    )
+    .unwrap();
+    let limit = 64 * 1024 * 1024_i64;
+    db.execute_batch("PRAGMA max_page_count=16384; CREATE TABLE pressure(payload BLOB);")
+        .unwrap();
+    db.execute(
+        "INSERT INTO pressure VALUES(zeroblob(?1))",
+        [limit - 2 * 1024 * 1024],
+    )
+    .unwrap();
+    while db
+        .execute("INSERT INTO pressure VALUES(zeroblob(3500))", [])
+        .is_ok()
+    {}
+    // Leave no room for the archive reference that compaction writes first.
+    while db
+        .execute(
+            "INSERT INTO hook_archive_file VALUES(hex(randomblob(32)),hex(randomblob(32)))",
+            [],
+        )
+        .is_ok()
+    {}
+    let result = f.success(&[
+        "miner",
+        "hooks",
+        "archive",
+        "--project-root",
+        ".",
+        "--limit",
+        "32",
+    ]);
+    assert_eq!(result["archived"], 2);
+    assert_eq!(f.receipts("ended", "%ToolUse"), 0);
+}
+
+#[test]
 fn large_tool_output_keeps_a_receipt_without_poisoning_capture() {
     let f = Fixture::new();
     f.capture("large-output", "before");
@@ -585,6 +813,17 @@ impl Fixture {
             .write_all(event.to_string().as_bytes())
             .unwrap();
         child.wait_with_output().unwrap()
+    }
+    fn receipts(&self, session: &str, kind: &str) -> i64 {
+        rusqlite::Connection::open(self.home.join(".mastermind/persona-events.db"))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM hook_event e JOIN hook_session s ON s.id=e.session
+                WHERE json_extract(s.data,'$.native_id')=?1 AND e.kind LIKE ?2",
+                [session, kind],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
     fn event(&self, session: &str, turn: &str, kind: &str, extras: Value) -> Value {
         let mut v = json!({"session_id":session,"hook_event_name":kind});

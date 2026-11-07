@@ -226,17 +226,27 @@ the completed revision, including when reading older retained episodes.
 | Quality | [Synthetic regression and source-span evaluation](persona-quality.md), real-history accuracy and task benefit unmeasured |
 
 Capture archives inactive payloads under active-episode or database pressure.
-Current episodes remain in the working set. Archives preserve gaps, deduplication
-identity and review bindings. Source reads check the archive digest and keep
+Current episodes remain in the working set. Archives preserve gaps and review
+bindings. Source reads check the archive digest and keep
 the original evidence revision. Missing or changed archives withhold dependent
-claims. `pipeline.retention` separates active and archived counts.
+claims. `pipeline.retention` separates active and archived counts and reports
+`database_bytes` against `database_byte_limit`.
+
+The journal archives at 48 MiB of used pages and drops tool-use receipts of ended
+sessions and of older generations, up to 4,096 rows per run and across all
+projects. The archived episode keeps its tool trace. Running sessions keep their
+receipts, because they pair tool results and deduplicate replays. Lifecycle
+receipts stay. The `events` counts in the capture summary therefore cover
+retained receipts, not every delivered event. A replayed tool event of an ended
+session is ignored. If that session has resumed, the replay can join its current
+turn and mark that episode incomplete.
 
 ```bash
 mmcg miner hooks archive --project-root . --limit 32
 ```
 
 The 2,000-episode bound applies to active payloads. Metadata and other journal
-records still share the 64 MiB database cap. Archive storage grows until an
+records share the 64 MiB database cap. Archive storage grows until an
 explicit `hooks forget`, which removes archived copies and adjacent copied
 context. Transferred profile audit quotes, backups and external processor data
 are outside that erasure. Recovery starts a new generation without reconstructing
@@ -326,6 +336,8 @@ prompt identity and digest.
 | Failure | Stop worker |
 | Interruption | Release unfinished lease for retry. Cannot retract a received provider request |
 | Contention, crash, unsupported input, lost user/assistant prose or missing lifecycle/tool event | Mark incomplete delivery and withhold evidence |
+| Journal write failure | Record `capture_delivery_failed`, keep one marker, stop capture for that client and project until recovery |
+| 1,024 markers for one client and project | Refuse that grant only. Other projects keep capturing |
 | Recovery | New generation, no reconstruction of lost events |
 
 Native client contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),

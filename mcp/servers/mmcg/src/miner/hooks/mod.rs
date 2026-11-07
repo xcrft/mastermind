@@ -352,83 +352,27 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         delivery.clear()?;
         return print(&json!({}));
     };
-    if !delivery.current()? {
-        return Err("capture was revoked during delivery admission".into());
-    }
-    // The committed pending fence survives EOF errors, size violations,
-    // client timeouts, crashes and failures to append the observation.
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .take(MAX_INPUT + 1)
-        .read_to_end(&mut bytes)?;
-    let parsed = if bytes.len() as u64 > MAX_INPUT {
-        Err("hook input exceeded 4 MiB".to_owned())
-    } else {
-        crate::setup::parse_json_unique(&bytes)
-    };
-    let value = match parsed {
-        Ok(value) => value,
-        Err(_) => {
-            db.finish_ignored(&grant, Some("invalid_or_oversized_hook_input"))?;
-            return Err(
-                "hook input invalid; capture has a coverage gap, inspect hooks status".into(),
-            );
+    // Every failure after admission records one durable gap and keeps its
+    // marker until recovery. Later events then clear their own marker at once,
+    // so a persistent journal failure cannot exhaust the fence directory.
+    let delivered = match deliver(&mut db, &grant, &delivery, client_id, &root) {
+        Ok(delivered) => delivered,
+        Err(failure) => {
+            db.finish_ignored(&grant, failure.gap)?;
+            return Err(failure.message.into());
         }
     };
-    let native_cwd = value
-        .get("cwd")
-        .and_then(Value::as_str)
-        .and_then(|p| Path::new(p).canonicalize().ok());
-    let Some(native_cwd) = native_cwd else {
-        db.finish_ignored(&grant, Some("missing_or_unavailable_cwd"))?;
-        return Err("hook cwd unavailable; capture has a coverage gap".into());
-    };
-    let project = profile::persona_project_id(&root).ok_or("cannot resolve project identity")?;
-    if !native_cwd.starts_with(&root)
-        || profile::persona_project_id(&native_cwd).as_deref() != Some(project.as_str())
-    {
+    let Some(Delivered {
+        value,
+        receipt,
+        kind,
+        native_session,
+    }) = delivered
+    else {
         db.finish_ignored(&grant, None)?;
         delivery.clear()?;
         return print(&json!({}));
-    }
-    let mut incoming = match normalize(&value) {
-        Ok(event) => event,
-        Err(_) => {
-            db.finish_ignored(&grant, Some("unsupported_hook_schema"))?;
-            return Err("unsupported hook schema; capture has a coverage gap".into());
-        }
     };
-    if incoming.model.is_none() && client_id == "claude" && incoming.kind == "Stop" {
-        // Missing or unsafe model metadata must not prevent local capture.
-        match native::transcript_model(&value, &root) {
-            Ok(Some((model, binding))) => {
-                incoming.model = Some(model);
-                incoming.model_binding = Some(binding);
-            }
-            Ok(None) => {}
-            Err(_) => eprintln!(
-                "{}",
-                json!({"model_capture":"omitted","reason":"native_transcript_unavailable"})
-            ),
-        }
-        if incoming.model.is_none() {
-            incoming.model_binding = native::pending_transcript_binding(&value);
-        }
-    }
-    if incoming.kind == "UserPromptSubmit"
-        && std::env::var_os("MMCG_INPUT_ORIGIN").as_deref()
-            == Some(std::ffi::OsStr::new("automation"))
-    {
-        incoming.origin = "automation_or_agent".into();
-        incoming.digest = hash(&json!([incoming.digest, "native_automation_origin_v1"]));
-    }
-    let kind = incoming.kind.clone();
-    let native_session = incoming.native_session.clone();
-    let repository = profile::persona_repository_id(&root).unwrap_or_default();
-    if !delivery.current()? {
-        return Err("capture was revoked during delivery".into());
-    }
-    let receipt = db.receive(&grant, incoming, &project, &repository)?;
     delivery.clear()?;
     if kind == "SessionStart" && receipt["status"] == "recorded" {
         if let Err(error) = background::on_session_start(client_id, &root, &native_session) {
@@ -541,6 +485,130 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":contexts.join("\n\n")}})
     };
     print(&output)
+}
+
+struct Delivered {
+    value: Value,
+    receipt: Value,
+    kind: String,
+    native_session: String,
+}
+
+struct DeliveryFailure {
+    // None for a revoked delivery: recovery has just cleared this grant, and a
+    // delivery that lost its marker to it must not stop the new generation.
+    gap: Option<&'static str>,
+    message: String,
+}
+
+impl<E: Into<Error>> From<E> for DeliveryFailure {
+    fn from(error: E) -> Self {
+        Self {
+            gap: Some("capture_delivery_failed"),
+            message: error.into().to_string(),
+        }
+    }
+}
+
+fn deliver(
+    db: &mut Journal,
+    grant: &journal::Grant,
+    delivery: &fence::Fence,
+    client_id: &str,
+    root: &Path,
+) -> Result<Option<Delivered>, DeliveryFailure> {
+    if !delivery.current()? {
+        return Err(DeliveryFailure {
+            gap: None,
+            message: "capture was revoked during delivery admission".into(),
+        });
+    }
+    // The committed pending fence survives EOF errors, size violations,
+    // client timeouts, crashes and failures to append the observation.
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(MAX_INPUT + 1)
+        .read_to_end(&mut bytes)?;
+    let parsed = if bytes.len() as u64 > MAX_INPUT {
+        Err("hook input exceeded 4 MiB".to_owned())
+    } else {
+        crate::setup::parse_json_unique(&bytes)
+    };
+    let value = match parsed {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(DeliveryFailure {
+                gap: Some("invalid_or_oversized_hook_input"),
+                message: "hook input invalid; capture has a coverage gap, inspect hooks status"
+                    .into(),
+            });
+        }
+    };
+    let native_cwd = value
+        .get("cwd")
+        .and_then(Value::as_str)
+        .and_then(|p| Path::new(p).canonicalize().ok());
+    let Some(native_cwd) = native_cwd else {
+        return Err(DeliveryFailure {
+            gap: Some("missing_or_unavailable_cwd"),
+            message: "hook cwd unavailable; capture has a coverage gap".into(),
+        });
+    };
+    let project = profile::persona_project_id(root).ok_or("cannot resolve project identity")?;
+    if !native_cwd.starts_with(root)
+        || profile::persona_project_id(&native_cwd).as_deref() != Some(project.as_str())
+    {
+        return Ok(None);
+    }
+    let mut incoming = match normalize(&value) {
+        Ok(event) => event,
+        Err(_) => {
+            return Err(DeliveryFailure {
+                gap: Some("unsupported_hook_schema"),
+                message: "unsupported hook schema; capture has a coverage gap".into(),
+            });
+        }
+    };
+    if incoming.model.is_none() && client_id == "claude" && incoming.kind == "Stop" {
+        // Missing or unsafe model metadata must not prevent local capture.
+        match native::transcript_model(&value, root) {
+            Ok(Some((model, binding))) => {
+                incoming.model = Some(model);
+                incoming.model_binding = Some(binding);
+            }
+            Ok(None) => {}
+            Err(_) => eprintln!(
+                "{}",
+                json!({"model_capture":"omitted","reason":"native_transcript_unavailable"})
+            ),
+        }
+        if incoming.model.is_none() {
+            incoming.model_binding = native::pending_transcript_binding(&value);
+        }
+    }
+    if incoming.kind == "UserPromptSubmit"
+        && std::env::var_os("MMCG_INPUT_ORIGIN").as_deref()
+            == Some(std::ffi::OsStr::new("automation"))
+    {
+        incoming.origin = "automation_or_agent".into();
+        incoming.digest = hash(&json!([incoming.digest, "native_automation_origin_v1"]));
+    }
+    let kind = incoming.kind.clone();
+    let native_session = incoming.native_session.clone();
+    let repository = profile::persona_repository_id(root).unwrap_or_default();
+    if !delivery.current()? {
+        return Err(DeliveryFailure {
+            gap: None,
+            message: "capture was revoked during delivery".into(),
+        });
+    }
+    let receipt = db.receive(grant, incoming, &project, &repository)?;
+    Ok(Some(Delivered {
+        value,
+        receipt,
+        kind,
+        native_session,
+    }))
 }
 
 pub fn submit_task_mining(

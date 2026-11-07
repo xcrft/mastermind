@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `team map` keeps a lock valid after a member starts `mmcg serve`. Indexing
   leaves the path classification current, and an empty WAL no longer changes
   the index digest. Locks made while an empty WAL existed need a new `team lock`.
+- Persona capture no longer fills its journal with tool receipts. Archiving now
+  drops them for ended sessions, and `pipeline.retention` reports `database_bytes`.
+- A failed journal write records one `capture_delivery_failed` gap and stops
+  capture for that client and project until `miner hooks recover`. It used to
+  leave a marker for every later event.
+- The 1,024 capture marker limit now applies per client and project, so one
+  failing project no longer stops capture everywhere.
 
 ## [3.4.2] - 2026-10-26
 

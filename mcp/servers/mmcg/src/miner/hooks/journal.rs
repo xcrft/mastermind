@@ -342,7 +342,7 @@ impl Journal {
     }
 
     pub fn finish_ignored(&self, grant: &Grant, gap: Option<&str>) -> Result<(), Error> {
-        self.conn.execute("UPDATE hook_grant SET pending=max(pending-1,0),gap=CASE WHEN ?4 IS NULL THEN gap ELSE ?4 END WHERE client=?1 AND project_root=?2 AND generation=?3",
+        self.conn.execute("UPDATE hook_grant SET pending=max(pending-1,0),gap=CASE WHEN gap='' AND ?4 IS NOT NULL THEN ?4 ELSE gap END WHERE client=?1 AND project_root=?2 AND generation=?3",
             params![grant.client,grant.project_root,grant.generation,gap])?;
         Ok(())
     }
@@ -767,10 +767,7 @@ impl Journal {
                 [],
                 |r| r.get(0),
             )?;
-            let pages: i64 = tx.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-            let free: i64 = tx.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
-            let size: i64 = tx.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-            if count >= MAX_EPISODES || (pages - free) * size > (MAX_BYTES * 3 / 4) as i64 {
+            if count >= MAX_EPISODES || archive::used_bytes(&tx)? > MAX_BYTES * 3 / 4 {
                 archive::compact(&tx, None, 32)?;
             }
             let count: i64 = tx.query_row(
@@ -931,7 +928,7 @@ impl Journal {
                 // SessionEnd receipt preserves the completed source revision.
                 revised_episode = Some(ep.id.clone());
             }
-        } else {
+        } else if !late_tool_receipt(&tx, &session, &incoming.kind)? {
             if let Some(gap) = &incoming.gap {
                 add_gap(&mut session.gaps, gap);
             }
@@ -1413,6 +1410,18 @@ fn add_gap(gaps: &mut Vec<String>, gap: &str) {
         gaps.push(gap.into());
     }
 }
+// Compaction drops tool receipts of ended sessions, so a replay of one is no
+// longer a duplicate. It must not change the session's completed evidence.
+fn late_tool_receipt(conn: &Connection, session: &Session, kind: &str) -> Result<bool, Error> {
+    Ok(!session.started
+        && matches!(kind, "PreToolUse" | "PostToolUse" | "PostToolUseFailure")
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hook_event WHERE session=?1 AND kind='SessionEnd')",
+            [&session.id],
+            |row| row.get(0),
+        )?)
+}
+
 fn closing_receipt(event: &EventInput) -> bool {
     event.kind == "SessionEnd"
         && event.actor == "system"

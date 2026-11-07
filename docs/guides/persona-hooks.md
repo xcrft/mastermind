@@ -224,6 +224,18 @@ mastermind miner hooks recover --client codex --project-root .
 Recovery starts a new generation. Restart the client afterward. Missing events
 remain missing, and changed evidence needs review again.
 
+| What you see | What it means | What to do |
+|---|---|---|
+| `grant.gap` is `capture_delivery_failed` | A journal write failed, and capture for this client and project stopped | Fix the cause, then recover |
+| Hook error `capture fence limit reached` | This client and project have 1,024 unfinished deliveries | Recover this client and project |
+| Hook error `capture fence directory is full` | Other projects hold 4,096 markers | Recover each client and project that has a `capture_delivery_failed` gap or pending deliveries |
+| `database_bytes` stays near `database_byte_limit` | Tool receipts or active episodes hold the journal | Run `mmcg miner hooks archive --project-root .` for each captured project, and repeat until `archived` is 0 and `database_bytes` stops falling. Then recover each stopped client and project |
+| Hook status reports `capture_journal_unavailable` | The journal is unreadable or over 64 MiB, or `~/.mastermind/.persona-capture` has an unexpected entry or too many markers | Look at the marker directory first. If the journal is too large, back it up and run `VACUUM` on it with `sqlite3` |
+
+Ending a session while capture is stopped records nothing, so do not wait for it.
+Recovery releases sessions of the old generation, and the next archive run
+removes their receipts.
+
 To stop future capture and mining, use `mastermind init --mining off`. Direct
 hook removal is also available:
 

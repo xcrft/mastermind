@@ -1,9 +1,20 @@
 //! Cold episode payloads. The journal retains identity, deduplication and review
-//! bindings; immutable private files retain the exact cited source bytes.
+//! bindings; immutable private files retain the exact cited source bytes. Tool
+//! receipts of ended sessions are dropped, because tool traffic is what fills the
+//! journal and the archived episode already holds its trace.
 
 use super::*;
 use crate::bounded_fs::AtomicWriteExpectation;
 use sha2::{Digest, Sha256};
+
+// One hook delivery must stay short. Pressure repeats on later events, so a
+// large backlog drains over several compactions.
+const MAX_DROPPED_RECEIPTS: i64 = 4096;
+// Session ids hash the generation, so no event can reach a session after its
+// grant moves on, and such a session never records SessionEnd.
+const SUPERSEDED: &str = "json_extract(s.data,'$.generation') IS NOT (SELECT g.generation
+    FROM hook_grant g WHERE g.client=json_extract(s.data,'$.client')
+    AND g.project_root=json_extract(s.data,'$.project_root'))";
 
 fn digest(bytes: &[u8]) -> String {
     crate::hex::encode(&Sha256::digest(bytes))
@@ -83,14 +94,16 @@ pub(super) fn compact(
 ) -> Result<usize, Error> {
     // The active episode can still receive Stop, tools or next-turn context.
     // Queued work and reviewed citations resolve through the same archive reader.
+    // Dropping first frees pages, because a full journal refuses the writes below.
+    drop_tool_receipts(conn)?;
     let ids = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT e.id FROM hook_episode e JOIN hook_session s ON s.id=e.session
             WHERE json_type(e.data,'$.archive') IS NULL
-            AND coalesce(json_extract(s.data,'$.active'),'')!=e.id
+            AND (coalesce(json_extract(s.data,'$.active'),'')!=e.id OR {SUPERSEDED})
             AND (?2 IS NULL OR json_extract(e.data,'$.project_root')=?2)
-            ORDER BY json_extract(e.data,'$.observed_at'),e.id LIMIT ?1",
-        )?;
+            ORDER BY json_extract(e.data,'$.observed_at'),e.id LIMIT ?1"
+        ))?;
         let rows = stmt.query_map(
             params![
                 limit.min(64) as i64,
@@ -103,10 +116,6 @@ pub(super) fn compact(
     for id in &ids {
         let episode = load_episode(conn, id)?;
         let key = write(conn, &episode)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO hook_archive_file(digest,episode) VALUES(?1,?2)",
-            params![key, id],
-        )?;
         let mut metadata = serde_json::to_value(&episode)?;
         metadata["events"] = json!([]);
         metadata["exposures"] = json!([]);
@@ -115,8 +124,43 @@ pub(super) fn compact(
             "UPDATE hook_episode SET data=?2 WHERE id=?1",
             params![id, metadata.to_string()],
         )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO hook_archive_file(digest,episode) VALUES(?1,?2)",
+            params![key, id],
+        )?;
     }
+    drop_tool_receipts(conn)?;
     Ok(ids.len())
+}
+
+// A running session still pairs tool results and deduplicates replays through
+// these rows. A session without SessionEnd may still be running, even when it
+// has no active turn right now. Receipts carry no payload and pressure comes
+// from the shared journal, so this is not limited to one project.
+fn drop_tool_receipts(conn: &Connection) -> Result<(), Error> {
+    conn.execute(
+        &format!(
+            "DELETE FROM hook_event WHERE rowid IN (
+            SELECT e.rowid FROM hook_session s CROSS JOIN hook_event e ON e.session=s.id
+            WHERE e.kind IN ('PreToolUse','PostToolUse','PostToolUseFailure')
+            AND ({SUPERSEDED} OR (json_extract(s.data,'$.started')=0
+                AND json_type(s.data,'$.active') IS NOT 'text'
+                AND EXISTS(SELECT 1 FROM hook_event x WHERE x.session=s.id AND x.kind='SessionEnd')))
+            AND NOT EXISTS(SELECT 1 FROM hook_episode x WHERE x.id=e.episode
+                AND json_type(x.data,'$.archive') IS NULL)
+            LIMIT ?1)"
+        ),
+        [MAX_DROPPED_RECEIPTS],
+    )?;
+    Ok(())
+}
+
+// Freed pages are reused, so they do not count toward the journal byte limit.
+pub(super) fn used_bytes(conn: &Connection) -> Result<u64, Error> {
+    let pages: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let free: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    Ok(((pages - free) * size) as u64)
 }
 
 pub(super) fn queued_delete(conn: &Connection, id: &str) -> Result<(), Error> {
@@ -169,7 +213,7 @@ impl Journal {
             "active_limit":MAX_EPISODES,"automatic":true,
             "source_storage":"private_digest_verified_files","deletion":"explicit_forget_only",
             "pinned":"current_session_episode",
-            "database_byte_limit":MAX_BYTES}),
+            "database_bytes":used_bytes(&self.conn)?,"database_byte_limit":MAX_BYTES}),
         )
     }
 }

@@ -2389,6 +2389,8 @@ mastermind ci --since origin/main \
 Without `--changed-only`, the command retains its compatibility behavior and
 walks all task specs. CI bundle publication always requires a canonical
 `executor-report.md`, even if the explicit requirement flag is omitted.
+With `--changed-only`, `--require-executor-report` or `--bundle-dir`, a checkout
+with no task contract fails. Task files must be in the checkout for these gates.
 Changed-task discovery resolves the requested baseline and HEAD to commit IDs,
 uses a literal task-directory pathspec, and shares the configured bounded Git
 deadline while ignoring ambient repository-routing and external-diff settings.

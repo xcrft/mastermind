@@ -5660,6 +5660,9 @@ impl Store {
 
     pub(crate) fn finalize_index_contracts_current(&self) -> SqlResult<ConceptFinalizeStats> {
         self.ensure_concept_schema()?;
+        // File writes revoke the stamp. Restoring it here keeps the next open
+        // read-only, so a pinned index digest survives a server start.
+        self.ensure_production_classification()?;
         let tx = self.conn.unchecked_transaction()?;
         let orphans_purged = tx.execute(
             "DELETE FROM symbol_concepts

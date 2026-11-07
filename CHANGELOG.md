@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `verify-spec`, `audit-spec` and `run-task` read `## Pre-edit Snapshot`, the
+  heading the spec templates write. The section was ignored before, so symbol,
+  caller and signature checks did not run on it. Existing specs with a filled
+  snapshot now get these checks, and an unfilled `<symbol>` line is an error.
+- `mastermind ci` fails when `--changed-only`, `--require-executor-report` or
+  `--bundle-dir` is set and no task contract exists. It used to pass when
+  `.mastermind/tasks/` was missing.
+- Git commands from Mastermind no longer run the `core.fsmonitor` program from
+  a repository's config.
+- `team map` keeps a lock valid after a member starts `mmcg serve`. Indexing
+  leaves the path classification current, and an empty WAL no longer changes
+  the index digest. Locks made while an empty WAL existed need a new `team lock`.
+
 ## [3.4.2] - 2026-10-26
 
 ### Added

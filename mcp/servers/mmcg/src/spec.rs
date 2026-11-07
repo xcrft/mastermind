@@ -8,7 +8,7 @@
 //!
 //! What's parsed:
 //! - Section name → body text (everything between `## Name` headers)
-//! - "Pre-edit symbol snapshot" → `SymbolClaim { name, callers }` from bullets
+//! - "Pre-edit snapshot" → `SymbolClaim { name, callers }` from bullets
 //!   like ``- `session_count` — 8 callers (...) ``
 //! - File paths — backticked path-like tokens (`*.rs`, `src/foo.ts`); audit-spec
 //!   compares against `git diff --name-only`.
@@ -31,7 +31,7 @@ pub struct ParsedSpec {
     pub section_order: Vec<String>,
     /// Normalized section names that appear more than once outside code fences.
     pub duplicate_section_keys: Vec<String>,
-    /// Symbols the planner declared in "Pre-edit symbol snapshot".
+    /// Symbols the planner declared in "Pre-edit snapshot".
     pub pre_edit_snapshot: Vec<SymbolClaim>,
     /// Backticked file paths the spec mentions (deduplicated).
     pub mentioned_files: Vec<String>,
@@ -413,7 +413,12 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
     let (sections, order, duplicate_section_keys) = split_sections(body_after_fm);
     let pre_edit_snapshot = order
         .iter()
-        .find(|name| section_key(name) == "pre-edit symbol snapshot")
+        .find(|name| {
+            matches!(
+                section_key(name).as_str(),
+                "pre-edit snapshot" | "pre-edit symbol snapshot"
+            )
+        })
         .and_then(|name| sections.get(name))
         .map(|body| extract_snapshot(body))
         .unwrap_or_default();

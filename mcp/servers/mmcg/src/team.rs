@@ -554,7 +554,10 @@ fn index_digest(
 ) -> Result<String, TeamError> {
     let database = hash_regular(root, index, deadline, total_bytes)?
         .ok_or_else(|| TeamError::Io("index database disappeared".into()))?;
-    let wal = hash_regular(root, &wal_path(index), deadline, total_bytes)?;
+    // SQLite keeps an empty WAL beside a live connection. It holds no data, so
+    // a member's open session must not invalidate the lock.
+    let wal = hash_regular(root, &wal_path(index), deadline, total_bytes)?
+        .filter(|(_, bytes)| *bytes > 0);
     let statement = serde_json::json!({
         "database": {"sha256": database.0, "bytes": database.1},
         "domain": "mastermind/team-index-snapshot/v1",
@@ -1238,6 +1241,70 @@ mod tests {
         );
         assert_eq!(git_status(&one_root), one_worktree_before);
         assert_eq!(git_status(&two_root), two_worktree_before);
+    }
+
+    #[test]
+    fn a_server_opening_a_member_index_keeps_the_lock_valid() {
+        let parent = tempfile::tempdir().unwrap();
+        let (root, index) = repository(parent.path(), "one", "pub fn api() {}\n");
+        let draft_path = parent.path().join("team.json");
+        let lock_path = parent.path().join("team.lock.json");
+        fs::write(
+            &draft_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "api_version": API_VERSION,
+                "repositories": [{"id": "one", "root": root, "index": index}],
+                "relationships": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        lock(&draft_path, &lock_path).unwrap();
+        let server = Store::open(&index).unwrap();
+        server.symbol_count().unwrap();
+        assert_eq!(fs::metadata(wal_path(&index)).unwrap().len(), 0);
+        assert!(!map(&lock_path, None).unwrap().partial);
+        drop(server);
+        assert!(!map(&lock_path, None).unwrap().partial);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn member_fsmonitor_does_not_run_during_lock_or_map() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let (root, index) = repository(parent.path(), "one", "pub fn api() {}\n");
+        let marker = parent.path().join("fsmonitor-ran");
+        let hook = parent.path().join("fsmonitor.sh");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        git(&root, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        git(&root, &["ls-files", "--cached"]);
+        assert!(marker.exists(), "fixture must expose the repository hook");
+        fs::remove_file(&marker).unwrap();
+        let draft_path = parent.path().join("team.json");
+        let lock_path = parent.path().join("team.lock.json");
+        fs::write(
+            &draft_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "api_version": API_VERSION,
+                "repositories": [{"id": "one", "root": root, "index": index}],
+                "relationships": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        lock(&draft_path, &lock_path).unwrap();
+        map(&lock_path, None).unwrap();
+        assert!(
+            !marker.exists(),
+            "team reads must disable the repository hook"
+        );
     }
 
     #[test]

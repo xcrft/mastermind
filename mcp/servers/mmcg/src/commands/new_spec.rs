@@ -916,4 +916,19 @@ mod tests {
         let error = Mode::from_str("direct").err().expect("direct is spec-free");
         assert!(error.contains("does not create a task spec"));
     }
+
+    #[test]
+    fn every_generated_snapshot_section_reaches_the_gate_parser() {
+        for mode in [Mode::Lite, Mode::Standard, Mode::Verified, Mode::Strict] {
+            let spec = render_spec("Change value", 1, &mode);
+            let parsed = mmcg::spec::parse_str("spec.md", &spec);
+            assert!(
+                parsed
+                    .pre_edit_snapshot
+                    .iter()
+                    .any(|claim| claim.name == "<symbol>"),
+                "snapshot section was not parsed from:\n{spec}"
+            );
+        }
+    }
 }

@@ -49,10 +49,8 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
         stats.symbols_total, stats.edges_total, stats.files_indexed, stats.files_unchanged,
     );
 
-    let Some(mut spec_paths) = mmcg::task_scaffold::discover_canonical_task_specs(&root)? else {
-        eprintln!("  no .mastermind/tasks/ — nothing to verify");
-        return Ok(true);
-    };
+    let mut spec_paths =
+        mmcg::task_scaffold::discover_canonical_task_specs(&root)?.unwrap_or_default();
 
     if opts.changed_only {
         let changed = changed_task_folders(&root, &opts.since)?;
@@ -69,6 +67,10 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
                 "  [FAIL] no changed task contracts found for {}..HEAD",
                 opts.since
             );
+            return Ok(false);
+        }
+        if opts.require_executor_report || opts.bundle_dir.is_some() {
+            eprintln!("  [FAIL] no task contracts found, CI evidence is required");
             return Ok(false);
         }
         eprintln!("  no spec.md files found in .mastermind/tasks/");
@@ -337,5 +339,37 @@ mod tests {
         .unwrap();
         assert!(!ok, "CI evidence must fail closed without executor report");
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_task_directory_fails_only_when_evidence_is_required() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("lib.py"), "def value(): return 1\n").unwrap();
+        git(root, &["init", "-q", "--initial-branch=main"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "baseline"]);
+        let baseline = git(root, &["rev-parse", "HEAD"]);
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        let index = root.join(".mastermind/mmcg.db");
+        let ci = |changed_only, require_executor_report, bundle_dir: Option<PathBuf>| {
+            run(
+                CiOpts {
+                    since: baseline.clone(),
+                    root: root.to_path_buf(),
+                    bundle_dir,
+                    changed_only,
+                    require_executor_report,
+                },
+                &index,
+            )
+            .unwrap()
+        };
+        assert!(!ci(true, false, None));
+        assert!(!ci(false, true, None));
+        assert!(!ci(false, false, Some(root.join("bundles"))));
+        assert!(ci(false, false, None));
     }
 }

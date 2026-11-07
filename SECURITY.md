@@ -7,8 +7,8 @@ verify it without exposing users or working exploit details.
 
 | Version | Security fixes |
 |---|---|
-| 2.x | Supported |
-| 1.x and earlier | Upgrade required |
+| 3.x | Supported |
+| 2.x and earlier | Upgrade required |
 
 ## Report privately
 
@@ -76,7 +76,7 @@ separately from the source graph.
 | One MCP request | Absolute deadline and cancellation across SQLite, Git, file reads, refresh, single retry, snapshots and serialization |
 | Cancellation | `cancelled` |
 | Deadline expiry | `work_limit_exceeded` |
-| Automatic refresh | At most 20,000 source candidates and 512 MiB declared source bytes |
+| Automatic refresh | At most 100,000 source candidates and 512 MiB declared source bytes |
 | Writable refresh | Only canonical `ROOT/.mastermind/mmcg.db` opened by `serve` |
 | Custom `--index` | Read-only snapshot, no creation, migration, truncation or source-side SQLite sidecars |
 | Incompatible schema | `schema_incompatible` |

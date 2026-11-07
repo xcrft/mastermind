@@ -29,7 +29,7 @@ def _exited(pid):
 
 def _group_quiescent(pgid):
     try:
-        result = subprocess.run(["/bin/ps", "-axo", "pgid=,stat="], env={"PATH": os.defpath},
+        result = subprocess.run(["/bin/ps", "-o", "pgid=,stat=", "-g", str(pgid)], env={"PATH": os.defpath},
             capture_output=True, text=True, timeout=5, check=True)
         rows = [line.split() for line in result.stdout.splitlines()]
         if any(len(row) != 2 for row in rows):

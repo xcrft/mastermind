@@ -396,6 +396,12 @@ pub(crate) fn repository_git_command() -> Command {
     ] {
         command.env_remove(name);
     }
+    // A read must not run a program named by the repository's own config. The
+    // environment form reaches every caller without reordering their arguments.
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .env("GIT_CONFIG_VALUE_0", "false");
     command
 }
 

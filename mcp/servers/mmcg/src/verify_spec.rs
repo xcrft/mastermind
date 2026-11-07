@@ -455,7 +455,7 @@ fn run_internal(
 
     // 3. Pre-edit snapshot symbols: existence, caller-count drift, blast radius.
     //    Two sources, both contribute findings:
-    //    a) heuristic `## Pre-edit symbol snapshot` bullets with lexical qualification
+    //    a) heuristic `## Pre-edit snapshot` bullets with lexical qualification
     //    b) frontmatter `touches[].symbols` with file+language scoping —
     //       constrains matching snapshots to the declared file and language.
     if let Some(store) = store {
@@ -558,7 +558,7 @@ fn check_symbol_claim(
         ),
         Err(error) if error.reason == "missing" => errors.push(Finding::MissingSymbol {
             symbol: claim.name.clone(),
-            section: "Pre-edit symbol snapshot".to_string(),
+            section: "Pre-edit snapshot".to_string(),
             raw: claim.raw.clone(),
         }),
         Err(error) => errors.push(unresolved_finding(&claim.name, error)),

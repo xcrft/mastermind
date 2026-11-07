@@ -43,7 +43,7 @@ mastermind team map team.lock.json > team-map.json
 |---|---|
 | `team lock` | Pins canonical paths, repository identities, Git revisions and database/WAL digests |
 | `team map` | Rechecks every pin and source freshness |
-| Changed repository or index | Requires a new lock |
+| Changed repository or index | Requires a new lock. This includes a no-op `mmcg index` and a checkpoint of a non-empty WAL, because the pin covers exact bytes. An empty WAL beside a running server does not count |
 | Nodes | Namespaced by repository |
 | Internal edges | Retain static codegraph provenance |
 | Cross-repository edges | Retain `provenance=team-manifest`. A declaration is not an observed network call |

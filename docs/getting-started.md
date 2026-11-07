@@ -224,3 +224,22 @@ ignore policy when sharing project files.
 
 Use `mastermind --help` for the short command catalog and `mmcg --help` for the
 full native catalog.
+
+## Remove from a project
+
+Run it in the project root. Preview first, then apply:
+
+```bash
+mastermind uninstall
+mastermind uninstall --force
+```
+
+| Removed | Kept |
+|---|---|
+| Hooks, capture grant, worker and profile access of each client in this project | `CONTEXT.md` and `CLAUDE.md` |
+| `.mastermind/`, including task records | Workflow skills and agents in `~/.claude` and `~/.codex`, used by other projects |
+| The Claude entry in the project `.mcp.json` | Other clients' MCP entries and `~/.mastermind/` |
+
+Copy `.mastermind/tasks/` first if you need the task records. Remove the Codex
+registration with `mastermind setup codex --remove --write`. `--scope all`
+also deregisters the global Claude entry.

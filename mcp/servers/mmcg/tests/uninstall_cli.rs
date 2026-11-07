@@ -26,6 +26,26 @@ impl Fixture {
         }
     }
 
+    fn mmcg(&self, args: &[&str], input: Option<&str>) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(&self.root)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("PATH", "/usr/bin:/bin")
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.unwrap_or("").as_bytes()).unwrap();
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    }
+
     fn run(&self, scope: &str, force: bool) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mmcg"));
         command
@@ -184,4 +204,59 @@ fn canonical_global_uninstall_previews_then_confirms_native_removal() {
     let repeated = fixture.run("global", true);
     assert!(repeated.status.success(), "{repeated:?}");
     assert!(String::from_utf8_lossy(&repeated.stdout).contains("outcome=no_change"));
+}
+
+#[cfg(unix)]
+#[test]
+fn project_uninstall_stops_capture_before_removing_setup() {
+    let fixture = Fixture::new();
+    assert!(Command::new("/usr/bin/git")
+        .args(["init", "--quiet"])
+        .current_dir(&fixture.root)
+        .env("HOME", &fixture.home)
+        .status()
+        .unwrap()
+        .success());
+    let setup = fixture.mmcg(
+        &["miner", "hooks", "setup", "--client", "claude", "--write"],
+        None,
+    );
+    assert!(setup.status.success(), "{setup:?}");
+    let hooks = fixture.root.join(".claude/settings.local.json");
+    assert!(fs::read_to_string(&hooks)
+        .unwrap()
+        .contains("miner hooks receive"));
+
+    // A stale or broken setup.json must not block removal.
+    fs::create_dir(fixture.root.join(".mastermind")).unwrap();
+    fs::write(fixture.root.join(".mastermind/setup.json"), "{bad").unwrap();
+    let planned = fixture.run("project", false);
+    assert!(planned.status.success(), "{planned:?}");
+    assert!(fs::read_to_string(&hooks)
+        .unwrap()
+        .contains("miner hooks receive"));
+
+    let removed = fixture.run("project", true);
+    assert!(removed.status.success(), "{removed:?}");
+    assert!(!fs::read_to_string(&hooks)
+        .unwrap()
+        .contains("miner hooks receive"));
+    assert!(!fixture.root.join(".codex").exists());
+    assert!(!fixture.root.join(".mastermind").exists());
+    let status = fixture.mmcg(&["miner", "hooks", "status", "--client", "claude"], None);
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["grant"]["enabled"], false);
+    let event = json!({"session_id":"s","hook_event_name":"UserPromptSubmit",
+        "prompt":"after uninstall","cwd":fixture.root});
+    let receive = fixture.mmcg(
+        &["miner", "hooks", "receive", "--client", "claude"],
+        Some(&event.to_string()),
+    );
+    assert!(receive.status.success(), "{receive:?}");
+    let events: i64 =
+        rusqlite::Connection::open(fixture.home.join(".mastermind/persona-events.db"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM hook_event", [], |row| row.get(0))
+            .unwrap();
+    assert_eq!(events, 0);
 }

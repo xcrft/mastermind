@@ -190,6 +190,7 @@ test("edited ownership and unowned collisions block before npm and leave the use
     const skill = path.join(f.home, ".codex", "skills", "mastermind-task-planning", "SKILL.md");
     if (kind === "edited") fs.writeFileSync(skill, "user modification\n");
     if (kind === "unowned") {
+      fs.writeFileSync(skill, "user modification\n");
       const manifest = path.join(f.home, ".codex", ".mastermind-workflow.json");
       fs.rmSync(manifest);
     }

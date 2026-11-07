@@ -9,7 +9,8 @@ use crate::UninstallScope;
 
 /// Remove a Mastermind setup.
 ///
-/// `Project` scope removes `.mastermind/` + the project `.mcp.json` mmcg entry.
+/// `Project` scope stops each client's capture, mining and profile delivery,
+/// then removes `.mastermind/` + the project `.mcp.json` mmcg entry.
 /// `Global` de-registers mmcg from Claude Code user scope via `claude mcp remove`.
 /// `All` does both. Safe by default — prints the plan and exits unless `force`.
 /// Never touches CONTEXT.md / CLAUDE.md.
@@ -26,6 +27,8 @@ pub fn do_uninstall(
     );
 
     if do_project {
+        // A failed client step keeps `.mastermind/`, so the command can be repeated.
+        remove_clients(root, force)?;
         let mastermind_dir = root.join(".mastermind");
         if mastermind_dir.exists() {
             if force {
@@ -57,6 +60,27 @@ pub fn do_uninstall(
 
     if !force {
         println!("\n(dry-run — pass --force to apply. CONTEXT.md / CLAUDE.md are never touched.)");
+    }
+    Ok(())
+}
+
+fn remove_clients(root: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Hooks can come from `miner hooks setup` without init, and setup.json may
+    // be stale or unreadable, so both clients are always cleaned. Removal of an
+    // absent client writes nothing.
+    for client in ["claude", "codex"] {
+        if !force {
+            println!(
+                "Would stop the {client} worker, remove its hooks and capture grant, and revoke its profile access."
+            );
+            continue;
+        }
+        for (component, result) in super::onboard::remove_client(root, client) {
+            if let Err(error) = result {
+                return Err(format!("{client} {component} failed: {error}. `.mastermind/` was kept. Fix it and run uninstall again").into());
+            }
+        }
+        println!("Stopped {client} capture, mining and profile delivery for this project.");
     }
     Ok(())
 }

@@ -450,8 +450,10 @@ the exact absolute executable path. Npm setup retains portable launcher
 commands. See [client integrations](../integrations/generic-mcp.md) for scopes
 and ownership rules.
 
-`mmcg uninstall` previews project teardown. `--force` removes `.mastermind/`
-and the project `.mcp.json` entry. `--scope global` deregisters the global Claude
+`mmcg uninstall` previews project teardown. `--force` first stops each client's
+worker, removes its hooks and capture grant and revokes its profile access in
+this project. It then removes `.mastermind/` and the project `.mcp.json` entry.
+If a client step fails, `.mastermind/` stays and the command can be repeated. `--scope global` deregisters the global Claude
 entry, and `--scope all` does both. It retains `CONTEXT.md` and `CLAUDE.md`.
 
 ### Explaining symbol queries

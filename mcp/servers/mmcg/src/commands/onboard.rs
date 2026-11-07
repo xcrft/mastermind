@@ -379,23 +379,11 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
     // A removed client must lose its project-specific grants. Shared global
     // workflow files and MCP entries can still serve other repositories.
     for client in settings.pending_removals.clone() {
-        let stopped = stage(
-            &mut steps,
-            &format!("{client}.stop"),
-            stop_worker(&root, &client),
-        );
-        let revoked = stage(
-            &mut steps,
-            &format!("{client}.remove_hooks"),
-            configure_hooks(&root, &client, Mining::Off, false, None),
-        );
-        let access = stage(
-            &mut steps,
-            &format!("{client}.revoke_profile"),
-            mmcg::miner::access::configure(&root, &client, false)
-                .map(|()| json!({"allowed":false})),
-        );
-        if stopped && revoked && access {
+        let removed = remove_client(&root, &client)
+            .into_iter()
+            .map(|(component, result)| stage(&mut steps, &format!("{client}.{component}"), result))
+            .collect::<Vec<_>>();
+        if removed.into_iter().all(|ok| ok) {
             settings
                 .pending_removals
                 .retain(|pending| pending != &client);
@@ -478,6 +466,25 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
         options.json,
     )?;
     Ok(success)
+}
+
+/// Stops one client's worker, removes its hooks and capture grant, and revokes
+/// its profile access in this project. Shared workflow files and MCP entries stay.
+pub(crate) fn remove_client(
+    root: &Path,
+    client: &str,
+) -> [(&'static str, Result<Value, Error>); 3] {
+    [
+        ("stop", stop_worker(root, client)),
+        (
+            "remove_hooks",
+            configure_hooks(root, client, Mining::Off, false, None),
+        ),
+        (
+            "revoke_profile",
+            mmcg::miner::access::configure(root, client, false).map(|()| json!({"allowed":false})),
+        ),
+    ]
 }
 
 fn stop_worker(root: &Path, client: &str) -> Result<Value, Error> {

@@ -7,7 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { PROFILE_NAMES, artifactDigest, bundled, profileBundle, readManifest } from "./install.js";
+import { PROFILE_NAMES, artifactDigest, assertPreserved, bundled, profileBundle, readManifest } from "./install.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENTS = ["claude", "codex"];
@@ -119,20 +119,11 @@ function workflowPlan(home, packageRoot, names, profile) {
     for (const kind of ["agents", "skills"]) {
       if (kind === "agents" && client === "codex") continue;
       directory(path.join(root, kind), "workflow artifact directory");
-      const owned = previous?.artifacts[kind] ?? [];
-      for (const name of owned) {
-        const installed = path.join(root, kind, name);
-        if (entry(installed) && treeDigest(installed, budget) !== previous.digests[`${kind}/${name}`]) {
-          throw new Error(`edited owned workflow artifact, preserve or restore it before updating: ${installed}`);
-        }
-      }
-      for (const name of desired[kind === "agents" ? "subagents" : "skills"]) {
-        const installed = path.join(root, kind, name);
-        if (!owned.includes(name) && entry(installed)) {
-          throw new Error(`unowned workflow artifact conflicts with the new bundle: ${installed}`);
-        }
-      }
     }
+    assertPreserved(root, previous, {
+      agents: client === "codex" ? [] : desired.subagents,
+      skills: desired.skills,
+    }, share, (installed) => treeDigest(installed, budget));
     return { client, profile: selected, installed_version: previous?.version ?? null, root };
   });
 }

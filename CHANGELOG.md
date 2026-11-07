@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leave a marker for every later event.
 - The 1,024 capture marker limit now applies per client and project, so one
   failing project no longer stops capture everywhere.
+- `mastermind uninstall --force` stops each client's worker, removes its hooks
+  and capture grant and revokes its profile access before it removes
+  `.mastermind/`. Prompts were still captured after uninstall before.
+- `mastermind install` refuses to replace an edited Mastermind skill or agent
+  and one it does not own. It used to replace them and delete the backup.
 
 ## [3.4.2] - 2026-10-26
 

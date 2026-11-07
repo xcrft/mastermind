@@ -153,7 +153,7 @@ impl From<FactAdapterFormat> for mmcg::fact_adapter::AdapterFormat {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum UninstallScope {
-    /// This project only: remove `.mastermind/` and the project `.mcp.json` mmcg entry.
+    /// This project only: stop each client's capture, mining and profile delivery, then remove `.mastermind/` and the project `.mcp.json` mmcg entry.
     Project,
     /// Global only: de-register mmcg from Claude Code user scope via `claude mcp remove` (leaves `.mastermind/` alone).
     Global,

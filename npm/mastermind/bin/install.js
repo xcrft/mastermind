@@ -469,6 +469,40 @@ function beginClientInstall({ share, target, client, version, profile, previous,
   }
 }
 
+// A local edit and an artifact Mastermind does not own are never replaced.
+// Content identical to the bundle is safe to take over: an interrupted install
+// and a copy made before manifests existed both look like that.
+// `root` is the client directory, `desired` holds the agent and skill names.
+export function assertPreserved(root, previous, desired, share, digest = artifactDigest) {
+  for (const kind of ["agents", "skills"]) {
+    const owned = previous?.artifacts[kind] ?? [];
+    if (!owned.length && !desired[kind].length) continue;
+    checkedDirectory(path.join(root, kind), `${kind} directory`);
+    const bundled = (name) => desired[kind].includes(name)
+      && digest(path.join(root, kind, name)) === artifactDigest(path.join(share, kind, name));
+    for (const name of owned) {
+      const installed = path.join(root, kind, safeName(name, kind));
+      if (
+        checkedExistingPath(installed, "managed artifact") !== null
+        && digest(installed) !== previous.digests[`${kind}/${name}`]
+        && !bundled(name)
+      ) {
+        throw new Error(`edited owned workflow artifact, move it aside or restore it, then run again: ${installed}`);
+      }
+    }
+    for (const name of desired[kind]) {
+      const installed = path.join(root, kind, safeName(name, kind));
+      if (
+        !owned.includes(name)
+        && checkedExistingPath(installed, "managed artifact") !== null
+        && !bundled(name)
+      ) {
+        throw new Error(`unowned workflow artifact conflicts with the new bundle, move it aside, then run again: ${installed}`);
+      }
+    }
+  }
+}
+
 export function copyAll({
   home = os.homedir(),
   share = DEFAULT_SHARE,
@@ -498,6 +532,7 @@ export function copyAll({
   });
 
   for (const install of installs) {
+    assertPreserved(install.target.root, install.previous, install.desired, share);
     for (const agent of install.desired.agents) {
       artifactDigest(path.join(share, "agents", agent));
     }

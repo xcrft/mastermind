@@ -76,7 +76,6 @@ test("update reconciles owned artifacts and preserves unrelated client files", (
   try {
     copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0", profile: "full" });
     const claude = path.join(f.home, ".claude");
-    fs.writeFileSync(path.join(claude, "skills", "alpha", "retired.txt"), "stale\n");
     fs.mkdirSync(path.join(claude, "skills", "user-skill"), { recursive: true });
     fs.writeFileSync(path.join(claude, "skills", "user-skill", "SKILL.md"), "user\n");
     fs.writeFileSync(path.join(claude, "agents", "user-agent.md"), "user\n");
@@ -88,7 +87,6 @@ test("update reconciles owned artifacts and preserves unrelated client files", (
 
     assert.equal(fs.existsSync(path.join(claude, "agents", "mastermind-one.md")), false);
     assert.equal(fs.readFileSync(path.join(claude, "agents", "mastermind-two.md"), "utf8"), "two\n");
-    assert.equal(fs.existsSync(path.join(claude, "skills", "alpha", "retired.txt")), false);
     assert.equal(fs.readFileSync(path.join(claude, "skills", "alpha", "SKILL.md"), "utf8"), "alpha v2\n");
     assert.equal(fs.readFileSync(path.join(claude, "skills", "user-skill", "SKILL.md"), "utf8"), "user\n");
     assert.equal(fs.readFileSync(path.join(claude, "agents", "user-agent.md"), "utf8"), "user\n");
@@ -606,4 +604,60 @@ test("profile arguments are explicit and validated", () => {
   });
   assert.throws(() => parseArgs(["install", "--profile"]), /--profile requires/);
   assert.throws(() => parseArgs(["install", "--profile", "unknown"]), /unsupported workflow profile/);
+});
+
+test("install keeps an edited owned skill and an unowned one with the same name", () => {
+  for (const kind of ["edited", "unowned"]) {
+    const f = completeFixture();
+    try {
+      const skill = path.join(f.home, ".claude", "skills", "mastermind-task-planning");
+      if (kind === "edited") {
+        copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+        fs.writeFileSync(path.join(skill, "SKILL.md"), "my change\n");
+      } else {
+        fs.mkdirSync(skill, { recursive: true });
+        fs.writeFileSync(path.join(skill, "SKILL.md"), "my change\n");
+      }
+      fs.writeFileSync(path.join(skill, "mine.txt"), "mine\n");
+      const manifest = manifestPath(f, "claude");
+      const before = fs.existsSync(manifest) ? fs.readFileSync(manifest, "utf8") : null;
+
+      assert.throws(
+        () => copyAll({ home: f.home, share: f.share, client: "claude", version: "2.0.0" }),
+        kind === "edited" ? /edited owned workflow artifact/ : /unowned workflow artifact conflicts/,
+      );
+      assert.equal(fs.readFileSync(path.join(skill, "SKILL.md"), "utf8"), "my change\n");
+      assert.equal(fs.readFileSync(path.join(skill, "mine.txt"), "utf8"), "mine\n");
+      assert.equal(fs.existsSync(manifest) ? fs.readFileSync(manifest, "utf8") : null, before);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("install takes over bundle-identical copies and ignores directories it never writes", () => {
+  const f = completeFixture();
+  try {
+    const skill = "mastermind-task-planning";
+    fs.cpSync(path.join(f.share, "skills", skill), path.join(f.home, ".claude", "skills", skill), {
+      recursive: true,
+    });
+    copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+    assert.ok(readManifest(manifestPath(f, "claude")).artifacts.skills.includes(skill));
+
+    // An install that stopped before writing its manifest leaves new content
+    // under old digests. Running it again must finish the install.
+    const manifest = JSON.parse(fs.readFileSync(manifestPath(f, "claude"), "utf8"));
+    manifest.digests[`skills/${skill}`] = "0".repeat(64);
+    fs.writeFileSync(manifestPath(f, "claude"), `${JSON.stringify(manifest)}\n`);
+    copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+
+    const outside = path.join(f.root, "dotfiles-agents");
+    fs.mkdirSync(outside);
+    fs.mkdirSync(path.join(f.home, ".codex"), { recursive: true });
+    fs.symlinkSync(outside, path.join(f.home, ".codex", "agents"), "dir");
+    copyAll({ home: f.home, share: f.share, client: "codex", version: "1.0.0" });
+  } finally {
+    f.cleanup();
+  }
 });

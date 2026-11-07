@@ -4691,9 +4691,9 @@ pub(crate) fn scan_index_freshness(
                 interrupted: None,
             },
         ) {
-            Ok(paths) => (
-                paths.len().min(STATUS_STALE_FILE_LIMIT),
-                paths.len() > STATUS_STALE_FILE_LIMIT,
+            Ok(scan) => (
+                scan.paths.len().min(STATUS_STALE_FILE_LIMIT),
+                scan.paths.len() > STATUS_STALE_FILE_LIMIT,
                 None,
             ),
             Err(error) => (0, false, Some(error.to_string())),

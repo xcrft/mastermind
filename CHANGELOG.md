@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   differ, so it never became current. `.ignore` files are no longer read.
 - A directory outside Git can now be checked for freshness and refreshed by MCP
   tools. It used to report `index_stale` on every structural query.
+- A source symlink or other non-regular source file is now named. `mmcg index`
+  prints it as `failed source:`, `index_stale` lists it in
+  `unindexable_sources`, and `run-task` names it when its refresh fails. Before,
+  the index stayed stale with only a failure count.
 - MCP tools return `index_rebuild_required` instead of `work_limit_exceeded`
   when a forced full rebuild does not fit the request budget.
 - `serve` with an external `--index` returns `index_replaced` after the file

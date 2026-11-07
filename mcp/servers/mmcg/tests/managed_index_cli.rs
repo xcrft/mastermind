@@ -205,6 +205,66 @@ fn default_source_review_commands_refresh_the_repository_index() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn source_symlink_is_named_by_index_and_index_stale() {
+    let fixture = Fixture::new();
+    std::os::unix::fs::symlink("probe.py", fixture.root.join("alias.py")).unwrap();
+
+    let index = fixture.command().args(["index", "."]).output().unwrap();
+    assert_success(&index);
+    let stderr = String::from_utf8_lossy(&index.stderr);
+    assert!(stderr.contains("failed source: \"alias.py\""), "{stderr}");
+
+    let result = fixture.search(None);
+    assert_eq!(result["isError"], true, "{result}");
+    let payload = &result["structuredContent"];
+    assert_eq!(payload["code"], "index_stale", "{result}");
+    assert_eq!(
+        payload["unindexable_sources"],
+        json!(["alias.py"]),
+        "{result}"
+    );
+
+    let query = fixture
+        .command()
+        .args(["query", "search", "original_refresh"])
+        .output()
+        .unwrap();
+    assert_success(&query);
+    let stderr = String::from_utf8_lossy(&query.stderr);
+    assert!(stderr.contains("never index: alias.py"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_regular_source_is_stale_but_not_named_unindexable() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.index(None);
+    fixture.source("updated_refresh", 1);
+    let probe = fixture.root.join("probe.py");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&probe).is_ok() {
+        // Running as root bypasses file permissions, so the case cannot occur.
+        return;
+    }
+
+    let result = fixture.search(None);
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(
+        result["structuredContent"]["code"], "index_stale",
+        "{result}"
+    );
+    assert!(
+        result["structuredContent"]
+            .get("unindexable_sources")
+            .is_none(),
+        "{result}"
+    );
+}
+
 #[test]
 fn explicit_custom_index_refuses_refresh_without_changing_database_bytes() {
     let fixture = Fixture::new();

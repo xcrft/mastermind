@@ -28,7 +28,7 @@ pub(crate) struct StaleIndex {
 
 #[derive(Debug)]
 pub(crate) enum Error {
-    Stale(StaleIndex),
+    Stale(Box<StaleIndex>),
     SchemaIncompatible,
     SnapshotChanged,
     WorkLimitExceeded,
@@ -115,60 +115,62 @@ fn index_status_with_limits(
         .meta_value("index_root")
         .map_err(|error| Error::internal("index_root_query", error))?
         .map(PathBuf::from);
-    let (stale_files, stale_files_truncated, freshness_error) = match index_root {
-        Some(index_root) => match index_root.canonicalize() {
-            Err(_) => (1, false, Some("index_root_unavailable")),
-            Ok(root)
-                if store
-                    .serve_root()
-                    .is_some_and(|authorized| authorized != root.as_path()) =>
-            {
-                (1, false, Some("index_root_mismatch"))
-            }
-            Ok(root) => {
-                let interrupted = || store.work_interrupted();
-                let (source_cap, source_bytes_cap) = limits.source_caps();
-                match crate::indexer::stale_paths_controlled(
-                    store,
-                    &root,
-                    queries::STATUS_STALE_FILE_PROBE_LIMIT,
-                    source_cap,
-                    source_bytes_cap,
-                    crate::bounded_fs::ReadControl {
-                        deadline: store.request_deadline(),
-                        interrupted: Some(&interrupted),
-                    },
-                ) {
-                    Ok(paths) => match store.source_snapshot_unchanged() {
-                        Ok(true) => (
-                            paths.len().min(queries::STATUS_STALE_FILE_LIMIT),
-                            paths.len() > queries::STATUS_STALE_FILE_LIMIT,
-                            None,
-                        ),
-                        Ok(false) => return Err(Error::SnapshotChanged),
-                        Err(error) => {
-                            return Err(Error::internal("freshness_snapshot_query", error))
-                        }
-                    },
-                    Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
-                        return Err(Error::RefreshLimit { dimension, cap })
-                    }
-                    Err(crate::indexer::IndexError::SnapshotChanged) => {
-                        return Err(Error::SnapshotChanged)
-                    }
-                    Err(crate::indexer::IndexError::Cancelled)
-                    | Err(crate::indexer::IndexError::DeadlineExceeded) => {
-                        return Err(Error::internal(
-                            "freshness_interrupted",
-                            "request interrupted",
-                        ))
-                    }
-                    Err(_) => (1, false, Some("freshness_scan_failed")),
+    let (stale_files, stale_files_truncated, freshness_error, unindexable_sources) =
+        match index_root {
+            Some(index_root) => match index_root.canonicalize() {
+                Err(_) => (1, false, Some("index_root_unavailable"), Vec::new()),
+                Ok(root)
+                    if store
+                        .serve_root()
+                        .is_some_and(|authorized| authorized != root.as_path()) =>
+                {
+                    (1, false, Some("index_root_mismatch"), Vec::new())
                 }
-            }
-        },
-        None => (1, false, Some("index_root_missing")),
-    };
+                Ok(root) => {
+                    let interrupted = || store.work_interrupted();
+                    let (source_cap, source_bytes_cap) = limits.source_caps();
+                    match crate::indexer::stale_paths_controlled(
+                        store,
+                        &root,
+                        queries::STATUS_STALE_FILE_PROBE_LIMIT,
+                        source_cap,
+                        source_bytes_cap,
+                        crate::bounded_fs::ReadControl {
+                            deadline: store.request_deadline(),
+                            interrupted: Some(&interrupted),
+                        },
+                    ) {
+                        Ok(scan) => match store.source_snapshot_unchanged() {
+                            Ok(true) => (
+                                scan.paths.len().min(queries::STATUS_STALE_FILE_LIMIT),
+                                scan.paths.len() > queries::STATUS_STALE_FILE_LIMIT,
+                                None,
+                                scan.unindexable,
+                            ),
+                            Ok(false) => return Err(Error::SnapshotChanged),
+                            Err(error) => {
+                                return Err(Error::internal("freshness_snapshot_query", error))
+                            }
+                        },
+                        Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
+                            return Err(Error::RefreshLimit { dimension, cap })
+                        }
+                        Err(crate::indexer::IndexError::SnapshotChanged) => {
+                            return Err(Error::SnapshotChanged)
+                        }
+                        Err(crate::indexer::IndexError::Cancelled)
+                        | Err(crate::indexer::IndexError::DeadlineExceeded) => {
+                            return Err(Error::internal(
+                                "freshness_interrupted",
+                                "request interrupted",
+                            ))
+                        }
+                        Err(_) => (1, false, Some("freshness_scan_failed"), Vec::new()),
+                    }
+                }
+            },
+            None => (1, false, Some("index_root_missing"), Vec::new()),
+        };
     Ok(queries::StatusResponse {
         db_path,
         db_path_error,
@@ -178,6 +180,7 @@ fn index_status_with_limits(
         stale_files,
         stale_files_truncated,
         freshness_error,
+        unindexable_sources,
         extractor_contract_current,
         concept_contract_current,
     })
@@ -267,11 +270,11 @@ pub(crate) fn admission(
         None
     };
     match reason {
-        Some(reason) => Err(Error::Stale(StaleIndex {
+        Some(reason) => Err(Error::Stale(Box::new(StaleIndex {
             status,
             reason,
             refresh_attempted: false,
-        })),
+        }))),
         None => Ok(status),
     }
 }
@@ -303,10 +306,17 @@ fn describe_stale(status: &queries::StatusResponse) -> String {
         } else {
             ""
         };
-        return format!(
+        let mut reason = format!(
             "{}{more} indexable files changed since the last index",
             status.stale_files
         );
+        if !status.unindexable_sources.is_empty() {
+            reason.push_str(&format!(
+                "; not regular files, never index: {}",
+                crate::terminal::escape(&status.unindexable_sources.join(", "))
+            ));
+        }
+        return reason;
     }
     "the index was built by an older extractor".into()
 }
@@ -382,17 +392,17 @@ fn brief_attempt(
     let status = admission(store, false, crate::indexer::IndexLimits::AUTO_REFRESH)?;
     queries::brief_detailed(store, root, since, role, budget_tokens, sizer).map_err(|error| {
         match error {
-            queries::BriefFailure::HistoryStale => Error::Stale(StaleIndex {
+            queries::BriefFailure::HistoryStale => Error::Stale(Box::new(StaleIndex {
                 status,
                 reason: StaleReason::History,
                 refresh_attempted: false,
-            }),
+            })),
             queries::BriefFailure::Query(queries::BriefError::IndexStale) => {
-                Error::Stale(StaleIndex {
+                Error::Stale(Box::new(StaleIndex {
                     status,
                     reason: StaleReason::Structural,
                     refresh_attempted: false,
-                })
+                }))
             }
             queries::BriefFailure::Query(error) => Error::Brief(error),
         }

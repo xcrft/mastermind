@@ -2144,8 +2144,14 @@ fn run_cli_inner(
             for path in &stats.skipped_paths {
                 eprintln!("skipped unsupported path: {path:?}");
             }
+            for path in &stats.failed_paths {
+                eprintln!("failed source: {path:?}");
+            }
             if stats.files_failed > 0 {
-                eprintln!("warning: {} files failed to parse", stats.files_failed);
+                eprintln!(
+                    "warning: {} source files failed to index; the index stays stale until they index or are removed (symlinks and other non-regular files never index)",
+                    stats.files_failed
+                );
             }
             if stats.extractor_contract_rebuilt {
                 eprintln!("extractor contract changed: rebuilt all structural data");

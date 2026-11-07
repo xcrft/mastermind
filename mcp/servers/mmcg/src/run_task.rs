@@ -2948,8 +2948,9 @@ fn run_pre(
         };
         if refresh.files_failed > 0 {
             eprintln!(
-                "❌ Pre-flight index refresh failed for {} file(s); refusing to verify against stale graph data",
-                refresh.files_failed
+                "❌ Pre-flight index refresh failed for {} file(s) ({}); refusing to verify against stale graph data",
+                refresh.files_failed,
+                crate::terminal::escape(&refresh.failed_paths.join(", "))
             );
             return Outcome::PreFailed;
         }
@@ -3267,8 +3268,9 @@ fn run_post_with_evidence(
         };
         if refresh.files_failed > 0 {
             eprintln!(
-                "error: post-flight index refresh failed for {} file(s); refusing to audit stale graph data",
-                refresh.files_failed
+                "error: post-flight index refresh failed for {} file(s) ({}); refusing to audit stale graph data",
+                refresh.files_failed,
+                crate::terminal::escape(&refresh.failed_paths.join(", "))
             );
             return Outcome::PostBroken;
         }

@@ -479,6 +479,8 @@ pub struct IndexStats {
     pub files_indexed: u32,
     /// Files that failed to parse or commit.
     pub files_failed: u32,
+    /// Bounded deterministic sample of source paths that failed to index.
+    pub failed_paths: Vec<String>,
     /// Unsupported extensions — skipped before parsing.
     pub files_skipped: u32,
     /// Bounded deterministic sample of unsupported-extension paths.
@@ -801,6 +803,7 @@ impl Indexer {
                 | Err(error @ IndexError::LimitExceeded { .. }) => return Err(error),
                 Err(_) => {
                     stats.files_failed += 1;
+                    push_path_sample(&mut stats.failed_paths, &rel);
                     continue;
                 }
             };
@@ -906,7 +909,10 @@ impl Indexer {
                                     callback();
                                 }
                             }
-                            Err(_) => stats.files_failed += 1,
+                            Err(_) => {
+                                stats.files_failed += 1;
+                                push_path_sample(&mut stats.failed_paths, &rel);
+                            }
                         }
                     }
                     Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
@@ -919,7 +925,10 @@ impl Indexer {
                     }
                     Err(error @ (IndexError::Cancelled | IndexError::DeadlineExceeded))
                     | Err(error @ IndexError::LimitExceeded { .. }) => return Err(error),
-                    Err(_) => stats.files_failed += 1,
+                    Err(_) => {
+                        stats.files_failed += 1;
+                        push_path_sample(&mut stats.failed_paths, &rel);
+                    }
                 }
             }
         }
@@ -1849,6 +1858,14 @@ fn source_candidates(root: &Path, control: ReadControl<'_>) -> Result<Vec<PathBu
     source_candidates_bounded(&root, usize::MAX, control)
 }
 
+/// Sorted stale paths, plus the subset that exists but is not a regular file,
+/// such as a symlink. Those stay stale until removed or ignored.
+#[derive(Debug, Default)]
+pub(crate) struct StaleScan {
+    pub(crate) paths: Vec<String>,
+    pub(crate) unindexable: Vec<String>,
+}
+
 pub(crate) fn stale_paths_controlled(
     store: &crate::store::Store,
     root: &Path,
@@ -1856,9 +1873,9 @@ pub(crate) fn stale_paths_controlled(
     source_cap: usize,
     source_bytes_cap: u64,
     control: crate::bounded_fs::ReadControl<'_>,
-) -> Result<Vec<String>, crate::indexer::IndexError> {
+) -> Result<StaleScan, crate::indexer::IndexError> {
     if cap == 0 {
-        return Ok(Vec::new());
+        return Ok(StaleScan::default());
     }
     control
         .check()
@@ -1878,6 +1895,7 @@ pub(crate) fn stale_paths_controlled(
     let mut declared_bytes = 0_u64;
     let mut seen = HashSet::new();
     let mut stale = Vec::new();
+    let mut unindexable = Vec::new();
     let mut absent_candidates = Vec::new();
     for path in candidates {
         control
@@ -1923,6 +1941,19 @@ pub(crate) fn stale_paths_controlled(
                 return Err(crate::indexer::IndexError::LimitExceeded { dimension, cap })
             }
             Err(_) => {
+                // Read errors and concurrent replacements can clear on retry, so
+                // only a path that is not a regular file is named as unindexable.
+                if matches!(
+                    crate::bounded_fs::inspect_path_kind_with_capability(
+                        &root_capability,
+                        &path,
+                        control,
+                    ),
+                    Ok(crate::bounded_fs::BoundedPathKind::Other
+                        | crate::bounded_fs::BoundedPathKind::Directory)
+                ) {
+                    push_path_sample(&mut unindexable, &relative);
+                }
                 stale.push(relative.clone());
                 seen.insert(relative);
                 if stale.len() >= cap {
@@ -2005,7 +2036,11 @@ pub(crate) fn stale_paths_controlled(
         }
     }
     stale.sort();
-    Ok(stale)
+    unindexable.sort();
+    Ok(StaleScan {
+        paths: stale,
+        unindexable,
+    })
 }
 
 /// Stateful ignore matcher for watcher events. It applies the same gitignore
@@ -4316,7 +4351,8 @@ mod stale_path_tests {
             AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .paths;
         assert!(stale.is_empty(), "{stale:?}");
     }
 
@@ -4343,7 +4379,8 @@ mod stale_path_tests {
             AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .paths;
         assert!(stale.is_empty(), "{stale:?}");
     }
 
@@ -4373,6 +4410,7 @@ mod stale_path_tests {
                 crate::bounded_fs::ReadControl::default(),
             )
             .unwrap()
+            .paths
         };
 
         assert!(check(&store).is_empty());
@@ -4416,7 +4454,8 @@ mod stale_path_tests {
             crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .paths;
         assert_eq!(stale, vec!["src/lib.rs".to_string()]);
         assert!(snapshot.source_snapshot_unchanged().unwrap());
         drop(snapshot);
@@ -4452,6 +4491,7 @@ mod stale_path_tests {
             crate::bounded_fs::ReadControl::default(),
         )
         .unwrap()
+        .paths
         .is_empty());
         assert!(crate::lens::validate_index_snapshot(
             &store,
@@ -4488,6 +4528,7 @@ mod stale_path_tests {
                 crate::bounded_fs::ReadControl::default(),
             )
             .unwrap()
+            .paths
         };
         assert!(scan().is_empty());
         store.upsert_file("src/lib.rs", 1, 1).unwrap();
@@ -4528,7 +4569,8 @@ mod stale_path_tests {
             crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .paths;
         assert_eq!(stale, vec!["src/lib.rs".to_string()]);
         assert!(snapshot.source_snapshot_unchanged().unwrap());
         drop(snapshot);
@@ -4571,7 +4613,8 @@ mod stale_path_tests {
             crate::indexer::AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
             crate::bounded_fs::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .paths;
         assert!(stale.is_empty());
         assert!(snapshot.source_snapshot_unchanged().unwrap());
         drop(snapshot);

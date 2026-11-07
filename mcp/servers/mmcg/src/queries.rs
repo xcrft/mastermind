@@ -501,6 +501,11 @@ pub struct StatusResponse {
     /// `stale_files` is the conservative compatibility sentinel `1`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness_error: Option<&'static str>,
+    /// Bounded sample of stale paths that exist but cannot be indexed as regular
+    /// files inside the root, such as symlinks. They stay stale until removed
+    /// or ignored.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unindexable_sources: Vec<String>,
     /// False when extractor semantics changed after the stored index was built.
     pub extractor_contract_current: bool,
     /// False when the derived deterministic concept corpus is incomplete or was

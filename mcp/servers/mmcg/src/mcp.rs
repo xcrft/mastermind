@@ -115,6 +115,7 @@ enum HandlerError {
         concept_contract_current: bool,
         refresh_attempted: bool,
         stale_reason: Option<&'static str>,
+        unindexable_sources: Vec<String>,
     },
     RefreshLimit {
         dimension: &'static str,
@@ -1310,6 +1311,7 @@ fn handle_tools_call_inner(
                 concept_contract_current,
                 refresh_attempted,
                 stale_reason,
+                unindexable_sources,
             } => tool_result(
                 version,
                 index_stale_payload(
@@ -1320,6 +1322,7 @@ fn handle_tools_call_inner(
                     concept_contract_current,
                     refresh_attempted,
                     stale_reason,
+                    unindexable_sources,
                 ),
                 true,
             ),
@@ -1363,6 +1366,7 @@ fn handle_tools_call_inner(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_stale_payload(
     stale_files: usize,
     stale_files_truncated: bool,
@@ -1371,12 +1375,17 @@ fn index_stale_payload(
     concept_contract_current: bool,
     refresh_attempted: bool,
     stale_reason: Option<&'static str>,
+    unindexable_sources: Vec<String>,
 ) -> Value {
-    let guidance = if refresh_attempted {
+    let mut guidance = if refresh_attempted {
         "automatic refresh did not produce a fresh index; run `mastermind index .` and inspect indexing errors"
     } else {
         "automatic refresh is unavailable for this index; run `mastermind index .` before using structural mmcg tools"
-    };
+    }
+    .to_string();
+    if !unindexable_sources.is_empty() {
+        guidance.push_str(". `unindexable_sources` are not regular files, such as symlinks, and never index; delete them, or stop tracking them and list them in `.gitignore`");
+    }
     let mut payload = json!({
         "code": "index_stale",
         "freshness_basis": "path_and_mtime",
@@ -1388,6 +1397,9 @@ fn index_stale_payload(
         "refresh_attempted": refresh_attempted,
         "guidance": guidance
     });
+    if !unindexable_sources.is_empty() {
+        payload["unindexable_sources"] = json!(unindexable_sources);
+    }
     if let Some(reason) = stale_reason {
         payload["stale_reason"] = json!(reason);
         if reason == "history" {
@@ -1409,6 +1421,7 @@ fn index_stale_error(
         extractor_contract_current,
         true,
         refresh_attempted,
+        Vec::new(),
     )
 }
 
@@ -1423,6 +1436,7 @@ fn index_stale_error_from_status(
         status.extractor_contract_current,
         status.concept_contract_current,
         refresh_attempted,
+        status.unindexable_sources.clone(),
     )
 }
 
@@ -1433,6 +1447,7 @@ fn index_stale_error_with_coverage(
     extractor_contract_current: bool,
     concept_contract_current: bool,
     refresh_attempted: bool,
+    unindexable_sources: Vec<String>,
 ) -> HandlerError {
     HandlerError::IndexStale {
         stale_files,
@@ -1442,6 +1457,7 @@ fn index_stale_error_with_coverage(
         concept_contract_current,
         refresh_attempted,
         stale_reason: None,
+        unindexable_sources,
     }
 }
 
@@ -2467,7 +2483,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, and `freshness_error` explains when the scan could not establish a count. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, `freshness_error` explains when the scan could not establish a count, and `unindexable_sources` names up to 20 stale paths that are not regular files, such as symlinks. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3443,6 +3459,7 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
                 stale_files: 1,
                 stale_files_truncated: false,
                 freshness_error: Some("freshness_check_failed"),
+                unindexable_sources: Vec::new(),
                 extractor_contract_current: true,
                 concept_contract_current: false,
             });

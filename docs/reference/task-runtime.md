@@ -21,6 +21,7 @@ Keep these artifacts with the task when moving or recovering its checkout.
 | Retry, reset, repair or reapproval | Retains the first manifest and original Git baseline |
 | Missing or changed retained preimage | Blocks evidence; restore the exact retained artifact |
 | Legacy state without a manifest | Keeps whole commit-to-worktree auditing; no retroactive exemption |
+| Manifest with `schema_version` 1, which missed edits behind `assume-unchanged` or `skip-worktree` | Still readable; preflight and postflight fail with `initial_worktree_schema_outdated`, so start a new task |
 | Standalone audit-spec and CI | Preserve their explicit commit-to-worktree scope |
 | Freshness and semantic review | Continue to bind current execution inputs; ownership grants no writes |
 

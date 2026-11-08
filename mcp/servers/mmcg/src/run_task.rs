@@ -815,58 +815,24 @@ fn history_input_snapshot(
     }
     // Match the audit's working-tree scope, including files the executor did
     // not declare. Semantic history outputs are allowed to change after audit.
-    for args in [
-        vec![
-            "--literal-pathspecs",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "diff.external=",
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-renames",
-            &state.baseline_ref,
-            "--",
-        ],
-        vec![
-            "--literal-pathspecs",
-            "-c",
-            "core.fsmonitor=false",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    ] {
-        let output = crate::diff::run_bounded_git_with_limit(
-            repo_root,
-            &args,
-            None,
-            STRICT_EVIDENCE_GIT_BYTE_LIMIT,
-        )
-        .map_err(|error| format!("history snapshot Git inventory: {}", error.code()))?;
-        if !output.success {
-            return Err("history snapshot Git inventory failed".into());
-        }
-        for raw in output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|raw| !raw.is_empty())
-        {
-            let file = std::str::from_utf8(raw)
-                .map_err(|_| "history snapshot contains a non-UTF-8 path")?;
-            let file = crate::audit_bundle::normalize_relative_path(Path::new(file))
-                .map_err(|_| "history snapshot contains an invalid path")?;
-            let semantic_output = file == "CONTEXT.md"
-                || (!file.contains('/')
-                    && file.starts_with("CONTEXT-archive-")
-                    && file.ends_with(".md"));
-            if !file.starts_with(".mastermind/") && (!semantic_output || paths.contains(&file)) {
-                paths.insert(file);
-            }
+    let changed = crate::diff::complete_worktree_paths_controlled(
+        repo_root,
+        &state.baseline_ref,
+        Some(".mastermind"),
+        None,
+        None,
+    )
+    .map_err(|error| format!("history snapshot Git inventory: {}", error.code()))?
+    .ok_or("history snapshot Git inventory is incomplete")?;
+    for changed in changed {
+        let file = crate::audit_bundle::normalize_relative_path(Path::new(&changed.path))
+            .map_err(|_| "history snapshot contains an invalid path")?;
+        let semantic_output = file == "CONTEXT.md"
+            || (!file.contains('/')
+                && file.starts_with("CONTEXT-archive-")
+                && file.ends_with(".md"));
+        if !semantic_output || paths.contains(&file) {
+            paths.insert(file);
         }
     }
     // Artifacts outside .mastermind (legacy flat specs) are bound separately.
@@ -4171,6 +4137,27 @@ verifications: []\n\
         );
         fs::remove_file(spec.with_file_name("executor-report.md")).unwrap();
         assert!(current_history_snapshot(root.path(), &spec, &state).is_err());
+    }
+
+    #[test]
+    fn history_binding_sees_edits_hidden_by_skip_worktree() {
+        let (root, spec, mut state) = history_snapshot_fixture();
+        fs::write(root.path().join("local.conf"), "port = 1\n").unwrap();
+        git(root.path(), &["add", "local.conf"]);
+        git(root.path(), &["commit", "-qm", "local config"]);
+        state.baseline_ref = git_head(root.path()).unwrap();
+        git(
+            root.path(),
+            &["update-index", "--skip-worktree", "local.conf"],
+        );
+        let snapshot = current_history_snapshot(root.path(), &spec, &state).unwrap();
+
+        fs::write(root.path().join("local.conf"), "port = 2\n").unwrap();
+
+        assert_ne!(
+            current_history_snapshot(root.path(), &spec, &state).unwrap(),
+            snapshot
+        );
     }
 
     #[test]

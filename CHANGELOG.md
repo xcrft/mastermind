@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The audit change list now includes edits that `assume-unchanged` or
+  `skip-worktree` hide from `git diff`. Git diffs those files again on a copy
+  of the index with both flags cleared, so its own attribute, mode, symlink
+  and removal rules apply. In a sparse checkout, an absent `skip-worktree`
+  file is not read as a deletion. Standalone `audit-spec`, `ci` and the
+  task history binding use the same list.
+- Git reads for audits and inventories no longer run repository hooks. Git
+  runs `post-index-change` on any index write, including the refresh `diff`
+  may do.
+- A task started before this change fails preflight and postflight with
+  `initial_worktree_schema_outdated`. Its initial worktree manifest missed the
+  flagged edits, which would then be charged to the executor. Start a new
+  task. Its state stays readable.
+- `audit-spec` and `ci` refuse a change list over 10,000 files or with a
+  non-UTF-8 path (`change_inventory_incomplete`). They used to report Held for
+  the files they could list.
 - `verify-spec` no longer evaluates index checks against an index that no
   longer matches the files. It reports `not_evaluated`, and `--require-index`
   fails. Standalone `audit-spec` refuses such an index instead of holding.

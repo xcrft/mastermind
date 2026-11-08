@@ -12,6 +12,10 @@ const MAX_ENTRIES: usize = 1_000;
 const MANIFEST_LIMIT: usize = 512 * 1024;
 const FILE_LIMIT: u64 = crate::indexer::MAX_INDEXABLE_FILE_SIZE;
 const TOTAL_LIMIT: u64 = 32 * 1024 * 1024;
+/// Version 2 inventories include edits behind assume-unchanged and
+/// skip-worktree. A version 1 manifest left those out, so comparing it with a
+/// current inventory would charge them to the executor. It is still read.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,7 +61,7 @@ pub(crate) struct Comparison {
 
 impl InitialWorktree {
     pub(crate) fn validate(&self, baseline: &str) -> Result<(), String> {
-        if self.schema_version != 1
+        if !(1..=SCHEMA_VERSION).contains(&self.schema_version)
             || self.baseline_oid != baseline
             || !diff::is_full_git_oid(baseline)
             || self.entries.len() > MAX_ENTRIES
@@ -203,18 +207,15 @@ fn inventory(
     baseline: &str,
     deadline: Instant,
 ) -> Result<Vec<WorkingTreeChangedFile>, String> {
-    let (files, _, truncated, skipped) = diff::collect_worktree_paths_controlled(
+    diff::complete_worktree_paths_controlled(
         root,
         baseline,
         Some(".mastermind"),
         Some(deadline),
         None,
     )
-    .map_err(|error| format!("initial_worktree_inventory: {}", error.code()))?;
-    if truncated || skipped != 0 {
-        return Err("initial_worktree_inventory_incomplete".into());
-    }
-    Ok(files)
+    .map_err(|error| format!("initial_worktree_inventory: {}", error.code()))?
+    .ok_or_else(|| "initial_worktree_inventory_incomplete".into())
 }
 
 pub(crate) fn capture(root: &Path, spec: &Path, baseline: &str) -> Result<InitialWorktree, String> {
@@ -229,7 +230,7 @@ pub(crate) fn capture(root: &Path, spec: &Path, baseline: &str) -> Result<Initia
         return Err("initial_worktree_file_limit".into());
     }
     let mut initial = InitialWorktree {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         baseline_oid: baseline.into(),
         entries: Vec::new(),
     };
@@ -287,6 +288,11 @@ pub(crate) fn compare(
     deadline: Instant,
 ) -> Result<Comparison, String> {
     initial.validate(&initial.baseline_oid)?;
+    // An older manifest stays readable for status and history, but cannot be
+    // compared with an inventory that sees more.
+    if initial.schema_version < SCHEMA_VERSION {
+        return Err("initial_worktree_schema_outdated: start a new task".into());
+    }
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
     let raw_files = inventory(root, &initial.baseline_oid, deadline)?;
     let mut selected = raw_files
@@ -340,4 +346,33 @@ pub(crate) fn compare(
         },
         current_paths,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A version 1 manifest missed edits behind index flags. It stays
+    /// readable, but comparing it would charge those edits to the executor.
+    #[test]
+    fn a_manifest_from_before_flagged_files_were_listed_is_read_but_not_compared() {
+        let baseline = "0".repeat(40);
+        let initial = InitialWorktree {
+            schema_version: 1,
+            baseline_oid: baseline.clone(),
+            entries: Vec::new(),
+        };
+        assert_eq!(initial.validate(&baseline), Ok(()));
+        let refused = compare(
+            Path::new("."),
+            Path::new("spec.md"),
+            &initial,
+            Instant::now() + diff::git_timeout(),
+        )
+        .err();
+        assert_eq!(
+            refused.as_deref(),
+            Some("initial_worktree_schema_outdated: start a new task")
+        );
+    }
 }

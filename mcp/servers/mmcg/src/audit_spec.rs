@@ -517,6 +517,11 @@ fn run_internal(
         task.as_ref(),
     )
     .map_err(|error| diff::worktree_scope_error(git_ref, error))?;
+    // Scope and claims checks over a partial list would pass every path the
+    // list left out.
+    if !worktree.files_complete() {
+        return Err(DiffError::GitFailed("change_inventory_incomplete".into()));
+    }
     let symbol_diff = &worktree.diff;
     let mut findings: Vec<Finding> = Vec::new();
     if let Some(reason) = &spec.frontmatter_error {
@@ -546,9 +551,7 @@ fn run_internal(
         &worktree.baseline_oid,
         &declarations.removed,
         deadline,
-        !worktree.files_truncated
-            && worktree.skipped_non_utf8_paths == 0
-            && symbol_diff.errors.is_empty(),
+        symbol_diff.errors.is_empty(),
         task.as_ref().map(|task| &task.preimages),
     );
     if let Some(plan) = &removal_plan {
@@ -717,9 +720,7 @@ fn run_internal(
                 changes: &declarations,
                 repo_root,
                 baseline_oid: &worktree.baseline_oid,
-                complete: !worktree.files_truncated
-                    && worktree.skipped_non_utf8_paths == 0
-                    && symbol_diff.errors.is_empty(),
+                complete: symbol_diff.errors.is_empty(),
                 deadline,
             },
         );
@@ -2202,6 +2203,117 @@ Add caller2() in `src/lib.py`
         assert!(r.findings.iter().any(|f| matches!(f, Finding::SnapshotCallerDrift { symbol, spec_says, index_says } if symbol == "helper" && *spec_says == 1 && *index_says == 2)));
         assert_eq!(r.verdict, Verdict::Drift);
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    const SCOPE_SPEC: &str = "\
+## Goals
+Edit `src/lib.py`
+## Alternatives Considered
+- A — rejected
+## Tests Plan
+- n/a
+## Documentation Plan
+- n/a
+## Observability Plan
+- n/a
+## Performance Considerations
+- O(1)
+";
+
+    #[test]
+    fn edits_hidden_by_index_flags_are_unexpected_files() {
+        let dir = init_repo("hidden_flags");
+        write(&dir, "src/lib.py", "def helper(): pass\n");
+        for name in ["local.conf", "assumed.conf"] {
+            write(&dir, name, "port = 1\n");
+        }
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["update-index", "--skip-worktree", "local.conf"]);
+        git(
+            &dir,
+            &["update-index", "--assume-unchanged", "assumed.conf"],
+        );
+        write(&dir, "src/lib.py", "def helper(): return 1\n");
+        for name in ["local.conf", "assumed.conf"] {
+            write(&dir, name, "port = 2\n");
+        }
+        let mut store = Store::open(dir.join("idx.db")).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let r = run(
+            &spec::parse_str("spec.md", SCOPE_SPEC),
+            &store,
+            &dir,
+            "HEAD",
+        )
+        .unwrap();
+
+        for name in ["local.conf", "assumed.conf"] {
+            assert!(
+                r.findings
+                    .iter()
+                    .any(|f| matches!(f, Finding::UnexpectedFile { file } if file == name)),
+                "{name}: {:?}",
+                r.findings
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// APFS rejects non-UTF-8 names, so the path exists only in Git objects.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_change_list_refuses_the_audit() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = init_repo("incomplete_inventory");
+        write(&dir, "src/lib.py", "def helper(): pass\n");
+        git(&dir, &["add", "-A"]);
+        let blob = Command::new("git")
+            .args(["hash-object", "-w", "src/lib.py"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let blob = String::from_utf8(blob.stdout).unwrap();
+        let cacheinfo = [
+            b"100644,".as_slice(),
+            blob.trim().as_bytes(),
+            b",src/\xff.py",
+        ]
+        .concat();
+        let added = Command::new("git")
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(std::ffi::OsStr::from_bytes(&cacheinfo))
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        let removed = Command::new("git")
+            .args(["rm", "-q", "--cached", "--"])
+            .arg(std::ffi::OsStr::from_bytes(b"src/\xff.py"))
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(removed.success());
+        git(&dir, &["commit", "-q", "-m", "head"]);
+        let mut store = Store::open(dir.join("idx.db")).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let error = run(
+            &spec::parse_str("spec.md", SCOPE_SPEC),
+            &store,
+            &dir,
+            "baseline",
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("change_inventory_incomplete"),
+            "{error}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

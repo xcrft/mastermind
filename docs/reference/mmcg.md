@@ -249,7 +249,7 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only
 | `verify-spec` | Checks the pre-edit contract. `--strict` forces strict checks. `--require-index` rejects a missing, empty or stale index. Without it, skipped checks are explicitly `not_evaluated` and the reason is printed on stderr. |
 | `verification run` | Explicitly executes one declared `verify[].run` after preflight. Records task/file-bound observations on macOS/Linux. Every result except pass exits nonzero. |
 | `acceptance status` | Read-only criterion → declared check → current receipt projection. Exit 0 means `requirements_satisfied`. An absent contract is `not_declared`. |
-| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files. A broken verdict exits nonzero. An index that does not match the files is refused. Run `mastermind index .` first. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. |
+| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files and edits hidden by `assume-unchanged` or `skip-worktree`. A broken verdict exits nonzero. A change list over 10,000 files or with a non-UTF-8 path is refused with `change_inventory_incomplete`. An index that does not match the files is refused. Run `mastermind index .` first. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. |
 | `run-task` | Persists preflight, consumes the executor report, audits, then closes only through the applicable review and final evidence gates. |
 
 The [workflow guide](../workflow.md) describes the sequence and report files.

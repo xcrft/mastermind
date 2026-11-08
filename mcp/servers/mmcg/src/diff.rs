@@ -54,6 +54,8 @@ const CAT_FILE_RESPONSE_OVERHEAD: usize = 128;
 const BASELINE_BLOB_BATCH_OUTPUT_LIMIT: usize =
     MAX_INDEXABLE_FILE_SIZE as usize + CAT_FILE_RESPONSE_OVERHEAD;
 const BASELINE_BLOB_TOTAL_LIMIT: usize = 64 * 1024 * 1024;
+/// Flagged entries of `ls-files -v`, the path plus three bytes each.
+const FLAGGED_LISTING_LIMIT: usize = 64 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS: u64 = 30_000;
 const MAX_GIT_TIMEOUT_MS: u64 = 300_000;
 const MAX_GIT_PATHSPEC_BYTES: usize = 4096;
@@ -398,10 +400,18 @@ pub(crate) fn repository_git_command() -> Command {
     }
     // A read must not run a program named by the repository's own config. The
     // environment form reaches every caller without reordering their arguments.
+    // Hooks point at a path with no hooks in it, because Git runs
+    // `post-index-change` on any index write, including an opportunistic
+    // refresh during `diff` or a write to a temporary index.
     command
-        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_COUNT", "2")
         .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
-        .env("GIT_CONFIG_VALUE_0", "false");
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .env(
+            "GIT_CONFIG_VALUE_1",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
     command
 }
 
@@ -497,6 +507,13 @@ pub struct WorkingTreeSymbolDiff {
     pub body_changed: Vec<SymbolRef>,
     #[serde(skip)]
     pub snapshot_token: String,
+}
+
+impl WorkingTreeSymbolDiff {
+    /// Whether `files` lists every changed path. A gate refuses otherwise.
+    pub fn files_complete(&self) -> bool {
+        inventory_complete(self.files_truncated, self.skipped_non_utf8_paths)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1109,26 +1126,56 @@ pub(crate) struct BoundedGitOutput {
 }
 
 fn bounded_reader<R: Read + Send + 'static>(
+    reader: R,
+    limit: usize,
+) -> mpsc::Receiver<(Vec<u8>, bool)> {
+    bounded_record_reader(reader, limit, None)
+}
+
+/// Reads up to `limit` bytes. With `retain`, NUL-terminated records it rejects
+/// are dropped as they arrive and do not count against the limit.
+fn bounded_record_reader<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
+    mut retain: Option<RecordFilter>,
 ) -> mpsc::Receiver<(Vec<u8>, bool)> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut retained = Vec::new();
+        let mut record = Vec::new();
         let mut exceeded = false;
         let mut buffer = [0u8; 16 * 1024];
+        let keep = |bytes: &[u8], retained: &mut Vec<u8>| {
+            if retained.len() < limit + 1 {
+                let count = bytes.len().min(limit + 1 - retained.len());
+                retained.extend_from_slice(&bytes[..count]);
+            }
+            retained.len() > limit
+        };
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(count) => {
-                    if retained.len() < limit + 1 {
-                        let keep = count.min(limit + 1 - retained.len());
-                        retained.extend_from_slice(&buffer[..keep]);
+                Ok(count) => match retain.as_mut() {
+                    None => exceeded |= keep(&buffer[..count], &mut retained),
+                    Some(retain) => {
+                        for chunk in buffer[..count].split_inclusive(|byte| *byte == 0) {
+                            if record.len() <= limit {
+                                record.extend_from_slice(chunk);
+                            }
+                            if chunk.ends_with(&[0]) {
+                                if record.len() > limit || retain(&record[..record.len() - 1]) {
+                                    exceeded |= keep(&record, &mut retained);
+                                }
+                                record.clear();
+                            }
+                        }
                     }
-                    exceeded |= retained.len() > limit;
-                }
+                },
                 Err(_) => break,
             }
+        }
+        if retain.is_some_and(|mut retain| !record.is_empty() && retain(&record)) {
+            exceeded |= keep(&record, &mut retained);
         }
         let _ = sender.send((retained, exceeded));
     });
@@ -1182,8 +1229,29 @@ fn run_bounded_git_controlled(
     deadline: Option<Instant>,
     interrupted: Option<&dyn Fn() -> bool>,
 ) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
+    run_bounded_git_records(
+        repo,
+        git_command(args),
+        input,
+        output_limit,
+        deadline,
+        interrupted,
+        None,
+    )
+}
+
+/// With `retain`, only the stdout records it accepts are kept.
+fn run_bounded_git_records(
+    repo: &Path,
+    mut command: Command,
+    input: Option<&[u8]>,
+    output_limit: usize,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+    retain: Option<RecordFilter>,
+) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
     let start = Instant::now();
-    let mut child = git_command(args)
+    let mut child = command
         .current_dir(repo)
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -1202,7 +1270,7 @@ fn run_bounded_git_controlled(
         .stderr
         .take()
         .ok_or(WorkingTreeDiffError::GitUnavailable)?;
-    let stdout = bounded_reader(stdout_pipe, output_limit);
+    let stdout = bounded_record_reader(stdout_pipe, output_limit, retain);
     let stderr = bounded_reader(stderr_pipe, 64 * 1024);
     let writer = input.map(|bytes| {
         let (sender, receiver) = mpsc::channel();
@@ -1627,8 +1695,245 @@ pub(crate) fn collect_worktree_paths_controlled(
         }
         changed.insert(path.to_vec(), "untracked");
     }
+    add_flagged_index_changes(
+        repo,
+        baseline_oid,
+        ignored_path_prefix,
+        &mut changed,
+        deadline,
+        interrupted,
+    )?;
 
     Ok(finalize_changed_paths(changed))
+}
+
+/// Changed paths for a gate, which cannot judge a partial list: `None` when
+/// the list is over the limit or has a non-UTF-8 path.
+pub(crate) fn complete_worktree_paths_controlled(
+    repo: &Path,
+    baseline_oid: &str,
+    ignored_path_prefix: Option<&str>,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<Option<Vec<WorkingTreeChangedFile>>, WorkingTreeDiffError> {
+    let (files, _, truncated, skipped) = collect_worktree_paths_controlled(
+        repo,
+        baseline_oid,
+        ignored_path_prefix,
+        deadline,
+        interrupted,
+    )?;
+    Ok(inventory_complete(truncated, skipped).then_some(files))
+}
+
+fn inventory_complete(truncated: bool, skipped_non_utf8_paths: u32) -> bool {
+    !truncated && skipped_non_utf8_paths == 0
+}
+
+/// `git diff` trusts an index entry marked assume-unchanged or skip-worktree
+/// and reports the index blob in place of its file, so an edit behind either
+/// flag is invisible to it. The baseline diff is run again on a copy of the
+/// index with both flags cleared, and each flagged path takes its status from
+/// there, so Git itself applies its attribute, mode, symlink and removal
+/// rules. In a sparse checkout an absent skip-worktree file is what the
+/// checkout leaves out, so it keeps the status its index entry gave it.
+fn add_flagged_index_changes(
+    repo: &Path,
+    baseline_oid: &str,
+    ignored_path_prefix: Option<&str>,
+    changed: &mut BTreeMap<Vec<u8>, &'static str>,
+    deadline: Option<Instant>,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> Result<(), WorkingTreeDiffError> {
+    // The baseline diff covers the whole repository, so the flagged pass
+    // does too, from the top level, where every path is a full name.
+    let top = run_bounded_git_controlled(
+        repo,
+        &["rev-parse", "--show-toplevel"],
+        None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
+    if !top.success {
+        return Err(WorkingTreeDiffError::GitUnavailable);
+    }
+    let top = os_relative_path(top.stdout.strip_suffix(b"\n").unwrap_or(&top.stdout))
+        .ok_or(WorkingTreeDiffError::GitUnavailable)?
+        .to_path_buf();
+    let run = |command: Command, input: Option<&[u8]>, retain: Option<RecordFilter>| {
+        let output = run_bounded_git_records(
+            &top,
+            command,
+            input,
+            FLAGGED_LISTING_LIMIT,
+            deadline,
+            interrupted,
+            retain,
+        )?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(WorkingTreeDiffError::GitUnavailable)
+        }
+    };
+    // Only a sparse checkout explains an absent skip-worktree file. Without
+    // one, the absence is a deletion, so the entry stays in the listing.
+    let sparse = run_bounded_git_controlled(
+        &top,
+        &["config", "--type=bool", "--get", "core.sparseCheckout"],
+        None,
+        GIT_OUTPUT_LIMIT,
+        deadline,
+        interrupted,
+    )?;
+    let sparse = sparse.success && sparse.stdout.trim_ascii() == b"true";
+    // Tags: lowercase is assume-unchanged, `S` and `s` are skip-worktree.
+    // Other records are dropped while reading, so the bound applies to
+    // flagged files only.
+    let root = top.clone();
+    let listing = run(
+        git_command(&["ls-files", "-v", "-z", "--"]),
+        None,
+        Some(Box::new(move |entry: &[u8]| match entry {
+            [b'S' | b's', b' ', ..] if !sparse => true,
+            // A path the OS cannot represent cannot be present either.
+            [b'S' | b's', b' ', relative @ ..] => os_relative_path(relative).is_some_and(|path| {
+                std::fs::symlink_metadata(root.join(path))
+                    .map_or_else(|error| !missing_path(&error), |_| true)
+            }),
+            [tag, b' ', ..] => tag.is_ascii_lowercase(),
+            _ => true,
+        })),
+    )?;
+    let mut flagged = BTreeSet::new();
+    let (mut assumed, mut skipped) = (Vec::new(), Vec::new());
+    for entry in nul_fields(&listing) {
+        let [tag, b' ', path @ ..] = entry else {
+            return Err(WorkingTreeDiffError::InvalidRef);
+        };
+        if ignored_path_prefix.is_some_and(|ignored| path_within_prefix(path, ignored)) {
+            continue;
+        }
+        if matches!(tag, b'S' | b's') {
+            skipped.extend_from_slice(path);
+            skipped.push(0);
+        }
+        if *tag != b'S' {
+            assumed.extend_from_slice(path);
+            assumed.push(0);
+        }
+        flagged.insert(path.to_vec());
+    }
+    if flagged.is_empty() {
+        return Ok(());
+    }
+    let index = run(
+        git_command(&["rev-parse", "--git-path", "index"]),
+        None,
+        None,
+    )?;
+    let index = top.join(
+        os_relative_path(index.strip_suffix(b"\n").unwrap_or(&index))
+            .ok_or(WorkingTreeDiffError::GitUnavailable)?,
+    );
+    let copy = copy_index(&index)?;
+    let with_copy = |args: &[&str]| {
+        let mut command = git_command(args);
+        command.env("GIT_INDEX_FILE", copy.path().join("index"));
+        command
+    };
+    // One flag per call: together, `update-index` leaves skip-worktree set
+    // on entries that have both.
+    for (flag, paths) in [
+        ("--no-assume-unchanged", &assumed),
+        ("--no-skip-worktree", &skipped),
+    ] {
+        if !paths.is_empty() {
+            run(
+                with_copy(&["update-index", "-q", flag, "-z", "--stdin"]),
+                Some(paths),
+                None,
+            )?;
+        }
+    }
+    let diff = run(
+        with_copy(&[
+            "-c",
+            "diff.external=",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-status",
+            "-z",
+            baseline_oid,
+            "--",
+        ]),
+        None,
+        None,
+    )?;
+    // A flagged path absent from this diff matches the baseline, even when
+    // the flagged index reported it.
+    for path in &flagged {
+        changed.remove(path);
+    }
+    let mut fields = nul_fields(&diff);
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        if flagged.contains(path) {
+            let status = match status.first() {
+                Some(b'A') => "added",
+                Some(b'D') => "deleted",
+                _ => "modified",
+            };
+            changed.insert(path.to_vec(), status);
+        }
+    }
+    Ok(())
+}
+
+/// Drops a NUL-terminated output record when it returns false.
+type RecordFilter = Box<dyn FnMut(&[u8]) -> bool + Send>;
+
+/// A copy of the index in a private temporary directory, so a read-only
+/// `.git` still works and no other user can claim the name. Git finds a split
+/// index's shared part in the repository, not next to the copy. The copy keeps
+/// the index's mtime, which Git's racy-entry check compares with entry times.
+/// The directory, with any lock file Git left, is removed when dropped.
+fn copy_index(index: &Path) -> Result<tempfile::TempDir, WorkingTreeDiffError> {
+    let directory = tempfile::Builder::new()
+        .prefix("mmcg-flagged-index-")
+        .tempdir()
+        .map_err(|_| WorkingTreeDiffError::GitUnavailable)?;
+    let copy = directory.path().join("index");
+    std::fs::copy(index, &copy)
+        .and_then(|_| std::fs::metadata(index)?.modified())
+        .and_then(|modified| {
+            std::fs::File::options()
+                .write(true)
+                .open(&copy)?
+                .set_modified(modified)
+        })
+        .map_err(|_| WorkingTreeDiffError::GitUnavailable)?;
+    Ok(directory)
+}
+
+fn missing_path(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+#[cfg(unix)]
+fn os_relative_path(raw: &[u8]) -> Option<&Path> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(Path::new(std::ffi::OsStr::from_bytes(raw)))
+}
+
+#[cfg(not(unix))]
+fn os_relative_path(raw: &[u8]) -> Option<&Path> {
+    std::str::from_utf8(raw).ok().map(Path::new)
 }
 
 fn path_within_prefix(path: &[u8], prefix: &str) -> bool {
@@ -2373,6 +2678,402 @@ mod tests {
         assert_eq!(paths, vec!["staged.py", "unstaged.py", "untracked.py"]);
         assert_eq!(changed.files[2].status, "untracked");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn flag(dir: &Path, flag: &str, paths: &[&str]) {
+        let mut args = vec!["update-index", flag];
+        args.extend_from_slice(paths);
+        run(dir, &args);
+    }
+
+    fn listed(dir: &Path) -> Vec<(String, String)> {
+        let (files, _, truncated, skipped) = collect_worktree_paths(dir, "HEAD").unwrap();
+        assert!(!truncated);
+        assert_eq!(skipped, 0);
+        files
+            .into_iter()
+            .map(|file| (file.path, file.status))
+            .collect()
+    }
+
+    #[test]
+    fn edits_behind_index_flags_are_listed() {
+        let dir = init_repo("index-flags");
+        for name in ["assumed", "skipped", "both", "sparse", "gone", "same"] {
+            write(&dir, name, "baseline\n");
+        }
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        flag(
+            &dir,
+            "--assume-unchanged",
+            &["assumed", "both", "gone", "same"],
+        );
+        flag(
+            &dir,
+            "--skip-worktree",
+            &["skipped", "both", "sparse", "same"],
+        );
+        for name in ["assumed", "skipped", "both"] {
+            write(&dir, name, "edited\n");
+        }
+        fs::remove_file(dir.join("sparse")).unwrap();
+        fs::remove_file(dir.join("gone")).unwrap();
+
+        let modified = |name: &str| (name.to_string(), "modified".to_string());
+        let deleted = |name: &str| (name.to_string(), "deleted".to_string());
+        assert_eq!(
+            listed(&dir),
+            [
+                modified("assumed"),
+                modified("both"),
+                deleted("gone"),
+                modified("skipped"),
+                deleted("sparse"),
+            ]
+        );
+        // Only a sparse checkout leaves a skip-worktree file absent on purpose.
+        run(&dir, &["config", "core.sparseCheckout", "true"]);
+        assert_eq!(
+            listed(&dir),
+            [
+                modified("assumed"),
+                modified("both"),
+                deleted("gone"),
+                modified("skipped"),
+            ]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Git compares through the path's attributes and its own mode rules, and
+    /// so must the check behind a flag, or untouched files read as edits.
+    #[test]
+    fn unchanged_files_behind_index_flags_compare_like_git() {
+        let dir = init_repo("index-flags-unchanged");
+        write(&dir, ".gitattributes", "*.conf text eol=crlf\n");
+        write(&dir, "local.conf", "a\nb\n");
+        write(&dir, "big.bin", &"x".repeat(6 * 1024 * 1024));
+        write(&dir, "sub/nested.conf", "port = 1\n");
+        write(&dir, "target", "t\n");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("target", dir.join("link")).unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        // Checkout writes CRLF bytes for the LF blob.
+        fs::remove_file(dir.join("local.conf")).unwrap();
+        run(&dir, &["checkout", "--", "local.conf"]);
+        assert!(fs::read(dir.join("local.conf")).unwrap().contains(&b'\r'));
+        flag(&dir, "--skip-worktree", &["local.conf", "sub/nested.conf"]);
+        flag(&dir, "--assume-unchanged", &["big.bin"]);
+        #[cfg(unix)]
+        flag(&dir, "--assume-unchanged", &["link"]);
+
+        assert_eq!(listed(&dir), []);
+
+        write(&dir, "sub/nested.conf", "port = 2\n");
+        let (files, ..) =
+            collect_worktree_paths(&dir.join("sub"), &resolve_commit(&dir, "HEAD").unwrap())
+                .unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, "sub/nested.conf");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The name exists only in Git objects, since APFS rejects it on disk.
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_non_utf8_path_behind_skip_worktree_is_unchanged() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = init_repo("index-flag-non-utf8");
+        write(&dir, "a", "a\n");
+        run(&dir, &["add", "-A"]);
+        let blob = Command::new("git")
+            .args(["hash-object", "-w", "a"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let blob = String::from_utf8(blob.stdout).unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"data-\xff.bin");
+        let cacheinfo = [
+            b"100644,".as_slice(),
+            blob.trim().as_bytes(),
+            b",data-\xff.bin",
+        ]
+        .concat();
+        let git = |args: &[&str], path: &std::ffi::OsStr| {
+            let status = Command::new("git")
+                .args(args)
+                .arg(path)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        git(
+            &["update-index", "--add", "--cacheinfo"],
+            std::ffi::OsStr::from_bytes(&cacheinfo),
+        );
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["config", "core.sparseCheckout", "true"]);
+        git(&["update-index", "--skip-worktree"], name);
+        assert_eq!(listed(&dir), []);
+
+        git(&["update-index", "--no-skip-worktree"], name);
+        git(&["update-index", "--assume-unchanged"], name);
+        let (_, _, _, skipped) = collect_worktree_paths(&dir, "HEAD").unwrap();
+        assert_eq!(skipped, 1, "an absent assume-unchanged path is a deletion");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_bit_behind_an_index_flag_follows_core_filemode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_repo("index-flag-mode");
+        write(&dir, "run.sh", "echo\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        flag(&dir, "--skip-worktree", &["run.sh"]);
+        fs::set_permissions(dir.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(listed(&dir), [("run.sh".into(), "modified".into())]);
+        run(&dir, &["config", "core.fileMode", "false"]);
+        assert_eq!(listed(&dir), []);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Shapes Git handles without the flag: a name `--stdin-paths` would cut,
+    /// a parent that became a symlink or a file that became a directory
+    /// (both removals), and a symlink checked out as a file.
+    #[cfg(unix)]
+    #[test]
+    fn flagged_paths_of_every_shape_compare_like_git() {
+        let dir = init_repo("index-flag-shapes");
+        write(&dir, "cr\r", "same\n");
+        write(&dir, "\"quoted", "baseline\n");
+        write(&dir, "dir/file", "baseline\n");
+        write(&dir, "conf", "baseline\n");
+        std::os::unix::fs::symlink("target", dir.join("link")).unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["config", "core.symlinks", "false"]);
+        fs::remove_file(dir.join("link")).unwrap();
+        run(&dir, &["checkout", "--", "link"]);
+        assert!(fs::symlink_metadata(dir.join("link")).unwrap().is_file());
+        flag(
+            &dir,
+            "--assume-unchanged",
+            &["cr\r", "\"quoted", "dir/file", "conf", "link"],
+        );
+        write(&dir, "\"quoted", "edited\n");
+        let outside = dir.with_extension("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::copy(dir.join("dir/file"), outside.join("file")).unwrap();
+        fs::remove_dir_all(dir.join("dir")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("dir")).unwrap();
+        fs::remove_file(dir.join("conf")).unwrap();
+        write(&dir, "conf/inner", "x\n");
+
+        assert_eq!(
+            listed(&dir),
+            [
+                ("\"quoted".into(), "modified".into()),
+                ("conf".into(), "deleted".into()),
+                ("conf/inner".into(), "untracked".into()),
+                ("dir".into(), "untracked".into()),
+                ("dir/file".into(), "deleted".into()),
+            ]
+        );
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    /// Git's own comparison decides: a CRLF blob under `core.autocrlf` is not
+    /// renormalized, only the owner exec bit counts, an unreadable file is an
+    /// edit rather than a failure, and a quoted subdirectory root works.
+    #[cfg(unix)]
+    #[test]
+    fn flagged_files_follow_git_rules_for_eol_mode_and_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_repo("index-flag-git-rules");
+        write(&dir, "crlf.txt", "a\r\nb\r\n");
+        write(&dir, "group-exec", "x\n");
+        write(&dir, "owner-exec", "x\n");
+        write(&dir, "locked", "x\n");
+        write(&dir, "\"sub/inner", "x\n");
+        fs::set_permissions(dir.join("owner-exec"), fs::Permissions::from_mode(0o755)).unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["config", "core.autocrlf", "true"]);
+        flag(
+            &dir,
+            "--skip-worktree",
+            &[
+                "crlf.txt",
+                "group-exec",
+                "owner-exec",
+                "locked",
+                "\"sub/inner",
+            ],
+        );
+        let mode = |name: &str, mode| {
+            fs::set_permissions(dir.join(name), fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode("group-exec", 0o654);
+        mode("owner-exec", 0o655);
+        mode("locked", 0o000);
+        write(&dir, "\"sub/inner", "edited\n");
+
+        // Root reads the file anyway, and Git then finds it unchanged.
+        let unreadable = fs::File::open(dir.join("locked")).is_err();
+        let files = listed(&dir);
+        mode("locked", 0o644);
+        let modified = |name: &str| (name.to_string(), "modified".to_string());
+        let mut expected = vec![modified("\"sub/inner"), modified("owner-exec")];
+        if unreadable {
+            expected.insert(1, modified("locked"));
+        }
+        assert_eq!(files, expected);
+        // A subdirectory root still sees flagged edits elsewhere, as the
+        // baseline diff sees unflagged ones.
+        let (files, ..) = collect_worktree_paths(&dir.join("\"sub"), "HEAD").unwrap();
+        let paths = files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["\"sub/inner", "owner-exec"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A flagged path takes its status against the baseline from the worktree,
+    /// even when a staged change already listed it, and a split index needs
+    /// nothing written to the repository.
+    #[test]
+    fn flagged_paths_take_their_baseline_status_from_the_worktree() {
+        let dir = init_repo("index-flag-staged");
+        for name in ["staged-gone", "staged-back", "conf", "sparse"] {
+            write(&dir, name, "baseline\n");
+        }
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["update-index", "--split-index"]);
+        for name in ["staged-gone", "staged-back", "added-gone", "sparse"] {
+            write(&dir, name, "staged\n");
+            run(&dir, &["add", name]);
+        }
+        flag(
+            &dir,
+            "--assume-unchanged",
+            &["staged-gone", "staged-back", "added-gone"],
+        );
+        // An absent sparse entry keeps the status of its index blob.
+        run(&dir, &["config", "core.sparseCheckout", "true"]);
+        flag(&dir, "--skip-worktree", &["conf", "sparse"]);
+        fs::remove_file(dir.join("sparse")).unwrap();
+        fs::remove_file(dir.join("staged-gone")).unwrap();
+        fs::remove_file(dir.join("added-gone")).unwrap();
+        write(&dir, "staged-back", "baseline\n");
+        fs::remove_file(dir.join("conf")).unwrap();
+        write(&dir, "conf/inner", "x\n");
+        let git_files = || {
+            let mut names = fs::read_dir(dir.join(".git"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let before = git_files();
+
+        assert_eq!(
+            listed(&dir),
+            [
+                ("conf".into(), "deleted".into()),
+                ("conf/inner".into(), "untracked".into()),
+                ("sparse".into(), "modified".into()),
+                ("staged-gone".into(), "deleted".into()),
+            ]
+        );
+        assert_eq!(git_files(), before);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An entry as new as the index is racy, so Git checks its content. The
+    /// copy must keep the index's mtime, or a same-size edit made in the same
+    /// tick passes on stat data alone.
+    #[test]
+    fn a_racy_edit_behind_a_flag_is_listed() {
+        let dir = init_repo("index-flag-racy");
+        run(&dir, &["config", "core.trustctime", "false"]);
+        let tick = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let stamp = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(tick)
+                .unwrap()
+        };
+        write(&dir, "port.conf", "port = 1\n");
+        stamp(&dir.join("port.conf"));
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        flag(&dir, "--assume-unchanged", &["port.conf"]);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("port.conf"))
+            .unwrap()
+            .write_all(b"port = 2\n")
+            .unwrap();
+        stamp(&dir.join("port.conf"));
+        stamp(&dir.join(".git/index"));
+
+        assert_eq!(listed(&dir), [("port.conf".into(), "modified".into())]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Clearing flags writes an index, and Git runs `post-index-change` on
+    /// every index write. A read must not run the repository's hooks.
+    #[cfg(unix)]
+    #[test]
+    fn checking_flagged_files_runs_no_repository_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_repo("index-flag-hook");
+        write(&dir, "conf", "baseline\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        flag(&dir, "--assume-unchanged", &["conf"]);
+        write(&dir, "conf", "edited\n");
+        let marker = dir.join("hook-ran");
+        let hook = dir.join(".git/hooks/post-index-change");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(listed(&dir), [("conf".into(), "modified".into())]);
+        assert!(!marker.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The flagged listing is bounded by what it keeps, not by the index.
+    #[test]
+    fn retained_records_alone_count_against_the_output_limit() {
+        let mut output = b"H skip\0".repeat(4096);
+        output.extend_from_slice(b"h keep\0S tail");
+        let reader = bounded_record_reader(
+            std::io::Cursor::new(output),
+            16,
+            Some(Box::new(|record: &[u8]| record[0] != b'H')),
+        );
+        assert_eq!(reader.recv().unwrap(), (b"h keep\0S tail".to_vec(), false));
+
+        let reader = bounded_record_reader(
+            std::io::Cursor::new(b"h one\0h two\0h three\0".to_vec()),
+            12,
+            Some(Box::new(|_: &[u8]| true)),
+        );
+        assert!(reader.recv().unwrap().1);
     }
 
     #[test]

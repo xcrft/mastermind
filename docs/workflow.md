@@ -142,7 +142,11 @@ mastermind run-task "$TASK_SPEC" --post-only
 ```
 
 Postflight compares the contract, report, receipts, and actual diff, including
-staged, unstaged, and untracked work. Inspection does not launch checks.
+staged, unstaged, and untracked work. Files behind `assume-unchanged` or
+`skip-worktree` are compared the way Git would compare them without the flag,
+so the flags do not hide an edit. In a sparse checkout, an absent `skip-worktree`
+file is not read as a deletion. A change list that cannot be complete
+refuses the audit. Inspection does not launch checks.
 Its file list and release draft cover changes since the initial approval.
 Standalone `audit-spec --since` and CI still inspect the whole change from the
 requested commit. Older task states without initial worktree evidence retain

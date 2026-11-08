@@ -951,6 +951,8 @@ pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
     let mut quotes = Vec::new();
     let mut code_blocks = Vec::new();
     let mut html_blocks = Vec::new();
+    let mut open_items = Vec::new();
+    let mut items = Vec::new();
     let parsed = parser_input(body);
     for (event, range) in Parser::new(&parsed).into_offset_iter() {
         match event {
@@ -964,6 +966,19 @@ pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(start) = code_blocks.pop() {
                     hide_span(&starts, &mut delta, start, range.end);
+                }
+            }
+            Event::Start(Tag::Item) => open_items.push(range.start),
+            Event::End(TagEnd::Item) => {
+                if let Some(start) = open_items.pop() {
+                    // The range can start at the previous line's ending or
+                    // inside the marker's indentation.
+                    let start = start + body[start..].len()
+                        - body[start..]
+                            .trim_start_matches(['\r', '\n', ' ', '\t'])
+                            .len();
+                    let line_start = body[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+                    items.push((line_start, range.end, item_content_column(body, start)));
                 }
             }
             Event::Start(Tag::HtmlBlock) => html_blocks.push(range.start),
@@ -984,12 +999,54 @@ pub(crate) fn prose_lines(body: &str) -> Vec<ProseLine<'_>> {
         .enumerate()
         .filter_map(|(index, line)| {
             hidden += delta[index];
+            // Indentation counts from the innermost list item's content
+            // column. More than three spaces past it reads as an example, as an
+            // indented code block would.
+            let column = items
+                .iter()
+                .filter(|(start, end, _)| *start <= line.offset && line.offset < *end)
+                .max_by_key(|(start, _, _)| *start)
+                .map(|(_, _, column)| *column);
             let content = line.raw.trim_end_matches(['\r', '\n']);
-            let indent = content.bytes().take_while(|byte| *byte == b' ').count();
-            let code_indent = indent > 3 || line.text.starts_with('\t');
+            let lead = content.len() - content.trim_start_matches([' ', '\t']).len();
+            let code_indent = width(&content[..lead], 0) > column.unwrap_or(0) + 3;
             (hidden == 0 && !code_indent && !line.text.starts_with('>')).then_some(line)
         })
         .collect()
+}
+
+/// Column where the content of the list item whose marker starts at
+/// `marker_at` begins: the marker, then one to four columns of space. An item
+/// with nothing after its marker on that line starts one column past it.
+fn item_content_column(body: &str, marker_at: usize) -> usize {
+    let line_start = body[..marker_at].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    let rest = &body[marker_at..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let marker_end = marker_at + (digits + 1).min(rest.len());
+    let after = &body[marker_end..];
+    let content = after.trim_start_matches([' ', '\t']);
+    let space = &after[..after.len() - content.len()];
+    let column = width(&body[line_start..marker_end], 0);
+    let spaces = width(space, column) - column;
+    let blank = content.is_empty() || content.starts_with(['\r', '\n']);
+    column
+        + if (1..=4).contains(&spaces) && !blank {
+            spaces
+        } else {
+            1
+        }
+}
+
+/// Column reached after `text` from `column`, with a tab to the next
+/// multiple of four as in CommonMark.
+pub(crate) fn width(text: &str, column: usize) -> usize {
+    text.chars().fold(column, |column, character| {
+        if character == '\t' {
+            column + 4 - column % 4
+        } else {
+            column + 1
+        }
+    })
 }
 
 fn markdown_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
@@ -1204,6 +1261,33 @@ mod tests {
         for line in visible {
             assert_eq!(&body[line.offset..line.offset + line.raw.len()], line.raw);
         }
+    }
+
+    #[test]
+    fn list_item_content_is_indented_from_its_content_column() {
+        let body = "- item\n  continued\n      ## hidden-past-item-column\n\t\t## hidden-tab-past-item-column\n10. numbered\n    continued\n        ## hidden-past-numbered-column\n  - indented\n      - nested-under-indented\n-\ttabbed\n      - nested-under-tabbed\n- Group\n\t- Sub\n\t\t- Subsub\n\t\t\t- deepest\n\t\t\t\t\t## hidden-past-deepest\n\t\t\t\tdeepest-continued\n-   \n  blank-item\n       hidden-past-blank-item\n## live\n";
+        let visible = prose_lines(body);
+        assert_eq!(
+            visible.iter().map(|line| line.text).collect::<Vec<_>>(),
+            [
+                "- item",
+                "continued",
+                "10. numbered",
+                "continued",
+                "- indented",
+                "- nested-under-indented",
+                "-\ttabbed",
+                "- nested-under-tabbed",
+                "- Group",
+                "\t- Sub",
+                "\t\t- Subsub",
+                "\t\t\t- deepest",
+                "\t\t\t\tdeepest-continued",
+                "-   ",
+                "blank-item",
+                "## live"
+            ]
+        );
     }
 
     #[test]

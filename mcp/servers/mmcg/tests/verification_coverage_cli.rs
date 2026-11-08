@@ -244,7 +244,11 @@ fn verification_coverage_legacy_spans_preserve_embedded_backticks() {
     );
 
     let unmatched = spec::parse_str(SPEC, &spec_text(json!([]), "VERIFY: ``echo incomplete`"));
-    assert_eq!(unmatched.declared_verify_commands(), ["``echo incomplete`"]);
+    assert!(unmatched.declared_verify_commands().is_empty());
+    assert_eq!(
+        unmatched.unparsed_lines[0].reason,
+        "verify_command_unparsed"
+    );
     let longer = spec::parse_str(SPEC, &spec_text(json!([]), "VERIFY: `` echo '```' ``"));
     assert_eq!(longer.declared_verify_commands(), ["echo '```'"]);
 }

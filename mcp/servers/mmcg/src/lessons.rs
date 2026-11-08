@@ -501,6 +501,7 @@ fn summarize_findings(findings: &[Finding]) -> String {
     for f in findings {
         let key = match f {
             Finding::InvalidFrontmatter { .. } => "invalid frontmatter",
+            Finding::UnparsedLine { .. } => "unparsed spec line",
             Finding::UnexpectedFile { .. } => "scope creep",
             Finding::MissingExpectedFile { .. } => "missing expected file",
             Finding::DeclaredFileUnavailable { .. } => "declared file unavailable",

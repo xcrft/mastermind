@@ -12,6 +12,12 @@ const SPEC_LIMIT: u64 = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
 const CHAIN_LIMIT: usize = 128;
 const TOTAL_LIMIT: u64 = 32 * 1024 * 1024;
 
+/// Version 2 approvals were checked by the spec parser that records lines it
+/// cannot read. A version 1 approval stays valid for its own audit, but cannot
+/// carry preconditions into a reapproval, because the older parser could have
+/// dropped some of them and the edited files can no longer prove them.
+const SCHEMA_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Approval {
@@ -63,7 +69,13 @@ fn read(root: &Path, path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         })
 }
 
-fn load(root: &Path, spec: &Path, state: &RunState) -> Result<Option<(ParsedSpec, bool)>, String> {
+/// The approved spec, whether its index checks ran, and whether the current
+/// spec parser checked it.
+fn load(
+    root: &Path,
+    spec: &Path,
+    state: &RunState,
+) -> Result<Option<(ParsedSpec, bool, bool)>, String> {
     let Some(pin) = state.preflight_approval_sha256.as_deref() else {
         return Ok(None);
     };
@@ -93,7 +105,7 @@ fn load(root: &Path, spec: &Path, state: &RunState) -> Result<Option<(ParsedSpec
         }
         let record: Approval =
             serde_json::from_slice(&bytes).map_err(|_| "preflight_approval_invalid")?;
-        if record.schema_version != 1
+        if !(1..=SCHEMA_VERSION).contains(&record.schema_version)
             || state.repository_identity.as_deref() != Some(record.repository_identity.as_str())
             || record.spec_path != state.spec_path
             || !valid_hash(&record.spec_sha256)
@@ -128,11 +140,19 @@ fn load(root: &Path, spec: &Path, state: &RunState) -> Result<Option<(ParsedSpec
             return Err("preflight_approval_spec_changed".into());
         }
         let parsed = spec::parse_str(&record.spec_path, &body);
-        if parsed.frontmatter_error.is_some() {
+        // The older parser read a misplaced block as a spec without
+        // frontmatter, so its approval of that body still stands.
+        let legacy = record.schema_version < SCHEMA_VERSION
+            && parsed.frontmatter_error.as_deref() == Some("frontmatter_not_at_start");
+        if parsed.frontmatter_error.is_some() && !legacy {
             return Err("preflight_approval_spec_invalid".into());
         }
         if active.is_none() {
-            active = Some((parsed, record.indexed_preconditions_covered));
+            active = Some((
+                parsed,
+                record.indexed_preconditions_covered,
+                record.schema_version == SCHEMA_VERSION,
+            ));
         }
         child_iteration = Some(record.iteration);
         next = record.parent;
@@ -200,6 +220,9 @@ pub(crate) fn prepare(
             // An unchanged contract requests fresh validation, not amendment recovery.
             return Ok(validation);
         }
+        Some((_, _, false)) => {
+            return Err("preflight_approval_schema_outdated: start a new task".into());
+        }
         Some(approved) => {
             validation.parent = previous.preflight_approval_sha256.clone();
             validation.basis = "reapproval";
@@ -215,11 +238,11 @@ pub(crate) fn prepare(
             // A failed retry may have advanced the counter. This preserves
             // prior contract approval, not an invented original attempt.
             validation.basis = "legacy_prior_approval";
-            Some((current.clone(), !previous.allow_no_index))
+            Some((current.clone(), !previous.allow_no_index, true))
         }
         None => None,
     };
-    let Some((old, index_checked)) = historical else {
+    let Some((old, index_checked, _)) = historical else {
         return Ok(validation);
     };
     let find_keys = old
@@ -290,7 +313,7 @@ pub(crate) fn retain(
     index_checked: bool,
 ) -> Result<String, String> {
     let record = Approval {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         repository_identity: state
             .repository_identity
             .clone()
@@ -379,6 +402,60 @@ mod tests {
         assert_eq!(changed.carried, 0);
         assert_eq!(changed.current.pre_edit_snapshot.len(), 1);
         assert_eq!(changed.current.find_blocks.len(), 1);
+    }
+
+    #[test]
+    fn an_approval_from_the_older_spec_parser_cannot_be_reapproved() {
+        let root = tempfile::tempdir().unwrap();
+        let mut previous = state(BODY);
+        let path = root.path().join(&previous.spec_path);
+        let parsed = spec::parse_str(&previous.spec_path, BODY);
+        let first = prepare(root.path(), &path, &parsed, BODY, None, true).unwrap();
+        let pin = retain(root.path(), &path, &previous, BODY, &first, true).unwrap();
+        let directory = directory(root.path(), &path);
+        let current = std::fs::read_to_string(directory.join(format!("{pin}.json"))).unwrap();
+        let older = current.replace("\"schema_version\":2", "\"schema_version\":1");
+        assert_ne!(older, current);
+        let older_pin = crate::run_task::hash_text(&older);
+        std::fs::write(directory.join(format!("{older_pin}.json")), older).unwrap();
+        let revised = BODY.replace("Phase 1", "Phase renamed");
+        let parsed = spec::parse_str(&previous.spec_path, &revised);
+
+        previous.preflight_approval_sha256 = Some(pin);
+        let carried =
+            prepare(root.path(), &path, &parsed, &revised, Some(&previous), true).unwrap();
+        assert_eq!(carried.carried, 3);
+
+        previous.preflight_approval_sha256 = Some(older_pin);
+        assert_eq!(
+            prepare(root.path(), &path, &parsed, &revised, Some(&previous), true).err(),
+            Some("preflight_approval_schema_outdated: start a new task".to_string())
+        );
+        validate(root.path(), &path, &previous).unwrap();
+    }
+
+    #[test]
+    fn an_older_approval_of_a_misplaced_frontmatter_block_still_validates() {
+        let body = format!("\u{feff}{BODY}");
+        let root = tempfile::tempdir().unwrap();
+        let mut previous = state(&body);
+        let path = root.path().join(&previous.spec_path);
+        let parsed = spec::parse_str(&previous.spec_path, &body);
+        let first = prepare(root.path(), &path, &parsed, &body, None, true).unwrap();
+        let pin = retain(root.path(), &path, &previous, &body, &first, true).unwrap();
+        let directory = directory(root.path(), &path);
+        let current = std::fs::read_to_string(directory.join(format!("{pin}.json"))).unwrap();
+        let older = current.replace("\"schema_version\":2", "\"schema_version\":1");
+        let older_pin = crate::run_task::hash_text(&older);
+        std::fs::write(directory.join(format!("{older_pin}.json")), older).unwrap();
+
+        previous.preflight_approval_sha256 = Some(pin);
+        assert_eq!(
+            validate(root.path(), &path, &previous).err(),
+            Some("preflight_approval_spec_invalid".to_string())
+        );
+        previous.preflight_approval_sha256 = Some(older_pin);
+        validate(root.path(), &path, &previous).unwrap();
     }
 
     #[test]

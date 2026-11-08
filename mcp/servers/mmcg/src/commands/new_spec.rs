@@ -918,6 +918,26 @@ mod tests {
     }
 
     #[test]
+    fn generated_templates_parse_cleanly_and_declare_no_checklist_command() {
+        for mode in [Mode::Lite, Mode::Standard, Mode::Verified, Mode::Strict] {
+            let parsed = mmcg::spec::parse_str("spec.md", &render_spec("Change value", 1, &mode));
+            assert!(
+                parsed.unparsed_lines.is_empty(),
+                "{:?}",
+                parsed.unparsed_lines
+            );
+            assert!(
+                !parsed
+                    .verify_commands
+                    .iter()
+                    .any(|command| command.contains("commands are runnable")),
+                "{:?}",
+                parsed.verify_commands
+            );
+        }
+    }
+
+    #[test]
     fn every_generated_snapshot_section_reaches_the_gate_parser() {
         for mode in [Mode::Lite, Mode::Standard, Mode::Verified, Mode::Strict] {
             let spec = render_spec("Change value", 1, &mode);

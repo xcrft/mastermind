@@ -174,6 +174,7 @@ Fix failures before approval. Keep verified contracts to one or two screens.
 Strict contracts may need more space for evidence.
 
 FIND requires a repository-relative File marker and readable pre-edit contents.
+`FIND:` stands alone above its fence.
 After replacement, use postflight. `verify-spec` still tests the old precondition.
 Review CHANGE TO against the diff and final verification evidence.
 

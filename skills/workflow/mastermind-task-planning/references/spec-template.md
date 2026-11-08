@@ -42,7 +42,7 @@ acceptance:
 - [ ] <behavior that can be asserted>
 
 ## Pre-edit Snapshot
-- `<symbol>` — <caller count>; signature `<signature>`
+- `<symbol>` — <N> callers; signature `<signature>`
 
 ## Implementation Plan
 1. <outcome-oriented change>

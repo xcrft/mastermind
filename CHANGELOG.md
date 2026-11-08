@@ -39,6 +39,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify-spec` and `audit-spec` refuse spec lines they cannot read instead of
+  dropping them. A frontmatter block after a BOM or blank line, or with a
+  trailing space, fails as `frontmatter_not_at_start`. A snapshot line that
+  states a caller count or signature the parser cannot read, such as `~40
+  callers`, or states claims for several symbols, fails as `unparsed_line`, and
+  so does an upper-case FIND with text after its colon or inline code, plain
+  words above its fence, an empty fence or no fence, an empty upper-case
+  `VERIFY:`, a `VERIFY` line with several commands, and a snapshot heading that
+  is not a top-level `##` section. Snapshot prose without a count or signature
+  stays a note. Every top-level `##` heading that starts with `pre edit` and
+  names a snapshot is read. FIND, VERIFY and File markers are read inside list
+  items, and a `**File**:` marker no longer leaves FIND checked against the
+  previous file. A `- [ ] VERIFY: commands are runnable` checklist entry is no
+  longer a declared command.
+- A heading indented past a list item's content no longer splits spec sections
+  or resets the FIND target.
+- Reapproval of a task approved before this change fails with
+  `preflight_approval_schema_outdated`. Start a new task. The older parser could
+  have dropped preconditions that the edited files can no longer prove.
 - The audit change list now includes edits that `assume-unchanged` or
   `skip-worktree` hide from `git diff`. Git diffs those files again on a copy
   of the index with both flags cleared, so its own attribute, mode, symlink

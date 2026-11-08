@@ -62,6 +62,8 @@ pub enum Finding {
     /// A YAML frontmatter block was present but invalid, so its contract cannot
     /// be weakened into legacy prose heuristics.
     InvalidFrontmatter { reason: String },
+    /// A spec line the gates read but could not parse.
+    UnparsedLine { reason: String, line: String },
     /// File differs from the baseline (committed or not) but the spec didn't
     /// mention it.
     UnexpectedFile { file: String },
@@ -247,6 +249,7 @@ impl Report {
                 | Finding::PlannedTestNotAdded { .. }
                 | Finding::VacuousTestClaim { .. } => "⚠️ ",
                 Finding::InvalidFrontmatter { .. }
+                | Finding::UnparsedLine { .. }
                 | Finding::DeclaredFileUnavailable { .. }
                 | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
@@ -307,6 +310,9 @@ fn render_finding(f: &Finding) -> String {
     match f {
         Finding::InvalidFrontmatter { reason } => {
             format!("invalid_frontmatter: {reason} — repair the YAML contract")
+        }
+        Finding::UnparsedLine { reason, line } => {
+            format!("unparsed_line: {reason}: `{line}` — rewrite it in the template form")
         }
         Finding::UnexpectedFile { file } => {
             format!("unexpected_file: `{file}` changed but not in spec → scope creep")
@@ -529,6 +535,14 @@ fn run_internal(
             reason: reason.clone(),
         });
     }
+    findings.extend(
+        spec.unparsed_lines
+            .iter()
+            .map(|line| Finding::UnparsedLine {
+                reason: line.reason.to_string(),
+                line: line.line.clone(),
+            }),
+    );
     let mut observed_checks = crate::verification_receipts::inspect_checks(
         spec,
         repo_root,
@@ -1811,6 +1825,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
         matches!(
             f,
             Finding::InvalidFrontmatter { .. }
+                | Finding::UnparsedLine { .. }
                 | Finding::DeclaredFileUnavailable { .. }
                 | Finding::SnapshotSymbolGone { .. }
                 | Finding::SnapshotUnresolved { .. }
@@ -2762,6 +2777,29 @@ breaking_changes:
             finding, Finding::DeclaredFileUnavailable { file: Some(file), .. } if file == "README.md"
         )));
         assert_ne!(report.verdict, Verdict::Held);
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unparsed_snapshot_line_breaks_an_otherwise_held_audit() {
+        let dir = init_repo("unparsed_snapshot_line");
+        write(&dir, "README.md", "Before\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        write(&dir, "README.md", "After\n");
+        let mut store = Store::open(dir.join("idx.db")).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        let held = "---\nmode: lite\ntouches:\n  - file: README.md\n    scope: file\n    reason: Update setup instructions\n---\n## Goals\nUpdate setup instructions.\n";
+        let report = run(&spec::parse_str("spec.md", held), &store, &dir, "HEAD").unwrap();
+        assert_eq!(report.verdict, Verdict::Held, "{:?}", report.findings);
+
+        let unparsed = format!("{held}## Pre-edit Snapshot\n`setup` — 2 callers\n");
+        let report = run(&spec::parse_str("spec.md", &unparsed), &store, &dir, "HEAD").unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding, Finding::UnparsedLine { reason, .. } if reason == "snapshot_line_unparsed"
+        )));
+        assert_eq!(report.verdict, Verdict::Broken);
         drop(store);
         fs::remove_dir_all(&dir).unwrap();
     }

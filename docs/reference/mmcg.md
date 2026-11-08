@@ -2448,6 +2448,49 @@ Only one normalized `##` heading may define each contract section. For example,
 than competing definitions. Headings and directives inside fenced code examples
 are treated as example text, not contract data.
 
+A gate never reads an unparsed line as nothing to check. `verify-spec` reports
+`unparsed_line` as an error and `audit-spec` as a `broken` finding.
+
+| Input | Result |
+| --- | --- |
+| `---` after a BOM or a blank line, or with trailing spaces | `invalid_frontmatter: frontmatter_not_at_start` |
+| A count (`N callers`) or a signature (`` signature `sig` ``) outside a list item, or in an item without a backticked name before `signature` | `snapshot_line_unparsed` |
+| A Pre-edit Snapshot heading that is not a top-level `## ` section (`###`, `##` and a tab, a setext heading, or inside a list item) | `snapshot_heading_unparsed` |
+| Claims for several symbols or several counts in one item (`` `a`, `b` — 2 callers ``, `` `a` — 0 callers, `b` — 3 callers ``) | `snapshot_line_unparsed` |
+| A count that is not one whole number before `callers` in the same clause (`callers: 9`, `callers (4)`, `~40`, `40+`, `1,234`, `3–5`, `3 to 5`, `two`) | `snapshot_caller_count_unparsed` |
+| `signature` followed by an unreadable code span, or by a dash, arrow, parenthetical or up to three words before the span (`` signature is `sig` ``) | `snapshot_signature_unparsed` |
+| An upper-case `FIND` with text after its colon outside a checklist, inline code, plain words above a fence, an empty fence or no fence | `find_block_unparsed` |
+| An upper-case `VERIFY:` with nothing after it, a `VERIFY` with a command but no colon, or a `VERIFY` line with several or unclosed code spans | `verify_command_unparsed` |
+
+A refused line yields no claim. A snapshot item reads
+`` - `name` — N callers; signature `sig` ``. The count is the whole number
+nearest before `caller` or `callers` in the same clause, so `39 pooled indexed
+callers` reads 39 and `no callers` reads 0. A clause ends at `,`, `;`, `:`, a
+parenthesis or a dash, but not between digits. A number only after the word, as
+in `callers: 4`, is refused. `callers;` and `callers—` are the word, and
+`caller-side` is not. File locations such as
+`` `src/a.rs:12` ``, the span after `signature`, and spans after the count that
+name callers or parameters without a count of their own do not count as extra
+symbols. A later clause that opens with its own symbol and states a claim, as in
+`` `a` — 3 callers; `b` — signature `fn b()` ``, makes the line name several
+symbols. Snapshot lines that state no count or signature are planner notes.
+Every top-level `##` heading whose words start with `pre edit` and name a
+snapshot is read, after an optional section number, so `## 4. Pre edit
+snapshot:` counts.
+
+`FIND`, `VERIFY` and `File` markers are read inside list items, after a task
+checkbox and with a qualifier such as `FIND (exact):`. Fence content inside a
+list item loses the fence's indentation. A `VERIFY` marker needs a colon. An
+upper-case `VERIFY:` on its own line declares the text after it. In a list item,
+a checkbox or another letter case it declares only a backticked command, so a
+`- [ ] VERIFY: commands are runnable` checklist entry stays prose. `Find:`
+counts only when a fence follows, with or without the colon. A `)` inside a
+code span does not close a qualifier, as in ``FIND (inside `run()`):``. Indentation is
+measured in columns from the list item's content column, with a tab to the next
+multiple of four. A line four or more columns past that is an example, even
+when it continues a paragraph, and gates do not read it. A fence line indented
+four columns past its opener is content, not a closer.
+
 ### Reported verification
 
 Command matching trims outside whitespace only. Arguments, case, wrappers and

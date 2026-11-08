@@ -117,6 +117,8 @@ pub enum Finding {
     /// A normalized `## ...` heading appears more than once, so the contract is
     /// ambiguous and must be merged before it can be verified.
     DuplicateSection { section: String },
+    /// A line the gates read but could not parse.
+    UnparsedLine { reason: String, line: String },
     /// Pre-edit snapshot symbol has many callers — proceed with awareness.
     LargeBlastRadius {
         symbol: String,
@@ -250,6 +252,9 @@ fn render_finding(f: &Finding) -> String {
             format!(
                 "duplicate_section: `{section}` appears more than once — merge it into one heading"
             )
+        }
+        Finding::UnparsedLine { reason, line } => {
+            format!("unparsed_line: {reason}: `{line}` — rewrite it in the template form")
         }
         Finding::LargeBlastRadius {
             symbol,
@@ -434,6 +439,14 @@ fn run_internal(
             .iter()
             .cloned()
             .map(|section| Finding::DuplicateSection { section }),
+    );
+    errors.extend(
+        spec.unparsed_lines
+            .iter()
+            .map(|line| Finding::UnparsedLine {
+                reason: line.reason.to_string(),
+                line: line.line.clone(),
+            }),
     );
 
     // 1. Mandatory sections non-empty.
@@ -1608,6 +1621,41 @@ mode: verified
                 Finding::DuplicateSection { section } if section == "scope"
             )),
             "duplicate contract headings must fail verification: {:?}",
+            r.errors
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unparsed_snapshot_line_fails_without_an_index() {
+        let root = tmp();
+        let body = "\
+---
+id: \"1\"
+mode: verified
+---
+
+## Goals
+- Observable outcome
+## Scope
+- Boundary
+## Acceptance Criteria
+- [ ] Behavior is observable
+## Pre-edit Snapshot
+- `helper` — callers: 9
+## Tests Plan
+- focused test
+## Final Verification
+- repository gate
+";
+        let r = run(&spec::parse_str("t.md", body), None, &root);
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert!(
+            r.errors.iter().any(|error| matches!(
+                error,
+                Finding::UnparsedLine { reason, .. } if reason == "snapshot_caller_count_unparsed"
+            )),
+            "{:?}",
             r.errors
         );
         fs::remove_dir_all(&root).ok();

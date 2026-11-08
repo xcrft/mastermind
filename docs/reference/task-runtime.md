@@ -89,6 +89,7 @@ Keep the retained spec, receipts and initial-worktree preimages with the task.
 | Unchanged FIND and pre-edit symbol conditions in an amended spec | Retain their prior successful validation; implemented replacements need not restore old text or symbols |
 | Re-run preflight with the same retained spec | Rechecks current preconditions in full; invalid or unreadable targets still block approval |
 | New or changed literal, symbol, signature, caller count, file or language scope | Requires current verification |
+| Approval receipt with `schema_version` 1, from the parser that dropped unreadable lines | Still valid for its own audit, including a spec whose frontmatter block is now `frontmatter_not_at_start`; reapproval fails with `preflight_approval_schema_outdated`, start a new task |
 | Current declarations, creates, verification, acceptance and strict requirements | Checked in full against the revised contract |
 | Original Git baseline and initial-worktree manifest | Retained; implementation stays in the task delta |
 | Approval attempt | Consumes the cumulative iteration budget, including failures |

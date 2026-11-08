@@ -48,6 +48,16 @@ pub struct ParsedSpec {
     /// A present but invalid YAML block cannot fall back to a weaker contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontmatter_error: Option<String>,
+    /// Lines the gates read but could not parse. A dropped line would read as
+    /// nothing to check, so every gate refuses the spec instead.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unparsed_lines: Vec<UnparsedLine>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct UnparsedLine {
+    pub reason: &'static str,
+    pub line: String,
 }
 
 impl ParsedSpec {
@@ -411,20 +421,17 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
     // Retain the readable body for diagnostics while gates reject bad metadata.
     let (frontmatter, frontmatter_error, body_after_fm) = extract_frontmatter(body);
     let (sections, order, duplicate_section_keys) = split_sections(body_after_fm);
+    let mut unparsed_lines = Vec::new();
     let pre_edit_snapshot = order
         .iter()
-        .find(|name| {
-            matches!(
-                section_key(name).as_str(),
-                "pre-edit snapshot" | "pre-edit symbol snapshot"
-            )
-        })
-        .and_then(|name| sections.get(name))
-        .map(|body| extract_snapshot(body))
-        .unwrap_or_default();
+        .filter(|name| is_snapshot_heading(name))
+        .filter_map(|name| sections.get(name))
+        .flat_map(|body| extract_snapshot(body, &mut unparsed_lines))
+        .collect();
     let mentioned_files = extract_mentioned_files(body_after_fm);
-    let verify_commands = extract_verify_commands(body_after_fm);
-    let find_blocks = extract_find_blocks(body_after_fm);
+    unparsed_lines.extend(nested_snapshot_headings(body_after_fm));
+    let verify_commands = extract_verify_commands(body_after_fm, &mut unparsed_lines);
+    let find_blocks = extract_find_blocks(body_after_fm, &mut unparsed_lines);
 
     ParsedSpec {
         path: source_path.to_string(),
@@ -437,7 +444,54 @@ pub fn parse_str(source_path: &str, body: &str) -> ParsedSpec {
         find_blocks,
         frontmatter,
         frontmatter_error,
+        unparsed_lines,
     }
+}
+
+/// `Pre-edit Snapshot`, `Pre-edit symbol snapshot`, `Pre edit snapshot:` or
+/// any other heading whose words start with `pre edit` and name a snapshot,
+/// after an optional section number.
+fn is_snapshot_heading(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let words: Vec<_> = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .skip_while(|word| word.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    words.starts_with(&["pre", "edit"]) && words.contains(&"snapshot")
+}
+
+/// A snapshot heading that is not a top-level `## ` section, such as `###`,
+/// `##` and a tab, a setext heading or one inside a list item, whose claims
+/// no gate reads.
+fn nested_snapshot_headings(body: &str) -> Vec<UnparsedLine> {
+    let lines = crate::context_doctor::prose_lines(body);
+    let underline = |index: usize| {
+        lines.get(index + 1).is_some_and(|next| {
+            let text = next.text.trim();
+            next.index == lines[index].index + 1
+                && !text.is_empty()
+                && (text.bytes().all(|byte| byte == b'-') || text.bytes().all(|byte| byte == b'='))
+        })
+    };
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let raw = line.raw.trim_end_matches(['\r', '\n']);
+            let heading = raw.trim_start_matches([' ', '\t']);
+            let level = heading.bytes().take_while(|byte| *byte == b'#').count();
+            let atx = (1..=6).contains(&level)
+                && heading[level..].starts_with([' ', '\t'])
+                && is_snapshot_heading(&heading[level..]);
+            let setext = level == 0 && is_snapshot_heading(heading) && underline(index);
+            let section = level == 2 && heading_line(raw).starts_with("## ");
+            ((atx && !section) || setext).then(|| UnparsedLine {
+                reason: "snapshot_heading_unparsed",
+                line: line.text.trim().to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Markdown content after a leading YAML frontmatter block. Unterminated
@@ -459,7 +513,15 @@ pub fn markdown_body(body: &str) -> &str {
 /// deserialize failure the body stays readable, but is not a fallback contract.
 fn extract_frontmatter(body: &str) -> (Option<Frontmatter>, Option<String>, &str) {
     if !body.starts_with("---\n") && !body.starts_with("---\r\n") {
-        return (None, None, body);
+        // A block after a BOM, a blank line or with a trailing space would
+        // otherwise drop the whole contract to the legacy parser.
+        let misplaced = body
+            .trim_start_matches('\u{feff}')
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.trim() == "---");
+        let error = misplaced.then(|| "frontmatter_not_at_start".to_string());
+        return (None, error, body);
     }
     // Skip opening fence.
     let after_open = body
@@ -632,7 +694,7 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>, Vec<Str
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix("## ") {
+        if let Some(rest) = heading_line(line).strip_prefix("## ") {
             commit_section(
                 current.take(),
                 &mut sections,
@@ -657,6 +719,16 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>, Vec<Str
     (sections, order, duplicate_section_keys)
 }
 
+/// `line` without the up to three spaces a heading may be indented by.
+fn heading_line(line: &str) -> &str {
+    let indent = line
+        .bytes()
+        .take(3)
+        .take_while(|byte| *byte == b' ')
+        .count();
+    &line[indent..]
+}
+
 fn commit_section(
     section: Option<(String, String)>,
     sections: &mut BTreeMap<String, String>,
@@ -676,69 +748,386 @@ fn commit_section(
     sections.entry(name).or_insert(body);
 }
 
-/// `- \`name\` — 8 callers (...)` or `- \`name\` — added` bullet lines.
+/// `- \`name\` — 8 callers (...)` or `- \`name\` — added` list items.
 /// Separator is em-dash (Mastermind convention) but plain `-` is tolerated.
-/// Caller count is the first integer preceding literal "caller"
-/// (case-insensitive).
-fn extract_snapshot(body: &str) -> Vec<SymbolClaim> {
+/// The caller count is an integer up to four words before "caller", and the
+/// signature is the code span right after "signature". Keywords inside code
+/// spans are part of a name, not a claim.
+///
+/// A line that states a count or a backticked signature the parser cannot
+/// read, states one without a symbol, or states claims for several symbols
+/// is unparsed and yields no claim. Any other line is a planner note.
+fn extract_snapshot(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<SymbolClaim> {
     let mut out: Vec<SymbolClaim> = Vec::new();
     for line in crate::context_doctor::prose_lines(body) {
         let trimmed = line.text.trim();
-        if !trimmed.starts_with('-') {
+        if trimmed.is_empty() {
             continue;
         }
-        let after_dash = trimmed.trim_start_matches('-').trim();
-        // First backticked identifier — `name` (may be `mod.name` or `Type::method`).
-        let Some(start) = after_dash.find('`') else {
+        let item = strip_list_marker(trimmed);
+        let text = item.unwrap_or(trimmed);
+        let prose = outside_code_spans(text);
+        // The symbol is a span before any `signature` keyword, so a
+        // signature span is never read as the name.
+        let head = &text[..prose
+            .to_ascii_lowercase()
+            .find("signature")
+            .unwrap_or(text.len())];
+        let name = item.and(first_code_span(head));
+        let counts = caller_counts(&prose);
+        let states_count = !counts.is_empty();
+        let signatures = signatures(text, &prose);
+        let states_signature = !signatures.is_empty();
+        let reason = if !states_count && !states_signature {
+            None
+        } else if name.is_none()
+            || counts.len() > 1
+            || signatures.len() > 1
+            || names_several_symbols(text, &prose)
+        {
+            Some("snapshot_line_unparsed")
+        } else if counts.first().is_some_and(Option::is_none) {
+            Some("snapshot_caller_count_unparsed")
+        } else if signatures.first().is_some_and(Option::is_none) {
+            Some("snapshot_signature_unparsed")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            unparsed.push(UnparsedLine {
+                reason,
+                line: trimmed.to_string(),
+            });
+            continue;
+        }
+        let Some(name) = name else {
             continue;
         };
-        let Some(end_rel) = after_dash[start + 1..].find('`') else {
-            continue;
-        };
-        let full = &after_dash[start + 1..start + 1 + end_rel];
-        let callers = extract_caller_count(after_dash);
-        let signature = extract_signature(after_dash);
         out.push(SymbolClaim {
-            name: full.to_string(),
-            callers,
-            signature,
+            name: name.to_string(),
+            callers: counts.first().copied().flatten(),
+            signature: signatures.first().copied().flatten().map(str::to_string),
             raw: trimmed.to_string(),
         });
     }
     out
 }
 
-/// Extract the bullet's canonical `signature \`<sig>\`` claim, or None.
-fn extract_signature(text: &str) -> Option<String> {
-    // The match offset is reused against `text`, so normalization must preserve
-    // byte positions. Full Unicode lowercasing can expand characters before the
-    // ASCII keyword (for example `İ`) and shift the slice into later content.
-    let lower = text.to_ascii_lowercase();
-    let key = lower.find("signature")?;
-    let after = text[key + "signature".len()..].trim_start_matches(['*', ' ', ':', '=']);
-    // Preferred: backticked.
-    if let Some(stripped) = after.strip_prefix('`') {
-        if let Some(end) = stripped.find('`') {
-            let sig = stripped[..end].trim();
-            if !sig.is_empty() {
-                return Some(sig.to_string());
+/// One entry per `signature` keyword followed by a code span: the span when
+/// only `**`, `:` or `=` separate them, None when a dash, arrow,
+/// parenthetical or up to three words in the same clause do. `prose` is
+/// `text` with code spans blanked.
+fn signatures<'a>(text: &'a str, prose: &str) -> Vec<Option<&'a str>> {
+    let lower = prose.to_ascii_lowercase();
+    lower
+        .match_indices("signature")
+        .filter_map(|(key, word)| {
+            let after = &text[key + word.len()..];
+            let after = after.strip_prefix('s').unwrap_or(after);
+            let canonical = after.trim_start_matches(['*', ' ', ':', '=']);
+            if canonical.starts_with('`') {
+                return Some(first_code_span(canonical));
             }
-        }
-    }
-    None
+            let mut gap = canonical;
+            if let Some(rest) = gap
+                .trim_start_matches(['—', '–', '-', ' '])
+                .strip_prefix('(')
+            {
+                gap = rest.split_once(')').map_or(gap, |(_, rest)| rest);
+            }
+            let (words, _) = gap.split_once('`')?;
+            let clause = !words.contains([';', '.', ',']);
+            let words = words
+                .split_whitespace()
+                .filter(|word| word.chars().any(char::is_alphanumeric))
+                .count();
+            (clause && words <= 3).then_some(None)
+        })
+        .collect()
 }
 
-fn extract_caller_count(text: &str) -> Option<u32> {
-    // Walk words looking for "<int> caller(s)".
-    let words: Vec<&str> = text.split_whitespace().collect();
-    for (i, w) in words.iter().enumerate() {
-        if w.to_lowercase().starts_with("caller") && i > 0 {
-            if let Ok(n) = words[i - 1].parse::<u32>() {
-                return Some(n);
+/// Content of the code span `text` starts with, or of the first one in it
+/// when `text` does not start with a backtick. A span closes on a run of the
+/// same number of backticks.
+fn first_code_span(text: &str) -> Option<&str> {
+    next_code_span(text)
+        .map(|(span, _)| span)
+        .filter(|span| !span.is_empty())
+}
+
+/// Trimmed content of the first code span in `text` and the offset after it.
+fn next_code_span(text: &str) -> Option<(&str, usize)> {
+    let start = text.find('`')?;
+    let rest = &text[start..];
+    let width = rest.bytes().take_while(|byte| *byte == b'`').count();
+    let content = &rest[width..];
+    let fence = &rest[..width];
+    let (end, _) = content.match_indices(fence).find(|(end, _)| {
+        (*end == 0 || content.as_bytes()[end - 1] != b'`')
+            && content.as_bytes().get(end + width) != Some(&b'`')
+    })?;
+    Some((content[..end].trim(), start + width + end + width))
+}
+
+/// `text` with every code span's content blanked byte for byte, so keyword
+/// offsets still index `text`.
+fn outside_code_spans(text: &str) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    // The opening run's offset and width.
+    let mut open: Option<(usize, usize)> = None;
+    let mut index = 0;
+    loop {
+        if index == bytes.len() {
+            // A run that never closes is literal text, so scan again after it.
+            let Some((start, width)) = open.take() else {
+                break;
+            };
+            bytes[start..].copy_from_slice(&text.as_bytes()[start..]);
+            index = start + width;
+            continue;
+        }
+        if bytes[index] != b'`' {
+            if open.is_some() {
+                bytes[index] = b' ';
             }
+            index += 1;
+            continue;
+        }
+        let width = bytes[index..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        open = match open {
+            Some((_, opened)) if opened == width => None,
+            Some(opened) => {
+                bytes[index..index + width].fill(b' ');
+                Some(opened)
+            }
+            None => Some((index, width)),
+        };
+        index += width;
+    }
+    String::from_utf8(bytes).expect("only ASCII bytes and whole characters change")
+}
+
+/// Claims for more than the item's first symbol: another symbol span before
+/// the first `caller` or `signature` keyword, as in `` `a`, `b` — 2 callers ``,
+/// or one followed by its own count, as in `` `a` — 1 caller; `b` — 2 ``.
+/// File locations and spans that only name callers or parameters do not
+/// count.
+fn names_several_symbols(text: &str, prose: &str) -> bool {
+    let lower = prose.to_ascii_lowercase();
+    let claim = ["caller", "signature"]
+        .into_iter()
+        .filter_map(|keyword| lower.find(keyword))
+        .min()
+        .unwrap_or(text.len());
+    let mut offset = 0;
+    let mut symbols = 0;
+    while let Some((span, end)) = next_code_span(&text[offset..]) {
+        let start = offset + text[offset..].find('`').unwrap_or(0);
+        offset += end;
+        let location = is_location(span);
+        let signature = prose[..start]
+            .trim_end_matches([' ', ':', '=', '*'])
+            .to_ascii_lowercase()
+            .ends_with("signature");
+        if span.is_empty() || location || signature {
+            continue;
+        }
+        symbols += 1;
+        let counted = text[offset..]
+            .trim_start_matches([' ', '—', '–', '-', '(', ':', '='])
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| number_like(word.trim_end_matches([')', ',', ';', '.'])));
+        if symbols > 1 && (start < claim || counted) {
+            return true;
         }
     }
-    None
+    // A later clause that opens with its own symbol and states a claim, as in
+    // `` `a` — 3 callers; `b` — signature `fn b()` ``.
+    let breaks = lower
+        .match_indices(';')
+        .map(|(at, _)| at + 1)
+        .chain(lower.match_indices(". ").map(|(at, _)| at + 2));
+    breaks.into_iter().any(|at| {
+        let end = lower[at..]
+            .find([';'])
+            .into_iter()
+            .chain(lower[at..].find(". "))
+            .min()
+            .map_or(lower.len(), |end| at + end);
+        let clause = text[at..end].trim_start();
+        let claims = lower[at..end].contains("caller") || lower[at..end].contains("signature");
+        clause.starts_with('`')
+            && claims
+            && next_code_span(clause)
+                .is_some_and(|(span, _)| !span.is_empty() && !is_location(span))
+    })
+}
+
+/// A path or `file:line` span, which locates a symbol rather than naming one.
+fn is_location(span: &str) -> bool {
+    looks_like_path(span)
+        || span
+            .split_once(':')
+            .is_some_and(|(_, after)| after.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Text after a `-`, `*`, `+`, `1.` or `1)` list marker, or None.
+fn strip_list_marker(line: &str) -> Option<&str> {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = if digits > 0 {
+        line[digits..].strip_prefix(['.', ')'])?
+    } else {
+        line.strip_prefix(['-', '*', '+'])?
+    };
+    rest.starts_with(char::is_whitespace).then(|| rest.trim())
+}
+
+/// A directive line such as `**FIND:**`, `FIND (exact):` or `- [ ] Verify: \`x\``.
+struct Directive<'a> {
+    word: &'a str,
+    colon: bool,
+    /// Written as a list item or task checkbox.
+    listed: bool,
+    rest: &'a str,
+}
+
+/// Read a directive after any list marker, task checkbox and bold markers.
+fn directive(line: &str) -> Option<Directive<'_>> {
+    let line = line.trim();
+    let marked = strip_list_marker(line);
+    let item = marked.unwrap_or(line);
+    let checked = ["[ ]", "[x]", "[X]"]
+        .into_iter()
+        .find_map(|checkbox| item.strip_prefix(checkbox));
+    let listed = marked.is_some() || checked.is_some();
+    let item = checked.map_or(item, str::trim_start);
+    let item = item.trim_start_matches('*');
+    let length = item.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if length == 0 {
+        return None;
+    }
+    let (word, rest) = item.split_at(length);
+    let mut rest = rest.trim_start_matches('*').trim_start();
+    if rest.starts_with('(') {
+        // A `)` inside a code span does not close the qualifier.
+        let close = outside_code_spans(rest).find(')');
+        rest = close.map_or(rest, |at| &rest[at + 1..]);
+        rest = rest.trim_start_matches('*').trim_start();
+    }
+    let colon = rest.starts_with(':');
+    let rest = rest
+        .strip_prefix(':')
+        .unwrap_or(rest)
+        .trim_start_matches('*');
+    Some(Directive {
+        word,
+        colon,
+        listed,
+        rest,
+    })
+}
+
+/// One entry per `caller` or `callers` word that states a count. The count
+/// is the integer nearest before the word in its clause, or 0 for `no`. A
+/// clause ends at `,`, `;`, `:`, a parenthesis, a dash or the previous such
+/// word. A second number in that clause, an approximate, formatted or
+/// spelled-out number, or any number in the three words after the word, as
+/// in `callers: 4`, is None.
+fn caller_counts(prose: &str) -> Vec<Option<u32>> {
+    const BACK: [char; 7] = [',', ';', ':', '(', ')', '—', '–'];
+    const AHEAD: [char; 4] = [',', ';', '.', ')'];
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|word| {
+                word.trim_matches(['*', '.', ',', ';', ':', '(', ')'])
+                    .to_string()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    };
+    // `callers;`, `callers—two` and `(callers)` count. `caller-side` does not.
+    let lower = prose.to_ascii_lowercase();
+    let word_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_');
+    let keywords: Vec<(usize, usize)> = lower
+        .match_indices("caller")
+        .filter_map(|(start, word)| {
+            let end =
+                start + word.len() + usize::from(lower[start + word.len()..].starts_with('s'));
+            let open = !lower[..start].chars().next_back().is_some_and(word_char);
+            let close = !lower[end..].chars().next().is_some_and(word_char);
+            (open && close).then_some((start, end))
+        })
+        .collect();
+    let mut previous_end = 0;
+    let mut out = Vec::new();
+    for (index, &(start, end)) in keywords.iter().enumerate() {
+        let before = &prose[previous_end..start];
+        // A comma or dash between digits, as in `1,234` or `3–5`, does not
+        // end the clause.
+        let digit_at = |at: usize| before[at..].starts_with(|c: char| c.is_ascii_digit());
+        let clause = before
+            .char_indices()
+            .filter(|&(at, c)| {
+                let inside = at > 0
+                    && before[..at].ends_with(|c: char| c.is_ascii_digit())
+                    && digit_at(at + c.len_utf8());
+                BACK.contains(&c) && !inside
+            })
+            .map(|(at, c)| at + c.len_utf8())
+            .chain(before.rfind(". ").map(|at| at + 2))
+            .max()
+            .unwrap_or(0);
+        let before = words(&before[clause..]);
+        let next = keywords
+            .get(index + 1)
+            .map_or(prose.len(), |&(next, _)| next);
+        let after = prose[end..next].trim_start_matches([' ', '(', '—', '–', ':', '=', '-']);
+        let after = words(&after[..after.find(AHEAD).unwrap_or(after.len())]);
+        previous_end = end;
+        let numbers = before.iter().filter(|word| number_like(word)).count();
+        let read = before.iter().rev().find_map(|word| {
+            if word.eq_ignore_ascii_case("no") {
+                Some(0)
+            } else {
+                word.parse().ok()
+            }
+        });
+        match read {
+            Some(count) if numbers <= 1 => out.push(Some(count)),
+            Some(_) => out.push(None),
+            None if numbers > 0 || after.iter().take(3).any(|word| number_like(word)) => {
+                out.push(None)
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// `40`, `~40`, `40+`, `1,234`, `12k`, `3–5` or a number word.
+fn number_like(word: &str) -> bool {
+    const WORDS: &str = "zero one two three four five six seven eight nine ten eleven twelve \
+        thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty \
+        sixty seventy eighty ninety hundred dozen none";
+    if WORDS
+        .split_whitespace()
+        .any(|known| known.eq_ignore_ascii_case(word))
+    {
+        return true;
+    }
+    let digits = word
+        .trim_start_matches(['~', '≈'])
+        .trim_end_matches(['+', 'k', 'K']);
+    // One range separator at most, so a date is not a count.
+    digits.starts_with(|c: char| c.is_ascii_digit())
+        && digits
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ',' | '–' | '-'))
+        && digits.matches(['–', '-']).count() <= 1
 }
 
 /// Every backticked token that looks like a path — directory separator OR file
@@ -800,32 +1189,53 @@ fn looks_like_path(s: &str) -> bool {
     has_slash || has_known_ext
 }
 
-/// `**VERIFY**: `cmd`` or `**VERIFY**: command-without-backticks`. Strips the
-/// leading bold marker, returns the command text.
-fn extract_verify_commands(body: &str) -> Vec<String> {
+/// `**VERIFY**: \`cmd\``, `VERIFY: cmd` or `Verify: \`cmd\``. An upper-case
+/// marker on its own line declares the text after its colon. A list item,
+/// checkbox or another case declares only a backticked command, so a
+/// checklist entry or prose `Verify:` note stays prose. An upper-case marker
+/// with nothing after it, or a line with several or unclosed code spans, is
+/// unparsed.
+fn extract_verify_commands(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in crate::context_doctor::prose_lines(body) {
-        let trimmed = line.text.trim();
-        let after = trimmed
-            .strip_prefix("**VERIFY**:")
-            .or_else(|| trimmed.strip_prefix("**VERIFY:**"))
-            .or_else(|| trimmed.strip_prefix("VERIFY:"));
-        let Some(after) = after else { continue };
-        let after = after.trim();
-        let fence_len = after.bytes().take_while(|byte| *byte == b'`').count();
-        let cmd = if fence_len == 0 {
-            after
+        let Some(marker) = directive(line.text) else {
+            continue;
+        };
+        let after = marker.rest.trim();
+        let bare = marker.word == "VERIFY"
+            && !marker.colon
+            && !marker.listed
+            && after
+                .trim_start_matches(['—', '–', '-', ' '])
+                .starts_with('`');
+        if bare {
+            unparsed.push(UnparsedLine {
+                reason: "verify_command_unparsed",
+                line: line.text.trim().to_string(),
+            });
+            continue;
+        }
+        let declared = marker.colon
+            && marker.word.eq_ignore_ascii_case("verify")
+            && (after.starts_with('`') || (marker.word == "VERIFY" && !marker.listed));
+        if !declared {
+            continue;
+        }
+        let several = after.starts_with('`')
+            && next_code_span(after)
+                .is_some_and(|(_, end)| first_code_span(&after[end..]).is_some());
+        let unclosed = after.starts_with('`') && first_code_span(after).is_none();
+        if several || unclosed || (marker.word == "VERIFY" && after.is_empty()) {
+            unparsed.push(UnparsedLine {
+                reason: "verify_command_unparsed",
+                line: line.text.trim().to_string(),
+            });
+            continue;
+        }
+        let cmd = if after.starts_with('`') {
+            first_code_span(after).unwrap_or(after)
         } else {
-            let fence = &after[..fence_len];
-            let content = &after[fence_len..];
-            content
-                .match_indices(fence)
-                .find(|(end, _)| {
-                    (*end == 0 || content.as_bytes()[end - 1] != b'`')
-                        && content.as_bytes().get(end + fence_len) != Some(&b'`')
-                })
-                .map(|(end, _)| &content[..end])
-                .unwrap_or(after)
+            after
         };
         let cmd = cmd.trim();
         if !cmd.is_empty() {
@@ -845,7 +1255,10 @@ fn extract_verify_commands(body: &str) -> Vec<String> {
 ///
 /// Tracks the most recent phase heading + `**File:**` line, then on `FIND:`
 /// followed by a fenced block emits a FindBlock with whatever context is active.
-fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
+/// An upper-case FIND with text after its colon (outside a checklist), inline
+/// code, plain words above a fence, an empty fence or no fence is unparsed. Another case counts only as a marker
+/// followed by a fence, with or without a colon.
+fn extract_find_blocks(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<FindBlock> {
     let mut out: Vec<FindBlock> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_phase: Option<String> = None;
@@ -860,9 +1273,10 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
             continue;
         }
         let trimmed = line.trim();
+        let heading = heading_line(line);
 
         // Track phase headings — `## Phase N: ...` and `### N.M ...`.
-        if let Some(rest) = trimmed.strip_prefix("## ") {
+        if let Some(rest) = heading.strip_prefix("## ") {
             if rest.to_lowercase().starts_with("phase ") {
                 current_phase = Some(rest.trim().to_string());
                 current_file = None; // file marker is scoped to a subsection
@@ -873,7 +1287,7 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("### ") {
+        if let Some(rest) = heading.strip_prefix("### ") {
             // Subphase inherits the parent phase label.
             if let Some(parent) = &current_phase {
                 current_phase = Some(format!("{parent} / {}", rest.trim()));
@@ -884,50 +1298,85 @@ fn extract_find_blocks(body: &str) -> Vec<FindBlock> {
             continue;
         }
 
-        // `**File:** \`<path>\`` markers.
-        if let Some(rest) = trimmed.strip_prefix("**File:**") {
-            current_file = parse_backticked(rest.trim());
+        let Some(marker) = directive(trimmed) else {
+            continue;
+        };
+        // An unreadable File value clears the target, so a later FIND cannot
+        // be checked against the previous file.
+        if marker.word.eq_ignore_ascii_case("file") && marker.colon {
+            current_file = parse_backticked(marker.rest.trim());
             continue;
         }
-
-        // FIND: marker — next line opens a code fence; consume until closing
-        // fence, payload is everything between.
-        if trimmed == "FIND:" || trimmed == "**FIND:**" || trimmed == "**FIND**:" {
-            let mut payload = String::new();
-            // Skip blanks, then expect fence opener.
-            let mut opened = None;
-            while let Some((_, next)) = lines.peek() {
-                let nt = next.trim();
-                if nt.is_empty() && opened.is_none() {
+        if !marker.word.eq_ignore_ascii_case("find") {
+            continue;
+        }
+        let upper = marker.word == "FIND";
+        let inline = marker.rest.trim();
+        let fenced = lines
+            .clone()
+            .map(|(_, next)| next)
+            .find(|next| !next.trim().is_empty())
+            .is_some_and(|next| fence_opener(next).is_some());
+        if !inline.is_empty() || !(upper || marker.colon || fenced) {
+            // Inline code, or plain words above a fence, is a FIND the
+            // parser cannot bind to its block.
+            if upper
+                && !inline.is_empty()
+                && ((marker.colon && !marker.listed) || inline.contains('`') || fenced)
+            {
+                unparsed.push(UnparsedLine {
+                    reason: "find_block_unparsed",
+                    line: trimmed.to_string(),
+                });
+            }
+            continue;
+        }
+        // Skip blanks, then expect a fence opener. Payload lines lose the
+        // opener's indentation, as in a fence inside a list item.
+        let mut payload = String::new();
+        let mut opened = None;
+        while let Some((_, next)) = lines.peek() {
+            if next.trim().is_empty() && opened.is_none() {
+                lines.next();
+                continue;
+            }
+            if let Some((fence, indent, opener_column)) = opened {
+                let lead = next.len() - next.trim_start_matches([' ', '\t']).len();
+                // Four columns past the opener is content, not a closer.
+                let column = crate::context_doctor::width(&next[..lead], 0);
+                if column <= opener_column + 3 && fence_closes(next, fence) {
+                    lines.next();
+                    break;
+                }
+                payload.push_str(&next[lead.min(indent)..]);
+                payload.push('\n');
+                lines.next();
+            } else {
+                if let Some(fence) = fence_opener(next) {
+                    let indent = next.len() - next.trim_start_matches([' ', '\t']).len();
+                    let column = crate::context_doctor::width(&next[..indent], 0);
+                    opened = Some((fence, indent, column));
                     lines.next();
                     continue;
                 }
-                if let Some(fence) = opened {
-                    if fence_closes(next, fence) {
-                        lines.next();
-                        break;
-                    }
-                    payload.push_str(next);
-                    payload.push('\n');
-                    lines.next();
-                } else {
-                    if let Some(fence) = fence_opener(next) {
-                        opened = Some(fence);
-                        lines.next();
-                        continue;
-                    }
-                    break; // No fence after FIND: — abandon this block.
-                }
-            }
-            let payload = payload.trim_end_matches('\n').to_string();
-            if !payload.is_empty() {
-                out.push(FindBlock {
-                    file: current_file.clone(),
-                    find_text: payload,
-                    phase: current_phase.clone(),
-                });
+                break;
             }
         }
+        let payload = payload.trim_end_matches('\n');
+        if payload.trim().is_empty() {
+            if upper || opened.is_some() {
+                unparsed.push(UnparsedLine {
+                    reason: "find_block_unparsed",
+                    line: trimmed.to_string(),
+                });
+            }
+            continue;
+        }
+        out.push(FindBlock {
+            file: current_file.clone(),
+            find_text: payload.to_string(),
+            phase: current_phase.clone(),
+        });
     }
     out
 }
@@ -1273,6 +1722,424 @@ fn old_test() {}
         assert!(s.frontmatter.is_none());
         // Body still parses through the heuristic path.
         assert!(s.section_order.iter().any(|n| n.starts_with("Goals")));
+    }
+
+    #[test]
+    fn a_frontmatter_block_not_at_the_first_byte_is_an_error() {
+        for body in [
+            "\n---\nmode: strict\n---\n## Goals\n- x\n",
+            "\u{feff}---\nmode: strict\n---\n## Goals\n- x\n",
+            "--- \nmode: strict\n---\n## Goals\n- x\n",
+            "\r\n---\r\nmode: strict\r\n---\r\n## Goals\r\n- x\r\n",
+            "\u{feff}\n---\nmode: strict\n---\n## Goals\n- x\n",
+        ] {
+            let parsed = parse_str("t.md", body);
+            assert!(parsed.frontmatter.is_none(), "{body:?}");
+            assert_eq!(
+                parsed.frontmatter_error.as_deref(),
+                Some("frontmatter_not_at_start"),
+                "{body:?}"
+            );
+        }
+        let placed = parse_str("t.md", "---\nmode: strict\n---\n## Goals\n- x\n");
+        assert!(placed.frontmatter_error.is_none());
+        assert_eq!(placed.frontmatter.unwrap().mode.as_deref(), Some("strict"));
+    }
+
+    #[test]
+    fn snapshot_lines_outside_the_template_form_are_unparsed() {
+        let body = "\
+## Pre-edit Snapshot (from mmcg)
+* `star` — 3 callers
++ `plus` — 1 indexed caller
+1) `numbered` — 39 pooled indexed callers; signature ``fn numbered(x: &[u8])``
+- `get_caller` — added
+- `verify_signature` — 2 callers; signature unchanged
+- `added` — added in this spec
+- [ ] `checked` — **4** callers
+1. Step
+    - `nested` — callers: 2
+- plain — 3 callers
+- `spaced` — callers: 9
+- `doubled` — 1 caller; signature `` `
+- `first`, `second` — 2 callers
+-`tight` — 5 callers
+- `deep` — 39 indexed direct containing callers
+- `approx` — ~40 callers
+- `formatted` — 1,234 callers
+- `use` — 0 callers, `helper` — 39 callers
+- `validate_report` (28 callers), `read_reports` (7)
+- `arrow` — 2 callers; signature → `fn arrow()`
+- `later` — 2 callers; signatures stay. New signature: `fn later()`
+- `located` in `src/a.rs:12` — 3 callers
+- `listed` — 2 callers (`evaluate`, `run`); its `now` parameter is kept
+- `unused` — no callers
+- No caller-count inference was made for `inferred`.
+- `wordy` — 2 callers; signature is `fn wrong()`
+- `kept` — signature unchanged: `fn wrong()`
+- `tick` — handles the ` character, 9 callers
+- `open — 3 callers
+- signature `fn nameless()`
+- `gamma` (line 120) — callers: 4
+- `delta` — 1 file, callers: 4
+- `alpha` — 3 callers, all callers in src/cli
+- `zeta` — 2 callers; caller-side change needed
+- `beta` — signature `fn beta()` — 3 callers
+- `eps` — no direct callers
+- `far` — 5 indexed direct non-test production callers
+- `spread` — 3 callers in 2 files
+- `omega` — 3 callers and test callers
+- `first` — 3 callers; `second` — signature `fn second()`
+- `sig_first` — signature `fn sig_first()`; `later` has 3 callers
+- `glued` — 3 callers;signature `fn glued()`
+- `slash` — 3 callers/2 callees
+- `glued_count` — callers:4
+- `glued_open` —callers=4
+- `paren` — callers (4): `a`, `b`
+- `dash` — callers — 4
+- `range` — 3–5 callers
+- `spelled_range` — 3 to 5 callers
+- The converted functions keep their signatures.
+| `table` | 3 |
+Callers were read from source at 1556c27 because `mmcg_brief` was stale.
+`prose` — 2 callers
+<!-- planner note -->
+";
+        let parsed = parse_str("t.md", body);
+        let claims: Vec<_> = parsed
+            .pre_edit_snapshot
+            .iter()
+            .map(|claim| {
+                (
+                    claim.name.as_str(),
+                    claim.callers,
+                    claim.signature.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            claims,
+            [
+                ("star", Some(3), None),
+                ("plus", Some(1), None),
+                ("numbered", Some(39), Some("fn numbered(x: &[u8])")),
+                ("get_caller", None, None),
+                ("verify_signature", Some(2), None),
+                ("added", None, None),
+                ("checked", Some(4), None),
+                ("deep", Some(39), None),
+                ("later", Some(2), Some("fn later()")),
+                ("located", Some(3), None),
+                ("listed", Some(2), None),
+                ("unused", Some(0), None),
+                ("inferred", None, None),
+                ("tick", Some(9), None),
+                ("alpha", Some(3), None),
+                ("zeta", Some(2), None),
+                ("beta", Some(3), Some("fn beta()")),
+                ("eps", Some(0), None),
+                ("far", Some(5), None),
+                ("spread", Some(3), None),
+                ("omega", Some(3), None),
+                ("glued", Some(3), Some("fn glued()")),
+                ("slash", Some(3), None),
+            ]
+        );
+        let unparsed: Vec<_> = parsed
+            .unparsed_lines
+            .iter()
+            .map(|line| (line.reason, line.line.as_str()))
+            .collect();
+        assert_eq!(
+            unparsed,
+            [
+                ("snapshot_caller_count_unparsed", "- `nested` — callers: 2"),
+                ("snapshot_line_unparsed", "- plain — 3 callers"),
+                ("snapshot_caller_count_unparsed", "- `spaced` — callers: 9"),
+                (
+                    "snapshot_signature_unparsed",
+                    "- `doubled` — 1 caller; signature `` `"
+                ),
+                ("snapshot_line_unparsed", "- `first`, `second` — 2 callers"),
+                ("snapshot_line_unparsed", "-`tight` — 5 callers"),
+                ("snapshot_caller_count_unparsed", "- `approx` — ~40 callers"),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `formatted` — 1,234 callers"
+                ),
+                (
+                    "snapshot_line_unparsed",
+                    "- `use` — 0 callers, `helper` — 39 callers"
+                ),
+                (
+                    "snapshot_line_unparsed",
+                    "- `validate_report` (28 callers), `read_reports` (7)"
+                ),
+                (
+                    "snapshot_signature_unparsed",
+                    "- `arrow` — 2 callers; signature → `fn arrow()`"
+                ),
+                (
+                    "snapshot_signature_unparsed",
+                    "- `wordy` — 2 callers; signature is `fn wrong()`"
+                ),
+                (
+                    "snapshot_signature_unparsed",
+                    "- `kept` — signature unchanged: `fn wrong()`"
+                ),
+                ("snapshot_line_unparsed", "- `open — 3 callers"),
+                ("snapshot_line_unparsed", "- signature `fn nameless()`"),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `gamma` (line 120) — callers: 4"
+                ),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `delta` — 1 file, callers: 4"
+                ),
+                (
+                    "snapshot_line_unparsed",
+                    "- `first` — 3 callers; `second` — signature `fn second()`"
+                ),
+                (
+                    "snapshot_line_unparsed",
+                    "- `sig_first` — signature `fn sig_first()`; `later` has 3 callers"
+                ),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `glued_count` — callers:4"
+                ),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `glued_open` —callers=4"
+                ),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `paren` — callers (4): `a`, `b`"
+                ),
+                ("snapshot_caller_count_unparsed", "- `dash` — callers — 4"),
+                ("snapshot_caller_count_unparsed", "- `range` — 3–5 callers"),
+                (
+                    "snapshot_caller_count_unparsed",
+                    "- `spelled_range` — 3 to 5 callers"
+                ),
+                ("snapshot_line_unparsed", "`prose` — 2 callers"),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_headings_are_matched_by_their_words() {
+        for heading in [
+            "## Pre-edit Snapshot",
+            "## Pre-edit symbol snapshot",
+            "## Pre-edit snapshot *(filled by planner via mmcg)*",
+            "## Pre edit snapshot:",
+            "## **Pre-edit Snapshot**",
+            "  ## Pre-edit Snapshot",
+            "## 4. Pre-edit Snapshot",
+        ] {
+            let parsed = parse_str("t.md", &format!("{heading}\n- `helper` — 2 callers\n"));
+            assert_eq!(parsed.pre_edit_snapshot.len(), 1, "{heading}");
+        }
+        let unrelated = parse_str("t.md", "## Snapshot tests\n- `helper` — 2 callers\n");
+        assert!(unrelated.pre_edit_snapshot.is_empty());
+        let nested = parse_str(
+            "t.md",
+            "## Phase 1: Edit\n### Pre-edit Snapshot\n- `helper` — 2 callers\n### Snapshot tests\n- Fix it.\n\n    ## Pre-edit Snapshot\n\n##\tPre-edit Snapshot\n\nPre-edit Snapshot\n---\n",
+        );
+        let unparsed: Vec<_> = nested
+            .unparsed_lines
+            .iter()
+            .map(|line| (line.reason, line.line.as_str()))
+            .collect();
+        assert_eq!(
+            unparsed,
+            [
+                ("snapshot_heading_unparsed", "### Pre-edit Snapshot"),
+                ("snapshot_heading_unparsed", "## Pre-edit Snapshot"),
+                ("snapshot_heading_unparsed", "##\tPre-edit Snapshot"),
+                ("snapshot_heading_unparsed", "Pre-edit Snapshot"),
+            ]
+        );
+        let split = parse_str(
+            "t.md",
+            "## Pre-edit Snapshot\n- `a` — 1 caller\n## Notes\n- `n` — 5 callers\n## Pre-edit snapshot (tests)\n- `b` — 2 callers\n",
+        );
+        let names: Vec<_> = split
+            .pre_edit_snapshot
+            .iter()
+            .map(|claim| claim.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_heading_inside_a_list_item_keeps_the_find_target() {
+        let body = "## Phase 1: Edit\n**File:** `a.py`\n- Usage notes\n    ## Usage\nFIND:\n```python\ndef a():\n```\n";
+        let parsed = parse_str("t.md", body);
+        assert_eq!(parsed.find_blocks[0].file.as_deref(), Some("a.py"));
+        assert!(parsed.sections.contains_key("Phase 1: Edit"));
+        assert_eq!(parsed.section_order, ["Phase 1: Edit"]);
+    }
+
+    #[test]
+    fn find_markers_in_other_forms_are_unparsed() {
+        let body = "\
+## Phase 1: Edit
+**File:** `a.py`
+FIND:
+Not a fence.
+FIND: `inline`
+**FIND** in `a.py`:
+FIND:
+```
+```
+FIND: blocks below are optional.
+Find `helper` and rename it.
+Find:
+then prose
+1. FIND:
+   ```python
+   def listed():
+       return 1
+   ```
+2. Step
+
+    **Find**:
+    ```python
+    def nested():
+    ```
+- [ ] **FIND (exact):**
+  ```python
+  def checked():
+  ```
+- **File**: `b.py`
+FIND :
+```python
+def b():
+```
+FIND in b.py:
+
+```python
+def plain():
+```
+**File:** b.py
+**FIND:**
+```python
+def c():
+```
+3. FIND:
+\t```python
+\tdef tabbed():
+\t```
+**Find**
+```python
+def bold():
+```
+**Find** (inside `run()`):
+```markdown
+1. Run:
+    ```bash
+    cargo test
+    ```
+NOT IN FILE
+```
+FIND:
+```
+fn a() {
+\t```
+not_in_file();
+```
+";
+        let parsed = parse_str("t.md", body);
+        let blocks: Vec<_> = parsed
+            .find_blocks
+            .iter()
+            .map(|block| (block.file.as_deref(), block.find_text.as_str()))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                (Some("a.py"), "def listed():\n    return 1"),
+                (Some("a.py"), "def nested():"),
+                (Some("a.py"), "def checked():"),
+                (Some("b.py"), "def b():"),
+                (None, "def c():"),
+                (None, "def tabbed():"),
+                (None, "def bold():"),
+                (
+                    None,
+                    "1. Run:\n    ```bash\n    cargo test\n    ```\nNOT IN FILE"
+                ),
+                (None, "fn a() {\n\t```\nnot_in_file();"),
+            ]
+        );
+        let unparsed: Vec<_> = parsed
+            .unparsed_lines
+            .iter()
+            .map(|line| (line.reason, line.line.as_str()))
+            .collect();
+        assert_eq!(
+            unparsed,
+            [
+                ("find_block_unparsed", "FIND:"),
+                ("find_block_unparsed", "FIND: `inline`"),
+                ("find_block_unparsed", "**FIND** in `a.py`:"),
+                ("find_block_unparsed", "FIND:"),
+                ("find_block_unparsed", "FIND: blocks below are optional."),
+                ("find_block_unparsed", "FIND in b.py:"),
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_markers_are_read_inside_list_items() {
+        let body = "\
+## Phase 1: Edit
+- **VERIFY**: `cargo test listed`
+1. **VERIFY:** `cargo test numbered`
+- [ ] VERIFY: cargo test checked
+- [ ] Verify `--json` output is stable
+Verify: `cargo test mixed`
+**VERIFY** `cargo test bare`
+1. Run checks
+
+    **VERIFY**: `cargo test nested`
+- Verify: the page still renders after reload
+**VERIFY**:
+VERIFY: `cargo test one` and `cargo test two`
+VERIFY: `cargo test unclosed
+VERIFY (covers `parse()`): `cargo test qualified`
+";
+        let parsed = parse_str("t.md", body);
+        let unparsed: Vec<_> = parsed
+            .unparsed_lines
+            .iter()
+            .map(|line| (line.reason, line.line.as_str()))
+            .collect();
+        assert_eq!(
+            unparsed,
+            [
+                ("verify_command_unparsed", "**VERIFY** `cargo test bare`"),
+                ("verify_command_unparsed", "**VERIFY**:"),
+                (
+                    "verify_command_unparsed",
+                    "VERIFY: `cargo test one` and `cargo test two`"
+                ),
+                ("verify_command_unparsed", "VERIFY: `cargo test unclosed"),
+            ]
+        );
+        assert_eq!(
+            parsed.verify_commands,
+            [
+                "cargo test listed",
+                "cargo test numbered",
+                "cargo test mixed",
+                "cargo test nested",
+                "cargo test qualified",
+            ]
+        );
     }
 
     #[test]

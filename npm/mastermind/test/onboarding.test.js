@@ -6,17 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { PROFILE_SKILLS } from "../bin/install.js";
 
 const SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NATIVE = process.env.MMCG_TEST_BINARY;
-const CORE = [
-  "mastermind-agent-handoff",
-  "mastermind-architecture-review", "mastermind-change-impact", "mastermind-codegraph-research",
-  "mastermind-comment-audit", "mastermind-critical-review", "mastermind-investigation-ledger",
-  "mastermind-project-history", "mastermind-project-map", "mastermind-product-intake",
-  "mastermind-structured-report-contract", "mastermind-task-executor", "mastermind-task-planning",
-  "mastermind-test-audit", "mastermind-test-impact", "no-ai-slop-comments",
-];
+const CORE = PROFILE_SKILLS.core;
 const CODEX = `
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

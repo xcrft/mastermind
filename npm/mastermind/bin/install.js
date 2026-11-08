@@ -56,7 +56,7 @@ const SECURITY_SKILLS = [
 ].sort();
 
 export const PROFILE_NAMES = Object.freeze(["core", "frontend", "security", "full"]);
-const PROFILE_SKILLS = Object.freeze({
+export const PROFILE_SKILLS = Object.freeze({
   core: Object.freeze(CORE_SKILLS),
   frontend: Object.freeze(FRONTEND_SKILLS),
   security: Object.freeze(SECURITY_SKILLS),

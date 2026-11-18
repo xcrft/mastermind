@@ -204,7 +204,7 @@ fn finalize(db: &mut Journal, episode: &str, owner: &str, wait: bool) -> Result<
         db.record_task_finalizer(
             episode,
             owner,
-            FinalizerState::Waiting("transcript_pending"),
+            FinalizerState::Waiting("transcript_pending", now()),
         )?;
         std::thread::sleep(Duration::from_millis(100));
     }

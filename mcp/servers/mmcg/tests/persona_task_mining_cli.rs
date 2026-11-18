@@ -10,10 +10,12 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const PROMPT: &str = "I prefer short reviews only for simple changes.";
-/// Bounds the waits on observable episode state. A test that writes the
-/// transcript after Stop gives the finalizer the same window, so the outcome
-/// does not depend on how fast this machine runs the test's own commands.
+/// Bounds each wait on observable episode state.
 const WAIT: Duration = Duration::from_secs(30);
+/// A test that writes the transcript after Stop lets the finalizer outlast all
+/// of its own waits, so the outcome does not depend on how fast this machine
+/// runs the test's commands.
+const FINALIZER_WAIT: Duration = Duration::from_secs(120);
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -264,7 +266,7 @@ fn foreign_roots_and_forgotten_sources_cannot_use_a_task_ticket() {
 #[test]
 fn the_local_finalizer_waits_for_claudes_actual_model_without_calling_it() {
     let mut f = Fixture::for_client("claude");
-    f.finalizer_wait = Some(WAIT);
+    f.finalizer_wait = Some(FINALIZER_WAIT);
     let ticket = f.offer("one", PROMPT);
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "claude")));
     let slug = f
@@ -289,7 +291,7 @@ fn the_local_finalizer_waits_for_claudes_actual_model_without_calling_it() {
     };
     let shown = wait_for_episode(&f, |shown| task_analysis(shown).is_some());
     let analysis = task_analysis(&shown).unwrap();
-    assert_eq!(analysis["current"], true);
+    assert_eq!(analysis["current"], true, "{shown}");
     assert_eq!(analysis["processor"]["model"], "claude-task-model");
     assert_eq!(
         analysis["processor"]["model_binding"]["source"],
@@ -331,7 +333,7 @@ fn pending_transcript(f: &Fixture) -> PathBuf {
 #[test]
 fn the_finalizer_retries_a_missing_transcript_without_another_tool_event() {
     let mut f = Fixture::for_client("claude");
-    f.finalizer_wait = Some(WAIT);
+    f.finalizer_wait = Some(FINALIZER_WAIT);
     let ticket = f.offer("one", PROMPT);
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "claude")));
     let transcript = pending_transcript(&f);
@@ -340,6 +342,28 @@ fn the_finalizer_retries_a_missing_transcript_without_another_tool_event() {
         shown["task_mining"]["finalization"]["reason"] == "transcript_pending"
     });
     assert_eq!(waiting["task_mining"]["finalization"]["status"], "running");
+    // Outlive the lease seen now: only a renewing finalizer still owns the wait.
+    let lease_until: i64 = f
+        .journal()
+        .query_row(
+            "SELECT lease_until FROM hook_task_finalization",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let unix_now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+    while unix_now() <= lease_until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        f.episode()["task_mining"]["finalization"]["status"],
+        "running"
+    );
     write_native_transcript(&f, &transcript);
     let completed = wait_for_episode(&f, |shown| {
         shown["task_mining"]["finalization"]["status"] == "completed"

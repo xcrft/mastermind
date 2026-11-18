@@ -522,25 +522,9 @@ impl Journal {
 
     pub fn snapshot(&self, id: &str) -> Result<EpisodeInput, Error> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut snapshot = snapshot_at(&tx, id)?;
+        let snapshot = snapshot_at(&tx, id)?;
         tx.commit()?;
-        if super::fence::pending(&snapshot.client, Path::new(&snapshot.project_root))
-            .unwrap_or(true)
-        {
-            snapshot
-                .coverage_gaps
-                .push("capture_delivery_pending_or_unavailable".into());
-        }
-        // Git and filesystem checks can block. They must never hold SQLite
-        // readers across native process I/O or starve a capture's writer.
-        if super::super::profile::persona_project_id(Path::new(&snapshot.project_root)).as_deref()
-            != Some(snapshot.project.as_str())
-        {
-            snapshot
-                .coverage_gaps
-                .push("project_identity_changed".into());
-        }
-        Ok(snapshot)
+        Ok(with_local_gaps(snapshot))
     }
 
     pub fn bind_model(
@@ -1183,30 +1167,37 @@ impl Journal {
         {
             return Ok(vec![]);
         }
-        let current = self.snapshot(id)?;
-        let mut query = self.conn.prepare(
-            "SELECT r.revision,r.processor,r.data FROM hook_analysis_receipt r
-             JOIN hook_analysis a USING(episode,revision,processor)
-             WHERE r.episode=?1 AND a.completed=1
-             ORDER BY (r.revision=?2) DESC,r.revision,r.processor LIMIT 32",
-        )?;
-        let rows = query.query_map([id, current.revision.as_str()], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (revision, digest, data) = row?;
-            let receipt: Value = serde_json::from_str(&data)?;
-            if hash(&receipt) != digest {
-                return Err("analysis receipt digest mismatch".into());
-            }
-            Ok(json!({"revision":revision,"processor":receipt,
+        // A finalizer can bind the model and record its analysis between two
+        // separate reads, so the revision and receipts share one transaction.
+        let tx = self.conn.unchecked_transaction()?;
+        let current = snapshot_at(&tx, id)?;
+        let rows = tx
+            .prepare(
+                "SELECT r.revision,r.processor,r.data FROM hook_analysis_receipt r
+                 JOIN hook_analysis a USING(episode,revision,processor)
+                 WHERE r.episode=?1 AND a.completed=1
+                 ORDER BY (r.revision=?2) DESC,r.revision,r.processor LIMIT 32",
+            )?
+            .query_map([id, current.revision.as_str()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit()?;
+        let current = with_local_gaps(current);
+        rows.into_iter()
+            .map(|(revision, digest, data)| {
+                let receipt: Value = serde_json::from_str(&data)?;
+                if hash(&receipt) != digest {
+                    return Err("analysis receipt digest mismatch".into());
+                }
+                Ok(json!({"revision":revision,"processor":receipt,
                 "current":revision==current.revision && current.coverage_gaps.is_empty()}))
-        })
-        .collect()
+            })
+            .collect()
     }
 
     pub fn claim_analysis(
@@ -1623,6 +1614,25 @@ fn read_grant(conn: &Connection, client: &str, root: &Path) -> Result<Option<Gra
     Ok(conn.query_row("SELECT generation,enabled,pending,gap,profile_client FROM hook_grant WHERE client=?1 AND project_root=?2",
             params![client,root.to_string_lossy()], |r| Ok(Grant { client:client.into(), project_root:root.to_string_lossy().into_owned(),
                 generation:r.get(0)?,enabled:r.get(1)?,pending:r.get(2)?,gap:r.get(3)?,profile_client:r.get(4)? })).optional()?)
+}
+
+/// Git and filesystem checks can block. Callers run them after their read
+/// transaction, so they never hold SQLite readers across native process I/O
+/// or starve a capture's writer.
+fn with_local_gaps(mut snapshot: EpisodeInput) -> EpisodeInput {
+    if super::fence::pending(&snapshot.client, Path::new(&snapshot.project_root)).unwrap_or(true) {
+        snapshot
+            .coverage_gaps
+            .push("capture_delivery_pending_or_unavailable".into());
+    }
+    if super::super::profile::persona_project_id(Path::new(&snapshot.project_root)).as_deref()
+        != Some(snapshot.project.as_str())
+    {
+        snapshot
+            .coverage_gaps
+            .push("project_identity_changed".into());
+    }
+    snapshot
 }
 
 fn snapshot_at(conn: &Connection, id: &str) -> Result<EpisodeInput, Error> {

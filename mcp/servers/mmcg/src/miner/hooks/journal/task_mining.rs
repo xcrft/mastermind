@@ -1,7 +1,12 @@
 use super::*;
 
+/// Another process may replace a finalizer whose lease has passed. A claim, a
+/// renewal and each waiting record extend the lease this far from their time.
+const FINALIZER_LEASE_SECONDS: i64 = 10;
+
 pub(in crate::miner::hooks) enum FinalizerState {
-    Waiting(&'static str),
+    /// Keeps ownership and extends the lease from the given Unix time.
+    Waiting(&'static str, i64),
     Pending(&'static str),
     Completed(Option<&'static str>),
 }
@@ -350,7 +355,7 @@ impl Journal {
     ) -> Result<bool, Error> {
         Ok(self.conn.execute(
             "INSERT INTO hook_task_finalization(episode,owner,lease_until,attempts)
-            SELECT t.episode,?2,?3+10,1 FROM hook_task_mining t
+            SELECT t.episode,?2,?4,1 FROM hook_task_mining t
             JOIN hook_episode e ON e.id=t.episode
             JOIN hook_grant g ON g.client=json_extract(e.data,'$.client')
                 AND g.project_root=json_extract(e.data,'$.project_root')
@@ -362,7 +367,7 @@ impl Journal {
             ON CONFLICT(episode) DO UPDATE SET owner=excluded.owner,
                 lease_until=excluded.lease_until,attempts=min(hook_task_finalization.attempts+1,2147483647),reason=NULL
             WHERE hook_task_finalization.completed=0 AND hook_task_finalization.lease_until<=?3",
-            params![episode,owner,now],
+            params![episode,owner,now,now + FINALIZER_LEASE_SECONDS],
         )? == 1)
     }
 
@@ -377,9 +382,9 @@ impl Journal {
 
     pub fn renew_task_finalizer(&self, episode: &str, owner: &str, now: i64) -> Result<(), Error> {
         if self.conn.execute(
-            "UPDATE hook_task_finalization SET lease_until=?3+10
+            "UPDATE hook_task_finalization SET lease_until=?3
             WHERE episode=?1 AND owner=?2 AND completed=0",
-            params![episode, owner, now],
+            params![episode, owner, now + FINALIZER_LEASE_SECONDS],
         )? != 1
         {
             return Err("task finalizer ownership changed".into());
@@ -393,17 +398,19 @@ impl Journal {
         owner: &str,
         state: FinalizerState,
     ) -> Result<(), Error> {
-        let (reason, completed, release) = match state {
-            FinalizerState::Waiting(reason) => (Some(reason), false, false),
-            FinalizerState::Pending(reason) => (Some(reason), false, true),
-            FinalizerState::Completed(reason) => (reason, true, true),
+        let (reason, completed, lease_until) = match state {
+            FinalizerState::Waiting(reason, now) => {
+                (Some(reason), false, Some(now + FINALIZER_LEASE_SECONDS))
+            }
+            FinalizerState::Pending(reason) => (Some(reason), false, None),
+            FinalizerState::Completed(reason) => (reason, true, None),
         };
         if self.conn.execute(
             "UPDATE hook_task_finalization SET reason=?3,completed=?4,
-                owner=CASE WHEN ?5 THEN NULL ELSE owner END,
-                lease_until=CASE WHEN ?5 THEN 0 ELSE lease_until END
+                owner=CASE WHEN ?5 IS NULL THEN NULL ELSE owner END,
+                lease_until=coalesce(?5,0)
             WHERE episode=?1 AND owner=?2 AND completed=0",
-            params![episode, owner, reason, completed, release],
+            params![episode, owner, reason, completed, lease_until],
         )? != 1
         {
             return Err("task finalizer ownership changed".into());
@@ -606,8 +613,7 @@ impl Journal {
 mod finalizer_tests {
     use super::*;
 
-    #[test]
-    fn finalizer_claims_fence_stale_owners_and_revoked_capture() {
+    fn submitted_episode() -> (tempfile::TempDir, Journal) {
         let directory = tempfile::tempdir().unwrap();
         let db = Journal::open_target(&directory.path().join("journal.db"), true).unwrap();
         let root = directory.path().to_string_lossy();
@@ -623,6 +629,12 @@ mod finalizer_tests {
             .unwrap();
         db.conn.execute("INSERT INTO hook_task_mining(id,episode,data) VALUES('ticket','episode','{\"status\":\"submitted\"}')", []).unwrap();
         db.queue_task_finalizer("episode").unwrap();
+        (directory, db)
+    }
+
+    #[test]
+    fn finalizer_claims_fence_stale_owners_and_revoked_capture() {
+        let (_directory, db) = submitted_episode();
         assert!(db.claim_task_finalizer("episode", "first", 100).unwrap());
         assert!(!db
             .claim_task_finalizer("episode", "duplicate", 100)
@@ -654,5 +666,19 @@ mod finalizer_tests {
         db.record_task_finalizer("episode", "last", FinalizerState::Completed(None))
             .unwrap();
         assert!(!db.claim_task_finalizer("episode", "replayed", 200).unwrap());
+    }
+
+    #[test]
+    fn a_waiting_record_extends_the_lease_from_when_it_was_written() {
+        let (_directory, db) = submitted_episode();
+        assert!(db.claim_task_finalizer("episode", "slow", 100).unwrap());
+        db.record_task_finalizer(
+            "episode",
+            "slow",
+            FinalizerState::Waiting("transcript_pending", 109),
+        )
+        .unwrap();
+        assert!(!db.claim_task_finalizer("episode", "other", 111).unwrap());
+        assert!(db.claim_task_finalizer("episode", "other", 119).unwrap());
     }
 }

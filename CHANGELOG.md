@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dtolnay/rust-toolchain` commit.
 - `MMCG_TASK_FINALIZER_WAIT_MS` sets how long the persona task finalizer waits
   after Claude's Stop hook for the transcript to name the model. The default
-  stays 4 seconds. The finalizer tests set it themselves, so they no longer
-  fail when a loaded machine runs them slower than that window.
+  stays 4 seconds. A waiting finalizer renews its 10 second lease, so a longer
+  wait is not mistaken for a crashed finalizer. The finalizer tests set the
+  wait themselves, so they no longer fail when a loaded machine runs them
+  slower than that window.
 - `facts adapt` requires `--report-revision OID`, the full commit the report was
   produced from, such as `$GITHUB_SHA`. Existing adapt scripts fail until they
   pass it. The adapter used to stamp the indexed HEAD on a report of unknown
@@ -61,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `miner hooks show` no longer marks a fresh analysis as not current when the
+  task finalizer binds the model and records the analysis while `show` reads.
+  The episode revision and the analysis receipts are now read together.
 - `facts adapt` no longer rejects a whole report as "not all mapped" because
   of entries that carry no file fact, such as an OTLP span without a code path
   or a coverage line repeated across methods. Entries without a path or outside

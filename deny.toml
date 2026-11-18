@@ -19,7 +19,7 @@ allow = [
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
 exceptions = [
-    { allow = ["CC0-1.0"], crate = "notify@8.2.0" },
+    { allow = ["CC0-1.0"], crate = "notify@8.2.2" },
 ]
 
 [bans]

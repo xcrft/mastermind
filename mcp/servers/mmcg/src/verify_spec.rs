@@ -750,19 +750,16 @@ fn which_on_path(binary: &str) -> Option<std::path::PathBuf> {
 /// execute bit isn't a resolvable command, so existence is the wrong check; on
 /// Windows runnability isn't in the mode, so existence is the best signal.
 fn is_executable_file(p: &Path) -> bool {
-    if !p.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        p.metadata()
-            .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        p.is_file()
+            && p.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
-        true
+        p.is_file()
     }
 }
 

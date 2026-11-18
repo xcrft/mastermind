@@ -2666,16 +2666,13 @@ fn windows_absolute_evidence_path(value: &str) -> bool {
 }
 
 fn absolute_evidence_path(value: &str) -> bool {
-    if Path::new(value).is_absolute() {
-        return true;
-    }
     #[cfg(not(windows))]
     {
-        windows_absolute_evidence_path(value)
+        Path::new(value).is_absolute() || windows_absolute_evidence_path(value)
     }
     #[cfg(windows)]
     {
-        false
+        Path::new(value).is_absolute()
     }
 }
 

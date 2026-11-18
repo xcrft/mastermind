@@ -122,6 +122,21 @@ fn inspect_journal_file(
     }
 }
 
+/// Another hook's commit creates, grows and deletes the rollback journal, so a
+/// sidecar may change between observations. Both observations were still
+/// absent or regular files, which is all a planted-file check needs.
+fn inspect_sidecar(
+    root: &RootCapability,
+    target: &Path,
+    control: ReadControl<'_>,
+) -> Result<(), BoundedReadError> {
+    match inspect_journal_file(root, target, control) {
+        Ok(_) => Ok(()),
+        Err(BoundedReadError::SnapshotChanged) => root.verify(),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) struct Journal {
     conn: Connection,
 }
@@ -272,7 +287,7 @@ impl Journal {
         // SQLite can open them. WAL is deliberately not enabled for this store.
         for suffix in ["-journal", "-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{suffix}", target.display()));
-            inspect_journal_file(&root, &sidecar, control)?;
+            inspect_sidecar(&root, &sidecar, control)?;
         }
         let flags = if write {
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -1789,6 +1804,39 @@ mod tests {
                 Err(BoundedReadError::DeadlineExceeded)
             ));
         }
+    }
+
+    #[test]
+    fn a_rollback_journal_that_another_commit_keeps_changing_does_not_fail_open() {
+        use std::cell::Cell;
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.db-journal");
+        std::fs::write(&path, b"initial").unwrap();
+        let root = RootCapability::open(directory.path()).unwrap();
+        let checks = Cell::new(0);
+        let append_after_metadata = || {
+            checks.set(checks.get() + 1);
+            if checks.get() % 3 == 2 {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"+")
+                    .unwrap();
+            }
+            false
+        };
+        let control = ReadControl {
+            deadline: Some(Instant::now() + Duration::from_secs(1)),
+            interrupted: Some(&append_after_metadata),
+        };
+        assert!(matches!(
+            inspect_journal_file(&root, &path, control),
+            Err(BoundedReadError::SnapshotChanged)
+        ));
+        inspect_sidecar(&root, &path, control).unwrap();
     }
 
     #[test]

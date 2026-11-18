@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Persona capture hooks no longer fail when parallel tool calls deliver
+  events at once. Another hook's commit changes SQLite's rollback journal while
+  a hook opens the journal, and the open refused it with `file identity changed
+  during read`. Claude Code showed this as a hook that gave no usable answer,
+  and each failure left a pending capture marker until `miner hooks recover`.
 - `verify-spec` and `audit-spec` refuse spec lines they cannot read instead of
   dropping them. A frontmatter block after a BOM or blank line, or with a
   trailing space, fails as `frontmatter_not_at_start`. A snapshot line that

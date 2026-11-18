@@ -26,7 +26,7 @@ jobs:
 
       - name: Set up Rust for a Mastermind source checkout
         if: github.repository == 'xcrft/mastermind'
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       - name: Resolve pinned Mastermind
         env:

@@ -8,7 +8,6 @@ description = "Mastermind Codegraph — fast multi-language code indexer (Python
 authors = ["mastermind"]
 license = "MIT"
 repository = "https://github.com/xcrft/mastermind"
-homepage = "https://github.com/xcrft/mastermind"
 documentation = "https://github.com/xcrft/mastermind/blob/main/mcp/servers/mmcg/README.md"
 readme = "README.md"
 keywords = ["mcp", "codegraph", "indexer", "tree-sitter", "ai-agents"]
@@ -34,7 +33,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # SQLite with bundled C library — no system libsqlite3 dependency
-rusqlite = { version = "0.41", features = ["backup", "bundled", "hooks"] }
+rusqlite = { version = "0.43", features = ["backup", "bundled", "hooks"] }
 
 # tree-sitter — fastest mature parser. Each grammar vendors its own C source.
 # No system tree-sitter library required.
@@ -43,7 +42,7 @@ tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-javascript = "0.25"
-tree-sitter-c-sharp = "0.23"
+tree-sitter-c-sharp = "0.24"
 tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
 tree-sitter-php = "0.25"

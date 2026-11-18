@@ -545,6 +545,33 @@ mod tests {
     }
 
     #[test]
+    fn indexes_members_of_a_csharp_14_extension_block() {
+        let path = common::write_tmp(
+            "cs",
+            "Extensions.cs",
+            "public static class SequenceExtensions {\n\
+                 extension<T>(IEnumerable<T> source) {\n\
+                     public IEnumerable<T> SkipTwo() { return source.Skip(2); }\n\
+                 }\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CsharpExtractor).unwrap();
+        let owner = pending
+            .symbols
+            .iter()
+            .position(|symbol| symbol.name == "SequenceExtensions")
+            .unwrap();
+        let member = pending
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "SkipTwo")
+            .expect("extension member is indexed");
+        assert_eq!(member.kind, "method");
+        assert_eq!(member.parent_index, Some(owner));
+    }
+
+    #[test]
     fn extracts_using_directives() {
         let path = common::write_tmp(
             "cs",

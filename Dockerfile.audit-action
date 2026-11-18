@@ -1,4 +1,4 @@
-FROM rust:1.99-bookworm@sha256:59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0 AS builder
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /source
 COPY mcp/servers/mmcg/Cargo.toml mcp/servers/mmcg/Cargo.lock ./mcp/servers/mmcg/
 COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs
@@ -6,9 +6,9 @@ COPY mcp/servers/mmcg/src ./mcp/servers/mmcg/src
 COPY mcp/servers/mmcg/assets ./mcp/servers/mmcg/assets
 COPY mcp/servers/mmcg/templates ./mcp/servers/mmcg/templates
 COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches
-RUN cargo +1.99.0 build --manifest-path mcp/servers/mmcg/Cargo.toml --release --locked
+RUN cargo +1.100.0 build --manifest-path mcp/servers/mmcg/Cargo.toml --release --locked
 
-FROM buildpack-deps:bookworm-scm@sha256:b42f74a50a22540b839042134919504ff7c51e7cf8d751b79d0f94c56566cb92
+FROM buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
 RUN git --version
 COPY --from=builder /source/mcp/servers/mmcg/target/release/mmcg /usr/local/bin/mastermind
 COPY --chmod=0755 scripts/audit-action-entrypoint.sh /usr/local/bin/audit-action-entrypoint

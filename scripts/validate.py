@@ -1545,7 +1545,7 @@ def validate_review_package_contract() -> list[Issue]:
         for token in (
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
-            "dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d",
+            "dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca",
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
             "github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
@@ -2298,14 +2298,14 @@ def validate_audit_action_security() -> list[Issue]:
         issues.append(Issue(docker_path, "error", f"cannot read Dockerfile: {error}"))
     else:
         expected_from = [
-            "rust:1.99-bookworm@sha256:59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0",
-            "buildpack-deps:bookworm-scm@sha256:b42f74a50a22540b839042134919504ff7c51e7cf8d751b79d0f94c56566cb92",
+            "rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea",
+            "buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3",
         ]
         actual_from = dockerfile_from_images(docker_text)
         if actual_from != expected_from:
             issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
-        if "cargo +1.99.0 build" not in docker_text or "--locked" not in docker_text:
-            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.99 and the Cargo lockfile"))
+        if "cargo +1.100.0 build" not in docker_text or "--locked" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.100 and the Cargo lockfile"))
         if "COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches" not in docker_text:
             issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared benchmark target"))
         if "COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs" not in docker_text:

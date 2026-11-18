@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dependencies are on their latest releases: `rusqlite` 0.43,
+  `tree-sitter-c-sharp` 0.24 and compatible updates of the other crates. The
+  C# grammar reads C# 14 `extension` blocks, and their members are indexed as
+  methods of the enclosing class. Some C# code parses differently, such as
+  `(x) && y`, which is now a logical AND instead of a cast. The audit Docker
+  Action builds with Rust 1.100.0, and the PR review workflow pins the current
+  `dtolnay/rust-toolchain` commit.
 - `facts adapt` requires `--report-revision OID`, the full commit the report was
   produced from, such as `$GITHUB_SHA`. Existing adapt scripts fail until they
   pass it. The adapter used to stamp the indexed HEAD on a report of unknown

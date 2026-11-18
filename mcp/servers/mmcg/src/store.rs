@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "9";
@@ -2473,6 +2473,9 @@ pub struct Store {
     db_path: PathBuf,
     source_snapshot_state: Option<IndexFileState>,
     guard_stack: RefCell<Vec<GuardFrame>>,
+    /// Top of `guard_stack`, published for the progress handlers. They are
+    /// installed once per connection and cannot borrow the stack itself.
+    active_frame: Arc<Mutex<Option<GuardFrame>>>,
     ops_counter: Arc<AtomicU64>,
     interrupt_source: Arc<AtomicU8>,
     default_budget: Cell<WorkBudget>,
@@ -3178,7 +3181,13 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let mut store = Self::from_connection(connection, expected, None, None);
+        let mut store = Self::from_connection(
+            connection,
+            expected,
+            None,
+            None,
+            Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+        )?;
         store.managed_root = Some(root.canonical_root().to_path_buf());
         store.serve_root = Some(root.canonical_root().to_path_buf());
         store.init_schema()?;
@@ -3307,7 +3316,13 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let store = Self::from_connection(conn, db_path, None, None);
+        let store = Self::from_connection(
+            conn,
+            db_path,
+            None,
+            None,
+            Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+        )?;
         if initialize_schema {
             store.init_schema()?;
         }
@@ -3343,7 +3358,13 @@ impl Store {
             PRAGMA cache_size = -65536;
             "#,
         )?;
-        let store = Self::from_connection(conn, PathBuf::from(":memory:"), None, None);
+        let store = Self::from_connection(
+            conn,
+            PathBuf::from(":memory:"),
+            None,
+            None,
+            Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+        )?;
         store.init_schema()?;
         Ok(store)
     }
@@ -3399,7 +3420,8 @@ impl Store {
             db_path,
             Some(snapshot_dir),
             Some(source_snapshot_state),
-        );
+            Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+        )?;
         // Normalize only the private copy before sealing it for queries.
         store.with_work_budget(
             WorkBudget {
@@ -3511,8 +3533,14 @@ impl Store {
             "#,
         )?;
         validate_writable_sidecars(&snapshot_root, &snapshot_path)?;
-        let mut snapshot = Self::from_connection(conn, snapshot_path, Some(snapshot_dir), None);
-        snapshot.interrupt_source = Arc::clone(&self.interrupt_source);
+        // Sharing the marker lets the request's cancel handle stop work here.
+        let snapshot = Self::from_connection(
+            conn,
+            snapshot_path,
+            Some(snapshot_dir),
+            None,
+            Arc::clone(&self.interrupt_source),
+        )?;
         snapshot.set_default_work_budget(self.default_work_budget());
         if !snapshot.schema_current()? {
             return Err(rusqlite::Error::InvalidQuery);
@@ -3574,20 +3602,25 @@ impl Store {
         db_path: PathBuf,
         snapshot_dir: Option<tempfile::TempDir>,
         source_snapshot_state: Option<IndexFileState>,
-    ) -> Self {
-        Self {
+        interrupt_source: Arc<AtomicU8>,
+    ) -> SqlResult<Self> {
+        let mut store = Self {
             conn,
             _snapshot_dir: snapshot_dir,
             db_path,
             source_snapshot_state,
             guard_stack: RefCell::new(Vec::new()),
+            active_frame: Arc::new(Mutex::new(None)),
             ops_counter: Arc::new(AtomicU64::new(0)),
-            interrupt_source: Arc::new(AtomicU8::new(INTERRUPT_NONE)),
+            interrupt_source,
             default_budget: Cell::new(WorkBudget::from_millis(DEFAULT_SERVE_BUDGET_MS)),
             managed_root: None,
             serve_root: None,
             source_read_receipts: crate::source_read::Receipts::default(),
-        }
+        };
+        let handler = store.work_budget_handler();
+        store.conn.progress_handler(1_000, Some(handler))?;
+        Ok(store)
     }
 
     /// The work budget applied at MCP tool dispatch / CLI query boundaries
@@ -3669,9 +3702,9 @@ impl Store {
 
     /// Push a new guard frame whose effective deadline/op cap are the min of
     /// its own values and whatever remains of the parent frame (if any), then
-    /// installs the connection's progress handler from the new top frame —
-    /// the stack is the progress handler's single owner; nothing else may
-    /// call `Connection::progress_handler` on this connection. Returns `true`
+    /// publishes the new top frame to the progress handlers. The stack is the
+    /// only writer of that frame; nothing else may call
+    /// `Connection::progress_handler` on this connection. Returns `true`
     /// when the newly pushed frame is *already* exhausted (e.g. a zero
     /// budget) — callers must not run the guarded work in that case.
     pub fn push_work_budget(&self, budget: WorkBudget) -> bool {
@@ -3712,7 +3745,7 @@ impl Store {
         let expired = frame.expired(&self.ops_counter);
         stack.push(frame);
         drop(stack);
-        self.install_progress_handler();
+        self.publish_active_frame();
         if expired && self.interrupt_source.load(Ordering::SeqCst) != INTERRUPT_CANCEL {
             self.interrupt_source
                 .store(INTERRUPT_BUDGET, Ordering::SeqCst);
@@ -3720,44 +3753,48 @@ impl Store {
         expired
     }
 
-    /// Pop the innermost guard frame and reinstall the parent's progress
-    /// handler (or clear it entirely when the stack is empty).
+    /// Pop the innermost guard frame and publish the parent frame (or none
+    /// when the stack is empty).
     pub fn pop_work_budget(&self) {
-        {
-            let mut stack = self.guard_stack.borrow_mut();
-            stack.pop();
-        }
-        self.install_progress_handler();
+        self.guard_stack.borrow_mut().pop();
+        self.publish_active_frame();
     }
 
-    fn install_progress_handler(&self) {
-        self.inherit_work_budget(&self.conn);
+    fn publish_active_frame(&self) {
+        let top = self.guard_stack.borrow().last().copied();
+        *self
+            .active_frame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = top;
     }
 
     /// Scratch queries consume the same request deadline, cancellation marker
     /// and operation counter as the serving connection.
-    pub(crate) fn inherit_work_budget(&self, connection: &Connection) {
-        let top = self.guard_stack.borrow().last().copied();
-        let Some(frame) = top else {
-            let _ = connection.progress_handler(0, None::<fn() -> bool>);
-            return;
-        };
-        let ops_counter = self.ops_counter.clone();
-        let interrupt_source = self.interrupt_source.clone();
-        let _ = connection.progress_handler(
-            1_000,
-            Some(move || {
-                ops_counter.fetch_add(1, Ordering::Relaxed);
-                if interrupt_source.load(Ordering::SeqCst) == INTERRUPT_CANCEL {
-                    true
-                } else if frame.expired(&ops_counter) {
-                    interrupt_source.store(INTERRUPT_BUDGET, Ordering::SeqCst);
-                    true
-                } else {
-                    false
-                }
-            }),
-        );
+    pub(crate) fn inherit_work_budget(&self, connection: &mut Connection) -> SqlResult<()> {
+        connection.progress_handler(1_000, Some(self.work_budget_handler()))
+    }
+
+    /// Without an active frame the handler neither counts nor interrupts, so
+    /// unguarded work runs as if no handler were installed.
+    fn work_budget_handler(&self) -> impl FnMut() -> bool + Send + 'static {
+        let active_frame = Arc::clone(&self.active_frame);
+        let ops_counter = Arc::clone(&self.ops_counter);
+        let interrupt_source = Arc::clone(&self.interrupt_source);
+        move || {
+            let top = *active_frame.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(frame) = top else {
+                return false;
+            };
+            ops_counter.fetch_add(1, Ordering::Relaxed);
+            if interrupt_source.load(Ordering::SeqCst) == INTERRUPT_CANCEL {
+                true
+            } else if frame.expired(&ops_counter) {
+                interrupt_source.store(INTERRUPT_BUDGET, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        }
     }
 
     /// Run `f` under `budget`, composed via min with whatever guard is
@@ -10004,6 +10041,29 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("old")
+        );
+    }
+
+    #[test]
+    fn request_cancel_stops_work_on_its_private_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        drop(Store::open(&path).unwrap());
+        let source = Store::open_read_only(&path).unwrap();
+        let snapshot = source.private_writable_snapshot().unwrap();
+
+        source.cancel_handle().cancel();
+        let error = snapshot
+            .run_interrupt_probe(WorkBudget::UNLIMITED)
+            .unwrap_err();
+
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
+        );
+        assert_eq!(
+            source.take_interrupt_source(),
+            Some(InterruptSource::Cancel)
         );
     }
 

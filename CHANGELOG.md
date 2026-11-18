@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `pulldown-cmark` is updated to 0.13.6 for RUSTSEC-2026-0433. Mastermind
   does not enable wikilinks, so the quadratic parse was not reachable.
+- `rusqlite` is updated to 0.41.1 and the bundled SQLite to 3.54.1
+  (`libsqlite3-sys` 0.39.1) for RUSTSEC-2026-0459. Older SQLite could return
+  uninitialized memory when a database and its `-wal` file had different page
+  sizes. `mmcg` opens the index with its `-wal` from the checkout, so a
+  repository that ships a crafted pair could reach it.
 
 ### Changed
 

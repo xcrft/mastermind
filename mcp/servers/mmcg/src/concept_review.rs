@@ -841,9 +841,11 @@ fn prepare_snapshot(
             },
         );
     }
-    let scratch =
+    let mut scratch =
         Connection::open_in_memory().map_err(|_| failure("concept_review_scratch_failed"))?;
-    store.inherit_work_budget(&scratch);
+    store
+        .inherit_work_budget(&mut scratch)
+        .map_err(|_| failure("concept_review_scratch_failed"))?;
     scratch.execute_batch("CREATE VIRTUAL TABLE operations USING fts5(metadata, body, path UNINDEXED, line UNINDEXED, kind UNINDEXED, name UNINDEXED, tokenize='porter unicode61 remove_diacritics 0 tokenchars ''_'''); BEGIN")
         .map_err(|_| failure("concept_review_scratch_failed"))?;
     let mut operation_truncated = BTreeSet::new();

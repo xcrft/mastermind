@@ -82,6 +82,22 @@ def bind_fixture_runtime(report, git_digest="5" * 64, mmcg_digest="4" * 64):
     }
 
 
+def bind_verification_runtime(report):
+    report["verification_runtime"] = {
+        "cargo": {
+            "sha256": "3" * 64,
+            "git_mode": "100755",
+            "version": "cargo test version",
+        },
+        "rustc": {
+            "sha256": "4" * 64,
+            "git_mode": "100755",
+            "version": "rustc test version",
+        },
+        "stable": True,
+    }
+
+
 def valid_critic_report(case_id="c-1"):
     report = runner.build_report(
         [
@@ -1657,19 +1673,7 @@ action: passthrough
         )
 
         for report in (baseline, current):
-            report["verification_runtime"] = {
-                "cargo": {
-                    "sha256": "3" * 64,
-                    "git_mode": "100755",
-                    "version": "cargo test version",
-                },
-                "rustc": {
-                    "sha256": "4" * 64,
-                    "git_mode": "100755",
-                    "version": "rustc test version",
-                },
-                "stable": True,
-            }
+            bind_verification_runtime(report)
         self.assertTrue(runner.compare_to_baseline(current, baseline)["passed"])
 
         current["verification_runtime"]["cargo"]["sha256"] = "2" * 64
@@ -1895,6 +1899,49 @@ action: passthrough
         malformed = deepcopy(report)
         malformed["filters"] = {"suite": None, "case": None}
         malformed_reports.append((malformed, "does not contain every suite"))
+
+        malformed = deepcopy(report)
+        malformed["cases"].append(deepcopy(malformed["cases"][0]))
+        malformed_reports.append((malformed, "repeats case id"))
+
+        malformed = deepcopy(report)
+        malformed["cases"][0]["usage"]["total_tokens"] += 1
+        malformed_reports.append((malformed, "total tokens do not match raw usage"))
+
+        malformed = deepcopy(report)
+        malformed["suites"]["critic"]["telemetry"]["incomplete_cases"] = ["c-1"]
+        malformed_reports.append(
+            (malformed, "telemetry summary does not match raw cases")
+        )
+
+        bound = deepcopy(report)
+        bind_target_identity(bound)
+        bind_fixture_runtime(bound)
+        bind_verification_runtime(bound)
+        self.assertEqual(runner.report_comparison_issues(bound, "test"), [])
+        for path, expected_issue in (
+            (("claude_cli_stable",), "changed Claude CLI during evaluation"),
+            (("evaluation_harness", "stable"), "changed evaluation harness during run"),
+            (("fixture_runtime", "stable"), "changed fixture runtime during run"),
+            (
+                ("verification_runtime", "stable"),
+                "changed verification runtime during run",
+            ),
+            (
+                ("suites", "critic", "definition_stable"),
+                "changed definition during evaluation",
+            ),
+            (
+                ("suites", "critic", "target_definition_stable"),
+                "changed target during evaluation",
+            ),
+        ):
+            malformed = deepcopy(bound)
+            parent = malformed
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = False
+            malformed_reports.append((malformed, expected_issue))
 
         for malformed, expected_issue in malformed_reports:
             with self.subTest(expected_issue=expected_issue):
@@ -2492,7 +2539,10 @@ action: passthrough
             report["cases"][0]["reasons"],
         )
         self.assertFalse(report["suites"]["critic"]["definition_stable"])
-        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn(
+            "test suite 'critic' changed definition during evaluation",
+            runner.report_comparison_issues(report, "test"),
+        )
         self.assertIn("definition changed", output.getvalue())
 
     def test_frozen_evaluation_target_isolated_from_later_source_changes(self):
@@ -2586,7 +2636,10 @@ action: passthrough
         self.assertFalse(
             report["suites"]["critic"]["target_definition_stable"]
         )
-        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn(
+            "test suite 'critic' changed target during evaluation",
+            runner.report_comparison_issues(report, "test"),
+        )
         self.assertIn("agent or skill changed", output.getvalue())
 
     def test_main_fails_report_when_claude_runtime_changes_during_run(self):
@@ -2655,7 +2708,10 @@ action: passthrough
             "Claude CLI changed during evaluation", report["cases"][0]["reasons"]
         )
         self.assertFalse(report["claude_cli_stable"])
-        self.assertTrue(runner.report_comparison_issues(report, "test"))
+        self.assertIn(
+            "test report changed Claude CLI during evaluation",
+            runner.report_comparison_issues(report, "test"),
+        )
         self.assertIn("Claude CLI changed", output.getvalue())
 
     def test_main_fails_report_when_repository_head_changes_during_run(self):

@@ -1830,31 +1830,130 @@ mod tests {
         assert!(normalize_repository_identity("https://github.com/owner/repo?token=x").is_err());
     }
 
-    #[test]
-    fn detached_ed25519_signature_round_trip_and_wrong_key_failure() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let private = root.join("private.key");
-        let public = root.join("public.key");
-        let wrong = root.join("wrong.key");
-        let seed = [7_u8; 32];
-        let signing = SigningKey::from_bytes(&seed);
-        std::fs::write(&private, format!("{}\n", BASE64.encode(seed))).unwrap();
-        std::fs::write(
-            &public,
-            format!("{}\n", BASE64.encode(signing.verifying_key().to_bytes())),
-        )
-        .unwrap();
-        std::fs::write(&wrong, format!("{}\n", BASE64.encode([9_u8; 32]))).unwrap();
+    type PolicyChange<'a> = Box<dyn Fn(&mut VerifyPolicy) + 'a>;
+
+    fn write_key_pair(directory: &Path, seed: u8) -> (PathBuf, PathBuf) {
+        let private = directory.join(format!("private-{seed}.key"));
+        let public = directory.join(format!("public-{seed}.key"));
+        let signing = SigningKey::from_bytes(&[seed; 32]);
+        std::fs::write(&private, format!("{}\n", BASE64.encode([seed; 32]))).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+        std::fs::write(
+            &public,
+            format!("{}\n", BASE64.encode(signing.verifying_key().to_bytes())),
+        )
+        .unwrap();
+        (private, public)
+    }
+
+    #[test]
+    fn detached_ed25519_signature_round_trip_and_wrong_key_failure() {
+        let dir = tempdir().unwrap();
+        let (private, public) = write_key_pair(dir.path(), 7);
+        let (_, wrong) = write_key_pair(dir.path(), 9);
         let envelope = seal(manifest()).unwrap();
         let signature = sign_detached(&envelope, &private).unwrap();
         verify_detached(&envelope, &signature, &public).unwrap();
         assert!(verify_detached(&envelope, &signature, &wrong).is_err());
+    }
+
+    #[test]
+    fn complete_signature_policy_accepts_only_a_valid_signature_from_a_trusted_unrevoked_key() {
+        let dir = tempdir().unwrap();
+        let (private, public) = write_key_pair(dir.path(), 7);
+        let (_, other_public) = write_key_pair(dir.path(), 9);
+        let envelope = seal(manifest()).unwrap();
+        let signature = sign_detached(&envelope, &private).unwrap();
+        let trusted = VerifyPolicy {
+            public_key: Some(public),
+            signature: Some(signature.clone()),
+            trusted_key_ids: BTreeSet::from([signature.key_id.clone()]),
+            ..VerifyPolicy::default()
+        };
+        let report = verify_envelope(&envelope, &trusted);
+        assert!(report.reasons.is_empty(), "{:?}", report.reasons);
+        assert_eq!(report.provenance_authenticity, "pass");
+        assert_eq!(report.policy_acceptance, "pass");
+
+        let cases: Vec<(&str, &str, PolicyChange)> = vec![
+            (
+                "revoked while still trusted",
+                "revoked_key_id",
+                Box::new(|policy| {
+                    policy.revoked_key_ids.insert(signature.key_id.clone());
+                }),
+            ),
+            (
+                "not in the trusted set",
+                "untrusted_key_id",
+                Box::new(|policy| {
+                    policy.trusted_key_ids = BTreeSet::from([format!("sha256:{}", "a".repeat(64))]);
+                }),
+            ),
+            (
+                "another public key",
+                "signature_verification_failed",
+                Box::new(|policy| policy.public_key = Some(other_public.clone())),
+            ),
+            (
+                "forged signature bytes",
+                "signature_verification_failed",
+                Box::new(|policy| {
+                    policy.signature.as_mut().unwrap().signature = BASE64.encode([0_u8; 64]);
+                }),
+            ),
+        ];
+        for (label, reason, change) in cases {
+            let mut policy = trusted.clone();
+            change(&mut policy);
+            let report = verify_envelope(&envelope, &policy);
+            assert_eq!(report.reasons, vec![reason], "{label}");
+            assert_eq!(report.provenance_authenticity, "fail", "{label}");
+            assert_eq!(report.policy_acceptance, "fail", "{label}");
+        }
+    }
+
+    #[test]
+    fn snapshot_policy_compares_the_callers_expectations_with_the_manifest() {
+        let (_directory, root, value) = snapshot_fixture();
+        let envelope = seal_checked(value.clone(), &root).unwrap();
+        let cases: Vec<(&str, PolicyChange)> = vec![
+            (
+                "repository_mismatch",
+                Box::new(|policy| policy.expected_repository = Some("owner/other".into())),
+            ),
+            (
+                "baseline_mismatch",
+                Box::new(|policy| policy.expected_baseline = Some("0".repeat(40))),
+            ),
+            (
+                "head_mismatch",
+                Box::new(|policy| policy.expected_head = Some("f".repeat(40))),
+            ),
+        ];
+        for (reason, change) in cases {
+            let mut policy = snapshot_policy(&root, &value);
+            change(&mut policy);
+            assert_eq!(verify_envelope(&envelope, &policy).reasons, vec![reason]);
+        }
+
+        run_git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/owner/other.git",
+            ],
+        );
+        assert_eq!(
+            verify_envelope(&envelope, &snapshot_policy(&root, &value)).reasons,
+            vec!["repository_root_mismatch"]
+        );
     }
 
     #[test]

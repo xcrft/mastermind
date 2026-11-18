@@ -1165,6 +1165,48 @@ fn new_explicit_execution_changes_iteration_and_cannot_reuse_old_success() {
         .run(&["run-task", SPEC, "--post-only"])
         .status
         .success());
+    assert_eq!(
+        fixture.state()["blocking_reason"],
+        "invocation_receipt_binding_mismatch"
+    );
+}
+
+#[test]
+fn post_flight_rejects_a_receipt_that_differs_from_this_run_in_any_bound_field() {
+    let fixture = Fixture::new("success");
+    assert_success(&fixture.run(&["miner", "access", "grant", "--client", "custom"]));
+    assert_success(&fixture.execute(&["--profile-client", "custom"]));
+    let receipt = fixture.receipt();
+    let state = fs::read(fixture.root.join(STATE)).unwrap();
+    let post_with = |body: &Value| {
+        fs::write(fixture.root.join(STATE), &state).unwrap();
+        fixture.write(RECEIPT, &body.to_string());
+        fixture.run(&["run-task", SPEC, "--post-only"])
+    };
+    assert_success(&post_with(&receipt));
+    for (pointer, value) in [
+        ("/schema_version", json!(9)),
+        ("/invocation_id", json!("not-hex")),
+        ("/provenance", json!("local_runner_signed")),
+        ("/runner_version", json!("0.0.0")),
+        ("/platform", json!("plan9")),
+        ("/root", json!("/elsewhere")),
+        ("/policy/network", json!("unrestricted")),
+        ("/agent/duty", json!("other")),
+        ("/policy_sha256", json!("0".repeat(64))),
+        ("/options/max_turns", json!(0)),
+        ("/options/profile_client", Value::Null),
+    ] {
+        let mut tampered = receipt.clone();
+        *tampered.pointer_mut(pointer).unwrap() = value;
+        let output = post_with(&tampered);
+        assert!(!output.status.success(), "{pointer}");
+        assert_eq!(
+            fixture.state()["blocking_reason"],
+            "invocation_receipt_binding_mismatch",
+            "{pointer}: {output:?}"
+        );
+    }
 }
 
 #[test]

@@ -952,11 +952,28 @@ and provenance artifact to a canonical repository-relative path, byte size,
 and SHA-256 digest.
 
 `mmcg facts adapt` creates that manifest directly from one bounded SARIF,
-LCOV/Cobertura, JUnit, or OTLP JSON artifact. It uses the same parsers as Lens,
-requires every parsed fact to map to the current index, and publishes nothing
-when parsing is partial or truncated. Its input artifact must also have an exact
-UTF-8 repository-relative path. Ambiguous Unix backslash aliases are rejected.
-Exact duplicate findings are collapsed by their content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
+LCOV/Cobertura, JUnit, or OTLP JSON artifact. It uses the same parsers as Lens.
+The required `--report-revision OID` names the commit the producer analysed.
+It must be the full lowercase OID and equal the indexed Git HEAD. A SARIF run
+that declares `versionControlProvenance` for this repository must name the same
+revision, while entries for other repositories such as submodules are ignored.
+A mismatch fails with `artifact_revision_mismatch`. The revision remains the
+producer's declared claim: Mastermind checks that it is consistent, not that
+the report was actually computed from that commit.
+
+Every parsed fact must map to the current index. Entries without a file path
+(`report_entry_without_path`) or outside the index
+(`report_entry_outside_index`) reject the adaptation with their counts. OTLP
+spans without a code path are skipped, and repeated coverage lines are merged.
+Control characters in titles, messages and labels become spaces, and text over
+the manifest limits is cut with `…`. Nothing is published when parsing is
+partial or truncated, an XML report ends before its closing elements, an LCOV
+record has no `end_of_record`, or a JUnit suite lists fewer cases than its
+`tests` total or declares failures without a failed case. A report with no facts
+is refused, except an empty SARIF scan, which clears the dataset. Its input
+artifact must also have an exact UTF-8 repository-relative path. Ambiguous Unix
+backslash aliases are rejected. Exact duplicate findings are collapsed by their
+content-derived IDs. `mmcg facts keygen` creates a non-overwriting local
 Ed25519 keypair from the operating system CSPRNG and requires exact UTF-8 output
 paths before it writes either file. It atomically publishes complete files with
 the public half first, so failure cannot strand a private seed. `mmcg facts sign` and
@@ -979,8 +996,12 @@ MiB of source bytes, 64 provenance artifacts and 256 MiB of artifact bytes, and
 
 `mmcg query facts --path PATH --top N` and the fixed read-only `mmcg_facts` MCP
 tool expose the same normalized snapshot, bounded provenance-artifact digests,
-and explicit limits. Lens projects
-annotations as source-labelled findings. A relationship may decorate an
+and explicit limits. Annotations are returned errors first, then warnings. When
+`--top` cuts a source, that source becomes `partial` with a
+`normalized_fact_limit` diagnostic that names returned and total facts. Lens
+projects annotations as source-labelled findings. A source whose findings Lens
+drops at its per-file or global cap is also partial, and a review export does
+not attest it. A relationship may decorate an
 existing returned codegraph edge only when both file and line endpoints match.
 It cannot create topology.
 
@@ -1250,7 +1271,9 @@ evidence:
 - repeatable `--coverage PATH` inputs, auto-detected as LCOV tracefiles or
   Cobertura XML.
 - repeatable `--junit PATH` inputs for JUnit XML. Only explicit testcase `file`
-  attributes are correlated. Class names are not guessed into paths.
+  attributes are correlated. Class names are not guessed into paths. A suite
+  that lists fewer cases than its `tests` total, or declares failures without a
+  failed case, makes the source partial with `junit_totals_mismatch`.
 - repeatable `--otel PATH` inputs for OTLP JSON. Only explicit
   `code.file.path` or legacy `code.filepath` span attributes are correlated.
 - exact repository-path mentions from the indexed project-history corpus,
@@ -1457,9 +1480,9 @@ tracked corpus directory because publishing `summary.md` there would make the
 new package stale at creation time.
 
 Loaded `mastermind-facts/v1` datasets need no second sidecar attestation: their
-ingestion contract already verified exact repository identity, Git head, source
-digests, and provenance-artifact digests before Mastermind wrote normalized
-facts. Unsigned datasets remain `producer-attested`. A dataset imported through
+ingestion contract already verified repository identity, source digests and
+provenance-artifact digests, and checked that the producer's declared Git
+revision equals the indexed head, before Mastermind wrote normalized facts. Unsigned datasets remain `producer-attested`. A dataset imported through
 an allowlisted Ed25519 key is `producer-signed`. The package records its key ID,
 public key, signature, detached-signature digest, and canonical signed-manifest
 digest. Mixed evidence is `partially-producer-signed`. The autonomous Lens HTML

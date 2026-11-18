@@ -10,6 +10,9 @@ pub(super) struct ParsedJunit {
     pub invalid_records: bool,
     pub work_limited: bool,
     pub deadline_reached: bool,
+    /// A suite declares more tests, or failures and errors, than its
+    /// testcases show.
+    pub totals_mismatch: bool,
 }
 
 /// A JUnit testcase with its passed, failed, error, or skipped outcome.
@@ -47,7 +50,9 @@ impl CaseBuilder {
     fn from_event(event: &quick_xml::events::BytesStart<'_>) -> Self {
         Self {
             file: xml_attribute(event, "file"),
-            name: xml_attribute(event, "name").unwrap_or_else(|| "unnamed testcase".into()),
+            name: xml_attribute(event, "name")
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "unnamed testcase".into()),
             class_name: xml_attribute(event, "classname"),
             status: JunitStatus::Passed,
             message: String::new(),
@@ -88,12 +93,49 @@ impl CaseBuilder {
     }
 }
 
+/// The totals a `testsuite` or `testsuites` element declares, and where its
+/// testcases start in the parsed list.
+struct SuiteTotals {
+    tests: Option<usize>,
+    unsuccessful: Option<usize>,
+    first_case: usize,
+}
+
+impl SuiteTotals {
+    fn from_event(event: &quick_xml::events::BytesStart<'_>, first_case: usize) -> Self {
+        let count = |name| xml_attribute(event, name).and_then(|value| value.parse::<usize>().ok());
+        let unsuccessful = match (count("failures"), count("errors")) {
+            (None, None) => None,
+            (failures, errors) => Some(failures.unwrap_or(0).saturating_add(errors.unwrap_or(0))),
+        };
+        Self {
+            tests: count("tests"),
+            unsuccessful,
+            first_case,
+        }
+    }
+
+    /// Only a shortfall is checked. Tools differ on whether `tests` counts
+    /// skipped cases, and a testcase with both a failure and an error keeps
+    /// only its last outcome here, so equality would reject valid reports.
+    fn short_of(&self, cases: &[JunitCase]) -> bool {
+        self.tests.is_some_and(|tests| cases.len() < tests)
+            || self.unsuccessful.is_some_and(|unsuccessful| {
+                unsuccessful > 0
+                    && !cases
+                        .iter()
+                        .any(|case| matches!(case.status, JunitStatus::Failed | JunitStatus::Error))
+            })
+    }
+}
+
 /// Parse JUnit XML testcases, including outcome details and elapsed times.
 ///
-/// XML reader failures and input with no suite or testcase element return
-/// `InvalidFormat`. After a suite or testcase is recognized, limits and incomplete
-/// records are reported through partial, invalid-record, work-limit, and deadline
-/// flags; a deadline reached before that recognition also returns `InvalidFormat`.
+/// XML reader failures, input with no suite or testcase element, and input
+/// that ends with an open element return `InvalidFormat`. After a suite or
+/// testcase is recognized, limits, incomplete records and suites whose
+/// declared totals exceed their testcases are reported through flags; a
+/// deadline reached before that recognition also returns `InvalidFormat`.
 pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJunit, SourceFailure> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
@@ -107,6 +149,9 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
     let mut deadline_reached = false;
     let mut saw_suite = false;
     let mut events = 0usize;
+    let mut depth = 0usize;
+    let mut suites = Vec::new();
+    let mut totals_mismatch = false;
 
     loop {
         if events.is_multiple_of(4_096) && deadline.is_some_and(|value| Instant::now() >= value) {
@@ -115,12 +160,21 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
             break;
         }
         events += 1;
-        match reader
+        let event = reader
             .read_event_into(&mut buffer)
-            .map_err(|_| SourceFailure::InvalidFormat)?
-        {
+            .map_err(|_| SourceFailure::InvalidFormat)?;
+        // quick-xml rejects an unmatched end tag, so this cannot underflow.
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        match event {
             Event::Start(event) => match event.local_name().as_ref() {
-                "testsuites" | "testsuite" => saw_suite = true,
+                "testsuites" | "testsuite" => {
+                    saw_suite = true;
+                    suites.push(SuiteTotals::from_event(&event, cases.len()));
+                }
                 "testcase" => {
                     saw_suite = true;
                     if facts_total >= MAX_SOURCE_FACTS {
@@ -149,7 +203,10 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                 _ => {}
             },
             Event::Empty(event) => match event.local_name().as_ref() {
-                "testsuites" | "testsuite" => saw_suite = true,
+                "testsuites" | "testsuite" => {
+                    saw_suite = true;
+                    totals_mismatch |= SuiteTotals::from_event(&event, cases.len()).short_of(&[]);
+                }
                 "testcase" => {
                     saw_suite = true;
                     if facts_total >= MAX_SOURCE_FACTS {
@@ -192,6 +249,11 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                 }
             }
             Event::End(event) => match event.local_name().as_ref() {
+                "testsuites" | "testsuite" => {
+                    if let Some(suite) = suites.pop() {
+                        totals_mismatch |= suite.short_of(&cases[suite.first_case..]);
+                    }
+                }
                 "testcase" => {
                     if let Some(case) = current.take() {
                         cases.push(case.finish());
@@ -207,6 +269,9 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
                 }
                 _ => {}
             },
+            // A report cut between two complete elements still parses, so
+            // only the open element count shows that it ended early.
+            Event::Eof if depth > 0 => return Err(SourceFailure::InvalidFormat),
             Event::Eof => break,
             _ => {}
         }
@@ -222,9 +287,10 @@ pub(super) fn parse(bytes: &[u8], deadline: Option<Instant>) -> Result<ParsedJun
     Ok(ParsedJunit {
         cases,
         facts_total,
-        partial,
+        partial: partial || totals_mismatch,
         invalid_records,
         work_limited,
         deadline_reached,
+        totals_mismatch,
     })
 }

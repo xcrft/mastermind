@@ -73,6 +73,7 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
                 --output facts.json \
                 --producer release-smoke \
                 --producer-version "$VERSION" \
+                --report-revision "$(git rev-parse HEAD)" \
                 --dataset installed-package \
                 --root . >/dev/null
         )

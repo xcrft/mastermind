@@ -10,13 +10,15 @@ The [public schema](../schemas/mastermind-facts-v1.schema.json) is
 ## Import an existing report
 
 Index the repository, then adapt a report. Set `PRODUCER_VERSION` to the version
-that generated it.
+that generated it and `REPORT_REVISION` to the full commit OID the producer
+analysed, for example `$GITHUB_SHA`. It must equal the indexed Git HEAD.
 
 ```bash
 mastermind index .
 mastermind facts adapt --format sarif \
   --input reports/semgrep.sarif --output reports/semgrep.facts.json \
-  --producer semgrep --producer-version "$PRODUCER_VERSION" --dataset pr-security
+  --producer semgrep --producer-version "$PRODUCER_VERSION" \
+  --report-revision "$REPORT_REVISION" --dataset pr-security
 mastermind enrich --facts reports/semgrep.facts.json
 mastermind query facts --path src --top 100
 ```
@@ -30,9 +32,12 @@ mastermind query facts --path src --top 100
 
 | Adaptation step | Required result |
 |---|---|
-| Map report entries | Every fact maps to an indexed repository file |
+| Bind the revision | `--report-revision` is the full lowercase commit OID of the indexed HEAD. When a SARIF run declares `versionControlProvenance` for this repository, it must name the same revision |
+| Map report entries | Every fact maps to an indexed repository file. A JUnit testcase needs a `file` attribute and a SARIF result needs a location. OTLP spans without a code path are skipped. Repeated coverage lines are merged |
+| Fit text | Control characters become spaces. Titles, messages and labels over the manifest limits are cut with `…` |
 | Bind the report | Record its exact size and digest |
-| Parse or mapping failure | Reject the whole adaptation |
+| Parse or mapping failure | Reject the whole adaptation and name the entries that could not map |
+| Cut or empty report | Reject an XML report without its closing elements, an LCOV record without `end_of_record`, a JUnit suite that lists fewer cases than its `tests` total or declares failures without a failed case, and a report with no facts. Only an empty SARIF scan produces an empty dataset that clears the previous one |
 
 ## Write a custom producer
 

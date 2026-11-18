@@ -56,6 +56,9 @@ pub struct AdaptOptions<'a> {
     pub producer: &'a str,
     pub producer_version: &'a str,
     pub dataset: &'a str,
+    /// Commit the producer analysed. It is the producer's claim, checked
+    /// against the indexed HEAD and against SARIF provenance when present.
+    pub report_revision: &'a str,
     pub root: &'a Path,
 }
 
@@ -95,16 +98,6 @@ impl std::error::Error for AdapterError {}
 
 fn contract_error(error: impl fmt::Display) -> AdapterError {
     AdapterError::Contract(error.to_string())
-}
-
-fn truncate(value: impl AsRef<str>, maximum: usize) -> String {
-    let mut chars = value.as_ref().chars();
-    let prefix = chars.by_ref().take(maximum).collect::<String>();
-    if chars.next().is_some() {
-        format!("{prefix}…")
-    } else {
-        prefix
-    }
 }
 
 fn contained_artifact(root: &Path, input: &Path) -> Result<(PathBuf, String), AdapterError> {
@@ -198,20 +191,20 @@ fn convert_snapshot(
         || snapshot.runtime_edges.truncated
         || snapshot.diagnostics.truncated
     {
-        let codes = snapshot
+        let reasons = snapshot
             .diagnostics
             .items
             .iter()
-            .map(|diagnostic| diagnostic.code)
+            .map(|diagnostic| format!("{} ({})", diagnostic.code, diagnostic.message))
             .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if codes.is_empty() {
+            .join("; ");
+        let suffix = if reasons.is_empty() {
             String::new()
         } else {
-            format!(": {codes}")
+            format!(": {reasons}")
         };
         return Err(AdapterError::Evidence(format!(
-            "artifact parsing was partial or truncated{suffix}"
+            "artifact could not be adapted completely{suffix}"
         )));
     }
     let [source] = snapshot.sources.items.as_slice() else {
@@ -224,20 +217,16 @@ fn convert_snapshot(
             "evidence source could not be loaded completely".into(),
         ));
     }
-    if source.facts_total != Some(source.facts_returned) {
-        return Err(AdapterError::Evidence(format!(
-            "{} parsed facts were not all mapped to indexed repository files",
-            source.facts_total.unwrap_or(source.facts_returned)
-        )));
-    }
-
     let mut facts = Vec::new();
     let mut paths = BTreeSet::new();
     for file in &snapshot.files.items {
         match format {
             AdapterFormat::Sarif => {
                 for finding in &file.findings {
-                    let title = truncate(format!("{} · {}", finding.tool, finding.rule_id), 256);
+                    let title = facts::fit_text(
+                        &format!("{} · {}", finding.tool, finding.rule_id),
+                        facts::MAX_TITLE_BYTES,
+                    );
                     let fact = json!({
                         "kind": "annotation",
                         "path": file.path,
@@ -246,7 +235,7 @@ fn convert_snapshot(
                         "severity": severity(&finding.level),
                         "category": "sarif.finding",
                         "title": title,
-                        "message": truncate(&finding.message, 4096),
+                        "message": facts::fit_text(&finding.message, facts::MAX_MESSAGE_BYTES),
                     });
                     facts.push(with_id("sarif", fact)?);
                     paths.insert(file.path.clone());
@@ -299,16 +288,16 @@ fn convert_snapshot(
                             "line": 1,
                             "severity": "error",
                             "category": "test.junit.failure",
-                            "title": truncate(
-                                failure.class_name.as_ref().map_or_else(
+                            "title": facts::fit_text(
+                                &failure.class_name.as_ref().map_or_else(
                                     || failure.name.clone(),
                                     |class_name| format!("{class_name} · {}", failure.name),
                                 ),
-                                256,
+                                facts::MAX_TITLE_BYTES,
                             ),
-                            "message": truncate(
-                                format!("{}: {}", failure.status, failure.message),
-                                4096,
+                            "message": facts::fit_text(
+                                &format!("{}: {}", failure.status, failure.message),
+                                facts::MAX_MESSAGE_BYTES,
                             ),
                         });
                         facts.push(with_id("junit-failure", fact)?);
@@ -357,7 +346,7 @@ fn convert_snapshot(
                 "from": {"path": edge.parent_file, "line": 1},
                 "to": {"path": edge.child_file, "line": 1},
                 "confidence": "observed",
-                "label": truncate(label, 512),
+                "label": facts::fit_text(&label, facts::MAX_LABEL_BYTES),
             });
             facts.push(with_id("otel-edge", fact)?);
             paths.insert(edge.parent_file.clone());
@@ -383,6 +372,14 @@ fn convert_snapshot(
         }
         unique.insert(id, fact);
     }
+    // An empty manifest replaces the dataset with nothing. A clean SARIF scan
+    // means that. A test, coverage or trace report with no facts is a failed
+    // or misdirected run, and must not erase the previous facts.
+    if unique.is_empty() && format != AdapterFormat::Sarif {
+        return Err(AdapterError::Evidence(
+            "artifact produced no facts; only an empty SARIF scan may clear a dataset".into(),
+        ));
+    }
     Ok((unique.into_values().collect(), paths))
 }
 
@@ -406,6 +403,20 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
         ));
     }
     let contract = facts::contract(store).map_err(contract_error)?;
+    // A ref or abbreviated OID would be resolved against the same HEAD it is
+    // compared with, so it could never fail. Only the producer's full OID is a
+    // claim about which code the report describes.
+    if !crate::diff::is_full_git_oid(options.report_revision) {
+        return Err(contract_error(
+            "--report-revision must be the full lowercase commit OID the report was produced from",
+        ));
+    }
+    if options.report_revision != contract.repository.revision {
+        return Err(contract_error(format!(
+            "report revision {} does not match the indexed Git HEAD {}",
+            options.report_revision, contract.repository.revision
+        )));
+    }
     let (input, input_relative) = contained_artifact(&root, options.input)?;
     let output = output_identity(options.output)?;
     let output_path = output_path_string(&output)?;
@@ -425,6 +436,7 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
     }
     let snapshot = crate::evidence::collect_for_fact_adapter(
         &root,
+        &contract.repository,
         options.format.evidence_kind(),
         &input,
         indexed_paths.into_iter().collect(),

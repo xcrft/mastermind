@@ -5160,7 +5160,8 @@ impl Store {
              FROM fact_annotations fa
              JOIN fact_sources fs ON fs.id = fa.source_id
              WHERE {}
-             ORDER BY fa.path, fa.line, fa.fact_id, fs.producer_name, fs.dataset
+             ORDER BY CASE fa.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                      fa.path, fa.line, fa.fact_id, fs.producer_name, fs.dataset
              LIMIT ?",
             predicates.join(" AND ")
         );
@@ -5241,6 +5242,59 @@ impl Store {
         let truncated = items.len() > limit;
         items.truncate(limit);
         Ok((items, truncated))
+    }
+
+    /// Annotations plus relationships each source has in the filter's scope,
+    /// keyed by public source ID. Uses the same predicates as
+    /// `fact_annotations` and `fact_relationships`, so it counts exactly what
+    /// those queries could return without a limit.
+    pub(crate) fn fact_counts_in_scope(
+        &self,
+        source_ids: &[i64],
+        filter: &FactQueryFilter,
+    ) -> SqlResult<HashMap<String, u32>> {
+        let mut counts = HashMap::new();
+        if !self.fact_tables_exist()? || source_ids.is_empty() {
+            return Ok(counts);
+        }
+        for (table, alias, columns) in [
+            ("fact_annotations", "fa", &["fa.path"][..]),
+            (
+                "fact_relationships",
+                "fr",
+                &["fr.from_path", "fr.to_path"][..],
+            ),
+        ] {
+            let mut values = Vec::<SqlValue>::new();
+            let mut predicates = vec![Self::fact_source_filter_sql(source_ids, &mut values)];
+            if let Some(predicate) = Self::fact_path_filter_sql(filter, columns, &mut values) {
+                predicates.push(predicate);
+            }
+            let sql = format!(
+                "SELECT fs.producer_name, fs.dataset, COUNT(*)
+                 FROM {table} {alias}
+                 JOIN fact_sources fs ON fs.id = {alias}.source_id
+                 WHERE {}
+                 GROUP BY {alias}.source_id",
+                predicates.join(" AND ")
+            );
+            let mut statement = self.conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                let producer: String = row.get(0)?;
+                let dataset: String = row.get(1)?;
+                let count: i64 = row.get(2)?;
+                Ok((source_public_id(&producer, &dataset), count))
+            })?;
+            for row in rows {
+                let (source, count) = row?;
+                let count = u32::try_from(count).unwrap_or(u32::MAX);
+                counts
+                    .entry(source)
+                    .and_modify(|total: &mut u32| *total = total.saturating_add(count))
+                    .or_insert(count);
+            }
+        }
+        Ok(counts)
     }
 
     /// Wipe everything related to a single file before re-indexing it.

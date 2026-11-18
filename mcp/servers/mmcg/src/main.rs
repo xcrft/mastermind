@@ -857,6 +857,9 @@ enum FactCmd {
         producer_version: String,
         #[arg(long)]
         dataset: String,
+        /// Full commit OID the producer analysed; it must equal the indexed HEAD.
+        #[arg(long, value_name = "OID")]
+        report_revision: String,
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -2203,6 +2206,7 @@ fn run_cli_inner(
                 producer,
                 producer_version,
                 dataset,
+                report_revision,
                 root,
             } => {
                 let selected_index = index_path_for_root(index_override.as_deref(), &root);
@@ -2223,6 +2227,7 @@ fn run_cli_inner(
                         producer: &producer,
                         producer_version: &producer_version,
                         dataset: &dataset,
+                        report_revision: &report_revision,
                         root: &root,
                     },
                 )?;
@@ -3914,7 +3919,7 @@ mod tests {
 
     #[test]
     fn fact_lifecycle_and_team_graph_cli_contracts_are_explicit() {
-        let adapt = Cli::try_parse_from([
+        let adapt_args = [
             "mastermind",
             "facts",
             "adapt",
@@ -3930,14 +3935,23 @@ mod tests {
             "1.2.3",
             "--dataset",
             "runtime",
-        ])
+        ];
+        assert!(
+            Cli::try_parse_from(adapt_args).is_err(),
+            "adapt must not default the report revision to the local HEAD"
+        );
+        let adapt = Cli::try_parse_from(adapt_args.into_iter().chain([
+            "--report-revision",
+            "0123456789abcdef0123456789abcdef01234567",
+        ]))
         .unwrap();
         assert!(matches!(
             adapt.cmd,
             Cmd::Facts(FactCmd::Adapt {
                 format: FactAdapterFormat::Otel,
+                ref report_revision,
                 ..
-            })
+            }) if report_revision == "0123456789abcdef0123456789abcdef01234567"
         ));
 
         let keygen = Cli::try_parse_from([

@@ -1767,7 +1767,7 @@ def validate_extension_lifecycle_contract() -> list[Issue]:
     surfaces = {
         "mcp/servers/mmcg/src/fact_adapter.rs": (
             "collect_for_fact_adapter",
-            "facts_total != Some(source.facts_returned)",
+            "options.report_revision != contract.repository.revision",
             "validate_generated_manifest",
             "indexed_paths_bounded",
         ),

@@ -37,9 +37,9 @@ const MAX_ID_BYTES: usize = 256;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_VERSION_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 4 * 1024;
-const MAX_TITLE_BYTES: usize = 256;
-const MAX_MESSAGE_BYTES: usize = 4 * 1024;
-const MAX_LABEL_BYTES: usize = 512;
+pub(crate) const MAX_TITLE_BYTES: usize = 256;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_LABEL_BYTES: usize = 512;
 
 #[derive(Debug)]
 pub enum FactError {
@@ -376,6 +376,37 @@ fn validate_text(value: &str, maximum: usize, label: &str) -> Result<(), FactErr
     Ok(())
 }
 
+/// Fits report text to `validate_text`. Each run of control characters, such
+/// as a stack trace's line breaks, becomes one space. Longer text is cut on a
+/// character boundary so that it and a trailing ellipsis fit `maximum` UTF-8
+/// bytes. Text that already passes comes back unchanged, so the content
+/// derived IDs of facts that imported before stay the same.
+pub(crate) fn fit_text(value: &str, maximum: usize) -> String {
+    const ELLIPSIS: &str = "…";
+    let mut text = String::with_capacity(value.len());
+    let mut after_control = false;
+    for character in value.chars() {
+        if character.is_control() {
+            if !after_control {
+                text.push(' ');
+            }
+            after_control = true;
+        } else {
+            text.push(character);
+            after_control = false;
+        }
+    }
+    if text.len() > maximum {
+        let mut end = maximum.saturating_sub(ELLIPSIS.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(ELLIPSIS);
+    }
+    text
+}
+
 fn validate_token(value: &str, maximum: usize, label: &str) -> Result<(), FactError> {
     validate_text(value, maximum, label)?;
     if !value.bytes().all(|byte| {
@@ -627,22 +658,30 @@ pub(crate) fn repository_identity_until(
         deadline,
     )
     .map_err(RepositoryIdentityError::Git)?;
-    let canonical = if output.success {
+    let remote = if output.success {
         std::str::from_utf8(&output.stdout)
             .ok()
-            .and_then(canonical_remote)
-            .map(|value| ("git-remote", value))
+            .and_then(remote_identity)
     } else {
         None
     };
-    let (kind, identity) = match canonical {
+    Ok(match remote {
         Some(identity) => identity,
-        None => ("git-worktree", worktree_path_identity(root)?),
-    };
-    Ok(format!(
+        None => hashed_identity("git-worktree", &worktree_path_identity(root)?),
+    })
+}
+
+/// The repository identity of an origin URL, or `None` when the URL is not a
+/// supported remote form.
+pub(crate) fn remote_identity(url: &str) -> Option<String> {
+    canonical_remote(url).map(|remote| hashed_identity("git-remote", &remote))
+}
+
+fn hashed_identity(kind: &str, identity: &str) -> String {
+    format!(
         "{kind}:sha256:{}",
         crate::hex::encode(&Sha256::digest(identity.as_bytes()))
-    ))
+    )
 }
 
 fn repository_contract(store: &Store) -> Result<FactRepository, FactError> {
@@ -1544,22 +1583,41 @@ fn snapshot_filtered(
         entry.1.insert(relationship.from_path.clone());
         entry.1.insert(relationship.to_path.clone());
     }
-    let sources = source_rows
-        .iter()
-        .map(|source| {
-            let public_id = source_public_id(&source.producer_name, &source.dataset);
-            let (returned, files) = returned_by_source
-                .get(&public_id)
-                .map(|(count, files)| (*count, files.len() as u32))
-                .unwrap_or((0, 0));
-            source_view(
-                source,
-                source_status.get(&source.id).copied().unwrap_or("stale"),
-                returned,
-                files,
-            )
-        })
-        .collect::<Vec<_>>();
+    // A source with facts beyond the limit is not complete for this scope,
+    // and a reader must not treat it as a whole revision-bound claim.
+    let in_scope = if fact_limit_reached {
+        store
+            .fact_counts_in_scope(&current_source_ids, &filter)
+            .map_err(|error| FactError::Store(error.to_string()))?
+    } else {
+        HashMap::new()
+    };
+    let mut sources = Vec::with_capacity(source_rows.len());
+    for source in &source_rows {
+        let public_id = source_public_id(&source.producer_name, &source.dataset);
+        let (returned, files) = returned_by_source
+            .get(&public_id)
+            .map(|(count, files)| (*count, files.len() as u32))
+            .unwrap_or((0, 0));
+        let mut status = source_status.get(&source.id).copied().unwrap_or("stale");
+        if let Some(total) = in_scope
+            .get(&public_id)
+            .copied()
+            .filter(|total| status == "loaded" && *total > returned)
+        {
+            status = "partial";
+            push_diagnostic(
+                &mut diagnostics,
+                &mut diagnostics_truncated,
+                public_id,
+                "normalized_fact_limit",
+                format!(
+                    "{returned} of {total} facts in the requested scope were returned. Errors and warnings come first."
+                ),
+            );
+        }
+        sources.push(source_view(source, status, returned, files));
+    }
 
     let stale_sources = sources.iter().any(|source| source.status == "stale");
     let source_count = sources.len() as u32;
@@ -1584,7 +1642,9 @@ fn snapshot_filtered(
         || diagnostics_truncated;
     Ok(FactSnapshot {
         schema_version: 1,
-        available: sources.iter().any(|source| source.status == "loaded"),
+        available: sources
+            .iter()
+            .any(|source| matches!(source.status, "loaded" | "partial")),
         partial,
         contract,
         sources: FactCollection {
@@ -1839,6 +1899,79 @@ mod tests {
         assert!(snapshot.relationships.items[0]
             .source_id
             .starts_with("facts:sha256:"));
+    }
+
+    #[test]
+    fn fit_text_meets_validate_text_and_keeps_text_that_already_passes() {
+        for text in ["Payment boundary crossed", "оплата · ok", &"x".repeat(256)] {
+            assert_eq!(fit_text(text, MAX_TITLE_BYTES), text);
+        }
+        assert_eq!(fit_text("at a\n\tat b\r\n", 64), "at a at b ");
+        for text in ["x".repeat(257), "я".repeat(150)] {
+            let fitted = fit_text(&text, MAX_TITLE_BYTES);
+            assert!(fitted.ends_with('…'), "{fitted}");
+            validate_text(&fitted, MAX_TITLE_BYTES, "title").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_fact_limit_marks_only_the_cut_source_partial_and_returns_errors_first() {
+        let fixture = fixture();
+        let annotation = |id: &str, line: u32, severity: &str| {
+            json!({
+                "kind": "annotation",
+                "id": id,
+                "path": "src/lib.rs",
+                "line": line,
+                "severity": severity,
+                "category": "architecture.boundary",
+                "title": "Payment boundary crossed",
+                "message": "The changed function crosses the payment ownership boundary."
+            })
+        };
+        let mut small = manifest(&fixture);
+        small["capabilities"] = json!(["annotations"]);
+        small["dataset"] = json!("small");
+        small["facts"] = json!([annotation("architecture.payment-boundary", 1, "error")]);
+        let mut bulk = small.clone();
+        bulk["dataset"] = json!("bulk");
+        bulk["facts"] = json!([
+            annotation("a.info", 1, "info"),
+            annotation("b.info", 1, "info"),
+            annotation("c.info", 1, "info"),
+            annotation("z.error", 2, "error"),
+        ]);
+        for (value, name) in [(&small, "small.json"), (&bulk, "bulk.json")] {
+            import(&fixture.store, &write_manifest(&fixture, value, name)).unwrap();
+        }
+
+        let snapshot = snapshot(&fixture.store, ".", 2).unwrap();
+
+        let returned = snapshot
+            .annotations
+            .items
+            .iter()
+            .map(|item| item.fact_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(returned, ["architecture.payment-boundary", "z.error"]);
+        let status = |dataset: &str| {
+            snapshot
+                .sources
+                .items
+                .iter()
+                .find(|source| source.dataset == dataset)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status("small"), "loaded");
+        assert_eq!(status("bulk"), "partial");
+        assert!(snapshot.available);
+        let bulk_id = source_public_id("com.example.arch-lint", "bulk");
+        assert!(snapshot.diagnostics.items.iter().any(|diagnostic| {
+            diagnostic.source_id == bulk_id
+                && diagnostic.code == "normalized_fact_limit"
+                && diagnostic.message.starts_with("1 of 4 facts")
+        }));
     }
 
     #[test]

@@ -95,16 +95,31 @@ fn fixture() -> (TempDir, String) {
     (root, index_text)
 }
 
-fn adapt(
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn head(root: &Path) -> String {
+    git(root, &["rev-parse", "HEAD"])
+}
+
+fn adapt_at(
     root: &Path,
     index: &str,
     format: &str,
     input: &str,
     output: &Path,
     dataset: &str,
-) -> Value {
+    report_revision: &str,
+) -> Output {
     let output_text = output.to_string_lossy().into_owned();
-    let result = run(
+    run(
         root,
         &[
             "--index",
@@ -123,12 +138,36 @@ fn adapt(
             "1.0.0",
             "--dataset",
             dataset,
+            "--report-revision",
+            report_revision,
             "--root",
             ".",
         ],
-    );
+    )
+}
+
+fn adapt(
+    root: &Path,
+    index: &str,
+    format: &str,
+    input: &str,
+    output: &Path,
+    dataset: &str,
+) -> Value {
+    let result = adapt_at(root, index, format, input, output, dataset, &head(root));
     assert_success(&result);
     serde_json::from_slice(&fs::read(output).unwrap()).unwrap()
+}
+
+/// Adapts `input` and asserts that it is refused with `reason` and leaves no
+/// manifest behind.
+fn assert_adapt_refused(root: &Path, index: &str, format: &str, input: &str, reason: &str) {
+    let output = root.join("refused-facts.json");
+    let result = adapt_at(root, index, format, input, &output, "refused", &head(root));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "{input} was adapted");
+    assert!(stderr.contains(reason), "{input}: {stderr}");
+    assert!(!output.exists());
 }
 
 #[cfg(unix)]
@@ -226,31 +265,14 @@ fn adapter_signature_import_and_query_are_one_revision_bound_flow() {
     let signature = root.path().join("facts.sig.json");
     let manifest_text = manifest.to_string_lossy().into_owned();
     let signature_text = signature.to_string_lossy().into_owned();
-    let output = run(
+    let adapted = adapt(
         root.path(),
-        &[
-            "--index",
-            &index,
-            "facts",
-            "adapt",
-            "--format",
-            "sarif",
-            "--input",
-            "findings.sarif",
-            "--output",
-            &manifest_text,
-            "--producer",
-            "semgrep",
-            "--producer-version",
-            "1.0.0",
-            "--dataset",
-            "pr-security",
-            "--root",
-            ".",
-        ],
+        &index,
+        "sarif",
+        "findings.sarif",
+        &manifest,
+        "pr-security",
     );
-    assert_success(&output);
-    let adapted: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
     assert_eq!(adapted["api_version"], "mastermind-facts/v1");
     assert_eq!(adapted["provenance"]["kind"], "sarif");
     assert_eq!(adapted["facts"].as_array().unwrap().len(), 1);
@@ -371,34 +393,13 @@ fn adapter_rejects_external_facts_that_cannot_bind_to_the_index() {
         serde_json::to_vec_pretty(&sarif).unwrap(),
     )
     .unwrap();
-    let output_path = root.path().join("must-not-exist.json");
-    let output_text = output_path.to_string_lossy().into_owned();
-    let result = run(
+    assert_adapt_refused(
         root.path(),
-        &[
-            "--index",
-            &index,
-            "facts",
-            "adapt",
-            "--format",
-            "sarif",
-            "--input",
-            "unmapped.sarif",
-            "--output",
-            &output_text,
-            "--producer",
-            "semgrep",
-            "--producer-version",
-            "1.0.0",
-            "--dataset",
-            "unmapped",
-            "--root",
-            ".",
-        ],
+        &index,
+        "sarif",
+        "unmapped.sarif",
+        "report_entry_outside_index",
     );
-    assert!(!result.status.success());
-    assert!(!output_path.exists());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("not all mapped"));
 }
 
 #[test]
@@ -406,28 +407,14 @@ fn adapter_output_cannot_overwrite_its_input_through_a_path_alias() {
     let (root, index) = fixture();
     let input = root.path().join("findings.sarif");
     let before = fs::read(&input).unwrap();
-    let result = run(
+    let result = adapt_at(
         root.path(),
-        &[
-            "--index",
-            &index,
-            "facts",
-            "adapt",
-            "--format",
-            "sarif",
-            "--input",
-            "findings.sarif",
-            "--output",
-            "./findings.sarif",
-            "--producer",
-            "semgrep",
-            "--producer-version",
-            "1.0.0",
-            "--dataset",
-            "overwrite",
-            "--root",
-            ".",
-        ],
+        &index,
+        "sarif",
+        "findings.sarif",
+        Path::new("./findings.sarif"),
+        "overwrite",
+        &head(root.path()),
     );
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("must not overwrite"));
@@ -540,4 +527,378 @@ fn coverage_junit_and_otel_adapters_emit_importable_revision_bound_facts() {
         );
         assert_success(&result);
     }
+}
+
+#[test]
+fn adapter_binds_only_a_full_report_revision_that_is_the_indexed_head() {
+    let (root, index) = fixture();
+    let output = root.path().join("facts.json");
+    let short = head(root.path())[..12].to_string();
+    for (revision, reason) in [
+        (
+            "0000000000000000000000000000000000000000",
+            "does not match the indexed Git HEAD",
+        ),
+        ("HEAD", "full lowercase commit OID"),
+        (short.as_str(), "full lowercase commit OID"),
+    ] {
+        let result = adapt_at(
+            root.path(),
+            &index,
+            "sarif",
+            "findings.sarif",
+            &output,
+            "revision",
+            revision,
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{revision} was accepted");
+        assert!(stderr.contains(reason), "{revision}: {stderr}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn sarif_adapter_checks_the_provenance_the_report_declares() {
+    let (root, index) = fixture();
+    git(
+        root.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.test/owner/this.git",
+        ],
+    );
+    let head = head(root.path());
+    let report = |provenance: Value| {
+        json!({
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "Semgrep"}},
+                "versionControlProvenance": provenance,
+                "results": [{
+                    "ruleId": "payments.review",
+                    "message": {"text": "Review payment boundary"},
+                    "locations": [{"physicalLocation": {
+                        "artifactLocation": {"uri": "src/lib.rs"},
+                        "region": {"startLine": 1}
+                    }}]
+                }]
+            }]
+        })
+    };
+    let older = "0000000000000000000000000000000000000000";
+    for (name, provenance) in [
+        (
+            "older.sarif",
+            json!([{"repositoryUri": "https://example.test/owner/this", "revisionId": older}]),
+        ),
+        (
+            "other-repo.sarif",
+            json!([{"repositoryUri": "https://example.test/owner/other", "revisionId": head}]),
+        ),
+    ] {
+        fs::write(
+            root.path().join(name),
+            serde_json::to_vec(&report(provenance)).unwrap(),
+        )
+        .unwrap();
+        assert_adapt_refused(
+            root.path(),
+            &index,
+            "sarif",
+            name,
+            "artifact_revision_mismatch",
+        );
+    }
+
+    // A submodule entry at another revision does not contradict this
+    // repository's own entry.
+    fs::write(
+        root.path().join("with-submodule.sarif"),
+        serde_json::to_vec(&report(json!([
+            {"repositoryUri": "git@example.test:owner/this.git", "revisionId": head},
+            {"repositoryUri": "https://example.test/owner/vendored", "revisionId": older}
+        ])))
+        .unwrap(),
+    )
+    .unwrap();
+    let adapted = adapt(
+        root.path(),
+        &index,
+        "sarif",
+        "with-submodule.sarif",
+        &root.path().join("facts.json"),
+        "provenance",
+    );
+    assert_eq!(adapted["repository"]["revision"], head);
+}
+
+#[test]
+fn adapters_accept_entries_that_carry_no_file_fact_or_repeat_a_line() {
+    let (root, index) = fixture();
+    let traces = json!({
+        "resourceSpans": [{"scopeSpans": [{"spans": [
+            {
+                "traceId": "trace-1",
+                "spanId": "span-parent",
+                "name": "pay",
+                "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/lib.rs"}}]
+            },
+            {"traceId": "trace-1", "spanId": "span-http", "parentSpanId": "span-parent", "name": "GET /charge"}
+        ]}]}]
+    });
+    fs::write(
+        root.path().join("traces.json"),
+        serde_json::to_vec(&traces).unwrap(),
+    )
+    .unwrap();
+    let otel = adapt(
+        root.path(),
+        &index,
+        "otel",
+        "traces.json",
+        &root.path().join("otel-facts.json"),
+        "otel",
+    );
+    assert_eq!(
+        otel["facts"][0]["message"],
+        "Observed 1 spans across 1 traces."
+    );
+
+    for (name, report) in [
+        (
+            "methods.xml",
+            r#"<coverage><packages><package><classes><class filename="src/lib.rs"><methods><method name="pay"><lines><line number="1" hits="1"/></lines></method></methods><lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>"#,
+        ),
+        (
+            "tests.info",
+            "TN:unit\nSF:src/lib.rs\nDA:1,1\nend_of_record\nTN:integration\nSF:src/lib.rs\nDA:1,0\nend_of_record\n",
+        ),
+    ] {
+        fs::write(root.path().join(name), report).unwrap();
+        let coverage = adapt(
+            root.path(),
+            &index,
+            "coverage",
+            name,
+            &root.path().join("coverage-facts.json"),
+            "coverage",
+        );
+        assert_eq!(
+            coverage["facts"][0]["message"],
+            "1 of 1 executable lines covered; 0 uncovered.",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn adapters_name_entries_that_cannot_bind_to_an_indexed_file() {
+    let (root, index) = fixture();
+    for (name, report, reason) in [
+        (
+            "no-file.xml",
+            r#"<testsuite><testcase name="pays" file="src/lib.rs"/><testcase name="refunds" classname="RefundTest"/></testsuite>"#,
+            "report_entry_without_path",
+        ),
+        (
+            "unindexed.xml",
+            r#"<testsuite><testcase name="pays" file="src/nope.rs"/></testsuite>"#,
+            "report_entry_outside_index",
+        ),
+    ] {
+        fs::write(root.path().join(name), report).unwrap();
+        assert_adapt_refused(root.path(), &index, "junit", name, reason);
+    }
+}
+
+#[test]
+fn adapter_fits_multi_line_and_long_report_text_to_the_manifest() {
+    let (root, index) = fixture();
+    let name = "я".repeat(150);
+    fs::write(
+        root.path().join("junit.xml"),
+        format!(
+            "<testsuite><testcase name=\"{name}\" file=\"src/lib.rs\"><failure message=\"declined\">at pay\n\tat charge\r\nat main</failure></testcase></testsuite>"
+        ),
+    )
+    .unwrap();
+    let junit = adapt(
+        root.path(),
+        &index,
+        "junit",
+        "junit.xml",
+        &root.path().join("junit-facts.json"),
+        "junit",
+    );
+    let failure = junit["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["category"] == "test.junit.failure")
+        .unwrap();
+    let title = failure["title"].as_str().unwrap();
+    assert!(title.len() <= 256 && title.ends_with('…'), "{title}");
+    assert_eq!(
+        failure["message"],
+        "failed: declined · at pay at charge at main"
+    );
+
+    let long = "x".repeat(170);
+    let spans = std::iter::once(json!({
+        "traceId": "trace-1",
+        "spanId": "parent",
+        "name": "worker",
+        "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/worker.rs"}}]
+    }))
+    .chain((0..5).map(|index| {
+        json!({
+            "traceId": "trace-1",
+            "spanId": format!("child-{index}"),
+            "parentSpanId": "parent",
+            "name": format!("{index}{long}\nline"),
+            "attributes": [{"key": "code.file.path", "value": {"stringValue": "src/lib.rs"}}]
+        })
+    }))
+    .collect::<Vec<_>>();
+    fs::write(
+        root.path().join("traces.json"),
+        serde_json::to_vec(&json!({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let otel = adapt(
+        root.path(),
+        &index,
+        "otel",
+        "traces.json",
+        &root.path().join("otel-facts.json"),
+        "otel",
+    );
+    let label = otel["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|fact| fact["label"].as_str())
+        .unwrap();
+    assert!(label.len() <= 512 && label.ends_with('…'), "{label}");
+    assert!(!label.chars().any(char::is_control));
+
+    fs::write(
+        root.path().join("multi-line.sarif"),
+        serde_json::to_vec(&json!({
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": "Semgrep"}},
+                "results": [{
+                    "ruleId": "payments.review",
+                    "message": {"text": "Review payment boundary\nCalled from checkout"},
+                    "locations": [{"physicalLocation": {
+                        "artifactLocation": {"uri": "src/lib.rs"},
+                        "region": {"startLine": 1}
+                    }}]
+                }]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let sarif = adapt(
+        root.path(),
+        &index,
+        "sarif",
+        "multi-line.sarif",
+        &root.path().join("sarif-facts.json"),
+        "sarif",
+    );
+    assert_eq!(
+        sarif["facts"][0]["message"],
+        "Review payment boundary Called from checkout"
+    );
+
+    for manifest in ["junit-facts.json", "otel-facts.json", "sarif-facts.json"] {
+        assert_success(&run(
+            root.path(),
+            &["--index", &index, "enrich", "--facts", manifest],
+        ));
+    }
+}
+
+#[test]
+fn adapter_refuses_cut_or_empty_reports_and_keeps_the_previous_dataset() {
+    let (root, index) = fixture();
+    fs::write(
+        root.path().join("junit.xml"),
+        r#"<testsuite tests="1" failures="1"><testcase name="pays" file="src/lib.rs"><failure message="declined"/></testcase></testsuite>"#,
+    )
+    .unwrap();
+    let manifest = root.path().join("junit-facts.json");
+    let manifest_text = manifest.to_string_lossy().into_owned();
+    adapt(
+        root.path(),
+        &index,
+        "junit",
+        "junit.xml",
+        &manifest,
+        "refused",
+    );
+    assert_success(&run(
+        root.path(),
+        &["--index", &index, "enrich", "--facts", &manifest_text],
+    ));
+
+    for (format, name, report, reason) in [
+        (
+            "junit",
+            "cut.xml",
+            r#"<testsuites><testsuite tests="3" failures="1"><testcase name="t1" file="src/lib.rs"/>"#,
+            "invalid_format",
+        ),
+        (
+            "junit",
+            "lost-failure.xml",
+            r#"<testsuite tests="1" errors="1"><testcase name="t1" file="src/lib.rs"/></testsuite>"#,
+            "junit_totals_mismatch",
+        ),
+        ("junit", "empty.xml", "<testsuites/>", "produced no facts"),
+        (
+            "coverage",
+            "cut-cobertura.xml",
+            r#"<coverage><packages><package><classes><class filename="src/lib.rs"><lines><line number="1" hits="1"/></lines></class>"#,
+            "invalid_format",
+        ),
+        (
+            "coverage",
+            "cut.info",
+            "TN:\nSF:src/lib.rs\nDA:1,1\n",
+            "invalid_format",
+        ),
+    ] {
+        fs::write(root.path().join(name), report).unwrap();
+        assert_adapt_refused(root.path(), &index, format, name, reason);
+    }
+
+    let query = run(root.path(), &["--index", &index, "query", "facts"]);
+    assert_success(&query);
+    let query: Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["sources"]["items"][0]["dataset"], "refused");
+    assert_eq!(query["annotations"]["returned"], 2);
+
+    // A clean SARIF scan has no results and still clears its dataset.
+    fs::write(
+        root.path().join("clean.sarif"),
+        r#"{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Semgrep"}}, "results": []}]}"#,
+    )
+    .unwrap();
+    let clean = adapt(
+        root.path(),
+        &index,
+        "sarif",
+        "clean.sarif",
+        &root.path().join("clean-facts.json"),
+        "clean",
+    );
+    assert_eq!(clean["facts"], json!([]));
 }

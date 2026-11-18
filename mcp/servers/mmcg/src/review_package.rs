@@ -948,6 +948,11 @@ fn evidence_binding(
             .iter()
             .find(|source| source.id == artifact.source_id)
             .ok_or_else(|| ReviewPackageError::EvidenceBinding(artifact.source_id.clone()))?;
+        // A partial source was left out above. Its artifacts must not carry
+        // the claim it no longer makes as a whole.
+        if source.status != "loaded" {
+            continue;
+        }
         let signed = source.signature_status.as_deref() == Some("verified");
         bound_sources.push(EvidenceSourceBinding {
             id: format!("{}/artifact/{}", artifact.source_id, artifact.id),
@@ -2269,6 +2274,80 @@ mod tests {
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("arch.checkout-charge"));
         assert!(html.contains(&crate::hex::encode(&Sha256::digest(&artifact))));
+    }
+
+    #[test]
+    fn export_does_not_attest_a_fact_source_that_lens_could_not_show_in_full() {
+        let (repository, state, index_path) = fixture();
+        std::fs::create_dir_all(repository.path().join("reports")).unwrap();
+        let artifact = b"{\"producer\":\"arch-lint\"}\n";
+        std::fs::write(repository.path().join("reports/arch-lint.json"), artifact).unwrap();
+        let source = std::fs::read(repository.path().join("src/lib.rs")).unwrap();
+        let store = Store::open(&index_path).unwrap();
+        let contract = crate::facts::contract(&store).unwrap();
+        // One more annotation than Lens shows for a single file.
+        let facts = (0..=100)
+            .map(|index| {
+                serde_json::json!({
+                    "kind": "annotation",
+                    "id": format!("arch.review.{index:03}"),
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "severity": "warning",
+                    "category": "architecture.review",
+                    "title": "Review charge",
+                    "message": "The producer marked this changed function."
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest_path = state.path().join("facts.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_version": crate::facts::API_VERSION,
+                "capabilities": ["annotations"],
+                "repository": {
+                    "identity": contract.repository.identity,
+                    "revision": contract.repository.revision
+                },
+                "producer": {"name": "com.example.arch-lint", "version": "1.0.0"},
+                "dataset": "review",
+                "provenance": {"kind": "static-analysis", "artifacts": ["arch-lint"]},
+                "files": [{
+                    "path": "src/lib.rs",
+                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "bytes": source.len()
+                }],
+                "artifacts": [{
+                    "id": "arch-lint",
+                    "path": "reports/arch-lint.json",
+                    "sha256": crate::hex::encode(&Sha256::digest(artifact)),
+                    "bytes": artifact.len()
+                }],
+                "facts": facts
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::facts::import(&store, &manifest_path).unwrap();
+        drop(store);
+
+        let output = repository.path().join("fact-review");
+        export(&export_options(
+            repository.path(),
+            index_path,
+            output.clone(),
+        ))
+        .unwrap();
+
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        assert_ne!(manifest["evidence_binding"]["status"], "producer-attested");
+        assert!(manifest["evidence_binding"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|binding| binding["kind"] != "facts"));
     }
 
     #[cfg(unix)]

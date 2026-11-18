@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `facts adapt` requires `--report-revision OID`, the full commit the report was
+  produced from, such as `$GITHUB_SHA`. Existing adapt scripts fail until they
+  pass it. The adapter used to stamp the indexed HEAD on a report of unknown
+  revision. The OID must equal the indexed HEAD, and a SARIF run that declares
+  `versionControlProvenance` for this repository must name the same revision
+  (`artifact_revision_mismatch`).
 - `init` keeps the workflow instructions in a managed block. It appends the
   block to an existing `CLAUDE.md` instead of skipping the file, refreshes an
   older block, and writes the same block to `AGENTS.md` for Codex.
@@ -39,6 +45,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `facts adapt` no longer rejects a whole report as "not all mapped" because
+  of entries that carry no file fact, such as an OTLP span without a code path
+  or a coverage line repeated across methods. Entries without a path or outside
+  the index are named with counts (`report_entry_without_path`,
+  `report_entry_outside_index`).
+- `facts adapt` turns control characters in titles, messages and labels into
+  spaces and cuts text over the manifest limits with `…`. A multi-line SARIF
+  message or a JUnit failure trace used to fail the import.
+- `facts adapt` refuses a cut report: JUnit or Cobertura XML without its
+  closing elements, an LCOV record without `end_of_record`, and a report with
+  no facts. Only an empty SARIF scan clears a dataset. Before, a truncated CI
+  upload could replace a dataset with part of it or with nothing.
+- A JUnit suite that lists fewer cases than its `tests` total, or declares
+  failures without a failed case, is partial in Lens and refused by the
+  adapter (`junit_totals_mismatch`).
+- `query facts` and `mmcg_facts` return error annotations before warnings and
+  notes. When `--top` cuts a source, that source is `partial` with a
+  `normalized_fact_limit` diagnostic, instead of `loaded`.
+- Lens marks a fact source partial when its findings are dropped at the
+  per-file or global cap, and review export no longer attests such a source as
+  producer-attested.
 - Persona capture hooks no longer fail when parallel tool calls deliver
   events at once. Another hook's commit changes SQLite's rollback journal while
   a hook opens the journal, and the open refused it with `file identity changed

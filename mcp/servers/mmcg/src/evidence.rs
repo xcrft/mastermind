@@ -362,12 +362,21 @@ struct Collector<'a> {
     knowledge_match_count: usize,
     deadline: Option<Instant>,
     artifact_identities: HashMap<String, (String, u64)>,
+    /// Set only for fact adaptation. Every report entry must then name an
+    /// indexed file, and a report that states its own provenance must name
+    /// this repository at this revision.
+    report_repository: Option<&'a crate::facts::FactRepository>,
 }
 
 #[derive(Default)]
 struct SourceStats {
     facts_total: usize,
     facts_returned: usize,
+    /// Entries with no repository path, such as a SARIF result without a
+    /// location or a JUnit testcase without a `file` attribute.
+    pathless_records: usize,
+    /// Entries whose path is not in the collector's path set.
+    unmatched_records: usize,
     files: BTreeSet<String>,
     partial: bool,
     invalid_records: bool,
@@ -420,6 +429,7 @@ enum SourceFailure {
     Changed,
     InvalidUtf8,
     InvalidFormat,
+    RevisionMismatch,
     CodeownersTooLarge,
     CodeownersDiscovery(CodeownersDiscoveryError),
     Deadline,
@@ -437,6 +447,7 @@ impl SourceFailure {
             Self::Changed => "source_changed",
             Self::InvalidUtf8 => "invalid_utf8",
             Self::InvalidFormat => "invalid_format",
+            Self::RevisionMismatch => "artifact_revision_mismatch",
             Self::CodeownersTooLarge => "codeowners_too_large",
             Self::CodeownersDiscovery(error) => error.code(),
             Self::Deadline => "deadline_exceeded",
@@ -462,6 +473,9 @@ impl SourceFailure {
             Self::Changed => "The evidence source changed while Lens was reading it.",
             Self::InvalidUtf8 => "The evidence source is not valid UTF-8.",
             Self::InvalidFormat => "The evidence source does not match the expected format.",
+            Self::RevisionMismatch => {
+                "SARIF versionControlProvenance names another repository or revision."
+            }
             Self::CodeownersTooLarge => {
                 "The CODEOWNERS file is not under GitHub's 3 MiB ingestion limit."
             }
@@ -590,6 +604,7 @@ fn collect_internal(
         knowledge_match_count: 0,
         deadline,
         artifact_identities: HashMap::new(),
+        report_repository: None,
     };
 
     if !options.sarif.is_empty()
@@ -754,10 +769,12 @@ fn collect_internal(
 /// Parse exactly one external artifact against an explicit indexed-path
 /// inventory. Unlike Lens collection, this is not diff-scoped: adapters must
 /// bind every emitted fact to the current repository revision. Any parser
-/// truncation or malformed record is retained in `partial` and the adapter
-/// rejects the artifact rather than signing an incomplete projection.
+/// truncation, malformed or unbound record, or contradicting SARIF provenance
+/// is retained in `partial` and the adapter rejects the artifact rather than
+/// signing an incomplete projection.
 pub(crate) fn collect_for_fact_adapter(
     root: &Path,
+    repository: &crate::facts::FactRepository,
     kind: AdapterEvidenceKind,
     path: &Path,
     relevant: BTreeSet<String>,
@@ -788,6 +805,7 @@ pub(crate) fn collect_for_fact_adapter(
         knowledge_match_count: 0,
         deadline,
         artifact_identities: HashMap::new(),
+        report_repository: Some(repository),
     };
     match kind {
         AdapterEvidenceKind::Sarif => collector.load_sarif(path, "adapter:sarif".into()),
@@ -920,7 +938,34 @@ impl Collector<'_> {
         });
     }
 
-    fn source_done(&mut self, id: String, kind: &'static str, label: String, stats: SourceStats) {
+    fn source_done(
+        &mut self,
+        id: String,
+        kind: &'static str,
+        label: String,
+        mut stats: SourceStats,
+    ) {
+        // Lens scopes reports to the diff, so an entry outside its path set is
+        // expected there. An adapter must bind the whole report instead.
+        if self.report_repository.is_some() {
+            for (count, code, problem) in [
+                (
+                    stats.pathless_records,
+                    "report_entry_without_path",
+                    "name no repository file. SARIF results need a location and JUnit testcases need a file attribute.",
+                ),
+                (
+                    stats.unmatched_records,
+                    "report_entry_outside_index",
+                    "name files that are not in the index.",
+                ),
+            ] {
+                if count > 0 {
+                    stats.partial = true;
+                    self.diagnostic(id.clone(), code, format!("{count} report entries {problem}"));
+                }
+            }
+        }
         self.partial |= stats.partial;
         let artifact = self.artifact_identities.remove(&id);
         self.sources.push(EvidenceSource {
@@ -951,7 +996,7 @@ impl Collector<'_> {
             self.notes.push(EvidencePrecisionNote {
                 source_id: "facts",
                 code: "normalized_fact_overlay",
-                message: "Declarative facts are bound to the indexed repository, exact Git revision, and source digests. Relationship facts decorate only matching static graph endpoints and never create topology.".into(),
+                message: "Declarative facts are bound to the indexed repository, the Git revision their producer declared, and source digests. Relationship facts decorate only matching static graph endpoints and never create topology.".into(),
             });
         }
         let producers = snapshot
@@ -982,12 +1027,13 @@ impl Collector<'_> {
                 signed_manifest_digest: source.signed_manifest_digest,
             });
         }
-        let mut annotation_truncated = false;
+        let mut dropped = BTreeMap::<String, u32>::new();
         for annotation in snapshot.annotations.items {
             let tool = producers
                 .get(&annotation.source_id)
                 .cloned()
                 .unwrap_or_else(|| "declarative-facts".into());
+            let source_id = annotation.source_id.clone();
             let finding = EvidenceFinding {
                 source_id: annotation.source_id,
                 tool,
@@ -998,14 +1044,26 @@ impl Collector<'_> {
                 column: annotation.column,
             };
             if !self.add_finding(&annotation.path, finding) {
-                annotation_truncated = true;
+                *dropped.entry(source_id).or_default() += 1;
             }
         }
-        if annotation_truncated {
+        // Facts the Lens envelope could not show leave their source
+        // incomplete, the same as facts the query limit cut.
+        for (source_id, count) in dropped {
+            if let Some(source) = self
+                .sources
+                .iter_mut()
+                .find(|source| source.kind == "facts" && source.id == source_id)
+            {
+                source.facts_returned = source.facts_returned.saturating_sub(count);
+                if source.status == "loaded" {
+                    source.status = "partial";
+                }
+            }
             self.diagnostic(
-                "facts",
+                source_id,
                 "normalized_fact_limit",
-                "Some normalized annotations were omitted by the Lens finding limits.",
+                format!("{count} normalized annotations were omitted by the Lens finding limits."),
             );
         }
         self.fact_artifacts = snapshot.artifacts.items;
@@ -1220,6 +1278,12 @@ impl Collector<'_> {
                 );
                 break;
             }
+            if self
+                .report_repository
+                .is_some_and(|repository| !sarif_run_describes(run, repository))
+            {
+                return self.source_error(id, "sarif", label, SourceFailure::RevisionMismatch);
+            }
             let tool = sarif_tool(run);
             let bases = sarif_uri_bases(run);
             let rules = sarif_rules(run);
@@ -1253,10 +1317,10 @@ impl Collector<'_> {
                     .filter(|value| matches!(*value, "error" | "warning" | "note" | "none"))
                     .or(rule_default)
                     .unwrap_or("warning");
-                let message = result
-                    .pointer("/message/text")
-                    .and_then(Value::as_str)
-                    .or_else(|| result.pointer("/message/markdown").and_then(Value::as_str))
+                let message = ["/message/text", "/message/markdown"]
+                    .into_iter()
+                    .filter_map(|pointer| result.pointer(pointer).and_then(Value::as_str))
+                    .find(|text| !text.is_empty())
                     .unwrap_or("No SARIF message returned.");
                 let locations = result
                     .get("locations")
@@ -1274,6 +1338,7 @@ impl Collector<'_> {
                         break 'runs;
                     }
                     stats.facts_total += 1;
+                    stats.pathless_records += 1;
                     continue;
                 }
                 for location in locations {
@@ -1301,6 +1366,7 @@ impl Collector<'_> {
                         .and_then(|value| value.get("uri"))
                         .and_then(Value::as_str)
                     else {
+                        stats.pathless_records += 1;
                         continue;
                     };
                     let combined = artifact
@@ -1311,7 +1377,10 @@ impl Collector<'_> {
                     let repo_path =
                         match normalize_evidence_path(self.root, &combined, &self.relevant) {
                             Ok(Some(path)) => path,
-                            Ok(None) => continue,
+                            Ok(None) => {
+                                stats.unmatched_records += 1;
+                                continue;
+                            }
                             Err(_) => {
                                 stats.partial = true;
                                 stats.invalid_records = true;
@@ -1444,6 +1513,13 @@ impl Collector<'_> {
             deadline_reached: parsed.deadline_reached,
             ..SourceStats::default()
         };
+        if parsed.totals_mismatch {
+            self.diagnostic(
+                id.clone(),
+                "junit_totals_mismatch",
+                "A JUnit suite declares more tests, failures or errors than its testcases show.",
+            );
+        }
         let mut failure_limited = false;
         for case in parsed.cases {
             if self.deadline_reached() {
@@ -1452,11 +1528,15 @@ impl Collector<'_> {
                 break;
             }
             let Some(raw_path) = case.file.as_deref() else {
+                stats.pathless_records += 1;
                 continue;
             };
             let repo_path = match normalize_evidence_path(self.root, raw_path, &self.relevant) {
                 Ok(Some(path)) => path,
-                Ok(None) => continue,
+                Ok(None) => {
+                    stats.unmatched_records += 1;
+                    continue;
+                }
                 Err(_) => {
                     stats.partial = true;
                     stats.invalid_records = true;
@@ -1534,12 +1614,17 @@ impl Collector<'_> {
                 stats.deadline_reached = true;
                 break;
             }
+            // A span without a code path, such as a client or framework span,
+            // states nothing about a repository file.
             let Some(raw_path) = span.file.as_deref() else {
                 continue;
             };
             let repo_path = match normalize_evidence_path(self.root, raw_path, &self.relevant) {
                 Ok(Some(path)) => path,
-                Ok(None) => continue,
+                Ok(None) => {
+                    stats.unmatched_records += 1;
+                    continue;
+                }
                 Err(_) => {
                     stats.partial = true;
                     stats.invalid_records = true;
@@ -2461,6 +2546,42 @@ pub(crate) fn discover_codeowners(
     Ok(None)
 }
 
+/// Whether a SARIF run may describe `repository` at its revision. A run
+/// without `versionControlProvenance` makes no claim and is accepted. A run
+/// with provenance must name this repository, and every entry for it that
+/// carries a `revisionId` must name the expected commit. Entries for other
+/// repositories, such as submodules, are ignored. Without an origin remote
+/// the identity is a path hash that no URI can match, so every entry is
+/// treated as this repository.
+fn sarif_run_describes(run: &Value, repository: &crate::facts::FactRepository) -> bool {
+    let Some(entries) = run
+        .get("versionControlProvenance")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty())
+    else {
+        return true;
+    };
+    let remote_identity = repository.identity.starts_with("git-remote:");
+    let mut own = entries
+        .iter()
+        .filter(|entry| {
+            !remote_identity
+                || entry
+                    .get("repositoryUri")
+                    .and_then(Value::as_str)
+                    .and_then(crate::facts::remote_identity)
+                    .is_some_and(|identity| identity == repository.identity)
+        })
+        .peekable();
+    own.peek().is_some()
+        && own.all(|entry| {
+            entry
+                .get("revisionId")
+                .and_then(Value::as_str)
+                .is_none_or(|revision| revision.eq_ignore_ascii_case(&repository.revision))
+        })
+}
+
 fn sarif_tool(run: &Value) -> String {
     run.pointer("/tool/driver/name")
         .and_then(Value::as_str)
@@ -2711,6 +2832,7 @@ fn parse_lcov(
     let text = std::str::from_utf8(bytes).map_err(|_| SourceFailure::InvalidUtf8)?;
     let mut records = CoverageRecords::new();
     let mut current = None;
+    let mut in_record = false;
     let mut stats = SourceStats::default();
     let mut saw_format_marker = false;
     for (line_index, line) in text.lines().enumerate() {
@@ -2722,8 +2844,13 @@ fn parse_lcov(
         }
         if let Some(path) = line.strip_prefix("SF:") {
             saw_format_marker = true;
+            in_record = true;
             current = match normalize_evidence_path(root, path.trim(), relevant) {
-                Ok(path) => path,
+                Ok(Some(path)) => Some(path),
+                Ok(None) => {
+                    stats.unmatched_records += 1;
+                    None
+                }
                 Err(_) => {
                     stats.partial = true;
                     stats.invalid_records = true;
@@ -2734,6 +2861,7 @@ fn parse_lcov(
         }
         if line == "end_of_record" {
             saw_format_marker = true;
+            in_record = false;
             current = None;
             continue;
         }
@@ -2766,9 +2894,16 @@ fn parse_lcov(
                 .entry(line_number)
                 .and_modify(|value| *value = (*value).max(hits))
                 .or_insert(hits);
+        } else if !in_record {
+            stats.pathless_records += 1;
         }
     }
     if !saw_format_marker {
+        return Err(SourceFailure::InvalidFormat);
+    }
+    // Every LCOV record ends with `end_of_record`, so an open record at the
+    // end of a fully read report means the file was cut.
+    if in_record && !stats.deadline_reached && !stats.work_limited {
         return Err(SourceFailure::InvalidFormat);
     }
     Ok((records, stats))
@@ -2789,6 +2924,7 @@ fn parse_cobertura(
     let mut records = CoverageRecords::new();
     let mut stats = SourceStats::default();
     let mut events = 0usize;
+    let mut depth = 0usize;
     let mut saw_coverage = false;
     loop {
         if events.is_multiple_of(4_096) && deadline.is_some_and(|value| Instant::now() >= value) {
@@ -2797,10 +2933,16 @@ fn parse_cobertura(
             break;
         }
         events += 1;
-        match reader
+        let event = reader
             .read_event_into(&mut buffer)
-            .map_err(|_| SourceFailure::InvalidFormat)?
-        {
+            .map_err(|_| SourceFailure::InvalidFormat)?;
+        // quick-xml rejects an unmatched end tag, so this cannot underflow.
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        match event {
             Event::Start(event) => match event.local_name().as_ref() {
                 "coverage" => saw_coverage = true,
                 "source" => reading_source = true,
@@ -2839,6 +2981,9 @@ fn parse_cobertura(
                 "class" => current_filename = None,
                 _ => {}
             },
+            // A report cut between two complete elements still parses, so
+            // only the open element count shows that it ended early.
+            Event::Eof if depth > 0 => return Err(SourceFailure::InvalidFormat),
             Event::Eof => break,
             _ => {}
         }
@@ -2865,7 +3010,10 @@ fn add_cobertura_line(
     stats: &mut SourceStats,
 ) {
     stats.facts_total += 1;
-    let Some(filename) = filename else { return };
+    let Some(filename) = filename else {
+        stats.pathless_records += 1;
+        return;
+    };
     let Some(line) = xml_attribute(event, "number").and_then(|value| value.parse::<u32>().ok())
     else {
         stats.partial = true;
@@ -2902,9 +3050,13 @@ fn add_cobertura_line(
             }
         }
     }
-    if path.is_none() && invalid_path {
-        stats.partial = true;
-        stats.invalid_records = true;
+    if path.is_none() {
+        if invalid_path {
+            stats.partial = true;
+            stats.invalid_records = true;
+        } else {
+            stats.unmatched_records += 1;
+        }
     }
     if let Some(path) = path {
         records
@@ -3189,6 +3341,7 @@ mod tests {
             relevant: paths.iter().map(|path| (*path).to_string()).collect(),
             sources: Vec::new(),
             artifact_identities: HashMap::new(),
+            report_repository: None,
             files: BTreeMap::new(),
             diagnostics: Vec::new(),
             notes: Vec::new(),
@@ -3409,7 +3562,7 @@ mod tests {
     fn lcov_and_cobertura_merge_line_hits_without_inventing_files() {
         let root = tempfile::tempdir().unwrap();
         let relevant = BTreeSet::from(["src/pay.rs".to_string()]);
-        let lcov = b"TN:\nSF:src/pay.rs\nDA:1,0\nDA:2,3\nDA:2,4\nend_of_record\nDA:3,9\nSF:src/other.rs\nDA:1,9\n";
+        let lcov = b"TN:\nSF:src/pay.rs\nDA:1,0\nDA:2,3\nDA:2,4\nend_of_record\nDA:3,9\nSF:src/other.rs\nDA:1,9\nend_of_record\n";
         let (lcov_records, lcov_stats) = parse_lcov(root.path(), &relevant, lcov, None).unwrap();
         assert_eq!(lcov_stats.facts_total, 5);
         assert_eq!(lcov_records["src/pay.rs"].len(), 2);
@@ -3464,6 +3617,39 @@ mod tests {
             tests.failures[0].message,
             "expected decline · stack <trace>"
         );
+    }
+
+    #[test]
+    fn junit_suite_short_of_its_declared_totals_is_partial() {
+        let root = tempfile::tempdir().unwrap();
+        // A jest-style suite that failed to run reports an error but no
+        // testcase. A testcase with both a failure and an error is counted
+        // twice by pytest and must not trip the check.
+        for (report, status) in [
+            (
+                r#"<testsuites><testsuite tests="1"><testcase name="a" file="tests/pay_test.rs"/></testsuite><testsuite tests="0" errors="1"/></testsuites>"#,
+                "partial",
+            ),
+            (
+                r#"<testsuites tests="2"><testsuite tests="2" failures="1" errors="1"><testcase name="a" file="tests/pay_test.rs"><failure/><error/></testcase><testcase name="b" file="tests/pay_test.rs"/></testsuite><testsuite><testcase name="c" file="tests/pay_test.rs"/></testsuite></testsuites>"#,
+                "loaded",
+            ),
+        ] {
+            fs::write(root.path().join("junit.xml"), report).unwrap();
+            let mut collector = collector(root.path(), &["tests/pay_test.rs"]);
+            collector.load_junit(Path::new("junit.xml"), "junit:0".into());
+            let snapshot = collector.finish(0);
+
+            assert_eq!(snapshot.sources.items[0].status, status, "{report}");
+            assert_eq!(
+                snapshot
+                    .diagnostics
+                    .items
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "junit_totals_mismatch"),
+                status == "partial"
+            );
+        }
     }
 
     #[test]
@@ -3852,7 +4038,11 @@ mod tests {
     #[test]
     fn evidence_loaders_do_not_modify_sources_or_create_sidecars() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("coverage.info"), "SF:src/pay.rs\nDA:1,1\n").unwrap();
+        fs::write(
+            root.path().join("coverage.info"),
+            "SF:src/pay.rs\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
         let before = fs::read_dir(root.path())
             .unwrap()
             .map(|entry| {

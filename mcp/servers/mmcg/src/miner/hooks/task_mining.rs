@@ -141,8 +141,20 @@ pub(super) fn on_source_update(db: &mut Journal, grant: &Grant, episode: &str) {
     on_stop(db, grant, episode);
 }
 
+/// Claude can write the response record after its Stop hook returns. Past
+/// this wait the binding stays pending until the next local task boundary.
+fn transcript_wait() -> Duration {
+    let millis = std::env::var("MMCG_TASK_FINALIZER_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .unwrap_or(4_000)
+        .min(120_000);
+    Duration::from_millis(millis)
+}
+
 fn finalize(db: &mut Journal, episode: &str, owner: &str, wait: bool) -> Result<bool, Error> {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + transcript_wait();
     loop {
         if !db.owns_task_finalizer(episode, owner, now())? {
             return Err("task finalizer ownership expired".into());

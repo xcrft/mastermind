@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(x) && y`, which is now a logical AND instead of a cast. The audit Docker
   Action builds with Rust 1.100.0, and the PR review workflow pins the current
   `dtolnay/rust-toolchain` commit.
+- `MMCG_TASK_FINALIZER_WAIT_MS` sets how long the persona task finalizer waits
+  after Claude's Stop hook for the transcript to name the model. The default
+  stays 4 seconds. The finalizer tests set it themselves, so they no longer
+  fail when a loaded machine runs them slower than that window.
 - `facts adapt` requires `--report-revision OID`, the full commit the report was
   produced from, such as `$GITHUB_SHA`. Existing adapt scripts fail until they
   pass it. The adapter used to stamp the indexed HEAD on a report of unknown

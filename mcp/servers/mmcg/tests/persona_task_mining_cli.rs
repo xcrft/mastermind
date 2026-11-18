@@ -7,8 +7,13 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const PROMPT: &str = "I prefer short reviews only for simple changes.";
+/// Bounds the waits on observable episode state. A test that writes the
+/// transcript after Stop gives the finalizer the same window, so the outcome
+/// does not depend on how fast this machine runs the test's own commands.
+const WAIT: Duration = Duration::from_secs(30);
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -16,6 +21,7 @@ struct Fixture {
     home: PathBuf,
     bin: PathBuf,
     client: &'static str,
+    finalizer_wait: Option<Duration>,
 }
 
 impl Fixture {
@@ -37,6 +43,7 @@ impl Fixture {
             home,
             bin,
             client,
+            finalizer_wait: None,
         };
         fs::write(f.root.join("sample.py"), "def sample():\n    return True\n").unwrap();
         for client in ["codex", "claude"] {
@@ -83,6 +90,9 @@ impl Fixture {
             .env("HOME", &self.home)
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .args(args);
+        if let Some(wait) = self.finalizer_wait {
+            command.env("MMCG_TASK_FINALIZER_WAIT_MS", wait.as_millis().to_string());
+        }
         command
     }
 
@@ -253,7 +263,8 @@ fn foreign_roots_and_forgotten_sources_cannot_use_a_task_ticket() {
 
 #[test]
 fn the_local_finalizer_waits_for_claudes_actual_model_without_calling_it() {
-    let f = Fixture::for_client("claude");
+    let mut f = Fixture::for_client("claude");
+    f.finalizer_wait = Some(WAIT);
     let ticket = f.offer("one", PROMPT);
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "claude")));
     let slug = f
@@ -268,38 +279,34 @@ fn the_local_finalizer_waits_for_claudes_actual_model_without_calling_it() {
     let user = json!({"type":"user","sessionId":"task-session","cwd":f.root,"promptId":"one","message":{"role":"user","content":PROMPT}});
     let assistant = json!({"type":"assistant","sessionId":"task-session","cwd":f.root,"message":{"role":"assistant","model":"claude-task-model","content":[{"type":"text","text":"Reviewed the change."}]}});
     fs::write(transcript, format!("{user}\n{assistant}\n")).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-    loop {
-        let shown = f.episode();
-        if let Some(analysis) = shown["analyses"]
+    let task_analysis = |shown: &Value| {
+        shown["analyses"]
             .as_array()
             .unwrap()
             .iter()
             .find(|analysis| analysis["processor"]["engine"] == "current_task_agent")
-        {
-            assert_eq!(analysis["current"], true);
-            assert_eq!(analysis["processor"]["model"], "claude-task-model");
-            assert_eq!(
-                analysis["processor"]["model_binding"]["source"],
-                "native_session_transcript"
-            );
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{shown}");
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+            .cloned()
+    };
+    let shown = wait_for_episode(&f, |shown| task_analysis(shown).is_some());
+    let analysis = task_analysis(&shown).unwrap();
+    assert_eq!(analysis["current"], true);
+    assert_eq!(analysis["processor"]["model"], "claude-task-model");
+    assert_eq!(
+        analysis["processor"]["model_binding"]["source"],
+        "native_session_transcript"
+    );
     f.no_inference();
 }
 
 fn wait_for_episode(f: &Fixture, ready: impl Fn(&Value) -> bool) -> Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + WAIT;
     loop {
         let shown = f.episode();
         if ready(&shown) {
             return shown;
         }
         assert!(std::time::Instant::now() < deadline, "{shown}");
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -323,7 +330,8 @@ fn pending_transcript(f: &Fixture) -> PathBuf {
 
 #[test]
 fn the_finalizer_retries_a_missing_transcript_without_another_tool_event() {
-    let f = Fixture::for_client("claude");
+    let mut f = Fixture::for_client("claude");
+    f.finalizer_wait = Some(WAIT);
     let ticket = f.offer("one", PROMPT);
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "claude")));
     let transcript = pending_transcript(&f);
@@ -351,7 +359,8 @@ fn the_finalizer_retries_a_missing_transcript_without_another_tool_event() {
 
 #[test]
 fn expired_transcript_wait_is_visible_and_resumes_at_a_local_task_boundary() {
-    let f = Fixture::for_client("claude");
+    let mut f = Fixture::for_client("claude");
+    f.finalizer_wait = Some(Duration::from_millis(1));
     let ticket = f.offer("one", PROMPT);
     assert!(!failed(&f.submit(&ticket, f.candidates(PROMPT), "claude")));
     let transcript = pending_transcript(&f);

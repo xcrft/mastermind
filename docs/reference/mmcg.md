@@ -2257,6 +2257,7 @@ command's `MMCG_QUERY_BUDGET_MS` budget.
 | `MMCG_INDEX_PATH` | no | `.mastermind/mmcg.db` (relative to cwd) | Where the SQLite index lives. |
 | `MMCG_QUERY_BUDGET_MS` | no | `10000` for `mmcg serve`. `60000` for `mmcg query`/`mmcg map`/`mmcg impact` | Wall-clock work budget for a single MCP tool call or CLI graph query. `0` = unlimited. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for bounded Git subprocesses used by history, diff, verification, and audit paths. Capped at `300000`. A shorter request deadline still wins. A stuck process is killed and the operation fails with a timeout error. |
+| `MMCG_TASK_FINALIZER_WAIT_MS` | no | `4000` | How long the persona task finalizer waits after Claude's Stop hook for the transcript to name the model. Capped at `120000`. After that the binding stays pending until the next local task boundary. |
 | `MMCG_REQUEST_SOFT_TIMEOUT_MS` | no | `30000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog cancels the in-flight request. `0` = no soft ceiling. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_REQUEST_HARD_TIMEOUT_MS` | no | `300000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog exits the process rather than let it keep burning CPU. `0` = no hard ceiling. |
 | `MMCG_WATCHDOG` | no | unset | Set to `0` to disable the serve watchdog entirely — both ceilings and the reparent check. |

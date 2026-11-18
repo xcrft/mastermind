@@ -2,9 +2,11 @@
 //! The fake client only implements MCP management. No model is contacted.
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -106,9 +108,7 @@ impl Fixture {
     }
 
     fn client(&self, name: &str) {
-        let path = self.bin.join(name);
-        fs::write(&path, CLIENT).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        test_executable::write_executable(self.bin.join(name), CLIENT);
     }
 
     fn no_provider_calls(&self) {

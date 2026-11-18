@@ -1271,18 +1271,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn member_fsmonitor_does_not_run_during_lock_or_map() {
-        use std::os::unix::fs::PermissionsExt;
-
         let parent = tempfile::tempdir().unwrap();
         let (root, index) = repository(parent.path(), "one", "pub fn api() {}\n");
         let marker = parent.path().join("fsmonitor-ran");
         let hook = parent.path().join("fsmonitor.sh");
-        fs::write(
+        crate::test_executable::write_executable(
             &hook,
             format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         git(&root, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
         git(&root, &["ls-files", "--cached"]);
         assert!(marker.exists(), "fixture must expose the repository hook");

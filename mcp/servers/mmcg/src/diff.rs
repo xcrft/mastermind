@@ -3038,7 +3038,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checking_flagged_files_runs_no_repository_hook() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = init_repo("index-flag-hook");
         write(&dir, "conf", "baseline\n");
         run(&dir, &["add", "-A"]);
@@ -3047,9 +3046,10 @@ mod tests {
         write(&dir, "conf", "edited\n");
         let marker = dir.join("hook-ran");
         let hook = dir.join(".git/hooks/post-index-change");
-        fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write_executable(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
 
         assert_eq!(listed(&dir), [("conf".into(), "modified".into())]);
         assert!(!marker.exists());

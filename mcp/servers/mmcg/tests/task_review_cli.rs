@@ -3,10 +3,12 @@
 
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -77,8 +79,7 @@ impl Fixture {
         ] {
             fixture.git(&args);
         }
-        fixture.write(EXECUTABLE, PROBE);
-        fs::set_permissions(fixture.path(EXECUTABLE), fs::Permissions::from_mode(0o700)).unwrap();
+        test_executable::write_executable(fixture.path(EXECUTABLE), PROBE);
         let checks: Vec<Value> = ["unit", "integration"].into_iter().map(|id| json!({
             "cmd":format!("./{EXECUTABLE} {id}"),
             "run":{"id":id, "argv":[format!("./{EXECUTABLE}"),id], "cwd":".", "timeout_secs":10}
@@ -1363,7 +1364,7 @@ fn a_late_lessons_change_cannot_cross_the_final_guarded_completion_check() {
     let harness = fixture._temp.path().join("late-history-race");
     fs::create_dir_all(&harness).unwrap();
     let wrapper = harness.join("git");
-    fs::write(
+    test_executable::write_executable(
         &wrapper,
         r#"#!/bin/sh
 set -eu
@@ -1387,9 +1388,7 @@ if test "$#" -eq 8 &&
 fi
 exec /usr/bin/git "$@"
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let count_path = harness.join("stage-inventories");
     let marker_path = harness.join("injected");
     let wrapped = |args: &[&str], inject_at: usize| {
@@ -1489,13 +1488,10 @@ fn follow_up_returns_exact_bound_history_work_and_conditional_steps_without_side
     fs::create_dir_all(&guard).unwrap();
     let marker = guard.join("called");
     for client in ["claude", "codex"] {
-        let path = guard.join(client);
-        fs::write(
-            &path,
+        test_executable::write_executable(
+            guard.join(client),
             "#!/bin/sh\nprintf invoked > \"$MMCG_FOLLOW_UP_PROVIDER_MARKER\"\nexit 91\n",
-        )
-        .unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        );
     }
     // The command promises JSON even without --json.
     let output = fixture

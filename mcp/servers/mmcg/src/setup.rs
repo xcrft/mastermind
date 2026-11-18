@@ -3249,14 +3249,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn profile_registration_status_never_executes_clients_servers_or_helpers() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = tmp("registration-data-only");
         let binaries = tmp("registration-traps");
         for name in ["claude", "codex", "server"] {
-            let executable = binaries.join(name);
-            fs::write(&executable, "#!/bin/sh\n: > \"$0.executed\"\nexit 1\n").unwrap();
-            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_executable::write_executable(
+                binaries.join(name),
+                "#!/bin/sh\n: > \"$0.executed\"\nexit 1\n",
+            );
         }
         let _native = TestNativeBinGuard::new(binaries.clone());
         let entry = json!({"command": binaries.join("server"), "args": ["serve"]});
@@ -3894,8 +3893,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_profile_client_migrates_rechecks_and_preserves_conflicting_audience() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _entry = TestCanonicalEntryGuard::new(json!({
             "command": "/bin/mmcg", "args": ["serve"],
         }));
@@ -3939,8 +3936,7 @@ esac
         for client in [Client::Claude, Client::Codex] {
             let name = client_label(client);
             let executable = bin.join(name);
-            fs::write(&executable, script).unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_executable::write_executable(&executable, script);
             let mut request = Request {
                 client,
                 scope: Scope::User,
@@ -4062,18 +4058,14 @@ esac
     #[cfg(unix)]
     #[test]
     fn native_writes_require_observed_postconditions() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = tmp("native-postcondition");
         let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let executable = bin.join("codex");
-        fs::write(
+        crate::test_executable::write_executable(
             &executable,
             "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"list\" ]; then [ -f \"$STATE_FILE\" ] || { printf '%s\\n' '[]'; exit 0; }; printf '%s\\n' '[{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"]}}]'; exit 0; fi\nif [ \"$2\" = \"add\" ] || [ \"$2\" = \"remove\" ]; then exit 0; fi\nexit 1\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let _native_bin = TestNativeBinGuard::new(bin);
         let mut request = Request {
             client: Client::Codex,
@@ -4158,17 +4150,14 @@ esac
     fn native_executable_identity_change_is_rejected_before_mutation() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let root = tmp("native-identity");
             let script = root.join("native");
             let replacement = root.join("replacement");
             let marker = root.join("mutated");
             let body = "#!/bin/sh\n: > \"$1\"\n";
-            fs::write(&script, body).unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_executable::write_executable(&script, body);
             let identity = ExecutableIdentity::capture(&script).unwrap();
-            fs::write(&replacement, body).unwrap();
-            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_executable::write_executable(&replacement, body);
             fs::rename(replacement, &script).unwrap();
             assert_eq!(
                 run_native_checked(&script, &identity, &[marker.to_string_lossy().into_owned()])
@@ -4323,7 +4312,6 @@ esac
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let native_root = tmp("native-request-root");
             let bin = root.join("native-bin");
             fs::create_dir_all(&bin).unwrap();
@@ -4334,8 +4322,7 @@ esac
                 } else {
                     "#!/bin/sh\nSTATE_FILE=\"$0.state\"\nif [ \"$2\" = \"list\" ]; then [ \"$3\" = \"--json\" ] || exit 2; [ -f \"$STATE_FILE\" ] || { printf '%s\\n' '[]'; exit 0; }; STATE=\"\"; read -r STATE < \"$STATE_FILE\" || :; [ \"$STATE\" = \"removed\" ] && { printf '%s\\n' '[]'; exit 0; }; printf '%s\\n' '[{\"name\":\"mmcg\",\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"/bin/mmcg\",\"args\":[\"serve\"],\"env\":null,\"env_vars\":[],\"cwd\":null}}]'; exit 0; fi\nif [ \"$2\" = \"add\" ]; then : > \"$STATE_FILE\"; exit 0; fi\nif [ \"$2\" = \"remove\" ]; then printf 'removed\\n' > \"$STATE_FILE\"; exit 0; fi\nexit 1\n"
                 };
-                fs::write(&executable, script).unwrap();
-                fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+                crate::test_executable::write_executable(&executable, script);
             }
             for client in [Client::Claude, Client::Codex] {
                 let name = client_label(client);

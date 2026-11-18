@@ -2,6 +2,10 @@
 //! repositories, transcripts and historical task records.
 
 #[cfg(unix)]
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
+#[cfg(unix)]
 use mmcg::miner::store::ProfileStore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -237,8 +241,6 @@ impl Fixture {
 
     #[cfg(unix)]
     fn hook_draft(&self, root: &Path, session: &str) -> Value {
-        use std::os::unix::fs::PermissionsExt;
-
         let output = self
             .command(env!("CARGO_BIN_EXE_mmcg"))
             .current_dir(root)
@@ -300,10 +302,9 @@ impl Fixture {
                 "supports":[{"event_id":event["id"],"quote":HOOK_QUOTE}],"contradictions":[]}]
         });
         let processor = self._temp.path().join(format!("processor-{session}"));
-        fs::write(&processor, format!(
+        test_executable::write_executable(&processor, format!(
             "#!/bin/sh\n[ \"$MASTERMIND_MINER\" = 1 ] || exit 7\ncat >/dev/null\ncat <<'RESPONSE'\n{response}\nRESPONSE\n"
-        )).unwrap();
-        fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+        ));
         let output = self.success(&[
             "miner",
             "hooks",

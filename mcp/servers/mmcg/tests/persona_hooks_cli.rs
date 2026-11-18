@@ -2,6 +2,9 @@
 //! processor and profile is synthetic and isolated from the developer's data.
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use mmcg::miner::store::{Habit, ProfileStore};
 use serde_json::{json, Value};
 use std::fs;
@@ -866,8 +869,7 @@ impl Fixture {
         let path = self._temp.path().join("processor");
         // Single-quoted heredoc keeps the fixture bytes literal. It also
         // consumes the real stdin protocol and checks recursion protection.
-        fs::write(&path,format!("#!/bin/sh\n[ \"$MASTERMIND_MINER\" = 1 ] || exit 7\ncat >/dev/null\ncat <<'RESPONSE'\n{response}\nRESPONSE\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        test_executable::write_executable(&path,format!("#!/bin/sh\n[ \"$MASTERMIND_MINER\" = 1 ] || exit 7\ncat >/dev/null\ncat <<'RESPONSE'\n{response}\nRESPONSE\n"));
         path
     }
     fn analyze(&self, episode: &Value) -> Value {
@@ -1613,15 +1615,13 @@ fn batch_worker_checkpoints_empty_results_and_retries_failed_processors() {
     let processor = f._temp.path().join("empty-processor");
     let counter = f._temp.path().join("processor-invocations");
     let response = json!({"schema":1,"episode_id":episode["id"],"episode_revision":episode["revision"],"drafts":[]});
-    fs::write(
+    test_executable::write_executable(
         &processor,
         format!(
             "#!/bin/sh\ncat >/dev/null\nprintf x >> '{}'\ncat <<'RESPONSE'\n{response}\nRESPONSE\n",
             counter.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let args = [
         "miner",
         "hooks",
@@ -1638,8 +1638,7 @@ fn batch_worker_checkpoints_empty_results_and_retries_failed_processors() {
     assert!(!f.home.join(".mastermind/style.db").exists());
 
     let failed = f._temp.path().join("failed-processor");
-    fs::write(&failed, "#!/bin/sh\ncat >/dev/null\nexit 1\n").unwrap();
-    fs::set_permissions(&failed, fs::Permissions::from_mode(0o700)).unwrap();
+    test_executable::write_executable(&failed, "#!/bin/sh\ncat >/dev/null\nexit 1\n");
     let args = [
         "miner",
         "hooks",
@@ -1649,11 +1648,10 @@ fn batch_worker_checkpoints_empty_results_and_retries_failed_processors() {
     ];
     let result = f.run(&args);
     assert!(!result.status.success());
-    fs::write(
+    test_executable::write_executable(
         &failed,
         format!("#!/bin/sh\ncat >/dev/null\ncat <<'RESPONSE'\n{response}\nRESPONSE\n"),
-    )
-    .unwrap();
+    );
     assert_eq!(f.success(&args)["results"].as_array().unwrap().len(), 1);
 }
 
@@ -1746,9 +1744,8 @@ fn foreground_worker_observes_new_and_revised_episodes_without_repeating_complet
     let response = root.join("response.json");
     // The test answers the actual protocol requests, atomically, without a
     // provider dependency or assumptions about JSON serialization ordering.
-    fs::write(&processor, format!(
-        "#!/bin/sh\ncat > '{0}/request.tmp'\nmv '{0}/request.tmp' '{0}/request.json'\nwhile [ ! -f '{0}/response.json' ]; do sleep 0.02; done\ncat '{0}/response.json'\nrm '{0}/response.json'\n", root.display())).unwrap();
-    fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+    test_executable::write_executable(&processor, format!(
+        "#!/bin/sh\ncat > '{0}/request.tmp'\nmv '{0}/request.tmp' '{0}/request.json'\nwhile [ ! -f '{0}/response.json' ]; do sleep 0.02; done\ncat '{0}/response.json'\nrm '{0}/response.json'\n", root.display()));
     let mut worker = ForegroundWorker::start(&f, &processor);
     let db = rusqlite::Connection::open(f.home.join(".mastermind/persona-events.db")).unwrap();
     db.busy_timeout(std::time::Duration::from_secs(1)).unwrap();
@@ -1836,15 +1833,13 @@ fn foreground_worker_cancellation_terminates_provider_and_releases_its_lease() {
     f.capture("cancel-session", "cancel-turn");
     let processor = f._temp.path().join("slow-processor");
     let pid_file = f._temp.path().join("processor.pid");
-    fs::write(
+    test_executable::write_executable(
         &processor,
         format!(
             "#!/bin/sh\ncat >/dev/null\necho $$ > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nsleep 30\n",
             pid_file.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut worker = ForegroundWorker::start(&f, &processor);
     wait_until("provider started", || pid_file.exists());
     let pid: libc::pid_t = fs::read_to_string(pid_file)

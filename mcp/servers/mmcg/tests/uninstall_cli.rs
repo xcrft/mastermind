@@ -1,5 +1,9 @@
 //! Uninstall stays inside disposable projects, homes, and native client fixtures.
 
+#[cfg(unix)]
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -65,11 +69,8 @@ impl Fixture {
 
     #[cfg(unix)]
     fn native_client(&self) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let script = self.bin.join("claude");
-        fs::write(
-            &script,
+        test_executable::write_executable(
+            self.bin.join("claude"),
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/native-calls"
 [ "$1" = mcp ] || exit 91
@@ -85,9 +86,7 @@ case "$2" in
   *) exit 92;;
 esac
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         fs::write(self.home.join("registration"), "registered").unwrap();
     }
 }

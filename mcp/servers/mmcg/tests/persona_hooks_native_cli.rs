@@ -2,10 +2,12 @@
 //! Disposable clients emulate inference only; no real account or LLM is used.
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -67,9 +69,7 @@ impl Fixture {
             bin,
         };
         for client in ["claude", "codex"] {
-            let executable = f.bin.join(client);
-            fs::write(&executable, NATIVE).unwrap();
-            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+            test_executable::write_executable(f.bin.join(client), NATIVE);
             f.success(&["miner", "hooks", "setup", "--client", client, "--write"]);
         }
         f

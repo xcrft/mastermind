@@ -1,10 +1,13 @@
 //! Synthetic user channels exercise local storage and MCP only. The native
 //! client fixture fails every invocation; no account or model is used.
 #![cfg(unix)]
+
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -49,13 +52,10 @@ impl Fixture {
         };
         fs::write(f.root.join("sample.py"), "def sample():\n    return True\n").unwrap();
         for client in ["codex", "claude"] {
-            let path = f.bin.join(client);
-            fs::write(
-                &path,
+            test_executable::write_executable(
+                f.bin.join(client),
                 "#!/bin/sh\nprintf called >> \"$HOME/provider-calls\"\nexit 91\n",
-            )
-            .unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            );
         }
         assert!(f
             .command(&["index", "."])

@@ -779,8 +779,10 @@ mod tests {
         fs::create_dir(root.join(".mastermind")).unwrap();
         let hook = root.join(".mastermind/fsmonitor.sh");
         let marker = root.join(".mastermind/fsmonitor-ran");
-        fs::write(&hook, "#!/bin/sh\nprintf ran > .mastermind/fsmonitor-ran\n").unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_executable::write_executable(
+            &hook,
+            "#!/bin/sh\nprintf ran > .mastermind/fsmonitor-ran\n",
+        );
         git(root, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
         git(root, &["ls-files", "--others", "--exclude-standard"]);
         assert!(marker.exists(), "fixture must expose the repository hook");

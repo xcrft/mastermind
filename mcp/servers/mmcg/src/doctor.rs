@@ -2002,13 +2002,11 @@ mod tests {
     fn check_mcp_config_never_executes_configured_command() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let root = tmp().canonicalize().unwrap();
             let home = tmp().canonicalize().unwrap();
             let marker = root.join("executed");
             let sentinel = root.join("configured-command");
-            fs::write(&sentinel, "#!/bin/sh\n: > \"$1\"\n").unwrap();
-            fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_executable::write_executable(&sentinel, "#!/bin/sh\n: > \"$1\"\n");
             let command = sentinel.to_string_lossy().into_owned();
             let marker_arg = marker.to_string_lossy().into_owned();
             let configured = serde_json::json!({

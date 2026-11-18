@@ -829,16 +829,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn custom_process_receives_one_bound_request_in_an_isolated_guarded_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("processor.sh");
         let request = directory.path().join("request.json");
         let result = directory.path().join("response.json");
         let cwd = directory.path().join("cwd.txt");
         let count = directory.path().join("launches.txt");
-        std::fs::write(&script, "#!/bin/sh\ntest \"$MASTERMIND_MINER\" = 1 || exit 9\nprintf 'launch\\n' >> \"$4\"\npwd > \"$3\"\ncat > \"$1\"\ncat \"$2\"\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_executable::write_executable(&script, "#!/bin/sh\ntest \"$MASTERMIND_MINER\" = 1 || exit 9\nprintf 'launch\\n' >> \"$4\"\npwd > \"$3\"\ncat > \"$1\"\ncat \"$2\"\n");
         let input = input("Объясни эту настройку без запуска Mastermind.");
         let expected = passthrough(&input);
         std::fs::write(&result, serde_json::to_vec(&expected).unwrap()).unwrap();

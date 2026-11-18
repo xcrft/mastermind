@@ -2,11 +2,13 @@
 //! processors and captured inputs are synthetic. No model is contacted.
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Seek, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -82,12 +84,10 @@ impl Fixture {
             .canonicalize()
             .unwrap();
         let processor = harness.join("semantic-processor");
-        fs::write(
+        test_executable::write_executable(
             &processor,
             format!("#!{} -I\n{PROCESSOR}", python.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         fs::write(harness.join("mode"), mode).unwrap();
         let f = Self {
             home: home.canonicalize().unwrap(),

@@ -2,6 +2,10 @@
 
 //! Public CLI contract tests. The fake client honors actual guard decisions;
 //! the missing-hook case intentionally demonstrates the native fallback limit.
+
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
@@ -180,17 +184,11 @@ impl Fixture {
             "verify":[{"cmd":"./.mastermind/check.sh","run":{"id":check_id,"argv":["./.mastermind/check.sh"],"cwd":".","timeout_secs":10}}],
             "acceptance":[{"id":"return-two","statement":"The service returns two.","checks":[check_id]}]});
         f.write(SPEC, &format!("---\n{}---\n# Guard fixture\n\n## Goals\nUpdate the service.\n\n## Scope\nEdit service.py.\n\n## Acceptance Criteria\nThe service returns two.\n\n## Tests Plan\nRun the declared check.\n\n## Final Verification\nRun the declared command.\n\n## Alternatives Considered\nKeep the same service.\n\n## Risk Register\nLocal behavior only.\n\n## Evidence Ledger\nUse observed evidence.\n\n## Documentation Plan\nNo public documentation change.\n\n## Observability Plan\nNo logs needed.\n\n## Performance Considerations\nConstant work.\n\n## Rollback / Migration\nRestore the return value.\n", serde_norway::to_string(&frontmatter).unwrap()));
-        f.write(
-            ".mastermind/check.sh",
+        test_executable::write_executable(
+            f.root.join(".mastermind/check.sh"),
             "#!/bin/sh\n/usr/bin/grep -q 'return 2' service.py\n",
         );
-        fs::set_permissions(
-            f.root.join(".mastermind/check.sh"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        fs::write(f.bin.join("claude"), FAKE_LAUNCHER).unwrap();
-        fs::set_permissions(f.bin.join("claude"), fs::Permissions::from_mode(0o700)).unwrap();
+        test_executable::write_executable(f.bin.join("claude"), FAKE_LAUNCHER);
         fs::write(f.harness.join("client.py"), FAKE).unwrap();
         fs::write(f.harness.join("mode"), mode).unwrap();
         fs::write(f.harness.join("victim.py"), "PRIVATE_VICTIM_UNCHANGED").unwrap();

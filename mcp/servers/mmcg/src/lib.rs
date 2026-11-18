@@ -65,6 +65,8 @@ pub mod team;
 pub mod templates;
 pub mod temporal;
 mod terminal;
+#[cfg(all(test, unix))]
+mod test_executable;
 mod test_scan;
 mod verification;
 mod verification_inputs;

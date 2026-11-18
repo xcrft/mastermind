@@ -3,11 +3,13 @@
 
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -148,12 +150,7 @@ impl Fixture {
         ] {
             fixture.git(&args);
         }
-        fixture.write(".mastermind/check.sh", PROBE);
-        fs::set_permissions(
-            fixture.root.join(".mastermind/check.sh"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        test_executable::write_executable(fixture.root.join(".mastermind/check.sh"), PROBE);
         let metadata = json!({
             "mode":"verified",
             "touches":[{"file":"service.py", "symbols":["keep"]}],
@@ -167,12 +164,7 @@ impl Fixture {
             "---\n{}---\n# Native semantic review fixture\n\n## Goals\nReturn two from the service.\n\n## Scope\nEdit the existing service function.\n\n## Acceptance Criteria\nThe existing keep function returns two.\n\n## Tests Plan\nRun the declared unit check.\n\n## Final Verification\nRun the declared check after the edit.\n",
             serde_norway::to_string(&metadata).unwrap()
         ));
-        fs::write(fixture.bin.join("claude"), FAKE).unwrap();
-        fs::set_permissions(
-            fixture.bin.join("claude"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        test_executable::write_executable(fixture.bin.join("claude"), FAKE);
         fs::create_dir_all(fixture.home.join(".claude")).unwrap();
         fs::write(
             fixture.home.join(".claude/settings.json"),

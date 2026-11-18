@@ -1,7 +1,12 @@
 //! Public CLI evidence for observed verification, including real child processes.
 
 #[cfg(unix)]
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
+#[cfg(unix)]
 mod unix {
+    use crate::test_executable::write_executable;
     use mmcg::{indexer::Indexer, store::Store};
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
@@ -65,12 +70,7 @@ esac
                 let output = Self::git_command(root).args(args).output().unwrap();
                 assert!(output.status.success(), "{output:?}");
             }
-            fs::write(root.join(".mastermind/probe.sh"), PROBE).unwrap();
-            fs::set_permissions(
-                root.join(".mastermind/probe.sh"),
-                fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
+            write_executable(root.join(".mastermind/probe.sh"), PROBE);
             let command = mmcg::verification_receipts::display_command(&argv);
             let metadata = json!({
                 "mode": "verified", "touches": [{"file": "service.py", "symbols": ["keep"]}],
@@ -290,8 +290,7 @@ esac
     fn assert_stale_receipt_cannot_finish_history(change: &str) {
         let executable_directory = tempfile::tempdir().unwrap();
         let executable = executable_directory.path().join("probe.sh");
-        fs::write(&executable, PROBE).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable(&executable, PROBE);
         let fixture = Fixture::with_argv(
             vec![executable.to_str().unwrap().into(), "success".into()],
             ".",
@@ -305,7 +304,7 @@ esac
         assert_eq!(fixture.state()["status"], "history_review_required");
         let receipt = fs::read(fixture.path(RECEIPT)).unwrap();
         match change {
-            "executable" => fs::write(&executable, format!("{PROBE}\n# changed tool\n")).unwrap(),
+            "executable" => write_executable(&executable, format!("{PROBE}\n# changed tool\n")),
             "hidden_dependency" => {
                 let output = Fixture::git_command(fixture.root())
                     .args(["update-index", "--assume-unchanged", "sub/README.md"])
@@ -338,8 +337,7 @@ esac
         for mutate in [false, true] {
             let harness = tempfile::tempdir().unwrap();
             let executable = harness.path().join("probe.sh");
-            fs::write(&executable, PROBE).unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            write_executable(&executable, PROBE);
             let fixture = Fixture::with_argv(
                 vec![executable.to_str().unwrap().into(), "success".into()],
                 ".",
@@ -357,7 +355,7 @@ esac
             let receipt = fs::read(fixture.path(RECEIPT)).unwrap();
             let history = fs::read(fixture.path(HISTORY)).unwrap();
             let wrapper = harness.path().join("git");
-            fs::write(
+            write_executable(
                 &wrapper,
                 r#"#!/bin/sh
 set -eu
@@ -373,9 +371,7 @@ if test "$#" -ge 4 && test "$1" = -c &&
 fi
 exec /usr/bin/git "$@"
 "#,
-            )
-            .unwrap();
-            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             // Release notes are computed after observed checks have been
             // audited. The wrapper changes only the external executable at
             // that seam, leaving the successful receipt and Markdown intact.
@@ -438,7 +434,7 @@ exec /usr/bin/git "$@"
         assert!(resumed.status.success(), "{resumed:?}");
         assert_eq!(fixture.state()["status"], "learned");
 
-        fs::write(fixture.path(".mastermind/probe.sh"), "#!/bin/sh\nexit 7\n").unwrap();
+        write_executable(fixture.path(".mastermind/probe.sh"), "#!/bin/sh\nexit 7\n");
         let historical = fixture.run(&["run-task", SPEC]);
         assert!(historical.status.success(), "{historical:?}");
         assert_eq!(fixture.state()["status"], "learned");

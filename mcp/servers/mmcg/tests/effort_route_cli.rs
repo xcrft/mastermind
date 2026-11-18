@@ -1,5 +1,9 @@
 //! Public effort routing, bounded JSON inputs and model-free native launches.
 
+#[cfg(unix)]
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -78,14 +82,10 @@ fn malformed_oversized_and_multibyte_name_inputs_fail_without_a_route() {
 
 #[cfg(unix)]
 fn fake_client(root: &std::path::Path, client: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let path = root.join(client);
-    std::fs::write(
-        &path,
+    test_executable::write_executable(
+        root.join(client),
         "#!/bin/sh\n/usr/bin/touch ./spawned\nprintf '%s\\n' \"$@\"\n/bin/cat\nexit \"${FAKE_EXIT_CODE:-0}\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
 }
 
 #[cfg(unix)]

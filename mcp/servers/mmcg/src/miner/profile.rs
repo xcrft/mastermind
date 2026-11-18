@@ -4781,11 +4781,9 @@ diff --git a/app/bar.ts b/app/bar.ts
     #[test]
     #[cfg(unix)]
     fn completed_deep_capture_cleans_descendant_with_closed_pipes() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("claude");
-        std::fs::write(
+        crate::test_executable::write_executable(
             &script,
             "#!/bin/sh\n\
              (touch ready\n\
@@ -4794,9 +4792,7 @@ diff --git a/app/bar.ts b/app/bar.ts
              echo $! > descendant.pid\n\
              while [ ! -e ready ]; do sleep 0.01; done\n\
              printf 'bounded\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
 
         let output =
             run_claude_capture_with_timeout(&script, root.path(), "prompt", Duration::from_secs(5))
@@ -4844,16 +4840,12 @@ diff --git a/app/bar.ts b/app/bar.ts
     fn completed_deep_capture_cleans_descendant_holding_pipes_open() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("claude");
-            std::fs::write(
+            crate::test_executable::write_executable(
                 &script,
                 "#!/bin/sh\nsleep 30 &\necho $!\nprintf '## Design patterns & tendencies (interpreted)\\n\\n- bounded\\n'\nexit 0\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            );
 
             let started = Instant::now();
             let output = run_claude_capture_with_timeout(

@@ -2,10 +2,13 @@
 //! executable and receipt in these tests is synthetic and local to its fixture.
 
 #[cfg(unix)]
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
+#[cfg(unix)]
 mod unix {
     use serde_json::{json, Value};
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::{Command, Output};
 
@@ -82,9 +85,7 @@ printf 'ACCEPTANCE_RAW_EXECUTION_OUTPUT_PRIVATE\n'
             ] {
                 assert_success(&fixture.command("/usr/bin/git").args(args).output().unwrap());
             }
-            fixture.write(EXECUTABLE, PROBE);
-            fs::set_permissions(fixture.path(EXECUTABLE), fs::Permissions::from_mode(0o700))
-                .unwrap();
+            crate::test_executable::write_executable(fixture.path(EXECUTABLE), PROBE);
             fixture.write_spec(metadata);
             fixture.index();
             fixture

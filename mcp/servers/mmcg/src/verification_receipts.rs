@@ -2086,7 +2086,6 @@ mod tests {
     }
 
     fn repair_fixture() -> (tempfile::TempDir, ParsedSpec, Context, Receipt) {
-        use std::os::unix::fs::PermissionsExt;
         let (directory, _, mut receipt) = receipt_fixture();
         let root = directory.path();
         std::fs::create_dir_all(root.join(".mastermind/tasks/001-check")).unwrap();
@@ -2127,8 +2126,7 @@ mod tests {
             .trim()
             .to_owned();
         let executable = root.join(".mastermind/check.sh");
-        std::fs::write(&executable, "#!/bin/sh\nexit 7\n").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_executable::write_executable(&executable, "#!/bin/sh\nexit 7\n");
         let body = "---\nverify:\n  - cmd: ./.mastermind/check.sh\n    run:\n      id: test\n      argv: [./.mastermind/check.sh]\n      cwd: .\n      timeout_secs: 1\n---\n# Synthetic repair receipt\n";
         let relative = ".mastermind/tasks/001-check/spec.md";
         let spec_path = root.join(relative);
@@ -2214,11 +2212,10 @@ mod tests {
             .unwrap()
         );
 
-        std::fs::write(
+        crate::test_executable::write_executable(
             root.join(".mastermind/check.sh"),
             "#!/bin/sh\n/bin/rm source-link\n/bin/ln -s source.txt source-link\nexit 0\n",
-        )
-        .unwrap();
+        );
         let changed = run(&spec_path, root, "test").unwrap();
         assert_eq!(changed.exit_code, Some(0));
         assert_eq!(changed.status, Status::InputChanged);

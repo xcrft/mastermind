@@ -2,10 +2,12 @@
 //! observed native events never stand in for a provider call or client trust.
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Seek, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -444,12 +446,10 @@ fn configured_refiner_is_not_a_provider_test_or_a_background_miner() {
     let f = Fixture::new();
     let processor = f._temp.path().join("must-not-execute");
     let marker = f._temp.path().join("unexpected-provider-call");
-    fs::write(
+    test_executable::write_executable(
         &processor,
         format!("#!/bin/sh\ntouch '{}'\nexit 9\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&processor, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let setup = f.success(&[
         "miner",
         "hooks",

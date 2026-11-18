@@ -3635,8 +3635,6 @@ mod tests {
             return;
         }
 
-        use std::os::unix::fs::PermissionsExt;
-
         let sandbox = tmp("executor_cwd");
         let root = sandbox.join("repo");
         let bin = sandbox.join("bin");
@@ -3660,14 +3658,10 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "baseline"]);
 
         let fake_claude = bin.join("claude");
-        fs::write(
+        crate::test_executable::write_executable(
             &fake_claude,
             "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.1.267 (Claude Code)'; exit 0;;\n  --help) echo '--input-format --output-format --verbose --tools --permission-mode --permission-prompts --max-turns --no-session-persistence --no-chrome acceptEdits none stream-json text'; exit 0;;\nesac\ncat >/dev/null\npwd > \"$MMCG_RUN_TASK_CWD_TEST_CAPTURE\"\nexit 1\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_claude, permissions).unwrap();
+        );
 
         let mut path_entries = vec![bin];
         path_entries.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));

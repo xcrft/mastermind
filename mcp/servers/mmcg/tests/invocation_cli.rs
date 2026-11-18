@@ -3,6 +3,9 @@
 
 #![cfg(unix)]
 
+#[path = "../src/test_executable.rs"]
+mod test_executable;
+
 use mmcg::miner::store::ProfileStore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -158,18 +161,8 @@ impl Fixture {
             "acceptance": [{"id": "service-result", "statement": "The service returns two.", "checks": ["unit"]}]
         });
         fixture.write(SPEC, &format!("---\n{}---\n# Invocation fixture\n\n## Goals\nUpdate the service.\n\n## Scope\nEdit service.py.\n\n## Acceptance Criteria\nThe service returns two.\n\n## Tests Plan\nRun the declared check.\n\n## Final Verification\nRun the declared command.\n\n## Alternatives Considered\nKeep one service.\n\n## Risk Register\nLocal behavior only.\n\n## Evidence Ledger\nUse the declared check.\n\n## Documentation Plan\nNo public documentation change.\n\n## Observability Plan\nNo logging change.\n\n## Performance Considerations\nConstant work.\n\n## Rollback / Migration\nRestore the previous return value.\n", serde_norway::to_string(&metadata).unwrap()));
-        fixture.write(".mastermind/check.sh", PROBE);
-        fs::set_permissions(
-            fixture.root.join(".mastermind/check.sh"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        fs::write(fixture.bin.join("claude"), FAKE).unwrap();
-        fs::set_permissions(
-            fixture.bin.join("claude"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        test_executable::write_executable(fixture.root.join(".mastermind/check.sh"), PROBE);
+        test_executable::write_executable(fixture.bin.join("claude"), FAKE);
         fixture.mode(mode);
         fixture.stream("init.json", json!({"type":"system", "subtype":"init", "cwd":fixture.root,
             "session_id":"synthetic-native-session", "model":"synthetic-model", "claude_code_version":"2.1.267",
@@ -1331,12 +1324,10 @@ fn auto_repair_does_not_retry_native_denial_runtime_scope_or_missing_current_evi
 #[test]
 fn auto_repair_requires_all_declared_checks_to_have_current_receipts() {
     let fixture = Fixture::new("auto_once");
-    fixture.write(".mastermind/extra-check.sh", "#!/bin/sh\nexit 0\n");
-    fs::set_permissions(
+    test_executable::write_executable(
         fixture.root.join(".mastermind/extra-check.sh"),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+        "#!/bin/sh\nexit 0\n",
+    );
     fixture.edit_frontmatter(|metadata| {
         metadata["verify"].as_array_mut().unwrap().push(json!({
             "cmd":"./.mastermind/extra-check.sh", "run":{
@@ -1477,12 +1468,10 @@ fn auto_repair_rechecks_hidden_dependencies_before_delivering_feedback() {
 fn auto_repair_rejects_contradictory_duplicate_and_undeclared_report_rows() {
     for scenario in ["contradictory", "duplicate", "undeclared"] {
         let fixture = Fixture::new("auto_report_conflict");
-        fixture.write(".mastermind/other.sh", "#!/bin/sh\nexit 0\n");
-        fs::set_permissions(
+        test_executable::write_executable(
             fixture.root.join(".mastermind/other.sh"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+            "#!/bin/sh\nexit 0\n",
+        );
         fixture.edit_frontmatter(|metadata| {
             metadata["verify"].as_array_mut().unwrap().push(json!({
                 "cmd":"./.mastermind/other.sh", "run":{

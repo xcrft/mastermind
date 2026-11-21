@@ -26,11 +26,35 @@ Keep these artifacts with the task when moving or recovering its checkout.
 | Freshness and semantic review | Continue to bind current execution inputs; ownership grants no writes |
 
 Initial dirty inputs are limited to 1,000 entries, 512 KiB of manifest metadata,
-the indexer's per-file byte limit and 32 MiB of retained file bytes. Unsupported
+the indexer's per-file byte limit and a total of retained file bytes. Unsupported
 or incomplete input fails preflight before handoff. This manifest establishes
 local attribution, not authenticated authorship. Release draft statistics use
 the original commit for the selected task files and separately list files
 changed from the initial worktree.
+
+The total is the project's `worktree_max_total_bytes` (default 32 MiB, at most
+1 GiB; set it with `mastermind init --worktree-max-total-bytes`). The first
+preflight records it in the manifest as `max_total_bytes`, and every later
+preflight of that task keeps the manifest and its budget, so a changed setting
+does not reach an open task. A manifest without `max_total_bytes`, captured
+before this setting, is read against 1 GiB.
+
+Every preflight (`--pre-only`, `--reset`, `--exec` and the native loop) also
+pins the project's `snapshot_max_total_bytes` (default 32 MiB, at most 1 GiB; set
+it with `mastermind init --snapshot-max-total-bytes`) in `state.json` and its
+approval record. The history input and audit snapshots and the strict workflow
+snapshot charge that value in post-flight, review, close, policy evidence and
+resume. The history snapshot also reads the task's prior local files, so the
+snapshot budget must cover the worktree budget plus the task's own changes; a
+project that raises one usually raises both. To apply a new value to an open task, change the
+setting and run `run-task <spec> --pre-only`: it pins the new value as a new
+approval and, like every approval, requires audit and review to run again. State
+without the field uses 32 MiB, and an approval whose value differs from its
+state is rejected with `preflight_approval_binding_mismatch`. A release that
+predates these fields rejects `state.json`, manifests and approval records that
+carry them, so finish or close open tasks before moving to it. A budget that
+runs out is reported with its setting, limit, counted bytes, the next file and
+the `init` flag.
 
 ## Dependency-cycle risk
 

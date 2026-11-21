@@ -22,6 +22,7 @@ use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
 use crate::indexer::{validate_index_root, Indexer};
 use crate::spec::{self, ParsedSpec};
 use crate::store::Store;
+use crate::task_worktree::ByteBudget;
 use crate::verify_spec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,7 +31,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const STRICT_EVIDENCE_FILE_LIMIT: usize = 1_000;
-const STRICT_EVIDENCE_TOTAL_BYTE_LIMIT: u64 = 32 * 1024 * 1024;
+/// Bytes the history and strict workflow snapshots may read until a task
+/// pins a project budget.
+pub(crate) const DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const SNAPSHOT_FILE_LIMIT: u64 = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
 const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const HISTORY_REVIEW_BYTE_LIMIT: u64 = 1024 * 1024;
 const RUN_STATE_BYTE_LIMIT: u64 = 1024 * 1024;
@@ -122,6 +126,18 @@ pub struct RunState {
     /// Optional committed Git refresh, separate from the task's verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_refresh: Option<serde_json::Value>,
+    /// Total bytes this task's history and strict workflow snapshots may read,
+    /// pinned by each pre-flight from the project's setting and bound by the
+    /// approval record. Missing from state written before budgets existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_max_total_bytes: Option<u64>,
+}
+
+impl RunState {
+    pub(crate) fn snapshot_limit(&self) -> u64 {
+        self.snapshot_max_total_bytes
+            .unwrap_or(DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES)
+    }
 }
 
 fn default_run_status() -> String {
@@ -162,6 +178,12 @@ pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
     }
     if let Some(initial) = &state.initial_worktree {
         initial.validate(&state.baseline_ref)?;
+    }
+    if state
+        .snapshot_max_total_bytes
+        .is_some_and(|max| !crate::onboarding::total_bytes_in_range(max))
+    {
+        return Err("controller snapshot byte budget is outside its range".into());
     }
     if let Some(revision) = state.semantic_review_sha256.as_deref() {
         if !state.semantic_review_required
@@ -791,12 +813,12 @@ fn history_input_snapshot(
         digest.update(b"preflight-approval\0");
         digest.update(approval.as_bytes());
     }
-    let mut bytes_left = STRICT_EVIDENCE_TOTAL_BYTE_LIMIT;
+    let mut budget = ByteBudget::snapshot(state.snapshot_limit());
     let spec = repository_relative_identity(&root, spec_path)?;
     let report =
         repository_relative_identity(&root, &spec_path.with_file_name("executor-report.md"))?;
     let mut read_input = |path: &str| -> Result<String, String> {
-        let file = hash_history_file(&root, path, true, &mut digest, &mut bytes_left)?
+        let file = hash_history_file(&root, path, true, &mut digest, &mut budget)?
             .ok_or_else(|| format!("history input `{path}` is missing"))?;
         String::from_utf8(file.bytes).map_err(|_| format!("history input `{path}` is not UTF-8"))
     };
@@ -850,18 +872,18 @@ fn history_input_snapshot(
         return Err("history snapshot exceeds the 1000-file limit".into());
     }
     for file in paths {
-        let _ = hash_history_file(&root, &file, false, &mut digest, &mut bytes_left)?;
+        let _ = hash_history_file(&root, &file, false, &mut digest, &mut budget)?;
     }
     // Observed verification records live under controller artifacts, but are
     // inputs to the reviewed result. A pending/changed rerun invalidates review.
     for path in crate::verification_receipts::history_paths(&parsed, repo_root, spec_path)? {
         let relative = repository_relative_identity(&root, &path)?;
-        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut bytes_left)?;
+        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut budget)?;
     }
     if state.invocation_required {
         let path = crate::invocation::receipt_path(repo_root, spec_path);
         let relative = repository_relative_identity(&root, &path)?;
-        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut bytes_left)?;
+        let _ = hash_history_file(&root, &relative, true, &mut digest, &mut budget)?;
     }
     Ok(HistoryInputs {
         snapshot: crate::hex::encode(&digest.finalize()),
@@ -875,33 +897,40 @@ fn hash_history_file(
     path: &str,
     required: bool,
     digest: &mut Sha256,
-    bytes_left: &mut u64,
+    budget: &mut ByteBudget,
 ) -> Result<Option<bounded_fs::BoundedFile>, String> {
     digest.update(path.as_bytes());
     digest.update([0]);
-    let limit = (*bytes_left).min(crate::audit_bundle::BUNDLE_INPUT_MAX as u64);
-    let file = match bounded_fs::read_regular_file_with_capability(
+    let limit = budget.read_limit(SNAPSHOT_FILE_LIMIT);
+    let read = bounded_fs::read_regular_file_with_capability(
         root,
         &root.requested_root().join(path),
         limit,
         limit,
         ReadControl::default(),
-    ) {
-        Ok(file) => {
-            *bytes_left -= file.declared_len;
+    );
+    let outcome = match read {
+        Ok(file) => budget.charge(file.declared_len, None).map(|()| Some(file)),
+        Err(BoundedReadError::Io(error))
+            if !required && error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(budget.describe(&error, SNAPSHOT_FILE_LIMIT)),
+    };
+    let file = match outcome {
+        Ok(Some(file)) => {
             digest.update(b"file\0");
             digest.update(file.identity.attributes().to_le_bytes());
             digest.update(file.declared_len.to_le_bytes());
             digest.update(&file.bytes);
             Some(file)
         }
-        Err(BoundedReadError::Io(error))
-            if !required && error.kind() == std::io::ErrorKind::NotFound =>
-        {
+        Ok(None) => {
             digest.update(b"missing\0");
             None
         }
-        Err(error) => return Err(format!("history snapshot `{path}`: {error}")),
+        Err(detail) => return Err(format!("history snapshot `{path}`: {detail}")),
     };
     digest.update([0]);
     Ok(file)
@@ -911,18 +940,19 @@ fn history_audit_snapshot(
     repo_root: &Path,
     spec_path: &Path,
     inputs: &str,
+    state: &RunState,
 ) -> Result<String, String> {
     let root = RootCapability::open(repo_root).map_err(|error| error.to_string())?;
     let mut digest = Sha256::new();
     digest.update(b"mastermind-history-audit-v1\0");
     digest.update(inputs.as_bytes());
-    let mut bytes_left = STRICT_EVIDENCE_TOTAL_BYTE_LIMIT;
+    let mut budget = ByteBudget::snapshot(state.snapshot_limit());
     for path in [
         spec_path.with_file_name("audit.md"),
         release_file_path(repo_root, spec_path),
     ] {
         let identity = repository_relative_identity(&root, &path)?;
-        let _ = hash_history_file(&root, &identity, true, &mut digest, &mut bytes_left)?;
+        let _ = hash_history_file(&root, &identity, true, &mut digest, &mut budget)?;
     }
     Ok(crate::hex::encode(&digest.finalize()))
 }
@@ -933,7 +963,7 @@ pub(crate) fn current_history_snapshot(
     state: &RunState,
 ) -> Result<String, String> {
     let inputs = history_input_snapshot(repo_root, spec_path, state)?;
-    history_audit_snapshot(repo_root, spec_path, &inputs.snapshot)
+    history_audit_snapshot(repo_root, spec_path, &inputs.snapshot, state)
 }
 
 fn refresh_durable_history(store: &mut Store, repo_root: &Path) -> Result<u32, String> {
@@ -1377,12 +1407,44 @@ pub(crate) fn strict_workflow_snapshot(
     repo_root: &Path,
     baseline_ref: &str,
     touch_files: &[String],
+    limit: u64,
 ) -> Result<String, String> {
     strict_workflow_snapshot_for_version(
         repo_root,
         baseline_ref,
         touch_files,
         STRICT_SNAPSHOT_VERSION,
+        limit,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn strict_snapshot_at_default_budget(
+    repo_root: &Path,
+    baseline_ref: &str,
+    touch_files: &[String],
+) -> Result<String, String> {
+    strict_workflow_snapshot(
+        repo_root,
+        baseline_ref,
+        touch_files,
+        DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn strict_snapshot_for_version_at_default_budget(
+    repo_root: &Path,
+    baseline_ref: &str,
+    touch_files: &[String],
+    version: u32,
+) -> Result<String, String> {
+    strict_workflow_snapshot_for_version(
+        repo_root,
+        baseline_ref,
+        touch_files,
+        version,
+        DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES,
     )
 }
 
@@ -1391,6 +1453,7 @@ pub(crate) fn strict_workflow_snapshot_for_version(
     baseline_ref: &str,
     touch_files: &[String],
     version: u32,
+    limit: u64,
 ) -> Result<String, String> {
     if !matches!(version, 1 | STRICT_SNAPSHOT_VERSION) {
         return Err(format!("unsupported strict-workflow snapshot version {version}; re-audit with a supported runtime"));
@@ -1419,8 +1482,8 @@ pub(crate) fn strict_workflow_snapshot_for_version(
 
     let root = RootCapability::open(repo_root)
         .map_err(|error| format!("strict-workflow repository root is unavailable: {error}"))?;
-    let first = strict_snapshot_digest(&root, baseline_ref, &paths, version)?;
-    if strict_snapshot_digest(&root, baseline_ref, &paths, version)? != first {
+    let first = strict_snapshot_digest(&root, baseline_ref, &paths, version, limit)?;
+    if strict_snapshot_digest(&root, baseline_ref, &paths, version, limit)? != first {
         return Err("strict-workflow files or Git modes changed during the snapshot".into());
     }
     Ok(first)
@@ -1431,6 +1494,7 @@ fn strict_snapshot_digest(
     baseline_ref: &str,
     paths: &BTreeSet<String>,
     version: u32,
+    limit: u64,
 ) -> Result<String, String> {
     let mut digest = Sha256::new();
     digest.update(format!("mastermind-strict-workflow-snapshot-v{version}\0").as_bytes());
@@ -1471,30 +1535,36 @@ fn strict_snapshot_digest(
         }
         Some(strict_snapshot_modes(root, paths)?)
     };
-    let mut total_bytes = 0u64;
+    let mut budget = ByteBudget::snapshot(limit);
 
     for relative in paths {
         digest.update(relative.as_bytes());
         digest.update([0]);
-        let limit = (crate::audit_bundle::BUNDLE_INPUT_MAX as u64)
-            .min(STRICT_EVIDENCE_TOTAL_BYTE_LIMIT - total_bytes);
-        let file = match bounded_fs::read_regular_file_with_capability(
+        let read_limit = budget.read_limit(SNAPSHOT_FILE_LIMIT);
+        let read = bounded_fs::read_regular_file_with_capability(
             root,
             &root.requested_root().join(relative),
-            limit,
-            limit,
+            read_limit,
+            read_limit,
             ReadControl::default(),
-        ) {
-            Ok(file) => file,
+        );
+        let outcome = match read {
+            Ok(file) => budget.charge(file.declared_len, None).map(|()| Some(file)),
             Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(budget.describe(&error, SNAPSHOT_FILE_LIMIT)),
+        };
+        let file = match outcome {
+            Ok(Some(file)) => file,
+            Ok(None) => {
                 digest.update(b"missing\0");
                 continue;
             }
-            Err(error) => {
-                return Err(format!("strict-workflow touch file `{relative}`: {error}"));
+            Err(detail) => {
+                return Err(format!("strict-workflow touch file `{relative}`: {detail}"));
             }
         };
-        total_bytes += file.declared_len;
         digest.update(b"file\0");
         if let Some((trust_filemode, modes)) = &git_modes {
             if modes
@@ -2862,7 +2932,12 @@ fn run_pre(
     };
     let initial_worktree = match previous {
         Some(previous) => previous.initial_worktree.clone(),
-        None => match crate::task_worktree::capture(repo_root, spec_path, &head) {
+        None => match crate::task_worktree::capture(
+            repo_root,
+            spec_path,
+            &head,
+            crate::onboarding::worktree_max_total_bytes(repo_root),
+        ) {
             Ok(initial) => Some(initial),
             Err(error) => {
                 eprintln!("error: capturing initial task worktree: {error}");
@@ -3081,6 +3156,7 @@ fn run_pre(
             .clone()
             .or_else(|| previous.and_then(|state| state.profile_client.clone())),
         profile_refresh: None,
+        snapshot_max_total_bytes: Some(crate::onboarding::snapshot_max_total_bytes(repo_root)),
     };
     match crate::task_approval::retain(
         repo_root,
@@ -3357,7 +3433,12 @@ fn run_post_with_evidence(
                     .code_paths()
                     .map(str::to_string)
                     .collect::<Vec<_>>();
-                match strict_workflow_snapshot(repo_root, &state.baseline_ref, &touches) {
+                match strict_workflow_snapshot(
+                    repo_root,
+                    &state.baseline_ref,
+                    &touches,
+                    state.snapshot_limit(),
+                ) {
                     Ok(snapshot) => Some(snapshot),
                     Err(error) => {
                         eprintln!(
@@ -3408,7 +3489,7 @@ fn run_post_with_evidence(
         }
         println!("Release notes saved to {}", release_path.display());
         let history_snapshot =
-            match history_audit_snapshot(repo_root, spec_path, &inputs_before_audit) {
+            match history_audit_snapshot(repo_root, spec_path, &inputs_before_audit, state) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     eprintln!("error: cannot bind the history review: {error}");
@@ -3747,6 +3828,7 @@ verifications: []\n\
             semantic_review_sha256: None,
             profile_client: Some("task-reader".into()),
             profile_refresh: None,
+            snapshot_max_total_bytes: None,
         };
         save_state(&path, &state).unwrap();
         let loaded = load_state(&path).unwrap().expect("present");
@@ -4210,6 +4292,96 @@ verifications: []\n\
         }
     }
 
+    fn exhausted(setting_limit: u64, counted: u64, size: u64) -> String {
+        format!(
+            "snapshot_max_total_bytes {setting_limit} is exhausted: {counted} bytes counted, \
+             this file has {size} bytes; raise it with \
+             `mastermind init --snapshot-max-total-bytes <bytes>` and repeat \
+             `mastermind run-task <spec> --pre-only`"
+        )
+    }
+
+    fn len(path: &Path) -> u64 {
+        fs::metadata(path).unwrap().len()
+    }
+
+    #[test]
+    fn history_inputs_pass_at_exactly_the_pinned_budget_and_fail_one_byte_over() {
+        let (root, spec, mut state) = history_snapshot_fixture();
+        let before_source = len(&spec) + len(&spec.with_file_name("executor-report.md"));
+        let source = len(&root.path().join("src/lib.py"));
+        state.snapshot_max_total_bytes = Some(before_source + source);
+        assert!(current_history_snapshot(root.path(), &spec, &state).is_ok());
+        state.snapshot_max_total_bytes = Some(before_source + source - 1);
+        assert_eq!(
+            current_history_snapshot(root.path(), &spec, &state).err(),
+            Some(format!(
+                "history snapshot `src/lib.py`: {}",
+                exhausted(before_source + source - 1, before_source, source)
+            ))
+        );
+    }
+
+    #[test]
+    fn history_audit_files_pass_at_exactly_the_pinned_budget_and_fail_one_byte_over() {
+        let (root, spec, mut state) = history_snapshot_fixture();
+        let audit = len(&spec.with_file_name("audit.md"));
+        let release = len(&release_file_path(root.path(), &spec));
+        state.snapshot_max_total_bytes = Some(audit + release);
+        assert!(history_audit_snapshot(root.path(), &spec, "inputs", &state).is_ok());
+        state.snapshot_max_total_bytes = Some(audit + release - 1);
+        assert_eq!(
+            history_audit_snapshot(root.path(), &spec, "inputs", &state).err(),
+            Some(format!(
+                "history snapshot `.mastermind/releases/001-review.md`: {}",
+                exhausted(audit + release - 1, audit, release)
+            ))
+        );
+    }
+
+    #[test]
+    fn a_history_input_over_its_own_limit_keeps_the_per_file_error_under_a_large_budget() {
+        let (root, spec, mut state) = history_snapshot_fixture();
+        state.snapshot_max_total_bytes = Some(64 * 1024 * 1024);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join("src/lib.py"))
+            .unwrap()
+            .set_len(16 * 1024 * 1024 + 1)
+            .unwrap();
+        assert_eq!(
+            current_history_snapshot(root.path(), &spec, &state).err(),
+            Some(
+                "history snapshot `src/lib.py`: file has 16777217 bytes, limit is 16777216".into()
+            )
+        );
+    }
+
+    #[test]
+    fn state_without_a_snapshot_budget_uses_32_mib_and_does_not_write_one() {
+        let (_root, _spec, state) = history_snapshot_fixture();
+        assert_eq!(state.snapshot_max_total_bytes, None);
+        assert_eq!(state.snapshot_limit(), 33_554_432);
+        let written = serde_json::to_value(&state).unwrap();
+        assert!(written.get("snapshot_max_total_bytes").is_none());
+    }
+
+    #[test]
+    fn a_pinned_snapshot_budget_outside_one_to_one_gibibyte_makes_the_state_invalid() {
+        let (_root, _spec, state) = history_snapshot_fixture();
+        let mut written = serde_json::to_value(&state).unwrap();
+        for (value, valid) in [
+            (0u64, false),
+            (1, true),
+            (1_073_741_824, true),
+            (1_073_741_825, false),
+        ] {
+            written["snapshot_max_total_bytes"] = serde_json::json!(value);
+            let parsed = parse_run_state(written.to_string().as_bytes());
+            assert_eq!(parsed.is_ok(), valid, "{value}: {parsed:?}");
+        }
+    }
+
     #[test]
     fn release_summary_includes_uncommitted_and_untracked_implementation() {
         let (root, spec, state) = history_snapshot_fixture();
@@ -4492,21 +4664,23 @@ verifications: []\n\
         ]
         .map(String::from)
         .to_vec();
-        let approved = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let approved = strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap();
         let legacy =
-            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap();
+            strict_snapshot_for_version_at_default_budget(root.path(), &baseline, &paths, 1)
+                .unwrap();
         git(root.path(), &["add", "-A"]);
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             approved
         );
         assert_ne!(
-            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap(),
+            strict_snapshot_for_version_at_default_budget(root.path(), &baseline, &paths, 1)
+                .unwrap(),
             legacy
         );
         git(root.path(), &["commit", "-qm", "implementation"]);
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             approved
         );
 
@@ -4523,27 +4697,30 @@ verifications: []\n\
             ],
         );
         assert_eq!(
-            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(&checkout, &baseline, &paths).unwrap(),
             approved
         );
         fs::write(checkout.join("source.txt"), "after\r\n").unwrap();
         assert_ne!(
-            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(&checkout, &baseline, &paths).unwrap(),
             approved
         );
         fs::write(checkout.join("source.txt"), "after\n").unwrap();
         fs::write(checkout.join("gone.txt"), "").unwrap();
         assert_ne!(
-            strict_workflow_snapshot(&checkout, &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(&checkout, &baseline, &paths).unwrap(),
             approved
         );
         fs::remove_file(checkout.join("gone.txt")).unwrap();
         assert_ne!(
-            strict_workflow_snapshot(&checkout, &baseline, &paths[..4]).unwrap(),
+            strict_snapshot_at_default_budget(&checkout, &baseline, &paths[..4]).unwrap(),
             approved
         );
-        assert!(strict_workflow_snapshot_for_version(&checkout, &baseline, &paths, 999).is_err());
-        assert!(strict_workflow_snapshot(&checkout, &"0".repeat(40), &paths).is_err());
+        assert!(
+            strict_snapshot_for_version_at_default_budget(&checkout, &baseline, &paths, 999)
+                .is_err()
+        );
+        assert!(strict_snapshot_at_default_budget(&checkout, &"0".repeat(40), &paths).is_err());
     }
 
     #[test]
@@ -4565,18 +4742,18 @@ verifications: []\n\
             .unwrap();
         }
         let paths = vec!["run.sh".into()];
-        let approved = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let approved = strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap();
         git(root.path(), &["add", "run.sh"]);
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             approved
         );
         git(root.path(), &["update-index", "--chmod=+x", "run.sh"]);
-        let executable = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let executable = strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap();
         assert_ne!(executable, approved);
         git(root.path(), &["commit", "-qm", "executable"]);
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             executable
         );
     }
@@ -4596,18 +4773,18 @@ verifications: []\n\
         fs::write(&source, "echo test").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
         let paths = vec![name.into()];
-        let plain = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let plain = strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o654)).unwrap();
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             plain
         );
         fs::set_permissions(&source, fs::Permissions::from_mode(0o744)).unwrap();
-        let executable = strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap();
+        let executable = strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap();
         assert_ne!(executable, plain);
         git(root.path(), &["--literal-pathspecs", "add", "--", name]);
         assert_eq!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).unwrap(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).unwrap(),
             executable
         );
     }
@@ -4623,7 +4800,7 @@ verifications: []\n\
         git(root.path(), &["commit", "-qm", "baseline"]);
         let baseline = git_head(root.path()).unwrap();
         let paths = vec!["link.txt".into()];
-        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok());
+        assert!(strict_snapshot_at_default_budget(root.path(), &baseline, &paths).is_ok());
         let blob = Command::new("git")
             .current_dir(root.path())
             .args(["rev-parse", "HEAD:link.txt"])
@@ -4643,12 +4820,14 @@ verifications: []\n\
             fs::read(root.path().join("link.txt")).unwrap(),
             b"target.txt"
         );
-        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths)
-            .unwrap_err()
-            .contains("Git file type"));
+        assert!(
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths)
+                .unwrap_err()
+                .contains("Git file type")
+        );
         fs::remove_file(root.path().join("link.txt")).unwrap();
         assert!(
-            strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok(),
+            strict_snapshot_at_default_budget(root.path(), &baseline, &paths).is_ok(),
             "deleting an indexed link needs no file read"
         );
     }
@@ -4701,7 +4880,8 @@ verifications: []\n\
         legacy.update(5u64.to_le_bytes());
         legacy.update(b"after\0");
         assert_eq!(
-            strict_workflow_snapshot_for_version(root.path(), &baseline, &paths, 1).unwrap(),
+            strict_snapshot_for_version_at_default_budget(root.path(), &baseline, &paths, 1)
+                .unwrap(),
             crate::hex::encode(&legacy.finalize())
         );
     }
@@ -4716,17 +4896,87 @@ verifications: []\n\
         let limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
         let first = fs::File::create(root.path().join("a.txt")).unwrap();
         first.set_len(limit + 1).unwrap();
-        assert!(strict_workflow_snapshot(root.path(), &baseline, &["a.txt".into()]).is_err());
+        assert!(
+            strict_snapshot_at_default_budget(root.path(), &baseline, &["a.txt".into()]).is_err()
+        );
         first.set_len(limit).unwrap();
         fs::File::create(root.path().join("b.txt"))
             .unwrap()
             .set_len(limit)
             .unwrap();
         let mut paths = vec!["a.txt".into(), "b.txt".into()];
-        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_ok());
+        assert!(strict_snapshot_at_default_budget(root.path(), &baseline, &paths).is_ok());
         fs::write(root.path().join("c.txt"), "x").unwrap();
         paths.push("c.txt".into());
-        assert!(strict_workflow_snapshot(root.path(), &baseline, &paths).is_err());
+        assert!(strict_snapshot_at_default_budget(root.path(), &baseline, &paths).is_err());
+    }
+
+    #[test]
+    fn strict_snapshot_passes_at_exactly_the_pinned_budget_and_fails_one_byte_over() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        let file_limit = crate::audit_bundle::BUNDLE_INPUT_MAX as u64;
+        let budget = file_limit + 4 * 1024 * 1024;
+        for (name, size) in [
+            ("a.txt", file_limit),
+            ("b.txt", 4 * 1024 * 1024),
+            ("c.txt", 1),
+        ] {
+            fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        }
+        let paths = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(strict_workflow_snapshot(
+            root.path(),
+            &baseline,
+            &paths(&["a.txt", "b.txt"]),
+            budget
+        )
+        .is_ok());
+        assert_eq!(
+            strict_workflow_snapshot(
+                root.path(),
+                &baseline,
+                &paths(&["a.txt", "b.txt", "c.txt"]),
+                budget
+            )
+            .err(),
+            Some(format!(
+                "strict-workflow touch file `c.txt`: {}",
+                exhausted(budget, budget, 1)
+            ))
+        );
+    }
+
+    #[test]
+    fn strict_snapshot_keeps_the_per_file_error_for_one_file_over_its_limit() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-qm", "baseline"]);
+        let baseline = git_head(root.path()).unwrap();
+        fs::File::create(root.path().join("a.txt"))
+            .unwrap()
+            .set_len(16 * 1024 * 1024 + 1)
+            .unwrap();
+        assert_eq!(
+            strict_workflow_snapshot(root.path(), &baseline, &["a.txt".into()], 64 * 1024 * 1024)
+                .err(),
+            Some(
+                "strict-workflow touch file `a.txt`: file has 16777217 bytes, limit is 16777216"
+                    .into()
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -4744,13 +4994,16 @@ verifications: []\n\
         symlink("absent", root.path().join("dangling")).unwrap();
         for path in ["linked/file.txt", "dangling", "dangling/child.txt"] {
             assert!(
-                strict_workflow_snapshot(root.path(), &baseline, &[path.into()]).is_err(),
+                strict_snapshot_at_default_budget(root.path(), &baseline, &[path.into()]).is_err(),
                 "{path}"
             );
         }
-        assert!(
-            strict_workflow_snapshot(root.path(), &baseline, &["missing/child.txt".into()]).is_ok()
-        );
+        assert!(strict_snapshot_at_default_budget(
+            root.path(),
+            &baseline,
+            &["missing/child.txt".into()]
+        )
+        .is_ok());
     }
 
     #[test]

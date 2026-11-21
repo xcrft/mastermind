@@ -438,6 +438,34 @@ these keys rejects the whole file: its `init` and hook mining fail, and
 fail-soft settings such as the profile budget use their defaults. Remove the
 keys before moving a project to an older release.
 
+`init --worktree-max-total-bytes N` and `init --snapshot-max-total-bytes N`
+(1–1,073,741,824 bytes) store `worktree_max_total_bytes` and
+`snapshot_max_total_bytes`; the default 33,554,432 (32 MiB) is not written, and
+a repeated `init` changes only the flags it is given. A value outside the range
+is rejected, and a `setup.json` holding one is invalid, so the fail-soft readers
+return the default. The ceiling exists because post-flight holds every retained
+initial file in memory; there is no unlimited value.
+
+- The worktree budget bounds the regular files a task's initial worktree may
+  hold. The task's first pre-flight records it in the manifest as
+  `max_total_bytes`; retry, reset, repair and reapproval keep the manifest and
+  its budget, so changing the setting later does not reach an open task. Each
+  retained file is still limited to 5 MiB. A manifest without `max_total_bytes`
+  predates the setting and is read against the 1 GiB ceiling.
+- The snapshot budget bounds the files that the history input and audit
+  snapshots and the strict workflow snapshot read in post-flight, review, close,
+  policy evidence and resume. The history snapshot also reads the task's prior
+  local files, so this budget must cover the worktree budget plus the task's own
+  changes; a project that raises one usually raises both. Every pre-flight
+  (`--pre-only`, `--reset`, `--exec` and the native loop) pins the current value
+  in `state.json` and its approval record as `snapshot_max_total_bytes`; to
+  apply a new value to an open task, run `init`, then
+  `run-task <spec> --pre-only`, which approves the task again. State without the
+  field uses 32 MiB. Each file is still limited to 16 MiB.
+
+When a budget runs out, the error names the setting, its limit, the bytes
+already counted, the next file and the `init` flag that raises it.
+
 `init` saves project choices and reconciles scaffolding, the code/document index,
 selected client integrations and mining. Unattended runs without a selected
 client stay local. `--no-index` skips that refresh, `--workflow off` skips bundled
@@ -1648,7 +1676,8 @@ Impact defaults are depth 3 and top 500 for policy checks. Override them with
 edges. Baseline cycle comparison is capped at 500 files and 32 MiB. Workflow
 evidence is capped at 1,000 directory entries, 1 MiB per artifact and 32 MiB total
 per read pass (including specs for unrelated tasks). A strict snapshot can
-bind at most 1,000 touch files, 16 MiB each and 32 MiB total. Reports stop at
+bind at most 1,000 touch files, 16 MiB each and the task's pinned snapshot budget
+in total (32 MiB unless `init --snapshot-max-total-bytes` sets another). Reports stop at
 1,000 total results (reserving one result for the fail-closed diagnostic) and
 become incomplete rather than allocating unbounded SARIF. Any relevant cap, stale index, concurrent snapshot
 change, or unreadable required evidence exits non-zero. JSON and SARIF preserve

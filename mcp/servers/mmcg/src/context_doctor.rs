@@ -1206,6 +1206,7 @@ mod tests {
             semantic_review_sha256: None,
             profile_client: None,
             profile_refresh: None,
+            snapshot_max_total_bytes: None,
         };
         std::fs::write(task.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
     }

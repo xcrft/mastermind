@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sizes. `mmcg` opens the index with its `-wal` from the checkout, so a
   repository that ships a crafted pair could reach it.
 
+### Added
+
+- `mastermind init --worktree-max-total-bytes N` and
+  `--snapshot-max-total-bytes N` (1 to 1,073,741,824 bytes) set the two total
+  byte budgets that were fixed at 32 MiB. The worktree budget bounds the prior
+  local files a task's initial worktree may hold; its first pre-flight records
+  it in the manifest, so it does not change for an open task. The snapshot
+  budget bounds the files the history, audit and strict workflow snapshots read,
+  including the task's prior files, so it should cover the worktree budget plus
+  the task's own changes;
+  every pre-flight pins it in `state.json` and its approval record, and a new
+  value reaches an open task through `run-task <spec> --pre-only`. A budget that
+  runs out names its setting, limit, counted bytes, the next file and the flag,
+  where the history snapshot used to report a small file as over a "limit" that
+  was the bytes left. Defaults stay 32 MiB. A release that predates the setting
+  rejects task state written with these fields and a `setup.json` that holds
+  the keys.
+
 ### Changed
 
 - Dependencies are on their latest releases: `rusqlite` 0.43,

@@ -830,6 +830,7 @@ fn collect_workflow_evidence(
             baseline_oid,
             &touch_files,
             state.held_snapshot_version,
+            state.snapshot_limit(),
         ) {
             Ok(current_snapshot) if current_snapshot == expected_snapshot => {}
             Ok(_) => continue,
@@ -1054,7 +1055,7 @@ mod tests {
         let spec = "---\nmode: strict\ntouches:\n  - file: critical.txt\n---\n# Critical\n";
         fs::write(task.join("spec.md"), spec).unwrap();
         fs::write(task.join("audit.md"), "✅ Held — spec.md\n").unwrap();
-        let snapshot = crate::run_task::strict_workflow_snapshot_for_version(
+        let snapshot = crate::run_task::strict_snapshot_for_version_at_default_budget(
             repo.path(),
             &baseline,
             &["critical.txt".into()],
@@ -1134,6 +1135,29 @@ mod tests {
     }
 
     #[test]
+    fn external_workflow_recomputes_the_held_snapshot_with_the_pinned_budget() {
+        for (budget, approved) in [(6u64, true), (5, false)] {
+            let (repo, evidence, baseline) = external_workflow_fixture(2);
+            let state_path = evidence.path().join("001-critical/state.json");
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            state["snapshot_max_total_bytes"] = budget.into();
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            let (files, gaps, _) = external_workflow(repo.path(), evidence.path(), &baseline);
+            assert_eq!(!files.is_empty(), approved, "{budget}");
+            assert_eq!(
+                gaps.iter()
+                    .any(|gap| gap.code == "workflow_snapshot_unavailable"
+                        && gap
+                            .message
+                            .contains("snapshot_max_total_bytes 5 is exhausted")),
+                !approved,
+                "{budget}: {gaps:?}"
+            );
+        }
+    }
+
+    #[test]
     fn external_workflow_does_not_fall_back_or_drop_invalid_contracts() {
         for mutation in [
             "unknown_version",
@@ -1154,7 +1178,7 @@ mod tests {
                 state["spec_hash"] = crate::run_task::hash_text(spec).into();
             } else if mutation == "wrong_version" {
                 state["held_snapshot_sha256"] =
-                    crate::run_task::strict_workflow_snapshot_for_version(
+                    crate::run_task::strict_snapshot_for_version_at_default_budget(
                         repo.path(),
                         &baseline,
                         &["critical.txt".into()],
@@ -1436,9 +1460,12 @@ mod tests {
             "---\nmode: strict\ntouches:\n  - file: services/payment/charge.ts\n---\n# Payment\n";
         fs::write(task.join("spec.md"), spec_body).unwrap();
         let touch_files = vec!["services/payment/charge.ts".to_string()];
-        let held_snapshot =
-            crate::run_task::strict_workflow_snapshot(root.path(), &baseline, &touch_files)
-                .unwrap();
+        let held_snapshot = crate::run_task::strict_snapshot_at_default_budget(
+            root.path(),
+            &baseline,
+            &touch_files,
+        )
+        .unwrap();
         fs::write(
             task.join("state.json"),
             serde_json::to_vec(&RunState {
@@ -1466,6 +1493,7 @@ mod tests {
                 semantic_review_sha256: None,
                 profile_client: None,
                 profile_refresh: None,
+                snapshot_max_total_bytes: None,
             })
             .unwrap(),
         )

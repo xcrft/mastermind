@@ -7,6 +7,8 @@ use crate::bounded_fs::{
 };
 use crate::invocation::{DEFAULT_MAX_TURNS as DEFAULT_EXEC_MAX_TURNS, DEFAULT_WALL_TIMEOUT_SECS};
 use crate::review_invocation::{DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS};
+use crate::run_task::DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES;
+use crate::task_worktree::DEFAULT_WORKTREE_MAX_TOTAL_BYTES;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -62,6 +64,34 @@ fn default_review_timeout_secs() -> u64 {
 
 fn is_default_review_timeout_secs(value: &u64) -> bool {
     *value == DEFAULT_TIMEOUT_SECS
+}
+
+/// Smallest total byte budget a project may set for the initial worktree or
+/// the controller's snapshots.
+pub const MIN_TOTAL_BYTES: u64 = 1;
+/// Largest total byte budget. Post-flight holds every initial preimage in
+/// memory at once, so there is no unlimited value.
+pub const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Whether `value` lies in the one range every total byte budget shares.
+pub fn total_bytes_in_range(value: u64) -> bool {
+    (MIN_TOTAL_BYTES..=MAX_TOTAL_BYTES).contains(&value)
+}
+
+fn default_worktree_max_total_bytes() -> u64 {
+    DEFAULT_WORKTREE_MAX_TOTAL_BYTES
+}
+
+fn is_default_worktree_max_total_bytes(value: &u64) -> bool {
+    *value == DEFAULT_WORKTREE_MAX_TOTAL_BYTES
+}
+
+fn default_snapshot_max_total_bytes() -> u64 {
+    DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES
+}
+
+fn is_default_snapshot_max_total_bytes(value: &u64) -> bool {
+    *value == DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +154,20 @@ pub struct Settings {
         skip_serializing_if = "is_default_review_timeout_secs"
     )]
     pub review_timeout_secs: u64,
+    /// Bytes of regular files the initial worktree manifest may hold. A task
+    /// reads it once, at its first pre-flight.
+    #[serde(
+        default = "default_worktree_max_total_bytes",
+        skip_serializing_if = "is_default_worktree_max_total_bytes"
+    )]
+    pub worktree_max_total_bytes: u64,
+    /// Bytes the history and strict workflow snapshots may read. Every
+    /// pre-flight pins it for its task.
+    #[serde(
+        default = "default_snapshot_max_total_bytes",
+        skip_serializing_if = "is_default_snapshot_max_total_bytes"
+    )]
+    pub snapshot_max_total_bytes: u64,
 }
 
 impl Settings {
@@ -161,6 +205,8 @@ impl Settings {
             exec_max_turns: DEFAULT_EXEC_MAX_TURNS,
             exec_timeout_secs: DEFAULT_WALL_TIMEOUT_SECS,
             review_timeout_secs: DEFAULT_TIMEOUT_SECS,
+            worktree_max_total_bytes: DEFAULT_WORKTREE_MAX_TOTAL_BYTES,
+            snapshot_max_total_bytes: DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES,
         }
     }
 
@@ -216,6 +262,18 @@ impl Settings {
         if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&self.review_timeout_secs) {
             return Err(format!(
                 "review timeout must be {MIN_TIMEOUT_SECS}-{MAX_TIMEOUT_SECS} seconds"
+            )
+            .into());
+        }
+        if !total_bytes_in_range(self.worktree_max_total_bytes) {
+            return Err(format!(
+                "worktree_max_total_bytes must be {MIN_TOTAL_BYTES}-{MAX_TOTAL_BYTES}"
+            )
+            .into());
+        }
+        if !total_bytes_in_range(self.snapshot_max_total_bytes) {
+            return Err(format!(
+                "snapshot_max_total_bytes must be {MIN_TOTAL_BYTES}-{MAX_TOTAL_BYTES}"
             )
             .into());
         }
@@ -312,6 +370,22 @@ pub fn exec_timeout_secs(root: &Path) -> u64 {
 /// the default.
 pub fn review_timeout_secs(root: &Path) -> u64 {
     setting(root, DEFAULT_TIMEOUT_SECS, |s| s.review_timeout_secs)
+}
+
+/// Project byte budget a task's initial worktree is captured under;
+/// fail-soft like [`profile_budget_tokens`].
+pub fn worktree_max_total_bytes(root: &Path) -> u64 {
+    setting(root, DEFAULT_WORKTREE_MAX_TOTAL_BYTES, |s| {
+        s.worktree_max_total_bytes
+    })
+}
+
+/// Project byte budget a pre-flight pins for the task's snapshots; fail-soft
+/// like [`profile_budget_tokens`].
+pub fn snapshot_max_total_bytes(root: &Path) -> u64 {
+    setting(root, DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES, |s| {
+        s.snapshot_max_total_bytes
+    })
 }
 
 pub fn profile_access(root: &Path, client: &str) -> Result<bool, Error> {
@@ -583,5 +657,72 @@ mod tests {
         assert_eq!(exec_max_turns(&root), 7);
         assert_eq!(exec_timeout_secs(&root), 20);
         assert_eq!(review_timeout_secs(&root), 45);
+    }
+
+    #[test]
+    fn total_byte_budgets_outside_one_to_one_gibibyte_are_invalid() {
+        assert_range(
+            |s, v| s.worktree_max_total_bytes = v,
+            [1, 1_073_741_824],
+            [0, 1_073_741_825],
+        );
+        assert_range(
+            |s, v| s.snapshot_max_total_bytes = v,
+            [1, 1_073_741_824],
+            [0, 1_073_741_825],
+        );
+    }
+
+    #[test]
+    fn configured_total_byte_budgets_are_read_back_and_defaults_are_never_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut settings = Settings::local(&root);
+        let written = serde_json::to_string(&settings).unwrap();
+        assert!(!written.contains("worktree_max_total_bytes"), "{written}");
+        assert!(!written.contains("snapshot_max_total_bytes"), "{written}");
+        settings.worktree_max_total_bytes = 67_108_864;
+        settings.snapshot_max_total_bytes = 50_331_648;
+        write_settings(&root, &settings);
+        assert_eq!(worktree_max_total_bytes(&root), 67_108_864);
+        assert_eq!(snapshot_max_total_bytes(&root), 50_331_648);
+    }
+
+    #[test]
+    fn a_setup_file_without_the_budget_keys_reads_as_32_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        assert_eq!(worktree_max_total_bytes(&root), 33_554_432);
+        assert_eq!(snapshot_max_total_bytes(&root), 33_554_432);
+        write_settings(&root, &Settings::local(&root));
+        let settings = load(&root).unwrap().unwrap();
+        assert_eq!(settings.worktree_max_total_bytes, 33_554_432);
+        assert_eq!(settings.snapshot_max_total_bytes, 33_554_432);
+    }
+
+    #[test]
+    fn a_budget_key_outside_the_range_invalidates_the_file_and_the_readers_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for key in ["worktree_max_total_bytes", "snapshot_max_total_bytes"] {
+            for value in [0u64, 1_073_741_825] {
+                let mut setup = serde_json::to_value(Settings::local(&root)).unwrap();
+                setup[key] = serde_json::json!(value);
+                std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+                std::fs::write(
+                    root.join(".mastermind/setup.json"),
+                    serde_json::to_vec(&setup).unwrap(),
+                )
+                .unwrap();
+                let error = load(&root).unwrap_err().to_string();
+                assert_eq!(
+                    error,
+                    format!("{key} must be 1-1073741824"),
+                    "{key} {value}"
+                );
+                assert_eq!(worktree_max_total_bytes(&root), 33_554_432);
+                assert_eq!(snapshot_max_total_bytes(&root), 33_554_432);
+            }
+        }
     }
 }

@@ -588,3 +588,100 @@ fn failed_file_commits_do_not_report_a_successful_index_build() {
         .unwrap();
     f.success(&["init", "--json"]);
 }
+
+impl Fixture {
+    fn setup_json(&self) -> Option<Value> {
+        let bytes = fs::read(self.root.join(".mastermind/setup.json")).ok()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn init_budgets(&self, flags: &[&str]) -> Output {
+        let mut args = vec!["init", "--client", "none"];
+        args.extend(flags);
+        args.push("--json");
+        self.run(&args)
+    }
+}
+
+#[test]
+fn init_stores_the_total_byte_budgets_and_never_the_default() {
+    let f = Fixture::new();
+    for (flags, key) in [
+        (
+            ["--worktree-max-total-bytes", "33554432"],
+            "worktree_max_total_bytes",
+        ),
+        (
+            ["--snapshot-max-total-bytes", "33554432"],
+            "snapshot_max_total_bytes",
+        ),
+    ] {
+        let output = f.init_budgets(&flags);
+        assert!(output.status.success(), "{output:?}");
+        assert!(f.setup_json().unwrap().get(key).is_none(), "{key}");
+    }
+    let output = f.init_budgets(&[
+        "--worktree-max-total-bytes",
+        "1",
+        "--snapshot-max-total-bytes",
+        "1073741824",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let setup = f.setup_json().unwrap();
+    assert_eq!(setup["worktree_max_total_bytes"], 1);
+    assert_eq!(setup["snapshot_max_total_bytes"], 1_073_741_824u64);
+}
+
+#[test]
+fn a_repeated_init_changes_only_the_budget_it_is_given() {
+    let f = Fixture::new();
+    let output = f.init_budgets(&[
+        "--worktree-max-total-bytes",
+        "67108864",
+        "--snapshot-max-total-bytes",
+        "50331648",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let output = f.init_budgets(&["--snapshot-max-total-bytes", "100663296"]);
+    assert!(output.status.success(), "{output:?}");
+    let setup = f.setup_json().unwrap();
+    assert_eq!(setup["worktree_max_total_bytes"], 67_108_864);
+    assert_eq!(setup["snapshot_max_total_bytes"], 100_663_296);
+    let output = f.init_budgets(&["--worktree-max-total-bytes", "33554432"]);
+    assert!(output.status.success(), "{output:?}");
+    let setup = f.setup_json().unwrap();
+    assert!(setup.get("worktree_max_total_bytes").is_none());
+    assert_eq!(setup["snapshot_max_total_bytes"], 100_663_296);
+}
+
+#[test]
+fn init_rejects_total_byte_budgets_outside_one_to_one_gibibyte() {
+    let f = Fixture::new();
+    for flag in ["--worktree-max-total-bytes", "--snapshot-max-total-bytes"] {
+        for value in ["0", "-1", "1073741825", "18446744073709551616", "abc"] {
+            let output = f.init_budgets(&[&format!("{flag}={value}")]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{flag}={value}: {output:?}");
+            assert!(
+                stderr.contains(&format!("invalid value '{value}' for '{flag} <")),
+                "{flag}={value}: {stderr}"
+            );
+            if matches!(value, "0" | "1073741825") {
+                assert!(
+                    stderr.contains(&format!("{value} is not in 1..=1073741824")),
+                    "{flag}={value}: {stderr}"
+                );
+            }
+            assert!(f.setup_json().is_none(), "{flag}={value}");
+        }
+    }
+}
+
+#[test]
+fn init_help_names_both_total_byte_budgets() {
+    let f = Fixture::new();
+    let output = f.run(&["init", "--help"]);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--worktree-max-total-bytes"), "{help}");
+    assert!(help.contains("--snapshot-max-total-bytes"), "{help}");
+}

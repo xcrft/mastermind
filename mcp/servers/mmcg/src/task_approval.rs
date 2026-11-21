@@ -32,6 +32,10 @@ struct Approval {
     indexed_preconditions_covered: bool,
     basis: String,
     parent: Option<String>,
+    /// The state's snapshot byte budget when this approval was retained. Absent
+    /// in approvals retained before budgets existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_max_total_bytes: Option<u64>,
 }
 
 pub(crate) struct Validation {
@@ -125,7 +129,8 @@ fn load(
         }
         if active.is_none()
             && (record.spec_sha256 != state.spec_hash
-                || record.preflight_started_at != state.started_at)
+                || record.preflight_started_at != state.started_at
+                || record.snapshot_max_total_bytes != state.snapshot_max_total_bytes)
         {
             return Err("preflight_approval_binding_mismatch".into());
         }
@@ -327,6 +332,7 @@ pub(crate) fn retain(
         indexed_preconditions_covered: index_checked,
         basis: validation.basis.into(),
         parent: validation.parent.clone(),
+        snapshot_max_total_bytes: state.snapshot_max_total_bytes,
     };
     let bytes = serde_json::to_vec(&record).map_err(|_| "preflight_approval_invalid")?;
     if bytes.len() as u64 > RECEIPT_LIMIT || body.len() as u64 > SPEC_LIMIT {
@@ -536,5 +542,64 @@ mod tests {
             }
             assert!(validate(root.path(), &path, &previous).is_err());
         }
+    }
+
+    fn approved(budget: Option<u64>) -> (tempfile::TempDir, PathBuf, RunState) {
+        let root = tempfile::tempdir().unwrap();
+        let mut approved = state(BODY);
+        approved.snapshot_max_total_bytes = budget;
+        let path = root.path().join(&approved.spec_path);
+        let parsed = spec::parse_str(&approved.spec_path, BODY);
+        let first = prepare(root.path(), &path, &parsed, BODY, None, true).unwrap();
+        approved.preflight_approval_sha256 =
+            Some(retain(root.path(), &path, &approved, BODY, &first, true).unwrap());
+        (root, path, approved)
+    }
+
+    #[test]
+    fn the_active_approval_must_match_the_snapshot_budget_of_the_state() {
+        let (root, path, mut approved) = approved(Some(33_554_432));
+        validate(root.path(), &path, &approved).unwrap();
+        for other in [Some(67_108_864), None] {
+            approved.snapshot_max_total_bytes = other;
+            assert_eq!(
+                validate(root.path(), &path, &approved).err(),
+                Some("preflight_approval_binding_mismatch".to_string()),
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_approval_retained_without_a_budget_validates_for_state_without_one() {
+        let (root, path, mut approved) = approved(None);
+        validate(root.path(), &path, &approved).unwrap();
+        let record = std::fs::read_to_string(directory(root.path(), &path).join(format!(
+            "{}.json",
+            approved.preflight_approval_sha256.as_deref().unwrap()
+        )))
+        .unwrap();
+        assert!(!record.contains("snapshot_max_total_bytes"), "{record}");
+        approved.snapshot_max_total_bytes = Some(33_554_432);
+        assert_eq!(
+            validate(root.path(), &path, &approved).err(),
+            Some("preflight_approval_binding_mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn an_older_approval_in_the_chain_keeps_the_budget_it_was_retained_with() {
+        let (root, path, previous) = approved(Some(33_554_432));
+        let revised = format!("{BODY}\nA clarification.\n");
+        let parsed = spec::parse_str(&previous.spec_path, &revised);
+        let validation =
+            prepare(root.path(), &path, &parsed, &revised, Some(&previous), true).unwrap();
+        let mut child = previous.clone();
+        child.iteration = 2;
+        child.spec_hash = crate::run_task::hash_text(&revised);
+        child.snapshot_max_total_bytes = Some(67_108_864);
+        child.preflight_approval_sha256 =
+            Some(retain(root.path(), &path, &child, &revised, &validation, true).unwrap());
+        validate(root.path(), &path, &child).unwrap();
     }
 }

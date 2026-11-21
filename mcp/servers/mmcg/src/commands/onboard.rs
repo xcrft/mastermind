@@ -49,6 +49,25 @@ pub struct Options {
     /// run-task --auto-review); an explicit command flag wins.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=7200))]
     review_timeout: Option<u64>,
+    /// Bytes of prior local files a task's initial worktree may hold (default
+    /// 33554432). Read at the task's first pre-flight; an open task keeps its
+    /// value.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u64)
+            .range(onboarding::MIN_TOTAL_BYTES..=onboarding::MAX_TOTAL_BYTES)
+    )]
+    worktree_max_total_bytes: Option<u64>,
+    /// Bytes the history and strict workflow snapshots may read (default
+    /// 33554432). They also read the task's prior local files, so it must cover
+    /// the worktree budget plus the task's own changes. Each pre-flight pins the
+    /// current value for its task.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u64)
+            .range(onboarding::MIN_TOTAL_BYTES..=onboarding::MAX_TOTAL_BYTES)
+    )]
+    snapshot_max_total_bytes: Option<u64>,
     /// Allow selected clients to read the personal profile. Enabled on first client setup.
     #[arg(long, value_parser = ["on", "off"])]
     profile_access: Option<String>,
@@ -177,6 +196,12 @@ fn selection(
     }
     if let Some(value) = options.review_timeout {
         settings.review_timeout_secs = value;
+    }
+    if let Some(value) = options.worktree_max_total_bytes {
+        settings.worktree_max_total_bytes = value;
+    }
+    if let Some(value) = options.snapshot_max_total_bytes {
+        settings.snapshot_max_total_bytes = value;
     }
     if let Some(value) = &options.profile_access {
         settings.profile_access = value == "on";

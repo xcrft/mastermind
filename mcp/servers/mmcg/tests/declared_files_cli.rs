@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+const MIB: usize = 1024 * 1024;
 const SPEC: &str = ".mastermind/tasks/001-declared-files/spec.md";
 const DOC: &str = "docs/guide.md";
 const VERIFY: &str = "git --version > .mastermind/should-not-run";
@@ -209,6 +210,98 @@ impl Fixture {
                 .unwrap(),
             success,
         )
+    }
+    fn write_reviewed_spec(&self) {
+        let metadata = json!({
+            "mode": "verified", "touches": [{"file": "service.py", "symbols": ["keep"]}],
+            "verify": [{"cmd": "git --version", "run": {"id": "unit", "argv": ["git", "--version"], "cwd": ".", "timeout_secs": 60}}],
+            "acceptance": [{"id": "service-result", "statement": "The service changed.", "checks": ["unit"]}],
+        });
+        let mut body = format!(
+            "---\n{}---\n# Reviewed change\n",
+            serde_norway::to_string(&metadata).unwrap()
+        );
+        for heading in verify_spec::mandatory_sections_for_mode(Some("verified")) {
+            body.push_str(&format!(
+                "\n## {heading}\nChange the service and run the declared check.\n"
+            ));
+        }
+        self.write(SPEC, body.as_bytes());
+    }
+    fn report_reviewed(&self) {
+        let value = json!({
+            "schema_version": 1, "spec": SPEC, "status": "complete", "phases": [],
+            "files_modified": ["service.py"], "claims": [], "defects": [],
+            "verifications": [{"cmd": "git --version", "result": "pass", "observed": {"exit_code": 0}}],
+        });
+        std::fs::write(
+            self.spec().with_file_name("executor-report.md"),
+            value.to_string(),
+        )
+        .unwrap();
+    }
+    fn run_unit_check(&self) {
+        let output = self
+            .command()
+            .args(["verification", "run"])
+            .arg(self.spec())
+            .args(["--id", "unit", "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    fn write_setup(&self, budgets: &[(&str, u64)]) {
+        let mut setup =
+            serde_json::to_value(mmcg::onboarding::Settings::local(self.root())).unwrap();
+        for (key, value) in budgets {
+            setup[key] = json!(value);
+        }
+        self.write(
+            ".mastermind/setup.json",
+            &serde_json::to_vec(&setup).unwrap(),
+        );
+    }
+    fn change_service(&mut self) {
+        self.write("service.py", b"def keep():\n    return 2\n");
+        self.refresh();
+    }
+    fn remove_setup(&self) {
+        std::fs::remove_file(self.root().join(".mastermind/setup.json")).unwrap();
+    }
+    fn write_blobs(&self, count: u8) {
+        for index in 0..count {
+            self.write(&format!("data/blob-{index}.bin"), &vec![index; 5 * MIB]);
+        }
+    }
+    fn plain_controller(&self) -> Output {
+        self.command()
+            .arg("run-task")
+            .arg(self.spec())
+            .arg("--root")
+            .arg(self.root())
+            .output()
+            .unwrap()
+    }
+    fn state_json(&self) -> Value {
+        serde_json::from_slice(
+            &std::fs::read(run_task::state_file_path(self.root(), &self.spec())).unwrap(),
+        )
+        .unwrap()
+    }
+    fn active_approval(&self) -> Value {
+        let pin = self.state_json()["preflight_approval_sha256"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        serde_json::from_slice(
+            &std::fs::read(
+                self.spec()
+                    .with_file_name("preflight-approvals")
+                    .join(format!("{pin}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
     fn controller_from(&self, cwd: &Path, pre_only: bool) -> Output {
         self.command()
@@ -1078,5 +1171,186 @@ fn declared_files_public_gates_reject_links_and_special_files_unix() {
         );
         file_error(&fixture.audit(false), Some(path), None);
         assert_eq!(fixture.controller(true), run_task::Outcome::PreFailed);
+    }
+}
+
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn a_larger_worktree_budget_lets_a_35_mib_prior_worktree_through_both_flights() {
+    let mut fixture = Fixture::new();
+    fixture.write_reviewed_spec();
+    fixture.write_setup(&[
+        ("worktree_max_total_bytes", 67_108_864),
+        ("snapshot_max_total_bytes", 67_108_864),
+    ]);
+    fixture.write_blobs(7);
+    assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
+    let state = fixture.state_json();
+    assert_eq!(state["initial_worktree"]["max_total_bytes"], 67_108_864);
+    assert_eq!(state["snapshot_max_total_bytes"], 67_108_864);
+    assert_eq!(
+        fixture.active_approval()["snapshot_max_total_bytes"],
+        67_108_864
+    );
+    fixture.remove_setup();
+    fixture.change_service();
+    fixture.run_unit_check();
+    fixture.report_reviewed();
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    let resumed = fixture.plain_controller();
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(
+        String::from_utf8_lossy(&resumed.stdout).contains("Mechanical audit is held"),
+        "{resumed:?}"
+    );
+    let state = fixture.state();
+    assert_eq!(state.status, "history_review_required");
+    assert_eq!(state.blocking_reason, None);
+    let prepared = fixture
+        .command()
+        .args(["review-task", "prepare"])
+        .arg(fixture.spec())
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(prepared.status.success(), "{prepared:?}");
+}
+
+#[test]
+fn a_strict_snapshot_over_32_mib_binds_under_the_pinned_budget_and_policy_accepts_it() {
+    let mut fixture = Fixture::new();
+    let names: Vec<String> = (0..7).map(|index| format!("big-{index}.bin")).collect();
+    let created: Vec<&str> = names.iter().map(String::as_str).collect();
+    fixture.write_creation_spec("strict", &[], &created, &[]);
+    fixture.write_setup(&[("snapshot_max_total_bytes", 67_108_864)]);
+    fixture.write(
+        ".mastermind/policy.yml",
+        b"rules:\n  - id: critical\n    critical: big-0.bin\n    require_workflow: strict\n",
+    );
+    assert_eq!(
+        fixture.controller_with_strict(true, true),
+        run_task::Outcome::PreReady
+    );
+    for (index, name) in names.iter().enumerate() {
+        fixture.write(name, &vec![index as u8; 5 * MIB]);
+    }
+    fixture.refresh();
+    fixture.report(&created);
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+    assert!(fixture.state().held_snapshot_sha256.is_some());
+    assert_eq!(
+        fixture.policy(true)["runs"][0]["properties"]["passed"],
+        true
+    );
+}
+
+#[test]
+fn editing_the_pinned_snapshot_budget_in_state_does_not_bypass_the_approval() {
+    let mut fixture = Fixture::new();
+    fixture.write_spec(&[]);
+    fixture.write_setup(&[("snapshot_max_total_bytes", 67_108_864)]);
+    assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
+    let mut state = fixture.state_json();
+    assert_eq!(state["snapshot_max_total_bytes"], 67_108_864);
+    state["snapshot_max_total_bytes"] = json!(50_331_648);
+    fixture.write(
+        &SPEC.replace("spec.md", "state.json"),
+        &serde_json::to_vec(&state).unwrap(),
+    );
+    fixture.change_service();
+    fixture.report(&["service.py"]);
+    let output = fixture.controller_from(fixture.root(), false);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("preflight_approval_binding_mismatch"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn the_default_worktree_budget_names_itself_and_its_init_flag() {
+    let fixture = Fixture::new();
+    fixture.write_blobs(7);
+    let output = fixture.controller_from(fixture.root(), true);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr_of(&output).contains(
+            "initial_worktree_byte_limit: worktree_max_total_bytes 33554432 is exhausted: \
+             31457280 bytes counted, next file `data/blob-6.bin` has 5242880 bytes; raise it \
+             with `mastermind init --worktree-max-total-bytes <bytes>` before the task's first \
+             pre-flight"
+        ),
+        "{output:?}"
+    );
+    assert!(!fixture.spec().with_file_name("state.json").exists());
+}
+
+#[test]
+fn a_snapshot_budget_is_pinned_by_pre_flight_and_a_change_waits_for_the_next_one() {
+    let mut fixture = Fixture::new();
+    fixture.write_spec(&[]);
+    fixture.write_setup(&[("worktree_max_total_bytes", 67_108_864)]);
+    fixture.write_blobs(7);
+    assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
+    let initial = fixture.state_json()["initial_worktree"].clone();
+    fixture.change_service();
+    fixture.report(&["service.py"]);
+    let failed = fixture.controller_from(fixture.root(), false);
+    assert!(!failed.status.success(), "{failed:?}");
+    let message = stderr_of(&failed);
+    for expected in [
+        "history snapshot `data/blob-6.bin`: snapshot_max_total_bytes 33554432 is exhausted: ",
+        " bytes counted, this file has 5242880 bytes; raise it with ",
+        "`mastermind init --snapshot-max-total-bytes <bytes>` and repeat ",
+        "`mastermind run-task <spec> --pre-only`",
+    ] {
+        assert!(message.contains(expected), "{expected}: {message}");
+    }
+    fixture.write_setup(&[
+        ("worktree_max_total_bytes", 33_554_432),
+        ("snapshot_max_total_bytes", 67_108_864),
+    ]);
+    let still = fixture.controller_from(fixture.root(), false);
+    assert!(
+        stderr_of(&still).contains("snapshot_max_total_bytes 33554432"),
+        "{still:?}"
+    );
+    assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
+    let state = fixture.state_json();
+    assert_eq!(state["initial_worktree"], initial);
+    assert_eq!(state["snapshot_max_total_bytes"], 67_108_864);
+    assert_eq!(
+        fixture.active_approval()["snapshot_max_total_bytes"],
+        67_108_864
+    );
+    assert_eq!(fixture.controller(false), run_task::Outcome::PostHeld);
+}
+
+#[test]
+fn a_larger_budget_keeps_the_per_file_limit_and_refuses_links() {
+    let fixture = Fixture::new();
+    fixture.write_setup(&[("worktree_max_total_bytes", 67_108_864)]);
+    fixture.write("data/big.bin", &vec![1; 5 * MIB + 1]);
+    let output = fixture.controller_from(fixture.root(), true);
+    assert!(
+        stderr_of(&output).contains(
+            "initial_worktree_file_unavailable: data/big.bin: file has 5242881 bytes, limit is 5242880"
+        ),
+        "{output:?}"
+    );
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(fixture.root().join("data/big.bin")).unwrap();
+        std::os::unix::fs::symlink("service.py", fixture.root().join("linked.py")).unwrap();
+        let output = fixture.controller_from(fixture.root(), true);
+        assert!(
+            stderr_of(&output).contains(
+                "initial_worktree_file_unavailable: linked.py: path is not a regular no-follow file"
+            ),
+            "{output:?}"
+        );
     }
 }

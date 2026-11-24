@@ -563,7 +563,7 @@ fn run_internal(
         spec,
         repo_root,
         &worktree.baseline_oid,
-        &declarations.removed,
+        &declarations,
         deadline,
         symbol_diff.errors.is_empty(),
         task.as_ref().map(|task| &task.preimages),
@@ -684,7 +684,7 @@ fn run_internal(
             findings.push(Finding::RemovedSymbolNotAcknowledged { symbol, file });
         }
     } else {
-        for removed in &symbol_diff.removed {
+        for removed in &declarations.api_removed_symbols {
             if removed.kind != "module"
                 && (spec.frontmatter.is_some()
                     || spec.frontmatter_error.is_some()
@@ -2426,6 +2426,65 @@ Edit `src/lib.py`
             Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "will_be_removed"
         )));
         assert_eq!(r.verdict, Verdict::Broken);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn removing_a_function_local_declaration_needs_no_acknowledgement() {
+        let dir = init_repo("removed_local");
+        write(
+            &dir,
+            "src/lib.py",
+            "def outer():\n    def helper():\n        return 1\n    return helper()\n\ndef gone():\n    return 2\n",
+        );
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        write(&dir, "src/lib.py", "def outer():\n    return 1\n");
+
+        let mut store = Store::open(dir.join("idx.db")).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        let s = spec::parse_str("spec.md", "## Goals\n- Simplify the module\n");
+        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let removed: Vec<_> = r
+            .findings
+            .iter()
+            .filter_map(|f| match f {
+                Finding::RemovedSymbolNotAcknowledged { symbol, .. } => Some(symbol.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, ["gone"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rename_without_content_change_removes_no_symbols() {
+        let dir = init_repo("removed_rename");
+        let source = "class Panel:\n    def show(self):\n        return 1\n\ndef build():\n    return Panel()\n";
+        write(&dir, "src/old.py", source);
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        git(&dir, &["mv", "src/old.py", "src/new.py"]);
+        let removed = |dir: &Path| {
+            let mut store = Store::open(dir.join("idx.db")).unwrap();
+            Indexer::new(dir).index_all(&mut store, false).unwrap();
+            let s = spec::parse_str("spec.md", "## Goals\n- Rename the module\n");
+            run(&s, &store, dir, "baseline")
+                .unwrap()
+                .findings
+                .into_iter()
+                .filter_map(|f| match f {
+                    Finding::RemovedSymbolNotAcknowledged { symbol, .. } => Some(symbol),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(removed(&dir), Vec::<String>::new());
+        // Any edit makes it a different file, so the old path's removals count.
+        write(&dir, "src/new.py", &source.replace("def build", "def make"));
+        assert!(removed(&dir).contains(&"build".to_string()));
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -48,6 +48,16 @@ pub fn run(opts: CiOpts, index_path: &Path) -> Result<bool, Box<dyn std::error::
         "  index: {} symbols, {} edges ({} files indexed, {} unchanged)",
         stats.symbols_total, stats.edges_total, stats.files_indexed, stats.files_unchanged,
     );
+    // An audit over a partial graph can miss removed or changed symbols, so a
+    // file that failed to index fails the run, as it does for run-task.
+    if stats.files_failed > 0 {
+        eprintln!(
+            "  [FAIL] {} file(s) failed to index: {}",
+            stats.files_failed,
+            stats.failed_paths.join(", ")
+        );
+        return Ok(false);
+    }
 
     let mut spec_paths =
         mmcg::task_scaffold::discover_canonical_task_specs(&root)?.unwrap_or_default();
@@ -339,6 +349,39 @@ mod tests {
         .unwrap();
         assert!(!ok, "CI evidence must fail closed without executor report");
         fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_that_fails_to_index_fails_ci() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("lib.py"), "def value(): return 1\n").unwrap();
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        let unreadable = root.join("broken.py");
+        fs::write(&unreadable, "def broken(): pass\n").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unreadable).is_ok() {
+            // Running as root bypasses file permissions, so the case cannot occur.
+            return;
+        }
+        let ci = || {
+            run(
+                CiOpts {
+                    since: "HEAD".into(),
+                    root: root.to_path_buf(),
+                    bundle_dir: None,
+                    changed_only: false,
+                    require_executor_report: false,
+                },
+                &root.join(".mastermind/mmcg.db"),
+            )
+            .unwrap()
+        };
+        assert!(!ci(), "a partial graph cannot back the audit");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(ci());
     }
 
     #[test]

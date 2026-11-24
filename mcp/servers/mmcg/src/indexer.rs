@@ -1760,7 +1760,10 @@ pub(crate) fn source_candidates_bounded(
         }
         return Err(IndexError::Other("git source inventory unavailable".into()));
     }
+    // Only files an extractor reads count toward the cap. Other files stay
+    // listed for scan stats, and the Git output byte limit bounds them.
     let mut paths = BTreeSet::new();
+    let mut sources = 0_usize;
     for raw in output.stdout.split(|byte| *byte == 0) {
         control.check().map_err(index_error_from_read)?;
         if raw.is_empty() {
@@ -1773,8 +1776,11 @@ pub(crate) fn source_candidates_bounded(
         if has_skipped_component(&relative) {
             continue;
         }
+        if extractor_for_path(&relative).is_some() {
+            sources += 1;
+        }
         paths.insert(root.canonical_root().join(relative));
-        if paths.len() > limit {
+        if sources > limit {
             return Err(IndexError::LimitExceeded {
                 dimension: "source_candidates",
                 cap: limit as u64,
@@ -1830,6 +1836,7 @@ fn walked_source_candidates(
     control: ReadControl<'_>,
 ) -> Result<Vec<PathBuf>, IndexError> {
     let mut paths = BTreeSet::new();
+    let mut sources = 0_usize;
     for entry in source_walk_builder(root.canonical_root()).build() {
         control.check().map_err(index_error_from_read)?;
         let Ok(entry) = entry else {
@@ -1838,8 +1845,11 @@ fn walked_source_candidates(
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
+        if extractor_for_path(entry.path()).is_some() {
+            sources += 1;
+        }
         paths.insert(entry.into_path());
-        if paths.len() > limit {
+        if sources > limit {
             return Err(IndexError::LimitExceeded {
                 dimension: "source_candidates",
                 cap: limit as u64,
@@ -1998,23 +2008,14 @@ pub(crate) fn stale_paths_controlled(
             }
         }
     }
+    // The inventory is complete, so an indexed path outside it is one a full
+    // index would purge, even when the file still exists, as an ignored one does.
     if stale.len() < cap {
         for indexed_path in indexed.keys() {
             control
                 .check()
                 .map_err(crate::indexer::index_error_from_read)?;
-            if seen.contains(indexed_path) {
-                continue;
-            }
-            let remains_regular = crate::bounded_fs::read_regular_file_with_capability(
-                &root_capability,
-                Path::new(indexed_path),
-                u64::MAX,
-                0,
-                control,
-            )
-            .is_ok();
-            if !remains_regular {
+            if !seen.contains(indexed_path) {
                 stale.push(indexed_path.clone());
                 if stale.len() >= cap {
                     break;
@@ -3877,6 +3878,34 @@ def candidate(value: ImportantType) -> ResultType"#
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn the_candidate_cap_counts_only_sources() {
+        let (dir, _db) = setup("candidate_cap_counts_sources");
+        fs::write(dir.join("one.py"), "def one(): pass\n").unwrap();
+        for index in 0..5 {
+            fs::write(dir.join(format!("notes-{index}.txt")), "text\n").unwrap();
+        }
+        git(&dir, &["init", "-q", "--initial-branch=main"]);
+        let root = RootCapability::open(&dir).unwrap();
+        assert_eq!(
+            source_candidates_bounded(&root, 2, ReadControl::default())
+                .unwrap()
+                .len(),
+            6
+        );
+        for index in 0..2 {
+            fs::write(dir.join(format!("more-{index}.py")), "def more(): pass\n").unwrap();
+        }
+        assert!(matches!(
+            source_candidates_bounded(&root, 2, ReadControl::default()),
+            Err(IndexError::LimitExceeded {
+                dimension: "source_candidates",
+                cap: 2
+            })
+        ));
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn tracked_inventory_skips_unportable_non_source_files() {
@@ -4271,6 +4300,15 @@ pub(crate) mod common {
 
     pub fn node_text<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
         node.utf8_text(source).ok()
+    }
+
+    pub fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
+        node.child_by_field_name("name")
+            .and_then(|name| node_text(&name, source))
+    }
+
+    pub fn starts_uppercase(text: &str) -> bool {
+        text.chars().next().is_some_and(char::is_uppercase)
     }
 
     pub fn line_of(node: &Node) -> u32 {

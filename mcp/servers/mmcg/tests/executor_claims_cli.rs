@@ -682,3 +682,36 @@ fn executor_claim_failures_reach_cli_ci_envelopes_and_controller_state() {
             .all(|check| (check.status == ClaimStatus::Verified) == actual_addition));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn audit_spec_accepts_an_absolute_spec_through_a_linked_root_alias() {
+    let mut fixture = Fixture::new(&[("service.py", "def run():\n    return 1\n")]);
+    fixture.source("service.py", "def run():\n    return 2\n");
+    git(fixture.root(), &["commit", "-qam", "change"]);
+    fixture.spec(&[]);
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("repo");
+    std::os::unix::fs::symlink(fixture.root(), &alias).unwrap();
+    let spec = alias.join(".mastermind/tasks/001-claims/spec.md");
+    let bundle = fixture
+        .root()
+        .join(".mastermind/tasks/001-claims/audit.bundle.json");
+    let output = fixture.command(&[
+        "audit-spec",
+        spec.to_str().unwrap(),
+        "--since",
+        "baseline",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(bundle.is_file(), "{output:?}");
+    assert!(
+        fixture
+            .root()
+            .join(".mastermind/tasks/_lessons.md")
+            .is_file(),
+        "the failed audit records its lesson candidate: {output:?}"
+    );
+}

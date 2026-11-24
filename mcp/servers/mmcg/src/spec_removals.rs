@@ -1,6 +1,6 @@
 //! Bind removal acknowledgements to parser ordinals in one immutable baseline.
 
-use crate::diff::{self, RemovedDeclarations};
+use crate::diff::{self, DeclarationChanges, RemovedDeclarations};
 use crate::indexer::{extractor_for_path, parse_baseline_blob};
 use crate::spec::{ParsedSpec, SymbolSpec};
 use crate::spec_symbols::{components, normalize_file, snapshot_scopes, Scope, Unresolved};
@@ -22,6 +22,8 @@ pub(crate) struct Plan {
     baseline: Result<Baseline, Unresolved>,
     acknowledged: HashSet<Key>,
     removed: HashSet<Key>,
+    /// The subset of `removed` that needs an acknowledgement.
+    required: HashSet<Key>,
     pub errors: Vec<AcknowledgementError>,
 }
 
@@ -35,14 +37,27 @@ impl Plan {
         deadline: Instant,
         complete: bool,
     ) -> Option<Self> {
-        Self::build_with_preimages(spec, root, baseline_oid, removed, deadline, complete, None)
+        let declarations = crate::diff::DeclarationChanges {
+            removed: removed.clone(),
+            api_removed: removed.clone(),
+            ..Default::default()
+        };
+        Self::build_with_preimages(
+            spec,
+            root,
+            baseline_oid,
+            &declarations,
+            deadline,
+            complete,
+            None,
+        )
     }
 
     pub(crate) fn build_with_preimages(
         spec: &ParsedSpec,
         root: &Path,
         baseline_oid: &str,
-        removed: &RemovedDeclarations,
+        declarations: &DeclarationChanges,
         deadline: Instant,
         complete: bool,
         preimages: Option<&BTreeMap<String, Option<Vec<u8>>>>,
@@ -74,17 +89,22 @@ impl Plan {
             }
         }
         let baseline = if complete {
-            Baseline::load(root, baseline_oid, &scopes, removed, deadline, preimages)
+            Baseline::load(
+                root,
+                baseline_oid,
+                &scopes,
+                &declarations.removed,
+                deadline,
+                preimages,
+            )
         } else {
             Err(Unresolved::unavailable("diff_incomplete"))
         };
         let mut plan = Self {
             baseline,
             acknowledged: HashSet::new(),
-            removed: removed
-                .iter()
-                .flat_map(|(file, indices)| indices.iter().map(|&index| (file.clone(), index)))
-                .collect(),
+            removed: keys(&declarations.removed),
+            required: keys(&declarations.api_removed),
             errors: Vec::new(),
         };
         for ack in acknowledgements {
@@ -110,7 +130,7 @@ impl Plan {
     pub(crate) fn unacknowledged(&self) -> Result<Vec<(String, String)>, Unresolved> {
         let baseline = self.baseline.as_ref().map_err(Clone::clone)?;
         let mut remaining = Vec::new();
-        for key in &self.removed {
+        for key in &self.required {
             let symbol = baseline.symbol(key)?;
             if symbol.kind != "module" && !self.acknowledged.contains(key) {
                 let file = &baseline.files[&key.0];
@@ -153,6 +173,13 @@ impl Plan {
         let mut keys = self.removed.iter().filter(|key| key.0 == file).peekable();
         keys.peek().is_some() && keys.all(|key| self.acknowledged.contains(key))
     }
+}
+
+fn keys(removed: &RemovedDeclarations) -> HashSet<Key> {
+    removed
+        .iter()
+        .flat_map(|(file, indices)| indices.iter().map(|&index| (file.clone(), index)))
+        .collect()
 }
 
 fn ack_scope(ack: &SymbolSpec) -> Scope<'_> {

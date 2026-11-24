@@ -12,7 +12,6 @@ use crate::bounded_fs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -278,9 +277,7 @@ struct CorpusInventory {
     directories: BTreeMap<String, StableFileIdentity>,
 }
 
-fn digest_bytes(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as digest_bytes;
 
 fn canonical_digest(value: &Value) -> Result<String, DocumentGraphError> {
     serde_json::to_vec(value)

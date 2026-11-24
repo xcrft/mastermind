@@ -541,6 +541,26 @@ fn explicit_file_deletion_still_requires_api_acknowledgements_and_required_docs(
 }
 
 #[test]
+fn an_unchanged_move_needs_no_acknowledgement_and_earlier_ones_still_hold() {
+    let mut fixture = Fixture::new(&[("old.py", METHODS), ("keep.py", "def keep(): return 1\n")]);
+    git(fixture.root(), &["mv", "old.py", "new.py"]);
+    Indexer::new(fixture.root())
+        .index_all(&mut fixture.store, false)
+        .unwrap();
+    let moved =
+        "  - file: old.py\n    scope: delete\n    reason: Rename the module\ncreates: [new.py]\n";
+    let path = fixture.write_spec(moved, "    []\n", "");
+    assert_eq!(fixture.audit(&path, true)["verdict"], "held");
+    // A spec written before moves were recognized touches the old path and
+    // acknowledges every declaration in it. It keeps passing.
+    let acknowledged = ["A", "A.run", "B", "B.run"]
+        .map(|name| format!("    - {{name: {name}, file: old.py}}\n"))
+        .concat();
+    let path = fixture.write_spec("  - file: old.py\ncreates: [new.py]\n", &acknowledged, "");
+    assert_eq!(fixture.audit(&path, true)["verdict"], "held");
+}
+
+#[test]
 fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
     for file in ["service.py", "./service.py"] {
         let mut fixture = Fixture::new(&[

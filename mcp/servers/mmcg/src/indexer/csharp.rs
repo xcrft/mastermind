@@ -2,7 +2,8 @@
 //! properties, using directives, calls, attributes.
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    line_of, name_field, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    starts_uppercase,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -218,11 +219,6 @@ fn walk(
     }
 }
 
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
-}
-
 fn method_kind_for(parent_index: Option<usize>, pending: &PendingFile) -> &'static str {
     match parent_index {
         Some(p)
@@ -325,10 +321,6 @@ fn type_prefix_from_expression(member: &Node, source: &[u8]) -> Option<String> {
     } else {
         None
     }
-}
-
-fn starts_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 fn first_identifier_text<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {

@@ -20,6 +20,9 @@ class DocumentationDiscoveryTests(unittest.TestCase):
             private = root / ".mastermind" / "research" / "copy" / "README.md"
             private.parent.mkdir(parents=True)
             private.write_text("[private](missing.md)\n[[missing-private]]\n")
+            worktree = root / ".claude" / "worktrees" / "agent" / "README.md"
+            worktree.parent.mkdir(parents=True)
+            worktree.write_text("[copy](missing.md)\n[[missing-copy]]\n")
             source = root / "README.md"
             source.write_text("[source](missing.md)\n[[missing-source]]\n")
             nearby = root / "mastermind-notes" / "README.md"

@@ -369,6 +369,11 @@ reset before reuse. Missing audit snapshot bindings require another audit.
 Canonical task folders keep their own state and review files. Legacy flat specs
 keep basename paths. Other specs use path-SHA-256 keys under
 `.mastermind/run-state/.noncanonical/` and `.mastermind/releases/.noncanonical/`.
+The executor report and the audit sit beside the spec. A spec named `spec.md`
+uses `executor-report.md` and `audit.md`. Any other spec adds its file stem, so
+`docs/specs/a.md` uses `a.executor-report.md` and `a.audit.md`, and two specs
+in one folder never share them. `run-task --pre-only` prints the exact report
+path.
 
 ### Semantic task review
 
@@ -512,7 +517,9 @@ initial file in memory; there is no unlimited value.
   hold. The task's first pre-flight records it in the manifest as
   `max_total_bytes`; retry, reset, repair and reapproval keep the manifest and
   its budget, so changing the setting later does not reach an open task. Each
-  retained file is still limited to 5 MiB. A manifest without `max_total_bytes`
+  retained file is still limited to 5 MiB. A larger uncommitted file stops
+  pre-flight with its path. Add it to `.gitignore`, commit it or move it out of
+  the worktree. A manifest without `max_total_bytes`
   predates the setting and is read against the 1 GiB ceiling.
 - The snapshot budget bounds the files that the history input and audit
   snapshots and the strict workflow snapshot read in post-flight, review, close,
@@ -1812,7 +1819,8 @@ Structural MCP queries also refresh the managed `.mastermind/mmcg.db` on demand
 when source files or the extractor contract drift. The repository root is
 derived from the canonical database path and checked against the stored index
 identity before any refresh. Automatic refresh admits at most 100,000 source
-candidates and 512 MiB of declared source bytes. Exceeding either cap returns
+files and 512 MiB of declared source bytes. Only files in a supported language
+count toward the file cap. Exceeding either cap returns
 `refresh_limit_exceeded` without a partial refresh. A changed extractor or
 concept contract forces a full rebuild. A full rebuild that does not fit the
 request budget starts from zero on the next call, so it returns
@@ -2218,9 +2226,16 @@ source must be a regular file in the retained Git baseline or a captured initial
 regular-file preimage. A missing baseline entry, symlink, submodule or failed
 baseline read cannot prove a deletion. Staging a rename is optional.
 
-Delete scope does not acknowledge removed APIs. Every removed non-module
+Delete scope does not acknowledge removed APIs. Every other removed non-module
 declaration still needs `breaking_changes.removed_symbols` with a uniquely
-resolved identity. A deleted path cannot also be an ordinary touch, a creation
+resolved identity. Two removals need no acknowledgement:
+
+| Removal | Why it is not an API removal |
+|---|---|
+| A declaration inside a function or method body | It is local, so no caller can reach it |
+| Every declaration of a deleted file whose exact bytes appear at a new or changed path in the same diff | The file moved and its declarations still exist. A move with any content change counts the old path's declarations as removed |
+
+A deleted path cannot also be an ordinary touch, a creation
 or an `expected_docs` requirement, including normalized aliases.
 
 The first preflight and standalone `verify-spec` require the source to exist.
@@ -2588,6 +2603,8 @@ provenance and does not silently upgrade these default graph queries.
 
 `mastermind ci` indexes the repository, verifies selected specs, parses their
 executor reports, audits the real diff, and optionally emits sealed bundles.
+A source file that fails to index fails the run and is named, because an audit
+over a partial graph can miss removed or changed symbols.
 Bundle construction reads the bound spec and executor report through one
 retained repository capability and rejects path substitution, symlinks, and
 special files before recording their digests.

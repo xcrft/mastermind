@@ -28,8 +28,8 @@
 //! large) or `ctags` (fast, similar precision tradeoffs to this extractor).
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
-    signature_until_body,
+    line_of, name_field, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    signature_until_body, starts_uppercase,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -263,11 +263,6 @@ fn walk(
     }
 }
 
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
-}
-
 /// Returns `(method_name, optional_receiver_type)` for a function_definition.
 /// `void foo() {}` → ("foo", None)
 /// `void Foo::bar() {}` → ("bar", Some("Foo"))
@@ -385,10 +380,6 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
         }
         _ => None,
     }
-}
-
-fn starts_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 /// `#include "foo.h"` / `#include <vector>` → import edge with the header name.

@@ -56,6 +56,19 @@ fn open_validated_index(
     Ok(Ok(store))
 }
 
+/// The canonical root and the spec path under it. A relative spec stays
+/// relative to the working directory, and an absolute one may reach the root
+/// through a link.
+fn gate_paths(
+    spec: &Path,
+    root: PathBuf,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+    Ok(super::task_paths(&std::path::absolute(spec)?, root)?)
+}
+
 pub fn verify(
     spec: &Path,
     root: PathBuf,
@@ -64,11 +77,9 @@ pub fn verify(
     strict: bool,
     index_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+    let (root, spec) = gate_paths(spec, root)?;
     let parsed =
-        mmcg::spec::parse_file(spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
+        mmcg::spec::parse_file(&spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
     let strict = strict
         || parsed
             .frontmatter
@@ -116,12 +127,9 @@ pub fn audit(
     executor_report_path: Option<&Path>,
     bundle_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = root
-        .canonicalize()
-        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    let source_path = std::path::absolute(spec)?;
-    let parsed = mmcg::spec::parse_file(&source_path)
-        .map_err(|e| format!("parse {}: {e}", source_path.display()))?;
+    let (root, spec) = gate_paths(spec, root)?;
+    let parsed =
+        mmcg::spec::parse_file(&spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
     let executor_report_path_str = executor_report_path
         .map(|path| exact_path(path, "executor report"))
         .transpose()?;
@@ -160,7 +168,7 @@ pub fn audit(
         }
     }
 
-    match mmcg::lessons::append_audit_candidate(&root, spec, &report) {
+    match mmcg::lessons::append_audit_candidate(&root, &spec, &report) {
         Ok(true) if !json => {
             eprintln!("  appended lesson candidate → .mastermind/tasks/_lessons.md")
         }

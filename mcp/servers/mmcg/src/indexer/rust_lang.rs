@@ -1,7 +1,7 @@
 //! Rust extractor — functions, structs, enums, traits, impls (with methods),
 //! calls, macro invocations, and use declarations.
 
-use super::common::{node_text, push_def, push_def_with_decorators, push_import};
+use super::common::{name_field, node_text, push_def, push_def_with_decorators, push_import};
 use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
 use crate::store::{PendingEdge, PendingFile};
 use std::collections::{HashMap, HashSet};
@@ -582,11 +582,6 @@ pub(crate) fn source_has_test_attribute(source: &[u8]) -> Option<bool> {
         }
     }
     Some(false)
-}
-
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
 }
 
 /// `impl Foo { ... }` → "Foo". `impl Trait for Foo { ... }` → "Foo" (the type,

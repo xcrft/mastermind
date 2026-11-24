@@ -17,6 +17,12 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
+/// The lowercase hex SHA-256 of `bytes`, the digest every stored binding uses.
+pub fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    encode(&Sha256::digest(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::encode;

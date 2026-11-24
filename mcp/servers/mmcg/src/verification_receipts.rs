@@ -15,7 +15,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RECEIPT_LIMIT: u64 = 128 * 1024;
 const FILE_LIMIT: u64 = 4 * 1024 * 1024;
-const SNAPSHOT_FILE_LIMIT: u64 = 128 * 1024 * 1024;
 const SNAPSHOT_TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
 const GIT_LIMIT: usize = 8 * 1024 * 1024;
 const EXECUTABLE_LIMIT: u64 = 128 * 1024 * 1024;
@@ -349,9 +348,7 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
     })
 }
 
-fn sha(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha;
 
 fn declaration_hash(command: &str, run: &RunDeclaration) -> String {
     sha(&serde_json::to_vec(&(command, run)).expect("serializable declaration"))
@@ -938,23 +935,8 @@ fn snapshot(
     spec: &ParsedSpec,
     deadline: Instant,
 ) -> Result<String, SnapshotFailure> {
-    let first = snapshot_once(
-        root,
-        baseline,
-        spec,
-        deadline,
-        SNAPSHOT_FILE_LIMIT,
-        SNAPSHOT_TOTAL_LIMIT,
-    )?;
-    if snapshot_once(
-        root,
-        baseline,
-        spec,
-        deadline,
-        SNAPSHOT_FILE_LIMIT,
-        SNAPSHOT_TOTAL_LIMIT,
-    )? != first
-    {
+    let first = snapshot_once(root, baseline, spec, deadline, SNAPSHOT_TOTAL_LIMIT)?;
+    if snapshot_once(root, baseline, spec, deadline, SNAPSHOT_TOTAL_LIMIT)? != first {
         return Err(SnapshotFailure::changed("verification_snapshot_changed"));
     }
     Ok(first)
@@ -965,7 +947,6 @@ fn snapshot_once(
     baseline: &str,
     spec: &ParsedSpec,
     deadline: Instant,
-    file_limit: u64,
     total_limit: u64,
 ) -> Result<String, SnapshotFailure> {
     let repo = root.canonical_root();
@@ -1065,12 +1046,11 @@ fn snapshot_once(
     for path in paths {
         digest.update(path.as_bytes());
         digest.update([0]);
-        let limit = remaining.min(file_limit);
         if symlinks.contains(&path) {
             let target = match bounded_fs::read_internal_symlink_with_capability(
                 root,
                 &root.requested_root().join(&path),
-                limit.min(4096),
+                remaining.min(4096),
                 ReadControl {
                     deadline: Some(deadline),
                     interrupted: Some(&interrupted),
@@ -1102,7 +1082,7 @@ fn snapshot_once(
                         }
                         _ => "verification_snapshot_symlink_unavailable",
                     };
-                    return Err(SnapshotFailure::read(error, reason));
+                    return Err(SnapshotFailure::read(error, &format!("{reason}: `{path}`")));
                 }
             };
             remaining -= target.len() as u64;
@@ -1115,7 +1095,7 @@ fn snapshot_once(
         match snapshot_file(
             root,
             &root.requested_root().join(&path),
-            limit,
+            remaining,
             deadline,
             &mut digest,
         ) {
@@ -1126,16 +1106,15 @@ fn snapshot_once(
                 digest.update(b"missing\0");
             }
             Err(error) => {
-                let reason = if matches!(&error, bounded_fs::BoundedReadError::TooLarge { .. }) {
-                    if remaining < file_limit {
-                        "verification_snapshot_total_byte_limit"
-                    } else {
-                        "verification_snapshot_file_byte_limit"
-                    }
-                } else {
-                    "verification_snapshot_file_unavailable"
+                let reason = match &error {
+                    bounded_fs::BoundedReadError::TooLarge { size, .. } => format!(
+                        "verification_snapshot_total_byte_limit: `{path}` has {size} bytes, over \
+                         the {remaining} bytes left of the {total_limit}-byte snapshot budget. \
+                         Each pass reads every tracked and nonignored file outside .mastermind/"
+                    ),
+                    _ => format!("verification_snapshot_file_unavailable: `{path}`: {error}"),
                 };
-                return Err(SnapshotFailure::read(error, reason));
+                return Err(SnapshotFailure::read(error, &reason));
             }
         }
         digest.update([0]);
@@ -1703,8 +1682,8 @@ mod tests {
         let file = bounded_fs::read_regular_file_with_capability(
             &root,
             &path,
-            SNAPSHOT_FILE_LIMIT,
-            SNAPSHOT_FILE_LIMIT,
+            SNAPSHOT_TOTAL_LIMIT,
+            SNAPSHOT_TOTAL_LIMIT,
             ReadControl::default(),
         )
         .unwrap();
@@ -1793,7 +1772,6 @@ mod tests {
                 &baseline,
                 &spec,
                 deadline,
-                SNAPSHOT_FILE_LIMIT,
                 SNAPSHOT_TOTAL_LIMIT,
             )
             .unwrap()
@@ -1817,14 +1795,13 @@ mod tests {
 
     #[test]
     fn snapshot_production_byte_limits_remain_fixed() {
-        assert_eq!(SNAPSHOT_FILE_LIMIT, 128 * 1024 * 1024);
         assert_eq!(SNAPSHOT_TOTAL_LIMIT, 512 * 1024 * 1024);
     }
 
     #[test]
     fn streamed_snapshot_enforces_the_aggregate_io_budget() {
         let (directory, spec, context, _) = repair_fixture();
-        let file_limit = 64;
+        let file_bytes = 64;
         let fixture_bytes: u64 = [".gitignore", "source.txt"]
             .iter()
             .map(|path| {
@@ -1836,10 +1813,10 @@ mod tests {
         for index in 0..2 {
             std::fs::File::create(directory.path().join(format!("budget-{index}")))
                 .unwrap()
-                .set_len(file_limit)
+                .set_len(file_bytes)
                 .unwrap();
         }
-        let total_limit = fixture_bytes + 2 * file_limit;
+        let total_limit = fixture_bytes + 2 * file_bytes;
         let deadline = Instant::now() + Duration::from_secs(20);
         let snapshot = || {
             snapshot_once(
@@ -1847,7 +1824,6 @@ mod tests {
                 &context.binding.baseline_oid,
                 &spec,
                 deadline,
-                file_limit,
                 total_limit,
             )
         };
@@ -1859,22 +1835,14 @@ mod tests {
             deadline,
         )
         .unwrap();
-        let last = std::fs::OpenOptions::new()
-            .write(true)
-            .open(directory.path().join("budget-1"))
-            .unwrap();
-        last.set_len(file_limit + 1).unwrap();
-        let file_reason = snapshot().err().map(|failure| failure.reason);
-        last.set_len(file_limit).unwrap();
         std::fs::write(directory.path().join("source.txt"), "original\n!").unwrap();
-        let total_reason = snapshot().err().map(|failure| failure.reason);
+        let reason = snapshot().err().map(|failure| failure.reason).unwrap();
         assert_eq!(exact.unwrap(), production);
-        assert_eq!(
-            (file_reason.as_deref(), total_reason.as_deref()),
-            (
-                Some("verification_snapshot_file_byte_limit"),
-                Some("verification_snapshot_total_byte_limit")
-            )
+        // The last file read overflows the budget, so the error names it.
+        assert!(
+            reason.starts_with("verification_snapshot_total_byte_limit: `source.txt` has 10 bytes")
+                && reason.contains(&format!("{total_limit}-byte snapshot budget")),
+            "{reason}"
         );
     }
 
@@ -2230,14 +2198,14 @@ mod tests {
         assert_eq!(
             preflight_snapshot_capability(&spec, root, &context.binding.baseline_oid, deadline)
                 .unwrap_err(),
-            "verification_snapshot_symlink_target_unsafe"
+            "verification_snapshot_symlink_target_unsafe: `source-link`"
         );
         let unavailable = run(&spec_path, root, "test").unwrap();
         assert_eq!(unavailable.status, Status::Unavailable);
         assert_eq!(unavailable.exit_code, None);
         assert_eq!(
             unavailable.reason.as_deref(),
-            Some("verification_snapshot_symlink_target_unsafe")
+            Some("verification_snapshot_symlink_target_unsafe: `source-link`")
         );
     }
 

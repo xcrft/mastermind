@@ -2502,7 +2502,14 @@ fn read_bounded_bytes(
 fn registered_servers_for_installed(builder: &mut WorkflowAuditBuilder) -> BTreeSet<String> {
     let mut servers = BTreeSet::new();
     let mut invalid_mmcg_entries = Vec::new();
-    for path in registration_config_candidates(&builder.root, std::env::home_dir().as_deref()) {
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    for path in registration_config_candidates(
+        &builder.root,
+        std::env::home_dir().as_deref(),
+        config_dir.as_deref(),
+    ) {
         if fs::symlink_metadata(&path).is_err() {
             continue;
         }
@@ -2578,10 +2585,18 @@ fn registered_servers_for_installed(builder: &mut WorkflowAuditBuilder) -> BTree
     servers
 }
 
-fn registration_config_candidates(installed_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+/// The project `.mcp.json` and the user file that `setup` writes for Claude,
+/// so the audit checks the same registration the installer made.
+fn registration_config_candidates(
+    installed_root: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let installed = installed_root.canonicalize().ok();
-    let user_install = home
-        .and_then(|home| home.join(".claude").canonicalize().ok())
+    let user_install = config_dir
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|home| home.join(".claude")))
+        .and_then(|user_root| user_root.canonicalize().ok())
         .is_some_and(|candidate| Some(candidate) == installed);
     let mut candidates = Vec::new();
     if !user_install {
@@ -2589,8 +2604,10 @@ fn registration_config_candidates(installed_root: &Path, home: Option<&Path>) ->
             candidates.push(project.join(".mcp.json"));
         }
     }
-    if let Some(home) = home {
-        candidates.push(home.join(".claude.json"));
+    if let Some(path) = home.and_then(|home| {
+        crate::setup::user_registration_path(crate::setup::Client::Claude, home, config_dir).ok()
+    }) {
+        candidates.push(path);
     }
     candidates.sort();
     candidates.dedup();
@@ -3934,7 +3951,6 @@ impl WorkflowStatus {
             .find(|t| t.phase == TaskPhase::AwaitingAudit)
         {
             let spec = path_text(&task.spec_path);
-            let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             let command = command_with_path("mastermind run-task", &task.spec_path, " --post-only");
             let prompt_command =
                 command_or_placeholder(&command, "mastermind run-task <spec-path> --post-only");
@@ -3949,7 +3965,7 @@ impl WorkflowStatus {
                      {spec}\n\n\
                      The canonical executor report is in {}. \
                      Run `{prompt_command}`, then perform semantic review.",
-                    path_text(&task_dir.join("executor-report.md"))
+                    path_text(&crate::run_task::executor_report_path(&task.spec_path))
                 )),
             });
         }
@@ -3997,7 +4013,6 @@ impl WorkflowStatus {
             .find(|t| t.phase == TaskPhase::AwaitingExecutor)
         {
             let spec = path_text(&task.spec_path);
-            let task_dir = task.spec_path.parent().unwrap_or(task.spec_path.as_path());
             if task
                 .state
                 .as_ref()
@@ -4023,7 +4038,7 @@ impl WorkflowStatus {
                      {spec}\n\n\
                      Read the spec, implement each step in the Scope section, run the VERIFY \
                      commands, and write an executor report to {}.",
-                    path_text(&task_dir.join("executor-report.md"))
+                    path_text(&crate::run_task::executor_report_path(&task.spec_path))
                 )),
             });
         }
@@ -4448,10 +4463,10 @@ impl WorkflowStatus {
                 path_text(&task_dir.join("state.json"))
             ));
         }
-        if task_dir.join("executor-report.md").is_file() {
+        if crate::run_task::executor_report_path(&task.spec_path).is_file() {
             out.push_str(&format!(
                 "  executor-report: {}\n",
-                path_text(&task_dir.join("executor-report.md"))
+                path_text(&crate::run_task::executor_report_path(&task.spec_path))
             ));
         }
         if task_dir.join("invocation.json").is_file() {
@@ -4460,10 +4475,10 @@ impl WorkflowStatus {
                 path_text(&task_dir.join("invocation.json"))
             ));
         }
-        if task_dir.join("audit.md").is_file() {
+        if crate::run_task::audit_file_path(&task.spec_path).is_file() {
             out.push_str(&format!(
                 "  audit:           {}\n",
-                path_text(&task_dir.join("audit.md"))
+                path_text(&crate::run_task::audit_file_path(&task.spec_path))
             ));
         }
         out.push('\n');
@@ -6124,7 +6139,7 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(install.join("agents")).unwrap();
         fs::create_dir_all(install.join("skills")).unwrap();
-        let candidates = registration_config_candidates(&install, Some(&home));
+        let candidates = registration_config_candidates(&install, Some(&home), None);
         assert_eq!(
             candidates,
             vec![home.join(".claude.json"), project.join(".mcp.json")]
@@ -6134,8 +6149,19 @@ mod tests {
         let user_install = home.join(".claude");
         fs::create_dir_all(&user_install).unwrap();
         assert_eq!(
-            registration_config_candidates(&user_install, Some(&home)),
+            registration_config_candidates(&user_install, Some(&home), None),
             vec![home.join(".claude.json")]
+        );
+        let config_dir = workspace.path().join("claude-config");
+        fs::create_dir_all(&config_dir).unwrap();
+        assert_eq!(
+            registration_config_candidates(&config_dir, Some(&home), Some(&config_dir)),
+            vec![config_dir.join(".claude.json")]
+        );
+        fs::write(config_dir.join(".config.json"), "{}").unwrap();
+        assert_eq!(
+            registration_config_candidates(&install, Some(&home), Some(&config_dir)),
+            vec![config_dir.join(".config.json"), project.join(".mcp.json")]
         );
         let non_windows_global = serde_json::json!({
             "command": "mastermind",

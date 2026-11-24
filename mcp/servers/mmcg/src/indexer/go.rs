@@ -1,7 +1,8 @@
 //! Go extractor — functions, methods, types (struct/interface), imports, calls.
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def, push_import, signature_until_body,
+    line_of, name_field, node_text, push_call_with_type, push_def, push_import,
+    signature_until_body, starts_uppercase,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -124,11 +125,6 @@ fn walk(
     }
 }
 
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
-}
-
 /// `import "fmt"` / `import f "fmt"` / `import ( a "x"; b "y" )`.
 fn collect_imports(decl: &Node, source: &[u8], pending: &mut PendingFile, module_index: usize) {
     let line = line_of(decl);
@@ -212,10 +208,6 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
         }
         _ => None,
     }
-}
-
-fn starts_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 #[cfg(test)]

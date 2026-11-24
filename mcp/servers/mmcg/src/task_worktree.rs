@@ -236,16 +236,14 @@ fn blob_path(root: &Path, spec: &Path, hash: &str) -> PathBuf {
         .join(hash)
 }
 
-fn sha(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha;
 
 fn artifacts(root: &Path, spec: &Path) -> Result<BTreeSet<String>, String> {
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
     [
         spec.to_path_buf(),
-        spec.with_file_name("executor-report.md"),
-        spec.with_file_name("audit.md"),
+        crate::run_task::executor_report_path(spec),
+        crate::run_task::audit_file_path(spec),
         crate::run_task::release_file_path(root, spec),
         crate::run_task::history_review_file_path(root, spec),
         crate::run_task::state_file_path(root, spec),
@@ -287,6 +285,11 @@ fn state(
         Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok((PathState::Missing, None))
         }
+        Err(error @ BoundedReadError::TooLarge { .. }) => Err(format!(
+            "initial_worktree_file_unavailable: {path}: {error}. The task keeps a copy of \
+             every uncommitted file, so add this one to .gitignore, commit it or move it \
+             out of the worktree"
+        )),
         Err(error) => Err(format!(
             "initial_worktree_file_unavailable: {path}: {error}"
         )),

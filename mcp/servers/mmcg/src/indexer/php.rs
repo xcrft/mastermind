@@ -2,8 +2,8 @@
 //! functions, calls, PHP 8 attributes (`#[Test]`), `use` directives.
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def_with_decorators, push_import,
-    signature_until_body,
+    line_of, name_field, node_text, push_call_with_type, push_def_with_decorators, push_import,
+    signature_until_body, starts_uppercase,
 };
 use super::LanguageExtractor;
 use crate::store::PendingFile;
@@ -229,15 +229,6 @@ fn walk(
             _ => walk(child, source, pending, parent_index, module_index),
         }
     }
-}
-
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
-}
-
-fn starts_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 /// `use Foo\Bar;` / `use Foo\Bar as Baz;` / `use Foo\{A, B as C};`.

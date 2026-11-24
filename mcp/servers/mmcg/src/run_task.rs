@@ -494,6 +494,28 @@ fn spec_artifact_layout(repo_root: &Path, spec_path: &Path) -> SpecArtifactLayou
     SpecArtifactLayout::Noncanonical(noncanonical_artifact_key(identity.as_deref(), spec_path))
 }
 
+/// The executor report and the post-flight audit live beside the spec. A
+/// file named `spec.md` is the only spec in its folder, so its artifacts keep
+/// plain names. Other specs can share a folder, so their artifacts carry the
+/// spec's file stem, as in `050-a.executor-report.md`.
+fn spec_artifact_path(spec_path: &Path, name: &str) -> PathBuf {
+    if spec_path.file_name() == Some(std::ffi::OsStr::new("spec.md")) {
+        return spec_path.with_file_name(name);
+    }
+    let mut file = spec_path.file_stem().unwrap_or_default().to_os_string();
+    file.push(".");
+    file.push(name);
+    spec_path.with_file_name(file)
+}
+
+pub fn executor_report_path(spec_path: &Path) -> PathBuf {
+    spec_artifact_path(spec_path, "executor-report.md")
+}
+
+pub fn audit_file_path(spec_path: &Path) -> PathBuf {
+    spec_artifact_path(spec_path, "audit.md")
+}
+
 /// Canonical specs own `<task>/state.json`. Legacy top-level task specs retain
 /// their basename-keyed location. Every other repository-contained spec uses a
 /// full exact-path digest so equal basenames cannot share controller state.
@@ -564,10 +586,7 @@ fn ensure_history_review(
             format!("invalid history-review release path: {error}"),
         )
     })?;
-    let audit_path = spec_path
-        .parent()
-        .map(|parent| parent.join("audit.md"))
-        .unwrap_or_else(|| spec_path.with_file_name("audit.md"));
+    let audit_path = audit_file_path(spec_path);
     let audit_identity = repository_relative_identity(&root, &audit_path).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -815,8 +834,7 @@ fn history_input_snapshot(
     }
     let mut budget = ByteBudget::snapshot(state.snapshot_limit());
     let spec = repository_relative_identity(&root, spec_path)?;
-    let report =
-        repository_relative_identity(&root, &spec_path.with_file_name("executor-report.md"))?;
+    let report = repository_relative_identity(&root, &executor_report_path(spec_path))?;
     let mut read_input = |path: &str| -> Result<String, String> {
         let file = hash_history_file(&root, path, true, &mut digest, &mut budget)?
             .ok_or_else(|| format!("history input `{path}` is missing"))?;
@@ -861,7 +879,7 @@ fn history_input_snapshot(
     for artifact in [
         spec,
         report,
-        repository_relative_identity(&root, &spec_path.with_file_name("audit.md"))?,
+        repository_relative_identity(&root, &audit_file_path(spec_path))?,
         repository_relative_identity(&root, &release_file_path(repo_root, spec_path))?,
         repository_relative_identity(&root, &history_review_file_path(repo_root, spec_path))?,
         repository_relative_identity(&root, &state_file_path(repo_root, spec_path))?,
@@ -948,7 +966,7 @@ fn history_audit_snapshot(
     digest.update(inputs.as_bytes());
     let mut budget = ByteBudget::snapshot(state.snapshot_limit());
     for path in [
-        spec_path.with_file_name("audit.md"),
+        audit_file_path(spec_path),
         release_file_path(repo_root, spec_path),
     ] {
         let identity = repository_relative_identity(&root, &path)?;
@@ -3191,7 +3209,8 @@ fn run_pre(
 
     println!(
         "\nNext: hand this spec to the implementation agent in your coding client. \
-         It must write `<task>/executor-report.md`. Then re-run:\n  mastermind run-task {}\nto audit + draft release notes.",
+         It must write `{}`. Then re-run:\n  mastermind run-task {}\nto audit + draft release notes.",
+        executor_report_path(spec_path).display(),
         spec_path.display()
     );
     Outcome::PreReady
@@ -3326,10 +3345,7 @@ fn run_post_with_evidence(
         };
     }
 
-    let report_path = spec_path
-        .parent()
-        .unwrap_or(spec_path)
-        .join("executor-report.md");
+    let report_path = executor_report_path(spec_path);
     let executor_report = match crate::executor_report::parse_canonical_str(&inputs.executor_body) {
         Ok(report) => report,
         Err(error) => {
@@ -3370,7 +3386,7 @@ fn run_post_with_evidence(
     }
     let audit_body = audit.render_text();
     print!("{audit_body}");
-    let audit_path = spec_path.parent().unwrap_or(spec_path).join("audit.md");
+    let audit_path = audit_file_path(spec_path);
     if let Err(error) =
         bounded_fs::write_atomic_regular_file(repo_root, &audit_path, audit_body.as_bytes(), false)
     {
@@ -3789,14 +3805,7 @@ verifications: []\n\
             spec_path.display(),
             files_yaml
         );
-        fs::write(
-            spec_path
-                .parent()
-                .unwrap_or(spec_path)
-                .join("executor-report.md"),
-            report,
-        )
-        .unwrap();
+        fs::write(executor_report_path(spec_path), report).unwrap();
     }
 
     #[test]
@@ -4496,6 +4505,28 @@ verifications: []\n\
                 .components()
                 .any(|component| component.as_os_str() == ".noncanonical"));
         }
+    }
+
+    #[test]
+    fn specs_sharing_a_folder_get_their_own_report_and_audit() {
+        for (first, second) in [
+            (".mastermind/tasks/050-a.md", ".mastermind/tasks/051-b.md"),
+            ("docs/specs/a.md", "docs/specs/b.md"),
+        ] {
+            let (first, second) = (Path::new(first), Path::new(second));
+            assert_ne!(executor_report_path(first), executor_report_path(second));
+            assert_ne!(audit_file_path(first), audit_file_path(second));
+            assert_ne!(executor_report_path(first), audit_file_path(first));
+        }
+        let canonical = Path::new(".mastermind/tasks/001-x/spec.md");
+        assert_eq!(
+            executor_report_path(canonical),
+            Path::new(".mastermind/tasks/001-x/executor-report.md")
+        );
+        assert_eq!(
+            audit_file_path(canonical),
+            Path::new(".mastermind/tasks/001-x/audit.md")
+        );
     }
 
     #[test]
@@ -5425,11 +5456,7 @@ python3 -m py_compile src/lib.py
                 "files_modified": ["src/lib.py"], "claims": [], "defects": [],
                 "verifications": [{"cmd": "python3 -m py_compile src/lib.py", "result": "pass", "observed": {"exit_code": 0}}]
             });
-            fs::write(
-                spec_path.parent().unwrap().join("executor-report.md"),
-                report.to_string(),
-            )
-            .unwrap();
+            fs::write(executor_report_path(&spec_path), report.to_string()).unwrap();
         };
         write_report();
 
@@ -5482,7 +5509,7 @@ python3 -m py_compile src/lib.py
         assert!(review.contains("**Lesson:** pending"));
 
         // Losing an audited input while review is pending requires re-audit.
-        fs::remove_file(spec_path.parent().unwrap().join("executor-report.md")).unwrap();
+        fs::remove_file(executor_report_path(&spec_path)).unwrap();
         assert_eq!(
             run(&spec_path, &dir, &index_path, RunOpts::default()),
             Outcome::PostBroken
@@ -5532,7 +5559,7 @@ python3 -m py_compile src/lib.py
         // A completed historical task is stable as later work changes the
         // checkout. An explicit re-audit must clear completion before failing.
         fs::write(dir.join("src/lib.py"), "def unrelated_later_work(): pass\n").unwrap();
-        fs::remove_file(spec_path.with_file_name("executor-report.md")).unwrap();
+        fs::remove_file(executor_report_path(&spec_path)).unwrap();
         assert_eq!(
             run(&spec_path, &dir, &index_path, RunOpts::default()),
             Outcome::PostHeld

@@ -1,17 +1,13 @@
 //! `mastermind setup claude` — MCP-config registrar.
 //!
 //! Registers mmcg with Claude Code. Two scopes:
-//!   - user (global, default): `claude mcp add --scope user` → `~/.claude.json`
-//!     (why that path, not `~/.claude/.mcp.json`: see `add_claude_user`).
+//!   - user (global, default): `claude mcp add --scope user` → `~/.claude.json`,
+//!     the file Claude Code reads for global servers. It ignores
+//!     `~/.claude/.mcp.json`.
 //!   - project (`--project .`): writes `<root>/.mcp.json`, merging into an
 //!     existing `mcpServers` object without clobbering others (see `run_claude`).
 //!
 //! Safe by default: prints what it will do and exits unless `--write`.
-//!
-//! Why hand-rolled diff (vs `similar` crate): the change is always additive +
-//! contiguous (one entry into one object), and `serde_json::to_string_pretty`
-//! gives stable line counts, so a prefix/suffix line-match covers it in ~30
-//! lines with no new dependency. Trade-off documented in `render_line_diff`.
 
 use serde::{de, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -469,7 +465,7 @@ pub fn inspect_profile_registration(
     )
 }
 
-fn user_registration_path(
+pub(crate) fn user_registration_path(
     client: Client,
     home: &Path,
     config_dir: Option<&Path>,
@@ -557,27 +553,6 @@ pub fn remove_claude(target: &Target, write: bool) -> Outcome {
     match current_mmcg_entry() {
         Ok(entry) => run_json(&request, target, &entry),
         Err(class) => finish_error(&request, &target.label, "remove", &json!({}), class),
-    }
-}
-
-/// Register mmcg at Claude Code's **user scope** via the official `claude mcp
-/// add` CLI, which writes `~/.claude.json` — the location Claude Code actually
-/// reads for global servers. (The previous approach wrote `~/.claude/.mcp.json`,
-/// which Claude Code ignores, so global registration silently never took
-/// effect.) Safe by default: prints the command and exits unless `opts.write`.
-pub fn add_claude_user(mmcg_binary: &Path, opts: Opts) -> Outcome {
-    let request = Request {
-        client: Client::Claude,
-        scope: Scope::User,
-        root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        config: None,
-        write: opts.write,
-        remove: false,
-        force: opts.force,
-    };
-    match mmcg_entry(mmcg_binary) {
-        Ok(entry) => run_native(&request, &entry),
-        Err(class) => finish_error(&request, "native", "install", &json!({}), class),
     }
 }
 
@@ -2336,48 +2311,6 @@ fn scope_label(scope: Scope) -> &'static str {
     }
 }
 
-/// Line diff: common prefix/suffix, marks only the changed window with up to 3
-/// context lines. Assumes a single contiguous change region (safe here — the
-/// merge is always additive on one key). Use `similar` if multi-region diffs are
-/// ever needed.
-#[cfg(test)]
-fn render_line_diff(before: &str, after: &str) -> String {
-    if before == after {
-        return "(no changes)\n".to_string();
-    }
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
-
-    let common_max = before_lines.len().min(after_lines.len());
-    let prefix_len = (0..common_max)
-        .take_while(|&i| before_lines[i] == after_lines[i])
-        .count();
-    let max_suffix = common_max - prefix_len;
-    let suffix_len = (0..max_suffix)
-        .take_while(|&i| {
-            before_lines[before_lines.len() - 1 - i] == after_lines[after_lines.len() - 1 - i]
-        })
-        .count();
-
-    let mut out = String::new();
-    let ctx_pre_start = prefix_len.saturating_sub(3);
-    for line in &before_lines[ctx_pre_start..prefix_len] {
-        out.push_str(&format!("  {line}\n"));
-    }
-    for line in &before_lines[prefix_len..before_lines.len() - suffix_len] {
-        out.push_str(&format!("- {line}\n"));
-    }
-    for line in &after_lines[prefix_len..after_lines.len() - suffix_len] {
-        out.push_str(&format!("+ {line}\n"));
-    }
-    let ctx_post_start = before_lines.len() - suffix_len;
-    let ctx_post_end = (ctx_post_start + 3).min(before_lines.len());
-    for line in &before_lines[ctx_post_start..ctx_post_end] {
-        out.push_str(&format!("  {line}\n"));
-    }
-    out
-}
-
 #[cfg(test)]
 mod path_entry_tests {
     use super::{describe_unsafe_path_entries, resolve_native_from_directories};
@@ -2530,24 +2463,6 @@ mod tests {
             stdout_truncated: truncated,
             stderr_truncated: false,
         }
-    }
-
-    #[test]
-    fn render_line_diff_marks_added_and_removed_lines() {
-        let before = "a\nb\nc\nd\ne\n";
-        let after = "a\nb\nX\nY\nd\ne\n";
-        let d = render_line_diff(before, after);
-        assert!(d.contains("- c"));
-        assert!(d.contains("+ X"));
-        assert!(d.contains("+ Y"));
-        assert!(d.contains("  b")); // prefix context
-        assert!(d.contains("  d")); // suffix context
-    }
-
-    #[test]
-    fn render_line_diff_returns_no_changes_for_identical() {
-        let s = "a\nb\nc\n";
-        assert!(render_line_diff(s, s).contains("no changes"));
     }
 
     #[test]

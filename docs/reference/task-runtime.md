@@ -199,7 +199,7 @@ Running a check neither requires nor modifies the executor report.
 | Input | Limit |
 |---|---|
 | Observed files | 100,000 |
-| Individual / total snapshot file bytes per pass | 128 MiB / 512 MiB |
+| Snapshot file bytes per pass | 512 MiB |
 | Retained snapshot file content | One 64 KiB streaming buffer |
 | Verification spec reads | 4 MiB |
 | Git response | 8 MiB |
@@ -221,7 +221,7 @@ per-file cap. Changing a larger file can still make `audit-spec` fail closed wit
 
 | Change or limitation | Effect |
 |---|---|
-| Unsupported, over-limit or unreadable snapshot | Preflight rejects observed checks early; direct runner records `unavailable` with a specific reason. Before spawn there is no command exit; after spawn the observed exit is retained |
+| Unsupported, over-limit or unreadable snapshot | Preflight rejects observed checks early; direct runner records `unavailable` with a specific reason. A size or read failure names the file. Before spawn there is no command exit; after spawn the observed exit is retained |
 | Changed bound input | `input_changed`; receipt cannot satisfy checks |
 | Dependency edit, staging, commit, executable replacement or new preflight | Can invalidate the receipt |
 | Receipt change during unfinished review | Invalidates that review |

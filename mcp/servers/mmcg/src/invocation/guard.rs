@@ -251,7 +251,7 @@ impl Prepared {
         {
             return Err("invocation_guard_protected_scope".into());
         }
-        let report = Path::new(&task.binding.spec_path).with_file_name("executor-report.md");
+        let report = crate::run_task::executor_report_path(Path::new(&task.binding.spec_path));
         write_paths.push(
             bounded_fs::normalize_repository_relative_path(&report)
                 .map_err(|_| "invocation_guard_report_path_invalid")?,
@@ -700,7 +700,7 @@ fn authorize(
             }
             let path = checked_path(root, text("file_path")?, true)?;
             let report =
-                Path::new(&manifest.binding.spec_path).with_file_name("executor-report.md");
+                crate::run_task::executor_report_path(Path::new(&manifest.binding.spec_path));
             if !manifest.write_paths.contains(&path)
                 || (protected(&path) && Path::new(&path) != report)
                 || path == manifest.binding.spec_path

@@ -9,7 +9,6 @@ use crate::task_review::{
     self, Assessment, CriterionAssessment, Report, Reviewer, ReviewerKind, Submission, Target,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -130,9 +129,7 @@ impl NativeAssessment {
     }
 }
 
-fn sha(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha;
 fn digest(value: &str, length: usize) -> bool {
     value.len() == length
         && value

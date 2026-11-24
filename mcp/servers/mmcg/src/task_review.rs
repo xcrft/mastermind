@@ -10,7 +10,6 @@ use crate::history_disposition::{self, Decisions, HistoryStatus};
 use crate::run_task::RunState;
 use crate::verification_receipts::Binding;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -238,9 +237,7 @@ impl Report {
     }
 }
 
-fn sha(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha;
 
 fn revision(target: &Target) -> Result<String, String> {
     serde_json::to_vec(target)
@@ -363,9 +360,9 @@ fn collect_target(
         ("spec", spec_path.to_path_buf()),
         (
             "executor-report",
-            spec_path.with_file_name("executor-report.md"),
+            crate::run_task::executor_report_path(spec_path),
         ),
-        ("audit", spec_path.with_file_name("audit.md")),
+        ("audit", crate::run_task::audit_file_path(spec_path)),
         (
             "release",
             crate::run_task::release_file_path(repository, spec_path),

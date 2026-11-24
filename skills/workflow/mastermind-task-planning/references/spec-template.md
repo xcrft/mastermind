@@ -87,7 +87,8 @@ requirements and removal checks remain in force.
 
 For file removals use `scope: delete` with a nonblank `reason` and no `symbols`.
 For moves, declare the source as a deletion and the destination in `creates`.
-Removed APIs still require `breaking_changes.removed_symbols`. Repeating
+Removed APIs still require `breaking_changes.removed_symbols`. A move without
+content changes and declarations inside function bodies need none. Repeating
 `run-task --pre-only` can admit a proven deletion against retained initial
 inputs. Standalone `verify-spec` still checks current files.
 

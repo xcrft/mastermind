@@ -679,14 +679,14 @@ exec /usr/bin/git "$@"
                 "large-file" => {
                     fs::File::create(fixture.path("large.bin"))
                         .unwrap()
-                        .set_len(128 * 1024 * 1024 + 1)
+                        .set_len(512 * 1024 * 1024 + 1)
                         .unwrap();
                     assert!(Fixture::git_command(fixture.root())
                         .args(["add", "large.bin"])
                         .status()
                         .unwrap()
                         .success());
-                    "verification_snapshot_file_byte_limit"
+                    "verification_snapshot_total_byte_limit: `large.bin` has 536870913 bytes"
                 }
                 _ => unreachable!(),
             };

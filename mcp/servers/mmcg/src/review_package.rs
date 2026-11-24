@@ -10,7 +10,6 @@ use crate::evidence::{EvidenceExtensionOptions, EvidenceOptions, EvidencePrecisi
 use crate::lens::{LensError, LensOptions, LensSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 #[cfg(unix)]
@@ -1542,9 +1541,7 @@ fn pretty_json(value: &Value) -> Result<Vec<u8>, ReviewPackageError> {
     Ok(body)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha256_hex;
 
 fn sha256_digest(value: &str) -> bool {
     value.len() == 64

@@ -1,7 +1,8 @@
 //! TypeScript / TSX extractor — declarations, methods, classes, interfaces, calls, imports.
 
 use super::common::{
-    line_of, node_text, push_call_with_type, push_def, push_import, signature_until_body,
+    line_of, name_field, node_text, push_call_with_type, push_def, push_import,
+    signature_until_body, starts_uppercase,
 };
 use super::{DocumentationTextBuilder, LanguageExtractor, RawConceptDocumentation};
 use crate::store::PendingFile;
@@ -159,11 +160,6 @@ pub(super) fn walk(
     }
 }
 
-fn name_field<'a>(node: &Node, source: &'a [u8]) -> Option<&'a str> {
-    node.child_by_field_name("name")
-        .and_then(|n| node_text(&n, source))
-}
-
 fn call_target_with_type(
     call_node: &Node,
     source: &[u8],
@@ -276,10 +272,6 @@ fn type_prefix_from_object(member: &Node, source: &[u8]) -> Option<String> {
     } else {
         None
     }
-}
-
-fn starts_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 fn collect_import_names(

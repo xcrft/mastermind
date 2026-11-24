@@ -8,7 +8,6 @@ use crate::queries::{self, ConceptFreshness};
 use crate::store::{self, ConceptReviewSymbol, Store};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
@@ -324,9 +323,7 @@ struct PreparedRequest<'a> {
     request_contract: RequestContract,
 }
 
-fn sha(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+use crate::hex::sha256 as sha;
 
 fn failure(reason: &'static str) -> String {
     reason.into()

@@ -4,7 +4,6 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -207,9 +206,7 @@ pub fn canonical_json(value: &Value) -> Result<Vec<u8>, BundleError> {
     serde_json::to_vec(&normalize(value)?).map_err(|e| BundleError::Json(e.to_string()))
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
+pub use crate::hex::sha256 as sha256_hex;
 
 pub fn seal(mut manifest: Manifest) -> Result<Envelope, BundleError> {
     sort_manifest(&mut manifest);

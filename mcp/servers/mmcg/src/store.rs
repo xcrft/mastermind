@@ -26,6 +26,19 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: &str = "9";
+/// Tables that query tools read without checking for them. Optional semantic
+/// and fact tables are checked where they are used.
+const TOOL_TABLES: [&str; 9] = [
+    "symbols",
+    "edges",
+    "files",
+    "meta",
+    "project_history_fts",
+    "document_section_fts",
+    "project_evidence",
+    "project_claim",
+    "scratchpad",
+];
 const PRODUCTION_CLASSIFICATION_META_KEY: &str = "production_classification_version";
 const PRODUCTION_CLASSIFICATION_VERSION: &str = "production-paths-v2";
 pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
@@ -3562,7 +3575,20 @@ impl Store {
         if !meta_exists {
             return Ok(false);
         }
-        Ok(self.meta_value("schema_version")?.as_deref() == Some(SCHEMA_VERSION))
+        if self.meta_value("schema_version")?.as_deref() != Some(SCHEMA_VERSION) {
+            return Ok(false);
+        }
+        // Read-only opens never run `init_schema`, so an index written before
+        // an additive table existed must fail here, not inside a tool query.
+        let present: i64 = self.conn.query_row(
+            &format!(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ({})",
+                vec!["?"; TOOL_TABLES.len()].join(",")
+            ),
+            rusqlite::params_from_iter(TOOL_TABLES),
+            |row| row.get(0),
+        )?;
+        Ok(present == TOOL_TABLES.len() as i64)
     }
 
     pub(crate) fn managed_root(&self) -> Option<&Path> {
@@ -9695,6 +9721,22 @@ mod tests {
             store.meta_value("probe").unwrap().as_deref(),
             Some("updated")
         );
+    }
+
+    #[test]
+    fn an_index_missing_a_tool_table_is_not_current() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute_batch("DROP TABLE project_claim;")
+            .unwrap();
+        drop(store);
+        assert!(!Store::open_read_only(&path)
+            .unwrap()
+            .schema_current()
+            .unwrap());
     }
 
     #[test]

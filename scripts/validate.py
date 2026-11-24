@@ -294,6 +294,9 @@ def _is_excluded(path: Path) -> bool:
     # Build artifacts, local state and version control inside this repository.
     if any(part in {".git", ".mastermind", "target", "node_modules", "__pycache__"} for part in parts):
         return True
+    # Agent worktrees are other checkouts of this repository.
+    if parts[:2] == (".claude", "worktrees"):
+        return True
 
     # Templates show example references, not real ones
     if "_template" in parts:

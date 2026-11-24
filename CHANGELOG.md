@@ -81,6 +81,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Post-flight no longer asks to acknowledge removals that are not API
+  removals. A declaration inside a function or method body is local, and a file
+  moved with its bytes unchanged keeps its declarations, so a pure `git mv` of
+  a component with local helpers passes without `removed_symbols`. A move with
+  content changes still counts the old path's declarations as removed.
+- The observed verification snapshot now reads files up to its 512 MiB pass
+  budget, so a tracked file over 128 MiB no longer stops pre-flight. When the
+  budget runs out, the error names the file, its size and the bytes left. A
+  read failure also names the file. An uncommitted file over 5 MiB still stops
+  pre-flight, and the error now says how to clear it.
+- An index that lacks a table the query tools read now counts as outdated, so
+  `mmcg_docs` and `mmcg_project_profile` answer `schema_incompatible` for an
+  old read-only index instead of an internal error.
+- `doctor` looks for the Claude MCP registration where `setup` writes it, under
+  `CLAUDE_CONFIG_DIR` or an existing `.config.json`. Before, it reported
+  `mmcg_registration_missing` as an error for such installs.
+- An indexed file that becomes ignored now counts as stale, so MCP refresh drops
+  its symbols. Before, `mmcg_status` reported fresh and search kept serving it.
+- The 100,000-file auto refresh cap counts only files in a supported language.
+  Before, a repository with many data or text files hit `refresh_limit_exceeded`
+  on every MCP call, and `mastermind index .` did not clear it.
+- `mastermind ci` fails and names the files when a source file fails to index.
+  Before, it audited the partial graph and could pass.
+- Legacy flat and other non-`spec.md` specs get their own executor report and
+  audit, named after the spec, such as `050-a.executor-report.md`. Before, two
+  such specs in one folder read and overwrote each other's report and audit,
+  and a finished task could fail its audit with `task_mismatch`. A task already
+  in flight under one of these layouts needs its report moved to the new name.
+- `run-task`, `review-task`, `verification run`, `acceptance status`,
+  `verify-spec` and `audit-spec` accept an absolute spec path that reaches the
+  repository through a link, such as `$PWD` in a linked directory or `/var` on
+  macOS. Before, `audit-spec --bundle` refused such a spec and a failed audit
+  dropped its lesson candidate without an error.
 - `miner hooks show` no longer marks a fresh analysis as not current when the
   task finalizer binds the model and records the analysis while `show` reads.
   The episode revision and the analysis receipts are now read together.

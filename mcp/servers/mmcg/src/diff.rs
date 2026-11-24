@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use similar::{capture_diff_slices, Algorithm, DiffTag};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -788,10 +788,35 @@ pub(crate) type RemovedDeclarations = BTreeMap<String, Vec<usize>>;
 #[derive(Default)]
 pub(crate) struct DeclarationChanges {
     pub removed: RemovedDeclarations,
+    /// The removals that need an acknowledgement: declarations outside function
+    /// bodies, in files that did not move unchanged to another path.
+    pub api_removed: RemovedDeclarations,
+    /// `api_removed` as symbol references.
+    pub api_removed_symbols: Vec<SymbolRef>,
     pub added: BTreeSet<i64>,
     pub uncertain_added: BTreeSet<i64>,
     pub unavailable_additions: BTreeMap<String, &'static str>,
     pub current_files: BTreeSet<String>,
+}
+
+impl DeclarationChanges {
+    fn record_api_removal(&mut self, file: &str, removal: Vec<(usize, SymbolRef)>) {
+        if removal.is_empty() {
+            return;
+        }
+        let (indices, symbols): (Vec<_>, Vec<_>) = removal.into_iter().unzip();
+        self.api_removed.insert(file.to_string(), indices);
+        self.api_removed_symbols.extend(symbols);
+    }
+}
+
+/// A declaration inside a function or method body is local to it. No caller
+/// can reach it, so removing it changes no interface.
+fn is_function_local(declarations: &[Declaration<'_>], index: usize) -> bool {
+    std::iter::successors(declarations[index].parent, |&parent| {
+        declarations[parent].parent
+    })
+    .any(|parent| matches!(declarations[parent].kind, "function" | "method"))
 }
 
 pub(crate) fn symbols_changed_in_worktree_with_declarations(
@@ -881,6 +906,15 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
     let mut body_changed = Vec::new();
     let mut errors = Vec::new();
     let mut declarations = DeclarationChanges::default();
+    // A deleted file whose exact bytes reappear at a changed path moved. Its
+    // declarations still exist, so deleting the old path removes none of them.
+    let deleted_contents: HashSet<&[u8]> = files
+        .iter()
+        .filter(|file| file.status == "deleted")
+        .filter_map(|file| old_blobs.get(&file.path)?.as_deref())
+        .collect();
+    let mut moved_contents = HashSet::new();
+    let mut deleted_removals = Vec::new();
 
     for file in &files {
         let rel = &file.path;
@@ -909,6 +943,12 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
                 .removed
                 .insert(rel.clone(), matches.removed.clone());
         }
+        let api_removal = matches
+            .removed
+            .iter()
+            .filter(|&&index| !is_function_local(&old_declarations, index))
+            .map(|&index| (index, old_declarations[index].symbol_ref(rel)))
+            .collect::<Vec<_>>();
         for &index in &matches.added {
             if matches.uncertain_added.contains(&index) {
                 declarations.uncertain_added.insert(new_symbols[index].id);
@@ -939,6 +979,16 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
                 .bytes,
             )
         };
+        if let Some(content) = current_bytes
+            .as_deref()
+            .and_then(|current| deleted_contents.get(current))
+        {
+            moved_contents.insert(*content);
+        }
+        match old_blob {
+            Some(old) if file.status == "deleted" => deleted_removals.push((old, rel, api_removal)),
+            _ => declarations.record_api_removal(rel, api_removal),
+        }
         if prove_additions && !matches.added.is_empty() {
             if let Some(extractor) = extractor_for_path(Path::new(rel)) {
                 for (bytes, reason) in [
@@ -984,11 +1034,18 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
         }
     }
 
+    for (old, rel, api_removal) in deleted_removals {
+        if !moved_contents.contains(old) {
+            declarations.record_api_removal(rel, api_removal);
+        }
+    }
+
     let symbol_order = |a: &SymbolRef, b: &SymbolRef| {
         (&a.file, a.line, &a.name, &a.kind).cmp(&(&b.file, b.line, &b.name, &b.kind))
     };
     added.sort_by(symbol_order);
     removed.sort_by(symbol_order);
+    declarations.api_removed_symbols.sort_by(symbol_order);
     body_changed.sort_by(symbol_order);
     signature_changed.sort_by(|a, b| {
         (&a.file, a.new_line, &a.name, &a.kind).cmp(&(&b.file, b.new_line, &b.name, &b.kind))

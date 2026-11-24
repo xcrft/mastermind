@@ -1957,7 +1957,7 @@ fn generated_follow_up_argv_executes_with_leading_dash_spec_and_check_id() {
     // are in the other fixtures. Their dedicated controller hashes still bind them.
     fixture.write(
         ".gitignore",
-        ".mastermind/\n-task.md\nexecutor-report.md\naudit.md\n",
+        ".mastermind/\n-task.md\n-task.executor-report.md\n-task.audit.md\n",
     );
     fixture.git(&["add", ".gitignore"]);
     fixture.git(&[
@@ -1980,7 +1980,7 @@ fn generated_follow_up_argv_executes_with_leading_dash_spec_and_check_id() {
             })
         })
         .collect();
-    fixture.write("executor-report.md", &json!({
+    fixture.write("-task.executor-report.md", &json!({
         "schema_version":1, "spec":DASH_SPEC, "status":"complete", "phases":[],
         "files_modified":["service.py"], "claims":[], "defects":[], "verifications":verifications
     }).to_string());

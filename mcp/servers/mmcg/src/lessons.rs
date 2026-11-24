@@ -47,10 +47,7 @@ pub fn append_audit_candidate(
     let id = stable_id(&spec_identity, "audit_contract_failure", "");
     let legacy_id = stable_id(&task_id, "audit_contract_failure", "");
     let spec = markdown_path(&spec_identity);
-    let audit = spec_path
-        .parent()
-        .map(|parent| parent.join("audit.md"))
-        .unwrap_or_else(|| spec_path.with_file_name("audit.md"));
+    let audit = crate::run_task::audit_file_path(spec_path);
     let audit_resolved = if audit.is_absolute() {
         audit.clone()
     } else {

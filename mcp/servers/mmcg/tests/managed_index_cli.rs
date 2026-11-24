@@ -79,6 +79,10 @@ impl Fixture {
     }
 
     fn search(&self, custom: Option<&Path>) -> Value {
+        self.search_name(custom, "updated_refresh")
+    }
+
+    fn search_name(&self, custom: Option<&Path>, name: &str) -> Value {
         let mut command = self.command();
         if let Some(path) = custom {
             command.arg("--index").arg(path);
@@ -100,7 +104,7 @@ impl Fixture {
                 "clientInfo":{"name":"managed-index-test","version":"1"}}}),
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"mmcg_search","arguments":{"name":"updated_refresh"}}}),
+                "name":"mmcg_search","arguments":{"name":name}}}),
         ] {
             writeln!(input, "{message}").unwrap();
         }
@@ -347,4 +351,32 @@ fn stale_index_is_refused_by_spec_gates_and_flagged_by_cli_queries() {
         !String::from_utf8_lossy(&query.stderr).contains("index is not current"),
         "{query:?}"
     );
+}
+
+#[test]
+fn an_indexed_file_that_becomes_ignored_leaves_the_index() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("scratch.py"),
+        "def beta():\n    return 1\n",
+    )
+    .unwrap();
+    fixture.index(None);
+    let found = fixture.search_name(None, "beta");
+    assert_eq!(
+        found["structuredContent"]["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{found}"
+    );
+
+    fs::write(
+        fixture.root.join(".gitignore"),
+        ".mastermind/\nscratch.py\n",
+    )
+    .unwrap();
+    let after = fixture.search_name(None, "beta");
+    assert_eq!(after["structuredContent"]["results"], json!([]), "{after}");
 }

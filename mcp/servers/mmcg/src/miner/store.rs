@@ -1166,18 +1166,6 @@ impl ProfileStore {
         }))
     }
 
-    /// The stored mine point (SHA) for a repo — `doctor` checks `<sha>..HEAD`.
-    pub fn repo_latest_sha(&self, repo_key: &str) -> SqlResult<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT latest_sha FROM repo WHERE repo_key = ?1",
-                params![repo_key],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map(|o| o.flatten())
-    }
-
     /// `(author, latest_sha, latest_date)` for a repo — staleness needs the
     /// author to count `--author=X <sha>..HEAD` and the date to display.
     pub fn repo_meta(&self, repo_key: &str) -> SqlResult<Option<RepoMeta>> {
@@ -1202,15 +1190,6 @@ impl ProfileStore {
             out.push(row?);
         }
         Ok(out)
-    }
-
-    /// Drop the given repos and all their counts/identities (retention sweep).
-    pub fn prune_repos(&mut self, keys: &[String]) -> SqlResult<()> {
-        let tx = self.conn.transaction()?;
-        for key in keys {
-            delete_repo(&tx, key)?;
-        }
-        tx.commit()
     }
 }
 
@@ -1720,8 +1699,17 @@ mod tests {
         assert_eq!(agg.counts["indent.space"], 50);
         assert_eq!(agg.counts["indent.tab"], 10);
         assert_eq!(agg.identities, vec!["a@x".to_string(), "b@x".to_string()]);
-        assert_eq!(s.repo_latest_sha("/a").unwrap().as_deref(), Some("aaa"));
-        assert_eq!(s.repo_latest_sha("/missing").unwrap(), None);
+        assert_eq!(
+            s.repo_meta("/a")
+                .unwrap()
+                .and_then(|meta| meta.1)
+                .as_deref(),
+            Some("aaa")
+        );
+        assert_eq!(
+            s.repo_meta("/missing").unwrap().and_then(|meta| meta.1),
+            None
+        );
         assert_eq!(
             s.owner_signals().unwrap(),
             (
@@ -2486,7 +2474,10 @@ mod tests {
         assert_eq!(aggregate.counts["x"], 10);
         assert_eq!(aggregate.identities, vec!["author@example.test"]);
         assert_eq!(
-            s.repo_latest_sha("/checkout").unwrap().as_deref(),
+            s.repo_meta("/checkout")
+                .unwrap()
+                .and_then(|meta| meta.1)
+                .as_deref(),
             Some("old")
         );
     }
@@ -2528,7 +2519,11 @@ mod tests {
         assert_eq!(aggregate.counts["x"], 10);
         assert_eq!(aggregate.identities, vec!["old@example.test"]);
         assert_eq!(
-            store.repo_latest_sha("/old").unwrap().as_deref(),
+            store
+                .repo_meta("/old")
+                .unwrap()
+                .and_then(|meta| meta.1)
+                .as_deref(),
             Some("old")
         );
     }
@@ -2546,7 +2541,7 @@ mod tests {
     }
 
     #[test]
-    fn list_and_prune_retention() {
+    fn list_repos_reports_each_mine_time() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
         s.upsert_repo("/fresh", &prov(None, 1000), &[], &commit(&[("x", 10)]), &[])
@@ -2565,11 +2560,6 @@ mod tests {
             .map(|(key, _)| key.clone())
             .collect();
         assert_eq!(drop, vec!["/old".to_string()]);
-        s.prune_repos(&drop).unwrap();
-
-        let agg = s.aggregate().unwrap();
-        assert_eq!(agg.repos, 1);
-        assert_eq!(agg.counts["x"], 10); // only /fresh survived
     }
 
     #[test]

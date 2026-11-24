@@ -211,6 +211,7 @@ impl Fixture {
             success,
         )
     }
+    #[cfg(unix)]
     fn write_reviewed_spec(&self) {
         let metadata = json!({
             "mode": "verified", "touches": [{"file": "service.py", "symbols": ["keep"]}],
@@ -228,6 +229,7 @@ impl Fixture {
         }
         self.write(SPEC, body.as_bytes());
     }
+    #[cfg(unix)]
     fn report_reviewed(&self) {
         let value = json!({
             "schema_version": 1, "spec": SPEC, "status": "complete", "phases": [],
@@ -240,6 +242,7 @@ impl Fixture {
         )
         .unwrap();
     }
+    #[cfg(unix)]
     fn run_unit_check(&self) {
         let output = self
             .command()
@@ -265,6 +268,7 @@ impl Fixture {
         self.write("service.py", b"def keep():\n    return 2\n");
         self.refresh();
     }
+    #[cfg(unix)]
     fn remove_setup(&self) {
         std::fs::remove_file(self.root().join(".mastermind/setup.json")).unwrap();
     }
@@ -273,6 +277,7 @@ impl Fixture {
             self.write(&format!("data/blob-{index}.bin"), &vec![index; 5 * MIB]);
         }
     }
+    #[cfg(unix)]
     fn plain_controller(&self) -> Output {
         self.command()
             .arg("run-task")
@@ -1178,6 +1183,8 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+// Observed verification runs only on unix.
+#[cfg(unix)]
 #[test]
 fn a_larger_worktree_budget_lets_a_35_mib_prior_worktree_through_both_flights() {
     let mut fixture = Fixture::new();

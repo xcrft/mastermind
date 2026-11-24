@@ -14,12 +14,7 @@ pub fn dispatch(
     action: Action<'_>,
     json: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let root = std::path::absolute(root)?;
-    let spec = if spec.is_absolute() {
-        spec.to_path_buf()
-    } else {
-        root.join(spec)
-    };
+    let (root, spec) = super::task_paths(spec, root)?;
     let report = match action {
         Action::FollowUp => {
             let packet = mmcg::task_review::follow_up(&spec, &root)?;

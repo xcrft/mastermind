@@ -8,12 +8,7 @@ pub fn dispatch(
     id: &str,
     json: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let root = std::path::absolute(root)?;
-    let spec = if spec.is_absolute() {
-        spec.to_path_buf()
-    } else {
-        root.join(spec)
-    };
+    let (root, spec) = super::task_paths(spec, root)?;
     let receipt = mmcg::verification_receipts::run(&spec, &root, id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&receipt)?);

@@ -275,6 +275,22 @@ esac
     }
 
     #[test]
+    fn an_absolute_spec_through_a_linked_root_alias_is_the_same_task() {
+        let fixture = Fixture::new("success", 10);
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("repo");
+        symlink(fixture.root(), &alias).unwrap();
+        let spec = alias.join(SPEC);
+        let spec = spec.to_str().unwrap();
+        let pre = fixture.run(&["run-task", spec, "--pre-only"]);
+        assert!(pre.status.success(), "{pre:?}");
+        assert!(fixture.path(STATE).exists());
+        let output = fixture.run(&["verification", "run", spec, "--id", "unit", "--json"]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(fixture.path(RECEIPT).exists());
+    }
+
+    #[test]
     fn missing_receipt_cannot_fall_back_to_report_and_audits_never_execute() {
         let fixture = Fixture::new("success", 10);
         fixture.prepare();

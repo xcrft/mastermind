@@ -279,13 +279,26 @@ fn pending_at(directory: &Path, prefix: &str) -> Result<bool> {
     let Some(root) = existing(directory)? else {
         return Ok(false);
     };
-    Ok(markers(&root, MAX_DIRECTORY_FILES)?
-        .iter()
-        .any(|(path, _)| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(prefix))
-        }))
+    // Other deliveries create and clear their markers during this read. A
+    // cleared marker is absent, and a changed listing is read again. Constant
+    // churn still fails closed after the bounded attempts.
+    let mut attempts = 0;
+    let names = loop {
+        match bounded_fs::read_directory_names_with_capability(
+            &root,
+            root.canonical_root(),
+            MAX_DIRECTORY_FILES,
+            ReadControl::default(),
+        ) {
+            Err(BoundedReadError::SnapshotChanged) if attempts < 8 => attempts += 1,
+            result => break result?,
+        }
+    };
+    Ok(marker_entries(&root, names, true)?.iter().any(|(path, _)| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(prefix))
+    }))
 }
 
 fn recover_at(directory: &Path, prefix: &str) -> Result<()> {
@@ -359,6 +372,30 @@ mod tests {
         assert!(pending_at(&f.directory, &key).unwrap());
         second.clear().unwrap();
         assert!(!pending_at(&f.directory, &key).unwrap());
+    }
+
+    #[test]
+    fn other_projects_finishing_deliveries_do_not_make_a_project_pending() {
+        let f = Fixture::new();
+        let key = f.key("codex");
+        let other = f.key("claude");
+        begin_at(&f.directory, &other).unwrap().clear().unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = {
+            let (directory, done) = (f.directory.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..300 {
+                    begin_at(&directory, &other).unwrap().clear().unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        let mut reads = 0;
+        while !done.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(!pending_at(&f.directory, &key).unwrap(), "read {reads}");
+            reads += 1;
+        }
+        worker.join().unwrap();
     }
 
     #[test]

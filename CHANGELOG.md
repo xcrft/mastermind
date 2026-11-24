@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prompt intake no longer degrades because another project or client finished
+  a capture at the same moment. The capture-pending check treats a marker
+  cleared during its read as absent and rereads a listing that changed, instead
+  of reporting the project as pending.
 - Post-flight no longer asks to acknowledge removals that are not API
   removals. A declaration inside a function or method body is local, and a file
   moved with its bytes unchanged keeps its declarations, so a pure `git mv` of

@@ -11,6 +11,7 @@ use crate::verification_receipts::{Binding, Executable, StreamDigest};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use serde_json::Value;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

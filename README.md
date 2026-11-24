@@ -18,8 +18,7 @@ evidence before completion.
 
 ## Quick start
 
-Current-task mining requires Mastermind 3.2.1 or newer. See the
-[source build](docs/getting-started.md#current-source-build) instructions for local development.
+See the [source build](docs/getting-started.md#current-source-build) instructions for local development.
 
 Requires Node.js 24+. The [npm manifest](npm/mastermind/package.json) lists
 prebuilt binaries for macOS, Linux, and Windows. Run these commands inside your repository:

@@ -263,12 +263,17 @@ def validate_artifact(a: Artifact) -> list[Issue]:
 # ----- wikilink resolution ----------------------------------------------
 
 
+# These trees show `[[slug]]` syntax as illustration, not as references to
+# artifacts. Their relative links are still checked.
+WIKILINK_ILLUSTRATION_ROOTS = {"docs", "research", "scripts", "examples", "evals"}
+
+
 def collect_wikilinks() -> dict[Path, set[str]]:
     """Walk all .md files and collect [[slug]] references. Skips code fences and
     inline code spans so documentation showing the syntax doesn't trigger."""
     result: dict[Path, set[str]] = {}
     for p in REPO_ROOT.rglob("*.md"):
-        if _is_excluded(p):
+        if _is_excluded(p) or p.relative_to(REPO_ROOT).parts[0] in WIKILINK_ILLUSTRATION_ROOTS:
             continue
         try:
             text = p.read_text(encoding="utf-8")
@@ -294,11 +299,7 @@ def _is_excluded(path: Path) -> bool:
     if "_template" in parts:
         return True
 
-    # Top-level `docs/` shows `[[slug]]` syntax as illustration, not as references
-    # research/ is not part of the artifact tree (stray notes from past sessions)
     rel_parts = rel.parts
-    if rel_parts and rel_parts[0] in {"docs", "research", "scripts", "examples", "evals"}:
-        return True
     # CLAUDE.md templates contain intentional links that resolve when copied
     # to a project root, not in the template's own location.
     if len(rel_parts) >= 2 and rel_parts[0] == "agents" and rel_parts[1] == "claude-md":

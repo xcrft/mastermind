@@ -61,30 +61,10 @@ To select a specific index, place `--index` before `serve`:
 | Granted personal preferences | `mmcg_profile` |
 
 `tools/list` defines names and schemas.
-For concept review, follow the returned `operation-roles-v3` rubric. Before
-retrieval, freeze a query-only `request_contract` with the requested `operation`
-and `constraints`: unique `id`, exact original-query `text`, and `kind` of
-`input`, `state`, `scope` or `result`. Pass it to `mmcg_concept_prepare`.
-Omitting it preserves the original query as the operation with an empty parsed
-ledger; it does not waive any original constraint.
-
-After inspecting source, every relevant judgment needs own citations, a role
-and `witness`: own observable `behavior`, a typed `relation`, and one
-`constraint_checks` entry per declared constraint. Each entry must be `matched`
-with exact source-bound evidence. Contradictions make the candidate irrelevant;
-uninspected constraints remain unknown, including for context. Retain those
-limits if the ledger itself is incomplete or mistaken.
-
-Choose roles from the candidate's own contribution. A concrete branch in a
-module or entrypoint may implement or expose the operation through delegation.
-A mandatory generic prerequisite contributes context unless its own behavior
-performs a defining domain step or enforces a requested constraint. Context
-still needs an inspected link to an existing requested operation satisfying
-every explicit constraint. An omitted selector does not establish absent runtime
-binding; rendered instructions do not perform the requested action. Nearby,
-opposite or missing behavior is insufficient. Validation checks source bindings,
-completeness and declared consistency, not semantic truth. Reprepare after a
-role-contract change.
+For concept review, call `mmcg_concept_prepare`, inspect the returned source,
+then submit judgments with `mmcg_concept_finish`. The response carries the role
+rubric. The request contract, witness and role rules are in
+[Local symbol concept search](../reference/mmcg.md#local-symbol-concept-search).
 The [MCP reference](../reference/mmcg.md#mcp-tools) defines arguments and limits.
 Graph queries may refresh the derived index. Scratchpad append is an additive
 local write.
@@ -114,7 +94,7 @@ See [Persona hooks](../guides/persona-hooks.md) for capture and review.
 | Protocol property | Value |
 |---|---|
 | Transport | JSON-RPC over stdin/stdout |
-| MCP versions | 2025-11-25 and legacy 2024-11-05 |
+| MCP versions | See the [protocol contract](../reference/mmcg.md#protocol-contract) |
 | Catalog | Tools, no resources or prompts |
 
 Source and message bounds: [protocol contract](../reference/mmcg.md#protocol-contract).

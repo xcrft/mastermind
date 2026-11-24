@@ -12,7 +12,7 @@ callers were updated and TypeScript passed.
 replacement tree. Omitted baseline files are deleted. The runner creates a
 disposable Git repository and supplies a live index where the case requires it.
 
-The case in [`auditor.jsonl`](../../auditor.jsonl) defines the verdict and evidence
+The case in [`auditor.jsonl`](../../cases/auditor.jsonl) defines the verdict and evidence
 assertions. Inspect source and Git changes as well as graph results: an empty
 index query alone does not establish that a symbol cannot exist at runtime.
 

@@ -35,6 +35,18 @@ class DocumentationDiscoveryTests(unittest.TestCase):
                 issues = validate.validate_wikilinks([], wiki)
                 self.assertEqual([issue.path for issue in issues], [source])
 
+    def test_docs_and_evals_links_are_checked_but_their_wikilinks_are_illustration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pages = [root / "docs/guide.md", root / "evals/README.md"]
+            for page in pages:
+                page.parent.mkdir(parents=True)
+                page.write_text("[missing](missing.md)\n[[example-slug]]\n")
+            with patch.object(validate, "REPO_ROOT", root):
+                issues = validate.validate_relative_links(validate.collect_relative_links())
+                self.assertEqual(sorted(issue.path for issue in issues), sorted(pages))
+                self.assertEqual(validate.collect_wikilinks(), {})
+
 
 class EvalFixtureClueTests(unittest.TestCase):
     def test_behavior_fixture_sources_are_scanned_but_readmes_are_excluded(self):

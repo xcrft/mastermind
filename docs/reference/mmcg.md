@@ -33,6 +33,8 @@ CLI, Lens and MCP read the same indexed state.
 | Local natural-language symbol retrieval | [Local symbol concept search](#local-symbol-concept-search) |
 | Personal evidence and agent context | [Persona](persona.md), [context composition](persona-context.md) |
 | Delivery and completion | [Task workflow](../workflow.md), [runtime contracts](task-runtime.md), [architecture](../architecture.md) |
+| Spec fields | [Spec frontmatter](#spec-frontmatter) |
+| Executor report checks and CI gate | [Executor report evidence](#executor-report-evidence), [CI](#ci), [audit envelopes](#schema-v3-audit-envelopes) |
 
 ## What it indexes
 
@@ -112,7 +114,7 @@ These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
 | SQLite | Share bounded queries across CLI, MCP and Lens |
 | Optional SCIP | Add compiler-resolved evidence alongside the syntactic graph |
 | External producers | Submit validated facts, no execution inside the process or direct SQLite writes |
-| MCP | Query or refresh derived data, with one additive gitignored scratchpad write |
+| MCP | Query or refresh derived data, with two additive writes: the gitignored scratchpad and task mining |
 
 ## Performance model
 
@@ -152,6 +154,35 @@ The recommended install for most users is `npm install -g @xcraftmind/mastermind
 
 Run these commands from the repository being inspected. Replace example paths
 and Git baselines with your own. `mmcg COMMAND --help` lists every argument.
+
+`mastermind` and `mmcg` are the same binary.
+
+| Command | Use it to | Details |
+|---|---|---|
+| `init`, `setup`, `uninstall` | Configure or remove a project and its clients | [Project and client setup](#project-and-client-setup) |
+| `status`, `doctor` | Check the index, client setup and mining | [Project and client setup](#project-and-client-setup) |
+| `index`, `watch`, `query` | Build the index and query symbols | [Index and inspect](#index-and-inspect), [watcher](#watcher-mmcg-watch) |
+| `enrich`, `facts` | Add SCIP or declarative evidence | [SCIP](#optional-scip-semantic-overlay), [facts](#declarative-fact-ingestion-sdk) |
+| `map`, `impact` | Summarize architecture and change impact | [Maps, change impact and Lens](#maps-change-impact-and-lens) |
+| `repo-map` | Build a question-specific shortlist | [Question-specific shortlist](#question-specific-shortlist-repo-map) |
+| `concept`, `concept-review` | Find symbols by concept and review relevance | [Local symbol concept search](#local-symbol-concept-search) |
+| `brief`, `history`, `why`, `context` | Build role context and search project history | [Project history and role context](#project-history-and-role-context) |
+| `temporal` | Compare architecture with a Git baseline | [Temporal graph](#temporal-graph-mmcg-temporal) |
+| `team` | Lock and query a graph across repositories | [Local team graph](#local-team-graph) |
+| `policy` | Check architecture rules | [Policy as code](#architecture-policy-as-code-mmcg-policy-check) |
+| `ui`, `review` | Review a change locally or export evidence | [Lens](#mastermind-lens-mmcg-ui), [review package](#pr-evidence-package-mmcg-review-export) |
+| `workflow` | Audit agent, skill and tool wiring | [Workflow audit](#workflow-audit) |
+| `new-spec`, `verify-spec`, `run-task`, `verification`, `acceptance`, `audit-spec` | Run a task through its gates | [Task gates](#task-gates) |
+| `review-task` | Record the semantic review of a held task | [Semantic task review](#semantic-task-review) |
+| `next`, `resume` | Print the next action, or the full packet for a pending task, with a ready-to-paste prompt | `mmcg resume --task 042-name` |
+| `ci` | Index, verify specs and audit executor evidence in CI | [CI](#ci) |
+| `audit` | Verify or sign schema-v3 audit envelopes | [Audit envelopes](#schema-v3-audit-envelopes) |
+| `pr-comment` | Render an `audit-spec --bundle` file as a GitHub comment on stdout | [Audit envelopes](#schema-v3-audit-envelopes) |
+| `pr-comment-untrusted` | Render an envelope without trust checks, marked untrusted and not for publication | [Audit envelopes](#schema-v3-audit-envelopes) |
+| `effort-route` | Select effort for a task and agent | [Effort routing](../guides/effort-routing.md) |
+| `serve` | Run the MCP stdio server | [MCP server usage](#mcp-server-usage) |
+| `miner` | Collect and review personal evidence | [Persona](persona.md) |
+| `demo`, `tour` | Try the workflow on a temporary repository, or print a guided walkthrough | `mmcg demo` |
 
 ### Index and inspect
 
@@ -215,6 +246,40 @@ mmcg ui --since main --path src --depth 2 --top 50 --production-only \
 mmcg review export --since main --out mastermind-review
 ```
 
+### Question-specific shortlist (`repo-map`)
+
+```bash
+mmcg repo-map "payment retry handler" --source-sha256 <verified-source-digest> --budget-bytes 1600
+mmcg repo-map "payment retry handler" --source-sha256 <digest> --payload map-only
+mmcg repo-map "payment retry handler" --source-sha256 <digest> --ranking graph
+```
+
+`repo-map` is experimental. It returns a JSON navigation payload using
+`focused_shortlist_v3`: weighted task-term overlap and grouped file locations,
+at most three files and three definitions per file. It leaves spare budget
+unused and excludes declared test functions. It is a query heuristic, not
+source evidence. Read the original source at the selected locations and follow
+the relevant call paths.
+
+| Input or option | Contract |
+|---|---|
+| `--source-sha256` | SHA-256 of the source projection you validated before the call, with index freshness and allowlist. The command does not check it against live files |
+| `--budget-bytes` | Byte cap for the returned text. `payload_bytes` charges the text actually returned |
+| `--payload bundle\|map-only\|instructions-only` | Component comparison. All variants use the same locations and header reservation. `instructions-only` has no locations. Default `bundle` |
+| `--ranking lexical\|graph` | Default `lexical`. `graph` runs personalized PageRank seeded by lexical scores over `calls` and `references` links between definitions with a unique same-language name |
+
+| Failure | Result |
+|---|---|
+| More than 20,000 candidates | The command fails instead of ranking a partial prefix |
+| Invalid digest, budget or location, or an index change during the call | Nonzero exit. Rebuild a stale index and compute a new digest |
+| Graph overflow (100,000 edges), empty graph or no seeds | Falls back to lexical selection. The `graph` field records the fallback and counts |
+| SQLite query error | The command fails |
+
+The index opens read-only. Graph links are navigation hints, not resolved
+semantic evidence. Keep graph ranking opt-in until a new quality and cost run
+qualifies it. The [scorecard](../../evals/scorecard.md) lists the retained
+repo-map runs.
+
 ### Project history and role context
 
 ```bash
@@ -271,12 +336,12 @@ command observations from reported results and semantic judgments.
 | `--force-iteration` | Override the general iteration limit and record the override as a lesson candidate. |
 | `--exec` | Start a new preflight iteration and one bound Claude invocation. |
 | `--guarded-exec` | With `--exec`, restrict supported native tools to the declared scope and exact verification commands, then reconcile observed calls. See [guarded execution](task-runtime.md#guarded-execution) for native fallback and process boundaries. |
-| `--exec-timeout N`, `--exec-max-turns N` | Executor limits: 1–7,200 seconds and 1–100 turns. Defaults 1,800 and 40, or the project defaults set by `init --exec-timeout` and `init --exec-max-turns`. |
+| `--exec-timeout N`, `--exec-max-turns N` | Executor time and turn limits. Ranges and defaults: [native executor](task-runtime.md#native-executor). |
 | `--profile-client ID` | Include advice through an existing profile grant. Requires `--exec`. |
 | `--auto-repair` | With `--exec`, retry eligible fresh failed checks under the same structured contract and a finite 1–20 iteration budget. |
 | `--auto-review` | Run one semantic review after a held audit, or resume review of an existing pending held task without `--exec`. |
 | `--auto-follow-up` | With `--exec --auto-review`, allow one concrete negative-criterion repair, new checks and review within the shared iteration budget. |
-| `--review-timeout N`, `--review-max-turns N` | Independent reviewer limits: 1–7,200 seconds and 1–100 turns. Defaults 600 and 30, or the project defaults set by `init --review-timeout` and `init --review-max-turns`. |
+| `--review-timeout N`, `--review-max-turns N` | Independent reviewer time and turn limits. Ranges and defaults: [native semantic reviewer](task-runtime.md#native-semantic-reviewer). |
 
 `--auto-repair` requires structured acceptance and observed checks. It rejects
 `--force-iteration`, `--pre-only` and `--post-only`. Scope drift, missing evidence
@@ -424,16 +489,13 @@ mmcg setup continue --scope project --root . --write
 mmcg setup generic --scope project --config ./mcp.json
 ```
 
-`init --review-max-turns N` (1–100) stores the reviewer turn default for
-`review-task run` and `run-task --auto-review` as `review_max_turns` in
-`.mastermind/setup.json`; the default 30 is not written, and an explicit flag
-wins. `init --review-timeout N` (1–7,200 seconds) stores `review_timeout_secs`
-for the same commands; the default 600 is not written. `init --exec-max-turns N`
-(1–100) and `init --exec-timeout N` (1–7,200 seconds) store `exec_max_turns` and
-`exec_timeout_secs` for `run-task --exec`; the defaults 40 and 1,800 are not
-written. Every limit resolves as explicit flag, then project setting, then
-default. Commit `setup.json` only if the team accepts that it changes native
-run cost. `setup.json` is read strictly, so a release that does not know one of
+`init --review-max-turns N`, `--review-timeout N`, `--exec-max-turns N` and
+`--exec-timeout N` store `review_max_turns`, `review_timeout_secs`,
+`exec_max_turns` and `exec_timeout_secs` in `.mastermind/setup.json`.
+Defaults are never written. Ranges, defaults and the resolution order are in
+[native executor](task-runtime.md#native-executor) and
+[native semantic reviewer](task-runtime.md#native-semantic-reviewer).
+Commit `setup.json` only if the team accepts that it changes native run cost. `setup.json` is read strictly, so a release that does not know one of
 these keys rejects the whole file: its `init` and hook mining fail, and
 fail-soft settings such as the profile budget use their defaults. Remove the
 keys before moving a project to an older release.
@@ -670,10 +732,8 @@ When a user clarifies query scope, prepare a new packet whose query states that
 scope explicitly. Retain the original review and the clarification; recall
 hints do not replace an original constraint. Distinguish database snapshot
 checks, content checks for executor-claim files and whole-index freshness.
-The [source-witness study](../../evals/baselines/concept-witness-20261016.md)
-records independent source judgments, preserved useful identities and actual
-stdio MCP calls separately from the Desktop connection. Historical raw studies
-are retained locally with immutable hashes recorded in that report.
+The [scorecard](../../evals/scorecard.md) indexes the retained concept review
+results.
 
 `mmcg_concept` and `mastermind concept` use one schema-v5 query builder over a
 private derived corpus. Searchable fields are normalized symbol names,
@@ -795,7 +855,7 @@ Finalization checks symbol/concept parity and FTS integrity before stamping the
 extractor and normalization contracts current. The active normalization
 contract is `mmcg-concepts-v5`. It retains compound components as whole tokens
 alongside their parts: `parse_JUnit` includes `junit`, and `read_TraceSpan`
-includes `tracespan`. This normalization change invalidates v4 concept corpora.
+includes `tracespan`.
 Custom external indexes open
 read-only, are never migrated, and return `index_stale` or
 `schema_incompatible` when the required corpus is unavailable. To rebuild an
@@ -893,9 +953,10 @@ are unchanged. `status`, `doctor`, and `mmcg_status` expose contract drift so
 agents do not trust stale derived data. `mastermind status` also checks the live
 durable-history inventory under the same 30-second deadline as source
 freshness. It reports the index as up to date only when all four checks pass.
-`mastermind doctor` uses that same scan for its `index freshness` check and
-returns a warning if any structural, concept, or durable-history input is stale,
-incomplete, changing, or cannot be checked within the bound.
+`mastermind doctor` uses that same scan with a 10-second deadline for its
+`index freshness` check and returns a warning if any structural, concept, or
+durable-history input is stale, incomplete, changing, or cannot be checked in
+time.
 
 Output example:
 
@@ -914,7 +975,7 @@ rejected before mutation, so orphan cleanup cannot purge files merely because
 the caller switched scope. Use a separate `--index` path for another root.
 `mmcg watch` keeps the root supplied at startup.
 
-The index lives at `.mastermind/mmcg.db` in the current directory by default. Override with `--index <path>` or env var `MMCG_INDEX_PATH`.
+Commands that take a root keep the index at `<root>/.mastermind/mmcg.db`. Commands without a root use `.mastermind/mmcg.db` in the current directory. Override either with `--index <path>` or env var `MMCG_INDEX_PATH`.
 
 ## Optional SCIP semantic overlay
 
@@ -1701,8 +1762,20 @@ mmcg serve
 
 ### Protocol contract
 
-- Supported revisions are MCP `2025-11-25` and legacy `2024-11-05`. Unknown requested revisions receive the latest supported revision. Clients that cannot support it disconnect.
-- Current results include compact JSON text and object `structuredContent`. Scratchpad reads keep their JSON-array text form and are wrapped as `{ "entries": [...] }` only in structured form. Legacy results remain content-only.
+The server supports two lifecycles. A request whose `_meta` names a protocol
+version, and every `server/discover` call, uses the per-request lifecycle.
+Before `initialize`, any request with `_meta` takes that path too. Other
+requests use `initialize`.
+
+| Lifecycle | Revisions | Version choice |
+|---|---|---|
+| `initialize`, then `tools/list` and `tools/call` | `2025-11-25`, legacy `2024-11-05` | `2024-11-05` when requested, `2025-11-25` for any other request. A client that cannot use the answer disconnects |
+| Per-request `_meta`, no `initialize` | `2026-07-28` | `server/discover`, `tools/list` and `tools/call` carry `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in `_meta`. Another version gets error `-32022` with `supported` and `requested` in its data. Missing or malformed metadata gets `-32602` |
+
+`server/discover` lists only `2026-07-28`. Per-request results add
+`resultType: "complete"` and the server info in `_meta`.
+
+- `2025-11-25` and `2026-07-28` results include compact JSON text and object `structuredContent`. Scratchpad reads keep their JSON-array text form and are wrapped as `{ "entries": [...] }` only in structured form. `2024-11-05` results are content-only.
 - Tool execution and input errors use `isError: true`. Malformed protocol requests and internal failures use JSON-RPC errors.
 - Input frames are limited to 1 MiB and an oversized frame closes the connection. The complete serialized JSON-RPC response is kept within 8 MiB (including duplicated text/structured content and envelope reserve). Oversized results ask the caller to narrow the query.
 - Tool annotations are advisory metadata, and returned tool content is untrusted. Neither grants permission or bypasses confirmation.
@@ -1841,7 +1914,7 @@ or stdin, with a 16 KiB input limit. Neither interface changes an active chat.
 | `mmcg_change_class` | `file` | Classify a file's last change as `structural`, `cosmetic`, or `first-seen`. Backed by an FNV-1a 64-bit hash of the file's parsed structural shape — line numbers and whitespace excluded. Pre-edit signal for planner and auditor: large diffs that are mostly cosmetic have smaller real scope than line count suggests. |
 | `mmcg_unreferenced` | optional `kind`, `language`, `top` (default 100, max 500) | Symbols with no indexed reference candidates, with per-symbol precision and explicit `precision_notes`. MCP responses expose the exact filtered `total`, returned `count`, `truncated`, and `row_limit`. Narrow by kind or language when truncated. The CLI retains its complete local listing. These are not proven dead code. **Review manually** — see Limitations for false-positive scenarios. |
 | `mmcg_api_surface` | `prefix`, optional `language`, `top` (default 100, max 500) | Symbols under the literal `prefix` with at least one outside syntactic name-and-kind reference candidate. MCP responses expose the exact filtered `total`, returned `count`, `truncated`, `row_limit`, per-symbol edge precision, and response precision notes. Narrow the prefix or add language when truncated. The CLI retains its complete local listing. Same-named definitions may be false-positive boundary candidates, so this empirical map is not compiler-resolved identity or declared visibility. |
-| `mmcg_concept` | `query`, optional `top` (default 10, max 50), optional `include_tests` (boolean, default false) | Deterministic schema-v5 symbol candidates from normalized names, repository paths, declaration shapes, and owned Rust/Python/JavaScript/TypeScript documentation tokens. Terms are escaped, Porter-stemmed, and deduplicated by FTS token sequence. Full AND matches precede qualifying partial supplements for queries with at least three distinct terms. Partial admission requires `max(2, ceil(n / 2))` total matches plus `min(3, overall floor, ranking_terms count)` informative matches. `all_and_partial_terms` reports both groups in the qualified corpus, and exact `indexed_total` counts their union before the page limit. Ranking prioritizes informative-term coverage, then total coverage and BM25. Recognized Rust test scopes (parsed `test`/`rstest`/namespaced `::test` attributes and descendants of bounded canonical `#[cfg(test)]` modules) are excluded before count and limit unless opted in; other cfg-module forms (compound expressions, comments within the canonical prefix or additional attributes), unmarked scopes and other languages remain unclassified. The response discloses query/ranking terms, both thresholds, test scope, matched terms, exact qualified coverage, page truncation and safety omissions from one SQLite snapshot. No raw FTS syntax, embeddings, model calls, network, source bodies, raw comments/docstrings, literals, or defaults. BM25 score is query-local and lower-is-better, not confidence or semantic relevance. Managed drift gets at most one refresh/retry. Custom indexes remain read-only and fail closed. |
+| `mmcg_concept` | `query`, optional `top` (default 10, max 50), optional `include_tests` (boolean, default false) | Deterministic schema-v5 symbol candidates from names, paths, declaration shapes and owned documentation tokens. Reports matched terms, exact coverage, page truncation and safety omissions from one snapshot. No model call, embeddings or source bodies. Scores are query-local and do not measure relevance. Rules: [Local symbol concept search](#local-symbol-concept-search) |
 | `mmcg_concept_prepare` | `query`, optional `top`, `include_tests`, `hints`, `request_contract` | Source-bound operation review packet with the lexical page plus broad body recall, exact declaration identities, source excerpts, assessment template and explicit coverage limits. Caller hints broaden recall; the original query defines relevance. No model invocation. |
 | `mmcg_concept_finish` | unchanged `packet`, complete `assessment` | Revalidates current source and packet, requires one judgment per candidate and source citations for relevant entries, then preserves relevant lexical entries before supplements in assessment order. Unknowns remain explicit. Semantic judgments belong to the calling agent. |
 
@@ -1849,7 +1922,7 @@ or stdin, with a 16 KiB input limit. Neither interface changes an active chat.
 
 | Tool | Args | What it returns |
 |---|---|---|
-| `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing with lexical file/directory scope: `%` and `_` are literal bytes, selected-directory components are relative to that directory, root components remain repository-relative, and selected files retain their paths. `production_only` excludes conventional test/fixture/example/generated/vendor path segments and test filenames (`test_*`, `*_test.*`, `*_tests.*`, `*.test.*`, `*.tests.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before bounded queries run. Older caches receive an atomic classification-only update: query-only commands normalize their private copy and authorized writable opens persist the same flags. Persistent guards invalidate the classification stamp when older runtimes write to the graph. The classification step preserves symbol IDs, graph/source bindings and prior concept-normalization state; other existing writable schema upgrades still apply. Query-only normalization preserves the canonical old cache. This does not establish source freshness. Hotspots prefer unambiguous definitions before pooled same-name collisions. JSON, text, Mermaid, and CLI SARIF are projections of the same result. Text reports per-section coverage and returned cycle members. Mermaid includes entry points, components, boundaries, hotspots, and cycle rings. When its visual summary omits returned rows, a notice names the omitted counts and points to JSON/text. SARIF exports returned cycles and derives its partial metadata from every top-level section and component boundary. Caps are 50,000 aggregation paths, 20 languages, 20 components, 20 boundaries/component and 400 globally, 50 entry points, 100 hotspots, 50,000 scoped cycle edges, 50 cycles, and 500 cycle memberships. Every truncated section names its cause: `path_work_limit` marks path-derived partial aggregates. `language_limit`, `entry_point_limit`, and `top_limit` identify section caps. `top_probe` marks a hotspot or per-component boundary cap+1 probe. `global_probe_limit` marks components whose certainty was prevented by the 401st global boundary row. `cycle_limit`, `cycle_membership_limit`, or `cycle_and_membership_limit` identify bounded complete SCC output. Cycle `work_limit` returns no cycles because SCC analysis was skipped before truncated edges could be analyzed. |
+| `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing: entry points, components, boundaries, hotspots and import cycles for a lexical file or directory scope. JSON, text, Mermaid and CLI SARIF are projections of the same result. Every truncated section names its cause. See [Map scope and caps](#map-scope-and-caps) |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, history review candidates, provenance, limits, and partial diagnostics. Collection totals and summary counts are exact only when their source projections are complete. Otherwise they are null. A truncated 10,000-file change set fails closed. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20, max 200) | Rank symbols by in-degree (distinct callers). Responses report the exact filtered `total`, returned `count`, `truncated`, effective filters, and precision notes, so a full `top` page is not mistaken for the whole ranking. Excludes synthetic `<module>` rows and zero-degree symbols. Name-based resolution can pool collisions. Ranking is a structural reading-order hint, not runtime importance proof. |
 | `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists. A cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges. Above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Name-based import resolution can over-approximate, so verify before refactoring. |
@@ -1857,7 +1930,49 @@ or stdin, with a 16 KiB input limit. Neither interface changes an active chat.
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched dependency candidates through calls and references, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Stable file-limit projections remain partial. Non-UTF-8 paths are omitted, counted, and mark the file collection partial. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct static candidates, deeper graph tests are transitive, and same-component candidates without graph evidence in this response are heuristic. The classification ranks source-level candidates. It does not establish a test run, line coverage, assertion quality, or runtime reachability. Explicit supported test attributes identify candidates independently of filename, including inline Rust `test`, `tokio::test`, and `async_std::test`. Name heuristics still require test-like paths. Fixtures and lifecycle hooks remain excluded. Fallback evidence is `same_component_test_filename` for test-like paths or `same_component_test_attribute` otherwise. Focused candidates never replace the repository's full required gate. |
 | `mmcg_brief` | `role` (`planner`, `executor`, or `auditor`), `since`, optional `root`, `budget_tokens` (256–8,000, default 2,000) | One deterministic schema-v1 role packet over the checked worktree, structural graph, and project-history inventory. It includes aggregate path-classified `disciplines` to route frontend, QA, and migration evidence without repeating repository path samples. Role changes prefix admission order, not fields. The accepted budget covers the serialized MCP result after JSON escaping, `content.text`, and `structuredContent` duplication. Repository paths and symbol names are capped, control/bidi-escaped untrusted data. Source bodies, signatures, literals/defaults, history titles, and excerpts are excluded. |
-| `mmcg_status` | — | Exact UTF-8 index path when JSON can represent it, file/symbol counts, separate `extractor_contract_current` and `concept_contract_current` signals, live `history_freshness`, and source freshness from one checked SQLite snapshot. A native non-UTF-8 path returns `db_path: null` and `db_path_error: non_utf8_path` instead of a lossy alias. History is reported independently as `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`. `history_freshness_error` identifies a failed or work-limited scan. The concept flag is false after an interrupted/failed derived-corpus update or a normalization change, even when the structural graph is current. `freshness_basis: path_and_mtime` makes the metadata contract explicit: added, deleted, older, and newer mtimes are stale. Content changed while preserving the exact mtime requires `mmcg index --force`. `stale_files` counts up to 100 paths, while `stale_files_truncated` marks a larger set. `freshness_error` is present when the structural scan could not establish the count. `unindexable_sources` names up to 20 stale paths that are not regular files, such as symlinks. The compatibility value `stale_files: 1` keeps older clients fail-closed. A non-zero value means the next structural query will refresh a managed index, or that a custom external index needs an explicit `mmcg index`. |
+| `mmcg_status` | — | Index path, file and symbol counts, extractor and concept contract flags, history freshness and source freshness from one checked SQLite snapshot. See [Status fields](#status-fields) |
+
+#### Map scope and caps
+
+| Rule | Contract |
+|---|---|
+| Path scope | Lexical. `%` and `_` are literal bytes. Components under a selected directory are relative to it, root components stay repository-relative, and a selected file keeps its path |
+| `production_only` | Excludes conventional test, fixture, example, generated and vendor path segments and test filenames (`test_*`, `*_test.*`, `*_tests.*`, `*.test.*`, `*.tests.*`, `*.spec.*`, `*Test.*`, `*Tests.*`) before the bounded queries run |
+| Hotspots | Unambiguous definitions come before pooled same-name collisions |
+| Text and Mermaid | Text reports coverage per section and the returned cycle members. Mermaid shows entry points, components, boundaries, hotspots and cycle rings, and names the omitted counts when the picture drops returned rows |
+| SARIF | Exports returned cycles. Its partial metadata comes from every top-level section and component boundary |
+| Freshness | The briefing does not establish source freshness |
+
+| Cap | Value |
+|---|---|
+| Aggregation paths | 50,000 |
+| Languages, components | 20 each |
+| Boundaries | 20 per component, 400 in total |
+| Entry points | 50 |
+| Hotspots | 100 |
+| Scoped cycle edges | 50,000 |
+| Cycles, cycle memberships | 50, 500 |
+
+| Truncation cause | Meaning |
+|---|---|
+| `path_work_limit` | Path-derived aggregates are partial |
+| `language_limit`, `entry_point_limit`, `top_limit` | That section reached its cap |
+| `top_probe` | A hotspot or per-component boundary cap+1 probe matched |
+| `global_probe_limit` | The 401st global boundary row kept a component result uncertain |
+| `cycle_limit`, `cycle_membership_limit`, `cycle_and_membership_limit` | Complete SCC output was bounded |
+| Cycle `work_limit` | SCC analysis was skipped before truncated edges, so no cycles are returned |
+
+#### Status fields
+
+| Field | Meaning |
+|---|---|
+| `db_path` | Exact UTF-8 index path. A non-UTF-8 path gives `db_path: null` and `db_path_error: non_utf8_path` instead of a lossy alias |
+| `extractor_contract_current`, `concept_contract_current` | Separate signals. The concept flag is false after an interrupted or failed corpus update or a normalization change, even when the structural graph is current |
+| `history_freshness` | `fresh`, `stale`, `incomplete`, `snapshot_changed` or `unknown`. `history_freshness_error` names a failed or work-limited scan |
+| `freshness_basis: path_and_mtime` | Added, deleted, older and newer mtimes are stale. A content change that keeps the exact mtime needs `mmcg index --force` |
+| `stale_files`, `stale_files_truncated` | Counts up to 100 stale paths and marks a larger set. A nonzero value means the next structural query refreshes a managed index, or a custom external index needs `mmcg index` |
+| `freshness_error` | The structural scan could not establish the count. `stale_files` is then 1, so older clients fail closed |
+| `unindexable_sources` | Up to 20 stale paths that are not regular files, such as symlinks |
 
 ### Compiler and external evidence
 
@@ -1895,6 +2010,25 @@ Tool responses are bounded JSON. Collection responses expose their own count or
 collection metadata. Status and workflow responses use named fields.
 
 ## Query and spec evidence
+
+### Spec frontmatter
+
+`mastermind new-spec` writes a spec with these fields already filled with
+placeholders. Every field is optional. An unknown field or a wrong type fails
+verification and audit with `invalid_frontmatter`.
+
+| Field | Form | Meaning | Details |
+|---|---|---|---|
+| `id`, `title` | String or integer, string | Task number and title | |
+| `mode` | `verified` or `strict` | Workflow contract mode. `lite` and `standard` are accepted for existing tasks | [Choose a mode](../workflow.md#choose-a-mode) |
+| `risk` | `low`, `medium` or `high` | Shown in the risk report | |
+| `touches` | List of `file`, `scope`, `reason`, `language`, `symbols` | Files the executor may change. `scope` is `symbols` (default), `file` or `delete`. `delete` needs a `reason` and no `symbols` | [Touch scope](#touch-scope), [deleted files](#deleted-files-and-moves) |
+| `touches[].symbols` | Names, or `name`, `signature`, `callers`, `file`, `language`, `reason` | Pre-edit snapshot of each changed symbol | [Spec snapshots](#spec-snapshots-and-removals) |
+| `creates` | Paths | Files that are new relative to the task baseline | [Created files](#created-files) |
+| `expected_docs` | Paths | Documents the change must update. A new document is also listed in `creates` | [Declared file scope](#declared-file-scope) |
+| `verify` | Labels, `cmd`, or `cmd` with `run` | A label is informational. `cmd` is a command obligation. `run` (`id`, `argv`, `cwd`, `timeout_secs`, optional `inputs`) is executed by `verification run` | [Observed verification](../workflow.md#observed-verification-commands-opt-in) |
+| `acceptance` | List of `id`, `statement`, `checks` | Each criterion requires every listed `verify[].run` ID. An explicit empty or null list fails | [Acceptance requirements](../workflow.md#acceptance-requirements) |
+| `breaking_changes.removed_symbols` | Names or detailed symbols | APIs the change removes. An unlisted removal breaks the audit | [Spec snapshots](#spec-snapshots-and-removals) |
 
 ### Declaration identity
 
@@ -1975,7 +2109,8 @@ inventory is incomplete, use precise file scopes or repair the baseline input.
 Vue baseline admission also checks its embedded script tree. Multiple script
 blocks, external scripts and unsupported script languages remain incomplete
 until the extractor can cover them. Quoted `lang="ts"` selects the actual
-TypeScript parser. Extractor contract v10 invalidates older indexed output.
+TypeScript parser. The active extractor contract is `mmcg-extractors-v10`.
+Output from an older contract needs a reindex.
 
 `mmcg ci` uses the same proved removal identity when checking snapshots and
 touches after execution. It also accepts a deleted touched file when all its
@@ -2171,17 +2306,17 @@ decorator edit can additionally select its containing class as `body_changed`.
 
 When changed files require source extraction, diff and impact reject old
 extractor contracts with `index_stale`. Text-only diff needs no extractor index.
-Extractor contract v9 includes attached decorators and attributes in exact
-signatures. Reindex an older corpus and refresh affected spec snapshots. Bare
+Exact signatures include attached decorators and attributes. Reindex a corpus
+from an older extractor contract and refresh affected spec snapshots. Bare
 `def ...` / `fn ...` snapshots do not describe the full declaration.
 Preserve multiline signatures in YAML rather than legacy one-line
 snapshot bullets. Adding a test attribute identifies a changed test candidate.
 It does not prove that the test ran or replace the full required gate.
 
-Concept normalization v3 treats Python `//` as division and preserves Python
+Concept normalization treats Python `//` as division and preserves Python
 quote escaping, keeping declaration types searchable while omitting decorator
-literals. An older concept corpus also requires refresh, even when the extractor
-contract is current.
+literals. A corpus from an older normalization contract also requires refresh,
+even when the extractor contract is current.
 
 ### Bounded role briefs
 
@@ -2283,13 +2418,18 @@ command's `MMCG_QUERY_BUDGET_MS` budget.
 
 | Var | Required | Default | What it does |
 |---|---|---|---|
-| `MMCG_INDEX_PATH` | no | `.mastermind/mmcg.db` (relative to cwd) | Where the SQLite index lives. |
+| `MMCG_INDEX_PATH` | no | `<root>/.mastermind/mmcg.db` for commands with a root, otherwise `.mastermind/mmcg.db` in the current directory | Where the SQLite index lives. |
 | `MMCG_QUERY_BUDGET_MS` | no | `10000` for `mmcg serve`. `60000` for `mmcg query`/`mmcg map`/`mmcg impact` | Wall-clock work budget for a single MCP tool call or CLI graph query. `0` = unlimited. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_GIT_TIMEOUT_MS` | no | `30000` | Deadline for bounded Git subprocesses used by history, diff, verification, and audit paths. Capped at `300000`. A shorter request deadline still wins. A stuck process is killed and the operation fails with a timeout error. |
 | `MMCG_TASK_FINALIZER_WAIT_MS` | no | `4000` | How long the persona task finalizer waits after Claude's Stop hook for the transcript to name the model. Capped at `120000`. After that the binding stays pending until the next local task boundary. |
 | `MMCG_REQUEST_SOFT_TIMEOUT_MS` | no | `30000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog cancels the in-flight request. `0` = no soft ceiling. See [Work budgets, timeouts, and cancellation](#work-budgets-timeouts-and-cancellation). |
 | `MMCG_REQUEST_HARD_TIMEOUT_MS` | no | `300000` | `mmcg serve` only. Wall-clock ceiling after which the watchdog exits the process rather than let it keep burning CPU. `0` = no hard ceiling. |
 | `MMCG_WATCHDOG` | no | unset | Set to `0` to disable the serve watchdog entirely — both ceilings and the reparent check. |
+| `MMCG_PROFILE_CLIENT` | for `mmcg_profile` | unset | Client ID the MCP server presents for personal profile access. `mastermind setup` writes it. Without it or a matching grant, `mmcg_profile` returns `access_denied`. See [Profile access](persona.md#profile-access). |
+| `MMCG_TEAM_MANIFEST` | for `mmcg_team_map` | unset | Path of the one team manifest the MCP server may read. Relative paths start at the repository root. See [Local team graph](#local-team-graph). |
+| `MMCG_TEAM_MANIFEST_SHA256` | for `mmcg_team_map` | unset | Expected SHA-256 of that manifest's bytes. A mismatch fails the call. |
+| `MMCG_AUDIT_NARRATIVE` | no | `.mastermind/audit-narrative.json` | Lens audit narrative path, repository-relative or absolute inside the repository. See [Optional AI audit narrative](#optional-ai-audit-narrative). |
+| `MMCG_INPUT_ORIGIN` | no | unset | `controller` makes persona capture skip the input. `automation` keeps the observation but marks it ineligible for personal quotes. `run-task` sets `controller` on its native runs. See [Native capture](persona.md#native-capture). |
 
 ## Work budgets, timeouts, and cancellation
 
@@ -2469,6 +2609,13 @@ uses a literal task-directory pathspec, and shares the configured bounded Git
 deadline while ignoring ambient repository-routing and external-diff settings.
 Task discovery has a fixed entry limit, does not follow linked directories or
 contracts, and maps changes anywhere below a task folder back to its spec.
+
+`.github/workflows/ci-mmcg.yml` runs the full test suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is not gated per-PR but builds locally via `cargo install --target=x86_64-apple-darwin`.
+
+## Executor report evidence
+
+`run-task --post-only`, `audit-spec` and `ci` read the executor report with
+these rules.
 
 ### Executor report admission
 
@@ -2691,12 +2838,10 @@ Unchecked or substituted reports produce a broken bundle with no verified
 claims. `mmcg_queries` provides inspection entry points for verified claims,
 not an execution trace.
 
-### Schema-v3 audit envelopes
+## Schema-v3 audit envelopes
 
 `mastermind audit-spec ... --bundle evidence.json` seals the mechanical report as canonical JSON with a manifest SHA-256 digest. Spec and executor-report paths require exact UTF-8 identities before they enter the bundle. A valid digest is tamper-evidence, not provenance: verification succeeds only with a complete exact repository/baseline/head/root/clean-worktree policy, a required Ed25519 signature rooted in an allowlisted non-revoked key ID, or both. `mastermind audit verify ... --integrity-only` is labelled untrusted and reports authenticity and policy as `not_evaluated`.
 
 Detached signatures use a domain-separated schema-v1 statement binding the envelope schema, hash algorithm, canonicalization, key ID, and manifest digest. Private keys are single-line base64 32-byte Ed25519 seeds with Unix mode 0600. Key owners are responsible for rotation, revocation allowlists, and protecting historical verification policy. Ed25519 alone provides neither signing time nor pre/post-compromise distinction.
 
 The Docker Action requires exact full baseline and head OIDs, a GitHub `owner/repo`, and a clean worktree. Its publication example treats `workflow_run` artifacts as hostile until independent run, attempt, workflow blob, PR, artifact ID/digest/size, envelope, and policy checks pass. The resulting attestation means only publication-workflow verification provenance. It does not prove that PR analysis ran in a trusted environment or that the findings are true.
-
-`.github/workflows/ci-mmcg.yml` runs the full test suite plus an end-to-end smoke (`mmcg doctor --json` + `mmcg verify-spec` + `mmcg audit-spec` against `tests/ci-fixture/`) on a 6-target matrix every PR: x86_64/aarch64 Linux gnu + musl, aarch64 macOS (Apple Silicon), x86_64 Windows. macOS Intel (`x86_64-apple-darwin`) is not gated per-PR but builds locally via `cargo install --target=x86_64-apple-darwin`.

@@ -255,7 +255,8 @@ enum Cmd {
     Resume(ResumeArgs),
     /// Configure a project, its client integrations, indexes and bounded mining.
     Init(commands::onboard::Options),
-    /// Remove a Mastermind setup. By default (`--scope project`) deletes
+    /// Remove a Mastermind setup. By default (`--scope project`) stops each
+    /// client's hooks, capture, mining and profile access, then deletes
     /// `.mastermind/` (index, tasks, run-state) and de-registers the `mmcg`
     /// entry from the project `.mcp.json`. `--scope global` de-registers mmcg
     /// from Claude Code user scope via `claude mcp remove`; `--scope all` does

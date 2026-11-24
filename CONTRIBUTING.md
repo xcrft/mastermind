@@ -62,6 +62,8 @@ Human-facing documentation describes current behavior. Keep the authority clear:
 | [Architecture](docs/architecture.md) | Components, data ownership and trust boundaries |
 | [Workflow](docs/workflow.md) | The delivery process and completion gates |
 | [Reference](docs/reference/mmcg.md) | CLI/MCP contracts, schemas, limits and precision |
+| [Task runtime](docs/reference/task-runtime.md) | Native executor and reviewer limits, snapshots, process supervision and receipts |
+| [Persona](docs/reference/persona.md) | Personal evidence storage, capture, mining and profile access |
 | Root README and guides | Orientation and task-oriented examples |
 
 - Check examples against the current parser. State the working directory when

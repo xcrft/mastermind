@@ -7,6 +7,8 @@ Product objectives, the current baseline and audit/fix acceptance rules are in
 [Product success measures](PRODUCT.md).
 Use [role calibration](ROLE_CALIBRATION.md) to compare role instructions,
 reasoning settings and the complete routed workflow separately.
+Open research items, written on 2026-10-15, are in the
+[improvement roadmap](IMPROVEMENT-ROADMAP.md).
 
 ## Choose a package
 
@@ -49,7 +51,7 @@ is not a canonical input for review admission or runtime verification.
 The Python tests use disposable fixtures and make no model calls. Full control
 integration needs Rust, Git and Node on POSIX. Run it against stable sources.
 Model-backed behavioral runs use [the verified runner](behavior/README.md) and
-consume inference usage. Retained outcomes and measurement limits live in the
+consume inference usage. Retained outcomes and measurement limits are indexed in the
 [scorecard](scorecard.md).
 
 ## Measurement contract
@@ -94,7 +96,7 @@ text differences, revisions and omissions separately from model application.
 
 Use [the campaign commands](benchmark/README.md#run-the-whole-corpus) to run every
 research case under one configuration. Model/runtime switches require a new
-campaign. The [scorecard](scorecard.md) records current results and gaps.
+campaign. The [scorecard](scorecard.md) indexes the latest retained results and gaps.
 
 | Comparison rule | Reason |
 |---|---|

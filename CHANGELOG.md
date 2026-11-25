@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-11-26
+
 ### Fixed
 
 - Mining and native runs with Claude Code work again. The `claude` executable
@@ -667,7 +669,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v4.0.0...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v4.0.1...HEAD
+[4.0.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v4.0.1
 [4.0.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v4.0.0
 [3.4.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.2
 [3.4.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.1

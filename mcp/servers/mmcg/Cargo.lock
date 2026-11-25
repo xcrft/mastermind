@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "mmcg"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "aho-corasick",
  "base64",

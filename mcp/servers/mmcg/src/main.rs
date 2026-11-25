@@ -3810,19 +3810,19 @@ mod tests {
 
     #[test]
     fn workflow_audit_cli_contract_is_explicit() {
+        let workflow = std::env::temp_dir().join("workflow");
         let cli = Cli::try_parse_from([
-            "mastermind",
-            "workflow",
-            "audit",
-            "--root",
-            "/workflow",
-            "--json",
+            "mastermind".as_ref(),
+            "workflow".as_ref(),
+            "audit".as_ref(),
+            "--root".as_ref(),
+            workflow.as_os_str(),
+            "--json".as_ref(),
         ])
         .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Workflow(WorkflowCmd::Audit { root, json })
-                if root == std::path::Path::new("/workflow") && json
+            Cmd::Workflow(WorkflowCmd::Audit { root, json }) if root == workflow && json
         ));
         let Err(usage) = Cli::try_parse_from(["mastermind", "workflow", "audit", "--unknown"])
         else {

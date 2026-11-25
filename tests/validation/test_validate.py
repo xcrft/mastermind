@@ -91,12 +91,12 @@ class ContractRuleTests(unittest.TestCase):
 
     CASES = (
         (
-            "release badge",
-            validate.validate_release_badges,
-            ("npm/mastermind/package.json", "README.md", "npm/mastermind/README.md"),
-            "README.md",
-            lambda text: text.replace("badge/npm-v", "badge/npm-v0."),
-            "npm badge must match package version",
+            "release version",
+            validate.validate_release_versions,
+            tuple(dict.fromkeys(path for path, _, _ in validate.release_version.LOCATIONS)),
+            "npm/platforms/win32-x64-msvc/package.json",
+            lambda text: re.sub(r'"version": "[^"]+"', '"version": "0.0.1"', text, count=1),
+            "differs from mcp/servers/mmcg/Cargo.toml",
         ),
         (
             "template mirror",
@@ -173,7 +173,7 @@ class MainTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 self.subTest(level=level),
-                patch.object(validate, "validate_release_badges", return_value=[issue]),
+                patch.object(validate, "validate_release_versions", return_value=[issue]),
                 redirect_stdout(output),
             ):
                 self.assertEqual(validate.main([]), status)

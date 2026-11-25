@@ -148,8 +148,9 @@ clean unrelated comments merely because a file was opened. This is the
 
 ## Canonical report
 
-Write the complete report to `<task>/executor-report.md`; returning the same
-text in chat is optional convenience. Never write `state.json` or `audit.md`.
+Write the complete report to the path `run-task --pre-only` printed:
+`<task>/executor-report.md` for a `spec.md`, `<stem>.executor-report.md`
+beside any other spec. Returning the same text in chat is optional convenience. Never write `state.json` or `audit.md`.
 The `mastermind run-task --post-only` controller owns lifecycle and audit state.
 
 Use plan-step IDs such as `plan-1`, `plan-2`; for a legacy spec, its existing

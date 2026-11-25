@@ -8,7 +8,6 @@ use crate::bounded_fs::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(unix)]
@@ -36,12 +35,6 @@ pub struct StartOptions {
     pub limit: Option<usize>,
     pub max_calls: Option<u64>,
     pub max_runtime: Option<u64>,
-}
-
-pub(super) trait BatchControl {
-    fn client(&self) -> &str;
-    fn before_attempt(&mut self) -> Result<(), Error>;
-    fn before_publish(&mut self) -> Result<(), Error>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -401,17 +394,6 @@ fn validate_selection(
     Ok(())
 }
 
-struct HashWriter(Sha256);
-impl Write for HashWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Shared by explicit and managed batches. A replaced executable is a new
 /// processor identity. Transitive script dependencies and remote model versions
 /// are outside this local executable binding.
@@ -428,7 +410,7 @@ pub(super) fn processor_fingerprint(
             .map_err(|_| "worker_provider_executable_unavailable")?,
     };
     let parent = RootCapability::open(path.parent().ok_or("worker_executable_invalid")?)?;
-    let mut writer = HashWriter(Sha256::new());
+    let mut hasher = Sha256::new();
     let file = bounded_fs::copy_regular_file_with_capability(
         &parent,
         &path,
@@ -438,7 +420,10 @@ pub(super) fn processor_fingerprint(
             interrupted: Some(&worker::interrupted),
         },
         None,
-        &mut writer,
+        &mut crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: std::io::sink(),
+        },
     )?;
     #[cfg(unix)]
     if file.identity.attributes() & 0o111 == 0 {
@@ -447,7 +432,7 @@ pub(super) fn processor_fingerprint(
     let mut receipt = json!({
         "path":processor.map(|_| &path),"provider":provider,
         "arguments_digest":hash(&json!(args)),"protocol":EXTRACTOR,
-        "executable":{"path":path,"sha256":crate::hex::encode(&writer.0.finalize()),"bytes":file.declared_len}
+        "executable":{"path":path,"sha256":crate::hex::encode(&hasher.finalize()),"bytes":file.declared_len}
     });
     if provider.is_some() {
         receipt["native_adapter"] = json!(super::native::VERSION);
@@ -1083,7 +1068,7 @@ pub fn stop(client: &str, root: &Path) -> Result<Value, Error> {
     }
 }
 
-struct Runtime {
+pub(super) struct Runtime {
     store: Store,
     config: Config,
     config_identity: StableFileIdentity,
@@ -1155,14 +1140,12 @@ impl Runtime {
         }
         Ok(())
     }
-}
 
-impl BatchControl for Runtime {
-    fn client(&self) -> &str {
+    pub(super) fn client(&self) -> &str {
         &self.config.client
     }
 
-    fn before_attempt(&mut self) -> Result<(), Error> {
+    pub(super) fn before_attempt(&mut self) -> Result<(), Error> {
         self.processor_admission()?;
         if self.state.attempts >= self.config.settings.max_calls {
             return Err(self.halt("worker_call_budget_exhausted"));
@@ -1173,7 +1156,7 @@ impl BatchControl for Runtime {
         self.record()
     }
 
-    fn before_publish(&mut self) -> Result<(), Error> {
+    pub(super) fn before_publish(&mut self) -> Result<(), Error> {
         self.processor_admission()
     }
 }

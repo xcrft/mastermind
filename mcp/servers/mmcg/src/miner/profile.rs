@@ -27,7 +27,7 @@ use super::store::{self, Counts};
 use super::tooling::{self, Governed, ToolScope};
 use super::workflow::{self, CommitShape};
 use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
-use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
+use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -981,7 +981,7 @@ fn run_profile_git(
     output_limit: usize,
     context: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = run_bounded_git_with_limit(root, args, None, output_limit)
+    let output = run_bounded_git_controlled(root, args, None, output_limit, None, None)
         .map_err(|error| format!("{context} failed: {error}"))?;
     if !output.success {
         return Err(format!("{context} exited unsuccessfully").into());
@@ -1164,7 +1164,7 @@ fn commit_shapes(
     let mut listed = cap;
     while listed > 0 {
         let count = format!("-n{listed}");
-        let out = run_bounded_git_with_limit(
+        let out = run_bounded_git_controlled(
             root,
             &[
                 "log",
@@ -1179,6 +1179,8 @@ fn commit_shapes(
             ],
             None,
             GIT_SAMPLE_OUTPUT_LIMIT,
+            None,
+            None,
         );
         match out {
             Ok(out) if out.success => {
@@ -1319,7 +1321,7 @@ fn fetch_diff_batch(
     diffs: &mut CommitDiffs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input: String = batch.iter().map(|sha| format!("{sha}\n")).collect();
-    let out = run_bounded_git_with_limit(
+    let out = run_bounded_git_controlled(
         root,
         &[
             "log",
@@ -1333,6 +1335,8 @@ fn fetch_diff_batch(
         ],
         Some(input.as_bytes()),
         GIT_SAMPLE_OUTPUT_LIMIT,
+        None,
+        None,
     );
     match out {
         Ok(out) if out.success => {
@@ -1380,7 +1384,7 @@ fn collect_commits(
     let mut listed = cap;
     loop {
         let count = format!("-n{listed}");
-        let out = run_bounded_git_with_limit(
+        let out = run_bounded_git_controlled(
             root,
             &[
                 "log",
@@ -1394,6 +1398,8 @@ fn collect_commits(
             ],
             None,
             GIT_SAMPLE_OUTPUT_LIMIT,
+            None,
+            None,
         );
         match out {
             Ok(out) if out.success => {
@@ -3118,7 +3124,7 @@ fn view_at_with_verifier(
     select(&mut agg);
     let selected_store_revision = agg.profile_revision();
     let source_verification_complete = mark_unavailable_claims(&db, &mut agg, verify);
-    let selection_revision = crate::hex::encode(&Sha256::digest(
+    let selection_revision = crate::hex::sha256(
         json!([
             "mastermind-profile-selection-v2",
             agg.profile_revision(),
@@ -3130,7 +3136,7 @@ fn view_at_with_verifier(
         ])
         .to_string()
         .as_bytes(),
-    ));
+    );
 
     let conventions: Vec<Value> = rules
         .iter()
@@ -3889,7 +3895,9 @@ mod tests {
                 counts: [("decl.const".to_string(), 3)].into_iter().collect(),
             })
             .collect();
-        db.upsert_repo(
+        db.apply_mine(
+            false,
+            &[],
             "/fixture",
             &store::RepoProvenance {
                 author: "Alice".into(),
@@ -3903,7 +3911,6 @@ mod tests {
             },
             &[],
             &evidence,
-            &[],
         )
         .unwrap();
         db.set_reader_grant(root.to_str().unwrap(), "test", true)
@@ -4117,12 +4124,13 @@ mod tests {
         {
             let mut db = store::ProfileStore::open(&db_path).unwrap();
             for alias in [&root, &subdir] {
-                db.upsert_repo(
+                db.apply_mine(
+                    false,
+                    &[],
                     &alias.canonicalize().unwrap().to_string_lossy(),
                     &provenance,
                     &["author@example.test".into()],
                     &one_commit(Counts::from([("indent.space".into(), 10)])),
-                    &[],
                 )
                 .unwrap();
             }
@@ -4283,7 +4291,9 @@ mod tests {
             std::fs::create_dir(&case).unwrap();
             {
                 let mut db = store::ProfileStore::open(&case.join("style.db")).unwrap();
-                db.upsert_repo(
+                db.apply_mine(
+                    false,
+                    &[],
                     &second.canonicalize().unwrap().to_string_lossy(),
                     &store::RepoProvenance {
                         author: "Second Alias".into(),
@@ -4298,7 +4308,6 @@ mod tests {
                     },
                     &["author@example.test".into()],
                     &one_commit(Counts::from([("foreign.marker".into(), 7)])),
-                    &[],
                 )
                 .unwrap();
             }
@@ -4364,7 +4373,9 @@ mod tests {
             std::fs::write(&profile, &previous).unwrap();
             {
                 let mut db = store::ProfileStore::open(&db_path).unwrap();
-                db.upsert_repo(
+                db.apply_mine(
+                    false,
+                    &[],
                     &old_repo.to_string_lossy(),
                     &store::RepoProvenance {
                         author: "Alice".into(),
@@ -4379,7 +4390,6 @@ mod tests {
                     },
                     &["alice@example.test".into()],
                     &one_commit(Counts::from([("indent.tab".into(), 10)])),
-                    &[],
                 )
                 .unwrap();
             }
@@ -5105,7 +5115,9 @@ diff --git a/app/bar.ts b/app/bar.ts
         ));
 
         db = store::ProfileStore::open(&db_path).unwrap();
-        db.upsert_repo(
+        db.apply_mine(
+            false,
+            &[],
             &repository_key(&repo).unwrap(),
             &store::RepoProvenance {
                 author: "Alice".into(),
@@ -5120,7 +5132,6 @@ diff --git a/app/bar.ts b/app/bar.ts
             },
             &["author@example.test".into()],
             &one_commit(Counts::new()),
-            &[],
         )
         .unwrap();
         drop(db);
@@ -5282,7 +5293,9 @@ diff --git a/app/bar.ts b/app/bar.ts
     fn owner_guard_rejects_a_different_person() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = store::ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        db.upsert_repo(
+        db.apply_mine(
+            false,
+            &[],
             "/alice/repo",
             &store::RepoProvenance {
                 author: "Alice".into(),
@@ -5297,7 +5310,6 @@ diff --git a/app/bar.ts b/app/bar.ts
             },
             &["alice@example.com".into()],
             &one_commit(Counts::new()),
-            &[],
         )
         .unwrap();
 
@@ -5910,7 +5922,9 @@ diff --git a/src/a.rs b/src/a.rs
                 .collect(),
             })
             .collect();
-        db.upsert_repo(
+        db.apply_mine(
+            false,
+            &[],
             "/sample-app",
             &store::RepoProvenance {
                 author: "Alice".into(),
@@ -5924,7 +5938,6 @@ diff --git a/src/a.rs b/src/a.rs
             },
             &[],
             &evidence,
-            &[],
         )
         .unwrap();
         let root = dir.path().canonicalize().unwrap();

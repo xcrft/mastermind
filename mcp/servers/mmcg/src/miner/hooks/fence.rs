@@ -5,6 +5,7 @@
 
 use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability, StableFileIdentity};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -32,19 +33,27 @@ fn directory() -> Result<PathBuf> {
 }
 
 fn prefix(client: &str, project: &Path) -> Result<String> {
-    if !matches!(client, "claude" | "codex") {
-        return Err("capture fence client must be claude or codex".into());
-    }
     let project = project.canonicalize()?;
     if !project.is_dir() {
         return Err("capture fence project must be a directory".into());
     }
-    let project = project
-        .to_str()
-        .ok_or("capture fence project is not UTF-8")?;
+    grant_prefix(
+        client,
+        project
+            .to_str()
+            .ok_or("capture fence project is not UTF-8")?,
+    )
+}
+
+/// The marker prefix of a grant whose canonical project root was stored
+/// earlier. The project directory itself may no longer exist.
+pub(super) fn grant_prefix(client: &str, project_root: &str) -> Result<String> {
+    if !matches!(client, "claude" | "codex") {
+        return Err("capture fence client must be claude or codex".into());
+    }
     let mut digest = Sha256::new();
     digest.update(b"mastermind-persona-capture-grant-v1\0");
-    digest.update(project.as_bytes());
+    digest.update(project_root.as_bytes());
     Ok(format!(
         "{client}-{}-",
         crate::hex::encode(&digest.finalize())
@@ -59,8 +68,92 @@ pub(super) fn pending(client: &str, root: &Path) -> Result<bool> {
     pending_at(&directory()?, &prefix(client, root)?)
 }
 
-pub(super) fn recover(client: &str, root: &Path) -> Result<()> {
-    recover_at(&directory()?, &prefix(client, root)?)
+/// This grant's markers, for status. Each one is a delivery that is still
+/// running or one that never reached the journal.
+pub(super) fn summary(client: &str, root: &Path) -> Result<Summary> {
+    let prefix = prefix(client, root)?;
+    Ok(markers_at(&directory()?)?
+        .map(|(_, markers)| {
+            Summary::of(
+                markers
+                    .iter()
+                    .filter(|marker| marker.name.starts_with(&prefix)),
+            )
+        })
+        .unwrap_or_default())
+}
+
+/// Every marker in the shared directory, grouped by grant prefix.
+pub(super) fn directory_summary() -> Result<BTreeMap<String, Summary>> {
+    let mut result = BTreeMap::<String, Summary>::new();
+    for marker in markers_at(&directory()?)?.map_or_else(Vec::new, |(_, markers)| markers) {
+        // A valid name is the prefix, a 32-digit nonce and the suffix.
+        let prefix = &marker.name[..marker.name.len() - SUFFIX.len() - 32];
+        result.entry(prefix.to_owned()).or_default().add(&marker);
+    }
+    Ok(result)
+}
+
+/// Lists and validates the directory. Nothing is removed before `remove`, so
+/// the caller can decide inside its own transaction.
+pub(super) fn recovery(client: &str, root: &Path) -> Result<Option<Recovery>> {
+    recovery_at(&directory()?, &prefix(client, root)?)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Summary {
+    pub count: usize,
+    pub oldest_modified_millis: Option<i64>,
+}
+
+impl Summary {
+    fn of<'a>(markers: impl Iterator<Item = &'a Marker>) -> Self {
+        let mut summary = Self::default();
+        for marker in markers {
+            summary.add(marker);
+        }
+        summary
+    }
+
+    fn add(&mut self, marker: &Marker) {
+        self.count += 1;
+        self.oldest_modified_millis = Some(
+            self.oldest_modified_millis
+                .map_or(marker.modified_millis, |oldest| {
+                    oldest.min(marker.modified_millis)
+                }),
+        );
+    }
+}
+
+pub(super) struct Recovery {
+    root: RootCapability,
+    markers: Vec<Marker>,
+}
+
+impl Recovery {
+    pub(super) fn remove(self) -> Result<()> {
+        for marker in self.markers {
+            match bounded_fs::remove_regular_file_expected_with_capability(
+                &self.root,
+                &marker.path,
+                marker.identity,
+            ) {
+                // The delivery that owns it can still finish and clear it.
+                Err(BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                result => result?,
+            }
+        }
+        Ok(())
+    }
+}
+
+struct Marker {
+    name: String,
+    path: PathBuf,
+    identity: StableFileIdentity,
+    modified_millis: i64,
 }
 
 impl Fence {
@@ -119,29 +212,59 @@ fn lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn foreign_entry(root: &RootCapability, name: &std::ffi::OsStr) -> Box<dyn Error> {
+    format!(
+        "unexpected entry {:?} in the capture fence directory {}; move it out of that directory, then retry",
+        name.to_string_lossy(),
+        root.canonical_root().display()
+    )
+    .into()
+}
+
+// Other deliveries create and clear their markers during this read. A changed
+// listing is read again. Constant churn still fails closed after the bounded
+// attempts.
+fn list(root: &RootCapability, limit: usize) -> Result<Vec<std::ffi::OsString>> {
+    let mut attempts = 0;
+    loop {
+        match bounded_fs::read_directory_names_with_capability(
+            root,
+            root.canonical_root(),
+            limit,
+            ReadControl::default(),
+        ) {
+            Err(BoundedReadError::SnapshotChanged) if attempts < 8 => attempts += 1,
+            result => return Ok(result?),
+        }
+    }
+}
+
 // Validate the complete bounded directory before treating it as absence or
 // starting recovery. Foreign, oversized or special files are never ignored.
-fn markers(root: &RootCapability, limit: usize) -> Result<Vec<(PathBuf, StableFileIdentity)>> {
-    let names = bounded_fs::read_directory_names_with_capability(
-        root,
-        root.canonical_root(),
-        limit,
-        ReadControl::default(),
-    )?;
-    marker_entries(root, names, false)
+// A marker that a finished delivery cleared after the listing is absent.
+fn markers_at(directory: &Path) -> Result<Option<(RootCapability, Vec<Marker>)>> {
+    markers_up_to(directory, MAX_DIRECTORY_FILES)
+}
+
+fn markers_up_to(directory: &Path, limit: usize) -> Result<Option<(RootCapability, Vec<Marker>)>> {
+    let Some(root) = existing(directory)? else {
+        return Ok(None);
+    };
+    let names = list(&root, limit)?;
+    let markers = marker_entries(&root, names, true)?;
+    Ok(Some((root, markers)))
 }
 
 fn marker_entries(
     root: &RootCapability,
     names: Vec<std::ffi::OsString>,
     allow_disappeared: bool,
-) -> Result<Vec<(PathBuf, StableFileIdentity)>> {
+) -> Result<Vec<Marker>> {
     let mut result = Vec::with_capacity(names.len());
     for name in names {
-        let name = name.to_str().ok_or("invalid capture fence filename")?;
-        if !valid_name(name) {
-            return Err("unexpected capture fence directory entry".into());
-        }
+        let Some(name) = name.to_str().filter(|name| valid_name(name)) else {
+            return Err(foreign_entry(root, &name));
+        };
         let path = root.canonical_root().join(name);
         let file = match bounded_fs::read_regular_file_with_capability(
             root,
@@ -175,7 +298,12 @@ fn marker_entries(
             }
             Err(error) => return Err(error.into()),
         };
-        result.push((path, file.identity));
+        result.push(Marker {
+            name: name.to_owned(),
+            path,
+            identity: file.identity,
+            modified_millis: file.modified_millis,
+        });
     }
     Ok(result)
 }
@@ -217,25 +345,34 @@ fn begin_at(directory: &Path, prefix: &str) -> Result<Fence> {
         MAX_DIRECTORY_FILES,
         ReadControl::default(),
     ) {
-        Ok(names) if names.len() >= MAX_DIRECTORY_FILES => {
-            return Err(
-                "capture fence directory is full; other projects hold the markers, recover each of them with miner hooks recover"
-                    .into(),
-            );
-        }
-        Ok(names)
+        Ok(names) => {
+            // A foreign entry would fail admission after the marker exists,
+            // and every later delivery would leave one more marker behind.
+            if let Some(name) = names
+                .iter()
+                .find(|name| !name.to_str().is_some_and(valid_name))
+            {
+                return Err(foreign_entry(&root, name));
+            }
+            if names.len() >= MAX_DIRECTORY_FILES {
+                return Err(
+                    "capture fence directory is full; other projects hold the markers, recover each of them with miner hooks recover"
+                        .into(),
+                );
+            }
             if names
                 .iter()
                 .filter(|name| name.to_str().is_some_and(|name| name.starts_with(prefix)))
                 .count()
-                >= MAX_PROJECT_FILES =>
-        {
-            return Err(
-                "capture fence limit reached; inspect miner hooks status, then run miner hooks recover"
-                    .into(),
-            );
+                >= MAX_PROJECT_FILES
+            {
+                return Err(
+                    "capture fence limit reached; inspect miner hooks status, then run miner hooks recover"
+                        .into(),
+                );
+            }
         }
-        Ok(_) | Err(BoundedReadError::SnapshotChanged) => {}
+        Err(BoundedReadError::SnapshotChanged) => {}
         Err(error) => return Err(error.into()),
     }
     for _ in 0..8 {
@@ -276,45 +413,25 @@ fn begin_at(directory: &Path, prefix: &str) -> Result<Fence> {
 }
 
 fn pending_at(directory: &Path, prefix: &str) -> Result<bool> {
-    let Some(root) = existing(directory)? else {
-        return Ok(false);
-    };
-    // Other deliveries create and clear their markers during this read. A
-    // cleared marker is absent, and a changed listing is read again. Constant
-    // churn still fails closed after the bounded attempts.
-    let mut attempts = 0;
-    let names = loop {
-        match bounded_fs::read_directory_names_with_capability(
-            &root,
-            root.canonical_root(),
-            MAX_DIRECTORY_FILES,
-            ReadControl::default(),
-        ) {
-            Err(BoundedReadError::SnapshotChanged) if attempts < 8 => attempts += 1,
-            result => break result?,
-        }
-    };
-    Ok(marker_entries(&root, names, true)?.iter().any(|(path, _)| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(prefix))
-    }))
+    Ok(markers_at(directory)?
+        .is_some_and(|(_, markers)| markers.iter().any(|marker| marker.name.starts_with(prefix))))
 }
 
+fn recovery_at(directory: &Path, prefix: &str) -> Result<Option<Recovery>> {
+    Ok(
+        markers_up_to(directory, MAX_RECOVERY_FILES)?.map(|(root, markers)| Recovery {
+            root,
+            markers: markers
+                .into_iter()
+                .filter(|marker| marker.name.starts_with(prefix))
+                .collect(),
+        }),
+    )
+}
+
+#[cfg(test)]
 fn recover_at(directory: &Path, prefix: &str) -> Result<()> {
-    let Some(root) = existing(directory)? else {
-        return Ok(());
-    };
-    for (path, identity) in markers(&root, MAX_RECOVERY_FILES)? {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(prefix))
-        {
-            bounded_fs::remove_regular_file_expected_with_capability(&root, &path, identity)?;
-        }
-    }
-    Ok(())
+    recovery_at(directory, prefix)?.map_or(Ok(()), Recovery::remove)
 }
 
 #[cfg(test)]
@@ -396,6 +513,80 @@ mod tests {
             reads += 1;
         }
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn recovery_tolerates_other_projects_finishing_their_deliveries() {
+        let f = Fixture::new();
+        let key = f.key("codex");
+        let other = f.key("claude");
+        begin_at(&f.directory, &other).unwrap().clear().unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = {
+            let (directory, done) = (f.directory.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..300 {
+                    begin_at(&directory, &other).unwrap().clear().unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        let mut attempts = 0;
+        while !done.load(std::sync::atomic::Ordering::Acquire) {
+            begin_at(&f.directory, &key).unwrap();
+            let result = recover_at(&f.directory, &key);
+            assert!(result.is_ok(), "attempt {attempts}: {result:?}");
+            attempts += 1;
+        }
+        worker.join().unwrap();
+        assert!(!pending_at(&f.directory, &key).unwrap());
+    }
+
+    #[test]
+    fn a_foreign_entry_is_named_and_refused_before_a_marker_is_created() {
+        let f = Fixture::new();
+        let key = f.key("codex");
+        begin_at(&f.directory, &key).unwrap().clear().unwrap();
+        std::fs::write(f.directory.join(".DS_Store"), b"finder").unwrap();
+        for _ in 0..3 {
+            let refused = begin_at(&f.directory, &key).err().unwrap().to_string();
+            assert!(refused.contains("\".DS_Store\""), "{refused}");
+        }
+        assert_eq!(std::fs::read_dir(&f.directory).unwrap().count(), 1);
+        for refused in [
+            pending_at(&f.directory, &key).err(),
+            recover_at(&f.directory, &key).err(),
+        ] {
+            let refused = refused.unwrap().to_string();
+            assert!(refused.contains("\".DS_Store\""), "{refused}");
+        }
+    }
+
+    #[test]
+    fn summaries_count_markers_per_grant() {
+        let f = Fixture::new();
+        let key = f.key("codex");
+        let other = f.key("claude");
+        let _first = begin_at(&f.directory, &key).unwrap();
+        let _second = begin_at(&f.directory, &key).unwrap();
+        let _third = begin_at(&f.directory, &other).unwrap();
+        let (_, markers) = markers_at(&f.directory).unwrap().unwrap();
+        let own = Summary::of(
+            markers
+                .iter()
+                .filter(|marker| marker.name.starts_with(&key)),
+        );
+        assert_eq!(own.count, 2);
+        let oldest = markers
+            .iter()
+            .filter(|marker| marker.name.starts_with(&key))
+            .map(|marker| marker.modified_millis)
+            .min();
+        assert_eq!(own.oldest_modified_millis, oldest);
+        assert_eq!(
+            grant_prefix("codex", f.project.canonicalize().unwrap().to_str().unwrap()).unwrap(),
+            key
+        );
     }
 
     #[test]

@@ -176,7 +176,7 @@ fn source(conn: &Connection, binding: &TaskBinding) -> Result<IntakeReceipt, Err
                 && event.kind == "UserPromptSubmit"
                 && event.origin == "user_channel_unverified"
                 && event.text == receipt.input.original
-                && super::super::refiner::prompt_digest(&event.text) == receipt.input.prompt_digest
+                && crate::hex::sha256(&event.text) == receipt.input.prompt_digest
         })
     {
         return Err("bound intake evidence is incomplete".into());

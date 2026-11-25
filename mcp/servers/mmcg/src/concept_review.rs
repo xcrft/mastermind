@@ -323,8 +323,6 @@ struct PreparedRequest<'a> {
     request_contract: RequestContract,
 }
 
-use crate::hex::sha256 as sha;
-
 fn failure(reason: &'static str) -> String {
     reason.into()
 }
@@ -349,7 +347,7 @@ fn packet_digest(packet: &ReviewPacket) -> Result<String, String> {
     unhashed.packet_sha256.clear();
     unhashed.assessment_template.packet_sha256.clear();
     serde_json::to_vec(&unhashed)
-        .map(|bytes| sha(&bytes))
+        .map(|bytes| crate::hex::sha256(&bytes))
         .map_err(|_| failure("concept_review_serialization_failed"))
 }
 
@@ -784,7 +782,7 @@ fn prepare_snapshot(
             continue;
         }
         aggregate_bytes += bytes.len();
-        let digest = sha(&bytes);
+        let digest = crate::hex::sha256(&bytes);
         if store
             .file_content_sha256(&path)
             .map_err(|_| failure("concept_review_index_unavailable"))?
@@ -994,7 +992,7 @@ fn prepare_snapshot(
         ))
         .map_err(|_| failure("concept_review_serialization_failed"))?;
         candidates.push(ReviewCandidate {
-            id: sha(&identity),
+            id: crate::hex::sha256(&identity),
             symbol_id: row.symbol.id,
             name: row.symbol.name.clone(),
             kind: row.symbol.kind.clone(),
@@ -1018,7 +1016,7 @@ fn prepare_snapshot(
         check_work(store)?;
         let bytes =
             load_file(store, root, path).map_err(|_| failure("concept_review_source_changed"))?;
-        if sha(&bytes) != file.digest {
+        if crate::hex::sha256(&bytes) != file.digest {
             return Err(failure("concept_review_source_changed"));
         }
     }
@@ -1152,7 +1150,7 @@ fn validate_supporting_evidence(
         if !cache.contains_key(&citation.path) {
             let bytes = load_file(store, root, &citation.path)
                 .map_err(|_| failure("concept_review_source_changed"))?;
-            let digest = sha(&bytes);
+            let digest = crate::hex::sha256(&bytes);
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| failure("concept_review_source_changed"))?;
             cache.insert(

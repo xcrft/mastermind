@@ -212,7 +212,6 @@ def run_vanilla(
             )
             payload, _, executions = runner.parse_claude_output(
                 stdout,
-                streamed=True,
                 runtime_contract=runtime_contract,
             )
         except (json.JSONDecodeError, TypeError, ValueError):

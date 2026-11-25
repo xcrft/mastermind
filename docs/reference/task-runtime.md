@@ -52,7 +52,10 @@ approval and, like every approval, requires audit and review to run again. State
 without the field uses 32 MiB, and an approval whose value differs from its
 state is rejected with `preflight_approval_binding_mismatch`. A release that
 predates these fields rejects `state.json`, manifests and approval records that
-carry them, so finish or close open tasks before moving to it. A budget that
+carry them, so finish or close open tasks before moving to it. `state.json`
+also records its `format_version`. A release that reads the field refuses a
+newer format by its version and asks for the newer binary. State written
+before the field is read as format 1. A budget that
 runs out is reported with its setting, limit, counted bytes, the next file and
 the `init` flag.
 

@@ -9,6 +9,7 @@ import os
 import re
 import stat
 
+from evals.shared.strict_json import strict_json
 
 FILE_BYTE_LIMIT = 2 * 1024 * 1024
 
@@ -32,18 +33,9 @@ def digest(value: object) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-def _pairs(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
 def parse_json(body: bytes) -> dict:
     try:
-        value = json.loads(body, object_pairs_hook=_pairs)
+        value = strict_json(body)
         if not isinstance(value, dict):
             raise ValueError("expected a JSON object")
         # Reject non-finite numbers and unpaired Unicode surrogates, including

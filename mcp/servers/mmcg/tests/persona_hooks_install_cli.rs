@@ -30,6 +30,8 @@ impl Fixture {
     fn run(&self, client: &str, extra: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_mmcg"))
             .current_dir(&self.project)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
             .env("CODEX_HOME", self.home.join("custom-codex"))

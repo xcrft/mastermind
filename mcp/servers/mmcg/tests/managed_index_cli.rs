@@ -216,7 +216,7 @@ fn source_symlink_is_named_by_index_and_index_stale() {
     std::os::unix::fs::symlink("probe.py", fixture.root.join("alias.py")).unwrap();
 
     let index = fixture.command().args(["index", "."]).output().unwrap();
-    assert_success(&index);
+    assert_eq!(index.status.code(), Some(1), "{index:?}");
     let stderr = String::from_utf8_lossy(&index.stderr);
     assert!(stderr.contains("failed source: \"alias.py\""), "{stderr}");
 

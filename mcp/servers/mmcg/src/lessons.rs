@@ -458,7 +458,7 @@ fn evidence_matches_identity(evidence: &str, identity: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with(';'))
 }
 
-fn markdown_path(path: &str) -> String {
+pub(crate) fn markdown_path(path: &str) -> String {
     let mut escaped = String::with_capacity(path.len());
     for character in path.chars() {
         match character {
@@ -472,21 +472,18 @@ fn markdown_path(path: &str) -> String {
             character => escaped.push(character),
         }
     }
-    let mut longest_run = 0;
-    let mut current_run = 0;
-    for character in escaped.chars() {
-        if character == '`' {
-            current_run += 1;
-            longest_run = longest_run.max(current_run);
-        } else {
-            current_run = 0;
-        }
-    }
+    code_span(&escaped)
+}
+
+/// Wraps text in a Markdown code span whose delimiter is longer than any
+/// backtick run inside it, padding with spaces when the text touches a backtick.
+pub(crate) fn code_span(text: &str) -> String {
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let delimiter = "`".repeat(longest_run + 1);
-    if escaped.starts_with('`') || escaped.ends_with('`') {
-        format!("{delimiter} {escaped} {delimiter}")
+    if text.starts_with('`') || text.ends_with('`') {
+        format!("{delimiter} {text} {delimiter}")
     } else {
-        format!("{delimiter}{escaped}{delimiter}")
+        format!("{delimiter}{text}{delimiter}")
     }
 }
 

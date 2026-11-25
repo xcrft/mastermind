@@ -6,7 +6,6 @@
 
 use crate::bounded_fs::{self, AbsentPath, ReadControl, RootCapability, StableFileIdentity};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -22,7 +21,6 @@ const SOURCES: [(&str, &str); 2] = [
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub schema_version: u32,
-    #[serde(deserialize_with = "unique_sources")]
     pub sources: BTreeMap<String, Source>,
 }
 
@@ -37,33 +35,6 @@ pub struct Source {
 
 fn required_digest<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
-}
-
-fn unique_sources<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<BTreeMap<String, Source>, D::Error> {
-    struct Sources;
-    impl<'de> serde::de::Visitor<'de> for Sources {
-        type Value = BTreeMap<String, Source>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a source map without duplicate keys")
-        }
-
-        fn visit_map<A: serde::de::MapAccess<'de>>(
-            self,
-            mut entries: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut sources = BTreeMap::new();
-            while let Some((key, value)) = entries.next_entry::<String, Source>()? {
-                if sources.insert(key, value).is_some() {
-                    return Err(serde::de::Error::custom("duplicate knowledge source"));
-                }
-            }
-            Ok(sources)
-        }
-    }
-    deserializer.deserialize_map(Sources)
 }
 
 enum Witness {
@@ -106,7 +77,7 @@ pub(crate) fn capture(root: &RootCapability) -> Result<Snapshot, String> {
                 std::str::from_utf8(&file.bytes)
                     .map_err(|_| "history_disposition_source_invalid_utf8")?;
                 (
-                    Some(crate::hex::encode(&Sha256::digest(&file.bytes))),
+                    Some(crate::hex::sha256(&file.bytes)),
                     Witness::Present(file.identity),
                 )
             }
@@ -338,7 +309,7 @@ mod tests {
         assert_ne!(empty, absent);
         assert_eq!(
             empty.sources["context"].sha256,
-            Some(crate::hex::encode(&Sha256::digest(b"")))
+            Some(crate::hex::sha256(b""))
         );
         assert!(empty.sources["lessons"].sha256.is_none());
         fs::create_dir_all(temp.path().join(".mastermind/tasks/archive")).unwrap();
@@ -426,7 +397,7 @@ mod tests {
             assert!(validate_snapshot(&changed).is_err(), "{mutation}");
         }
         assert!(serde_json::from_str::<Source>(r#"{"path":"CONTEXT.md"}"#).is_err());
-        assert!(serde_json::from_str::<Snapshot>(r#"{"schema_version":1,"sources":{"context":{"path":"CONTEXT.md","sha256":null},"context":{"path":"CONTEXT.md","sha256":null}}}"#).is_err());
+        assert!(crate::strict_json::from_slice::<Snapshot>(br#"{"schema_version":1,"sources":{"context":{"path":"CONTEXT.md","sha256":null},"context":{"path":"CONTEXT.md","sha256":null}}}"#, crate::strict_json::Floats::Reject).is_err());
         let mut wire = serde_json::to_value(snapshot).unwrap();
         wire["unexpected"] = true.into();
         assert!(serde_json::from_value::<Snapshot>(wire).is_err());

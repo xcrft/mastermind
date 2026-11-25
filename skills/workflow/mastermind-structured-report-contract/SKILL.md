@@ -9,10 +9,12 @@ metadata:
 
 # Structured report contract
 
-The only canonical machine-consumed agent handoff is
-`<task>/executor-report.md`. The Rust controller reads that file, extracts its
-sentinel-wrapped YAML, validates schema v1, and uses its supported claims and
-verification observations during post-flight.
+The only canonical machine-consumed agent handoff is the executor report at
+the path `run-task --pre-only` printed: `<task>/executor-report.md` for a
+`spec.md`, `<stem>.executor-report.md` beside any other spec. The Rust
+controller reads that file, extracts its sentinel-wrapped YAML, validates
+schema v1, and uses its supported claims and verification observations during
+post-flight.
 
 A copy returned in chat is useful to humans but is not the lifecycle record.
 The controller does not scrape planner chat, automatically patch a spec, or
@@ -20,7 +22,7 @@ re-spawn an executor. Missing or malformed file evidence fails post-flight.
 
 ## Executor tail
 
-Append this tail to the prose report in `executor-report.md`:
+Append this tail to the prose report in the executor report:
 
 ````markdown
 <!-- mastermind:report-begin -->

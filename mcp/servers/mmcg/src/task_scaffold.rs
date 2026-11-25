@@ -120,6 +120,13 @@ pub fn ensure_repository_directory(repo_root: &Path, path: &Path) -> std::io::Re
     Ok(missing)
 }
 
+/// Whether an entry under `.mastermind/tasks` can be a task. Names that start
+/// with `_` or `.` hold drafts, archives and shared files such as
+/// `_lessons.md`, so no command treats them as tasks.
+pub fn is_task_entry(name: &str) -> bool {
+    !name.starts_with('_') && !name.starts_with('.')
+}
+
 /// Enumerate canonical task contracts without following repository links or
 /// retaining an unbounded directory listing. `None` means the task directory
 /// is absent; an existing linked or non-directory path is an error.
@@ -148,6 +155,9 @@ pub fn discover_canonical_task_specs(repo_root: &Path) -> std::io::Result<Option
     .map_err(into_io_error)?;
     let mut specs = Vec::new();
     for name in names {
+        if name.to_str().is_some_and(|name| !is_task_entry(name)) {
+            continue;
+        }
         let task_dir = tasks_dir.join(name);
         match inspect_path_kind_with_capability(&root, &task_dir, ReadControl::default()) {
             Ok(BoundedPathKind::Directory) => {}
@@ -201,7 +211,12 @@ pub fn discover_legacy_flat_specs(repo_root: &Path) -> std::io::Result<Vec<Strin
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.ends_with(".md") || name.starts_with('_') || name.starts_with('.') {
+        // A legacy spec's own report and audit sit beside it as `<stem>.*.md`.
+        if !name.ends_with(".md")
+            || !is_task_entry(name)
+            || name.ends_with(".executor-report.md")
+            || name.ends_with(".audit.md")
+        {
             continue;
         }
         let path = tasks_dir.join(name);
@@ -417,6 +432,36 @@ mod tests {
         assert_eq!(
             discover_legacy_flat_specs(root.path()).unwrap(),
             vec!["003-legacy.md"]
+        );
+    }
+
+    #[test]
+    fn entries_that_start_with_an_underscore_or_a_dot_are_not_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = root.path().join(".mastermind/tasks");
+        for task in ["001-real", "_draft", ".archive"] {
+            std::fs::create_dir_all(tasks.join(task)).unwrap();
+            std::fs::write(tasks.join(task).join("spec.md"), "# Spec\n").unwrap();
+        }
+        assert_eq!(
+            discover_canonical_task_specs(root.path()).unwrap(),
+            Some(vec![tasks.join("001-real/spec.md")])
+        );
+        assert!(is_task_entry("001-real"));
+        assert!(!is_task_entry("_draft") && !is_task_entry(".archive"));
+    }
+
+    #[test]
+    fn a_legacy_flat_spec_is_counted_once_beside_its_own_report_and_audit() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = root.path().join(".mastermind/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        for file in ["050-a.md", "050-a.audit.md", "050-a.executor-report.md"] {
+            std::fs::write(tasks.join(file), "# Spec\n").unwrap();
+        }
+        assert_eq!(
+            discover_legacy_flat_specs(root.path()).unwrap(),
+            vec!["050-a.md"]
         );
     }
 

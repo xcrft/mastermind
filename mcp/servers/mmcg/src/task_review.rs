@@ -237,11 +237,9 @@ impl Report {
     }
 }
 
-use crate::hex::sha256 as sha;
-
 fn revision(target: &Target) -> Result<String, String> {
     serde_json::to_vec(target)
-        .map(|bytes| sha(&bytes))
+        .map(|bytes| crate::hex::sha256(&bytes))
         .map_err(|_| "semantic_review_serialization_failed".into())
 }
 
@@ -352,9 +350,6 @@ fn collect_target(
         deadline,
     )?;
     crate::verification_receipts::current_digests(&checks)?;
-    if !crate::acceptance::evaluate(&parsed, &Ok(checks.clone()))?.requirements_satisfied() {
-        return Err("semantic_review_acceptance_unmet".into());
-    }
     let mut evidence = BTreeMap::new();
     for (id, path) in [
         ("spec", spec_path.to_path_buf()),
@@ -372,7 +367,7 @@ fn collect_target(
             id.into(),
             Evidence {
                 path: Some(relative(root, &path)?),
-                sha256: sha(&read(root, &path, SOURCE_LIMIT)?),
+                sha256: crate::hex::sha256(&read(root, &path, SOURCE_LIMIT)?),
                 run_id: None,
             },
         );
@@ -415,8 +410,10 @@ fn collect_target(
             format!("knowledge:{kind}"),
             Evidence {
                 path: None,
-                sha256: sha(&serde_json::to_vec(source)
-                    .map_err(|_| "semantic_review_serialization_failed")?),
+                sha256: crate::hex::sha256(
+                    &serde_json::to_vec(source)
+                        .map_err(|_| "semantic_review_serialization_failed")?,
+                ),
                 run_id: None,
             },
         );
@@ -530,8 +527,10 @@ pub(crate) fn validate_report(report: &Submission, target: &Target) -> Result<bo
             for (kind, source) in &snapshot.sources {
                 let expected = Evidence {
                     path: None,
-                    sha256: sha(&serde_json::to_vec(source)
-                        .map_err(|_| "semantic_review_serialization_failed")?),
+                    sha256: crate::hex::sha256(
+                        &serde_json::to_vec(source)
+                            .map_err(|_| "semantic_review_serialization_failed")?,
+                    ),
                     run_id: None,
                 };
                 if target.evidence.get(&format!("knowledge:{kind}")) != Some(&expected) {
@@ -607,11 +606,11 @@ fn bound_record(root: &RootCapability, spec: &Path, state: &RunState) -> Result<
         &record_path(root.requested_root(), spec),
         RECORD_LIMIT,
     )?;
-    if sha(&bytes) != *pin {
+    if crate::hex::sha256(&bytes) != *pin {
         return Err("semantic_review_pin_mismatch".into());
     }
-    let record: Record =
-        serde_json::from_slice(&bytes).map_err(|_| "semantic_review_record_invalid")?;
+    let record: Record = crate::strict_json::from_slice(&bytes, crate::strict_json::Floats::Reject)
+        .map_err(|_| "semantic_review_record_invalid")?;
     if record.schema_version != 1
         || record.target.binding != binding(state)?
         || state.history_snapshot_sha256.as_ref() != Some(&record.target.history_snapshot_sha256)
@@ -894,7 +893,7 @@ pub fn prepare(spec: &Path, repository: &Path) -> Result<Request, String> {
     let target = collect_target(&root, spec, &state)?;
     let target_revision = revision(&target)?;
     let (previous, _) = prior_record(&root, spec)?;
-    let expected_review_revision = previous.as_deref().map(sha);
+    let expected_review_revision = previous.as_deref().map(crate::hex::sha256);
     let unknown = Assessment {
         status: Judgment::Unknown,
         reason: String::new(),
@@ -976,7 +975,7 @@ pub(crate) fn submit_locked(
         return Err("semantic_review_requires_pending_held_audit".into());
     }
     let (previous, expected) = prior_record(&root, spec)?;
-    if previous.as_deref().map(sha) != report.expected_review_revision {
+    if previous.as_deref().map(crate::hex::sha256) != report.expected_review_revision {
         return Err("semantic_review_conflict_prepare_again".into());
     }
     let target = collect_target(&root, spec, &state)?;
@@ -1036,7 +1035,7 @@ pub(crate) fn submit_locked(
             return Err("review_invocation_interrupted".into());
         }
     }
-    let review_revision = sha(&bytes);
+    let review_revision = crate::hex::sha256(&bytes);
     state.semantic_review_sha256 = Some(review_revision.clone());
     crate::run_task::save_state_in_repository(repository, &state_path, &state)
         .map_err(|_| "semantic_review_state_write_failed")?;

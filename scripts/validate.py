@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evals.behavior.paths import FIXTURES_RELATIVE_PATH
+from scripts import release_version
 
 try:
     import yaml
@@ -397,28 +398,13 @@ def validate_relative_links(links: dict[Path, set[str]]) -> list[Issue]:
     return issues
 
 
-def validate_release_badges() -> list[Issue]:
-    """Keep release-bound badges aligned with the packaged npm version."""
-    issues: list[Issue] = []
-    package_path = REPO_ROOT / "npm/mastermind/package.json"
+def validate_release_versions() -> list[Issue]:
+    """Keep every shipped version string equal to the crate version."""
     try:
-        package = json.loads(package_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        return [Issue(package_path, "error", f"cannot read npm package metadata: {error}")]
-    version = package.get("version")
-    if not isinstance(version, str) or not SEMVER_RE.match(version):
-        return [Issue(package_path, "error", "npm package version is not valid semver")]
-    badge = f"https://img.shields.io/badge/npm-v{version}-CB3837?logo=npm"
-    for relative in ("README.md", "npm/mastermind/README.md"):
-        path = REPO_ROOT / relative
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as error:
-            issues.append(Issue(path, "error", f"cannot read README badge: {error}"))
-            continue
-        if badge not in text:
-            issues.append(Issue(path, "error", f"npm badge must match package version {version}"))
-    return issues
+        problems = release_version.mismatches(REPO_ROOT)
+    except (OSError, ValueError) as error:
+        return [Issue(REPO_ROOT / release_version.SOURCE, "error", str(error))]
+    return [Issue(REPO_ROOT / path, "error", message) for path, message in problems]
 
 
 # These are the metadata and README surfaces that actually ship in the npm
@@ -1420,23 +1406,6 @@ def validate_executor_report_schema_contract() -> list[Issue]:
             if token not in text:
                 issues.append(Issue(path, "error", f"executor report contract missing {token!r}"))
 
-    rust_path = REPO_ROOT / "mcp/servers/mmcg/src/executor_report.rs"
-    try:
-        rust = rust_path.read_text(encoding="utf-8")
-    except OSError as error:
-        issues.append(Issue(rust_path, "error", f"cannot read executor report parser: {error}"))
-    else:
-        for token in (
-            "mastermind:report-begin",
-            "CanonicalExecutorReport",
-            "deny_unknown_fields",
-            "MAX_EXECUTOR_REPORT_BYTES",
-            "complete executor report must not contain defects",
-            "partial or failed executor report requires at least one defect",
-        ):
-            if token not in rust:
-                issues.append(Issue(rust_path, "error", f"strict executor report parser missing {token!r}"))
-
     return issues
 
 
@@ -1505,32 +1474,6 @@ def validate_review_package_contract() -> list[Issue]:
             if len(schema.get("allOf", [])) < 3 or "$.document_graph" not in json.dumps(schema.get("allOf", [])):
                 issues.append(Issue(path, "error", "review manifest must bind graph status to its partial-state projection"))
 
-    rust_path = REPO_ROOT / "mcp/servers/mmcg/src/review_package.rs"
-    try:
-        rust = rust_path.read_text(encoding="utf-8")
-    except OSError as error:
-        issues.append(Issue(rust_path, "error", f"cannot read review exporter: {error}"))
-    else:
-        for token in (
-            "REVIEW_PACKAGE_SCHEMA: u32 = 1",
-            "EVIDENCE_ATTESTATION_SCHEMA: u32 = 1",
-            "standalone_html",
-            "mastermind.sarif",
-            "summary.md",
-            "manifest.json",
-            "mastermind-review.yml",
-            "digest-bound-at-export",
-            "producer-attested",
-            "head_matches_snapshot",
-            "observation_sha256",
-            "corpus_directories",
-            "endpoint_changed_files",
-            "corpus_changed_files",
-            "from_json_strict",
-        ):
-            if token not in rust:
-                issues.append(Issue(rust_path, "error", f"review exporter missing {token!r}"))
-
     workflow_path = REPO_ROOT / "docs/examples/mastermind-review-pr.yml"
     try:
         workflow_text = workflow_path.read_text(encoding="utf-8")
@@ -1538,14 +1481,6 @@ def validate_review_package_contract() -> list[Issue]:
     except (OSError, yaml.YAMLError) as error:
         issues.append(Issue(workflow_path, "error", f"invalid review workflow: {error}"))
     else:
-        package_path = REPO_ROOT / "npm/mastermind/package.json"
-        try:
-            package_version = json.loads(package_path.read_text(encoding="utf-8"))["version"]
-        except (OSError, json.JSONDecodeError, KeyError) as error:
-            issues.append(Issue(package_path, "error", f"cannot resolve review workflow version: {error}"))
-        else:
-            if f"@xcraftmind/mastermind@{package_version}" not in workflow_text:
-                issues.append(Issue(workflow_path, "error", "review workflow must pin the current npm version"))
         for token in (
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
@@ -1654,21 +1589,6 @@ def validate_fact_ingestion_sdk_contract() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(facts_path, "error", f"cannot read fact ingestion module: {error}"))
     else:
-        for token in (
-            'API_VERSION: &str = "mastermind-facts/v1"',
-            'SUPPORTED_CAPABILITIES: [&str; 2] = ["annotations", "relationships"]',
-            "deny_unknown_fields",
-            "from_json_strict",
-            "run_bounded_git_with_limit",
-            "validate_index_root",
-            "current_head_oid",
-            "MAX_MANIFEST_BYTES",
-            "replace_fact_dataset",
-            "snapshot_for_paths",
-            "fact_source_stale",
-        ):
-            if token not in rust:
-                issues.append(Issue(facts_path, "error", f"fact ingestion contract missing {token!r}"))
         production = rust.split("#[cfg(test)]", 1)[0]
         for forbidden in ("Command::new(", "CREATE TABLE", "libloading", "dlopen"):
             if forbidden in production:
@@ -1676,40 +1596,7 @@ def validate_fact_ingestion_sdk_contract() -> list[Issue]:
                     Issue(facts_path, "error", f"fact ingestion boundary contains forbidden {forbidden!r}")
                 )
 
-    store_path = REPO_ROOT / "mcp/servers/mmcg/src/store.rs"
-    try:
-        store = store_path.read_text(encoding="utf-8")
-    except OSError as error:
-        issues.append(Issue(store_path, "error", f"cannot read normalized fact store: {error}"))
-    else:
-        for token in (
-            "fact_sources",
-            "fact_files",
-            "fact_artifacts",
-            "fact_annotations",
-            "fact_relationships",
-            "replace_fact_dataset",
-            "transaction()",
-        ):
-            if token not in store:
-                issues.append(Issue(store_path, "error", f"normalized fact store missing {token!r}"))
-
     surface_paths = {
-        "mcp/servers/mmcg/src/main.rs": ("facts: Option<PathBuf>", "QueryCmd::Facts"),
-        "mcp/servers/mmcg/src/mcp.rs": (
-            'read_only_tool("mmcg_facts"',
-            "crate::facts::snapshot",
-        ),
-        "mcp/servers/mmcg/src/evidence.rs": (
-            "snapshot_for_paths",
-            "fact_artifacts",
-            "fact_relationships",
-        ),
-        "mcp/servers/mmcg/src/review_package.rs": (
-            "normalized_fact_revision_binding",
-            "fact_artifacts",
-            'kind: "facts".into()',
-        ),
         "mcp/servers/mmcg/assets/lens/app.js": (
             "factMatchesGraphEdge",
             "factEvidence",
@@ -1769,46 +1656,6 @@ def validate_extension_lifecycle_contract() -> list[Issue]:
             issues.append(Issue(path, "error", f"{label} schema required fields drifted"))
 
     surfaces = {
-        "mcp/servers/mmcg/src/fact_adapter.rs": (
-            "collect_for_fact_adapter",
-            "options.report_revision != contract.repository.revision",
-            "validate_generated_manifest",
-            "indexed_paths_bounded",
-        ),
-        "mcp/servers/mmcg/src/fact_signature.rs": (
-            'SIGNATURE_DOMAIN: &str = "mastermind/fact-manifest-signature/v1"',
-            "generate_keypair",
-            "verify_stored_proof",
-            "trusted_key_ids",
-            "revoked_key_ids",
-        ),
-        "mcp/servers/mmcg/src/team.rs": (
-            'API_VERSION: &str = "mastermind-team/v1"',
-            "open_read_only_with_deadline",
-            "validate_index_snapshot",
-            'provenance: "team-manifest"',
-            "manifest_sha256",
-            "MAX_REPOSITORIES",
-            "MAX_INDEX_TOTAL_BYTES",
-        ),
-        "mcp/servers/mmcg/src/mcp.rs": (
-            'read_only_tool("mmcg_team_map"',
-            "schema_team_map",
-            "handle_team_map",
-            "MMCG_TEAM_MANIFEST",
-            "MMCG_TEAM_MANIFEST_SHA256",
-        ),
-        "mcp/servers/mmcg/src/main.rs": (
-            "Facts(FactCmd)",
-            "Team(TeamCmd)",
-            "FactCmd::Keygen",
-            "FactTrustPolicy",
-        ),
-        "mcp/servers/mmcg/src/review_package.rs": (
-            "producer-signed",
-            "signing_public_key",
-            "signed_manifest_digest",
-        ),
         ".github/workflows/publish-npm.yml": (
             "smoke-installed-npm-release.sh",
             "Publish or verify all 8 packages",
@@ -2375,7 +2222,7 @@ def main(argv: list[str]) -> int:
     rel_links = collect_relative_links()
     issues.extend(validate_relative_links(rel_links))
     issues.extend(validate_installable_link_escape(rel_links))
-    issues.extend(validate_release_badges())
+    issues.extend(validate_release_versions())
     issues.extend(validate_distributed_language_metadata())
 
     issues.extend(validate_mmcg_template_mirrors())

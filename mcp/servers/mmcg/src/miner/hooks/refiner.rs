@@ -6,7 +6,6 @@
 
 use super::{semantic, Error};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -15,6 +14,8 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_CONTEXT_BYTES: usize = 8 * 1024;
 const MAX_QUESTION_BYTES: usize = 1024;
 const MAX_EVIDENCE_BYTES: usize = 2 * 1024;
+
+pub(super) const MAX_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +28,7 @@ pub struct Config {
 
 impl Config {
     pub fn validate(&self) -> Result<(), Error> {
-        if !(1..=20).contains(&self.timeout_secs) {
+        if !(1..=MAX_TIMEOUT_SECS).contains(&self.timeout_secs) {
             return Err("refiner timeout must be 1 to 20 seconds".into());
         }
         match (&self.processor, self.provider.as_deref()) {
@@ -163,10 +164,6 @@ struct Request<'a> {
     response_example: Response,
 }
 
-pub(super) fn prompt_digest(text: &str) -> String {
-    crate::hex::encode(&Sha256::digest(text.as_bytes()))
-}
-
 pub(super) fn process(input: &Input, config: &Config) -> Result<Response, Error> {
     validate_input(input)?;
     config.validate()?;
@@ -240,7 +237,7 @@ fn validate_input(input: &Input) -> Result<(), Error> {
     if !bounded_text(&input.original, MAX_TEXT_BYTES, true) {
         return Err("refiner original must be nonempty, bounded and credential-free".into());
     }
-    if input.prompt_digest != prompt_digest(&input.original) {
+    if input.prompt_digest != crate::hex::sha256(&input.original) {
         return Err("refiner original does not match its host-bound digest".into());
     }
     if [
@@ -483,7 +480,7 @@ mod tests {
             session_id: "session-1".into(),
             client: "codex".into(),
             project_root: std::env::temp_dir().to_string_lossy().into_owned(),
-            prompt_digest: prompt_digest(original),
+            prompt_digest: crate::hex::sha256(original),
             capture_generation: 1,
             original: original.into(),
             active_task: None,
@@ -515,7 +512,7 @@ mod tests {
     #[test]
     fn digest_and_passthrough_bind_exact_utf8_without_normalization() {
         assert_eq!(
-            prompt_digest("abc"),
+            crate::hex::sha256("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let input = input("  Исправь café, сохрани 条件.\r\n");

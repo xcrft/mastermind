@@ -22,11 +22,26 @@ pub(super) use task_mining::FinalizerState;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EPISODE_BYTES: usize = 512 * 1024;
+// Text stops here. The rest of MAX_EPISODE_BYTES holds what an episode keeps
+// after its text is dropped: up to MAX_EVENTS text-free events, bounded tool
+// identities, gaps and exposure receipts.
+const MAX_EPISODE_TEXT_BYTES: usize = MAX_EPISODE_BYTES - 192 * 1024;
 const MAX_EVENTS: usize = 128;
 const MAX_TOOL_RECEIPTS: usize = 32;
 const MAX_EPISODES: i64 = 2000;
+// Raise this when a release changes what the journal stores, and migrate the
+// older version in `open_target`.
+const JOURNAL_VERSION: i64 = 1;
 const CAPTURE_VERSION: u32 = 3;
 const INSPECTION_ATTEMPTS: usize = 3;
+// A native hook has 3 s. A delivery that gives up on the writer lock leaves
+// a marker that only recovery clears, so wait most of that budget and keep
+// about 1 s for the delivery itself.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+// Archive writes and fsyncs run under the delivery's writer lock. Other
+// deliveries wait for it, so keep it well inside BUSY_TIMEOUT. A larger
+// backlog drains over later prompts.
+const COMPACTION_BUDGET: Duration = Duration::from_millis(250);
 
 const SCHEMA: &str = "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;
                 CREATE TABLE IF NOT EXISTS hook_grant (
@@ -304,11 +319,21 @@ impl Journal {
         if !current.same_object(identity) {
             return Err("hook journal changed while opening".into());
         }
-        conn.busy_timeout(Duration::from_millis(500))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > JOURNAL_VERSION {
+            return Err(format!(
+                "hook journal format version {version} is newer than version {JOURNAL_VERSION} that this mmcg reads; upgrade mmcg"
+            )
+            .into());
+        }
         if write {
             let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
             conn.pragma_update(None, "max_page_count", MAX_BYTES as i64 / page_size)?;
             conn.execute_batch(SCHEMA)?;
+            if version < JOURNAL_VERSION {
+                conn.pragma_update(None, "user_version", JOURNAL_VERSION)?;
+            }
             archive::drain_deletes(&conn)?;
         }
         Ok(Self { conn })
@@ -316,6 +341,14 @@ impl Journal {
 
     pub fn grant(&self, client: &str, root: &Path) -> Result<Option<Grant>, Error> {
         read_grant(&self.conn, client, root)
+    }
+
+    pub fn grant_keys(&self) -> Result<Vec<(String, String)>, Error> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT client,project_root FROM hook_grant")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn configure(
@@ -329,14 +362,40 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT INTO hook_grant(client,project_root,generation,enabled,profile_client) VALUES(?1,?2,1,?3,?4)
-            ON CONFLICT(client,project_root) DO UPDATE SET
-            generation=hook_grant.generation + CASE WHEN hook_grant.enabled != excluded.enabled OR ?5 THEN 1 ELSE 0 END,
-            enabled=excluded.enabled, profile_client=excluded.profile_client,
-            pending=CASE WHEN ?5 THEN 0 ELSE hook_grant.pending END,
-            gap=CASE WHEN ?5 THEN '' ELSE hook_grant.gap END",
-            params![client,root.to_string_lossy(),enabled,profile_client,recover])?;
-        let grant = read_grant(&tx, client, root)?.ok_or("capture grant unavailable")?;
+        let grant = upsert_grant(&tx, client, root, enabled, profile_client, recover)?;
+        tx.commit()?;
+        Ok(grant)
+    }
+
+    /// Starts a new capture generation and removes this grant's markers as one
+    /// step. The marker listing runs under the writer lock, so every delivery
+    /// admitted in the old generation already has its marker on disk.
+    pub fn recover(&mut self, client: &str, root: &Path) -> Result<Grant, Error> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old = read_grant(&tx, client, root)?.ok_or("capture is not configured")?;
+        let grant = upsert_grant(
+            &tx,
+            client,
+            root,
+            old.enabled,
+            old.profile_client.as_deref(),
+            true,
+        )?;
+        // A refused listing has removed nothing. Dropping tx keeps the generation.
+        let recovery = super::fence::recovery(client, root)?;
+        if let Some(Err(error)) = recovery.map(super::fence::Recovery::remove) {
+            drop(tx);
+            // Some markers may be gone while their deliveries still wait for
+            // the writer lock. Those events can no longer reach this
+            // generation, so it must not look complete.
+            self.conn.execute(
+                "UPDATE hook_grant SET gap='capture_recovery_incomplete' WHERE client=?1 AND project_root=?2 AND gap=''",
+                params![client, root.to_string_lossy()],
+            )?;
+            return Err(error);
+        }
         tx.commit()?;
         Ok(grant)
     }
@@ -354,6 +413,37 @@ impl Journal {
         let grant = read_grant(&tx, client, root)?;
         tx.commit()?;
         Ok(grant)
+    }
+
+    /// Waits, holding no lock, until this grant has at most `own` admitted
+    /// deliveries and markers. Another session's hook usually finishes within
+    /// milliseconds. A marker older than any hook can run belongs to a dead
+    /// delivery, so the wait ends at once and the caller fails closed.
+    pub fn await_other_deliveries(
+        &self,
+        grant: &Grant,
+        own: usize,
+        deadline: Instant,
+    ) -> Result<bool, Error> {
+        let root = Path::new(&grant.project_root);
+        loop {
+            let markers = super::fence::summary(&grant.client, root);
+            let pending = read_grant(&self.conn, &grant.client, root)?
+                .map_or(i64::MAX, |current| current.pending);
+            if usize::try_from(pending).is_ok_and(|pending| pending <= own)
+                && markers.as_ref().is_ok_and(|markers| markers.count <= own)
+            {
+                return Ok(true);
+            }
+            let dead = markers.map_or(true, |markers| {
+                super::readiness::age_seconds(markers.oldest_modified_millis)
+                    .is_some_and(|age| age > super::install::MAX_HOOK_SECS)
+            });
+            if dead || Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn finish_ignored(&self, grant: &Grant, gap: Option<&str>) -> Result<(), Error> {
@@ -767,7 +857,7 @@ impl Journal {
                 |r| r.get(0),
             )?;
             if count >= MAX_EPISODES || archive::used_bytes(&tx)? > MAX_BYTES * 3 / 4 {
-                archive::compact(&tx, None, 32)?;
+                archive::compact(&tx, None, 32, Some(Instant::now() + COMPACTION_BUDGET))?;
             }
             let count: i64 = tx.query_row(
                 "SELECT count(*) FROM hook_episode WHERE json_type(data,'$.archive') IS NULL",
@@ -899,6 +989,9 @@ impl Journal {
             }
             if incoming.kind == "PreToolUse" {
                 match &incoming.tool_id {
+                    Some(_) if ep.open_tools.len() >= MAX_EVENTS => {
+                        add_gap(&mut ep.gaps, "episode_tool_limit")
+                    }
                     Some(id) => ep.open_tools.push(id.clone()),
                     None => add_gap(&mut ep.gaps, "missing_tool_identity"),
                 }
@@ -1461,7 +1554,7 @@ fn tool_event(event: &EventInput) -> bool {
     )
 }
 
-fn push_event(ep: &mut Episode, event: EventInput) -> Result<(), Error> {
+fn push_event(ep: &mut Episode, mut event: EventInput) -> Result<(), Error> {
     if ep.closed && closing_receipt(&event) {
         // hook_event and hook_session retain the native lifecycle receipt.
         return Ok(());
@@ -1504,9 +1597,18 @@ fn push_event(ep: &mut Episode, event: EventInput) -> Result<(), Error> {
     }
     if ep.events.len() >= MAX_EVENTS {
         add_gap(&mut ep.gaps, "episode_event_limit");
-    } else {
-        ep.events.push(event);
+        return Ok(());
     }
+    // One long turn must not fail the delivery: save_episode would then fence
+    // the whole grant. The event keeps its identity, only its text is dropped.
+    if !event.text.is_empty()
+        && serde_json::to_string(ep)?.len() + serde_json::to_string(&event)?.len()
+            > MAX_EPISODE_TEXT_BYTES
+    {
+        event.text.clear();
+        add_gap(&mut ep.gaps, "episode_size_limit");
+    }
+    ep.events.push(event);
     Ok(())
 }
 fn load_episode(conn: &Connection, id: &str) -> Result<Episode, Error> {
@@ -1604,10 +1706,29 @@ fn save_session(conn: &Connection, session: &Session) -> Result<(), Error> {
 fn save_episode(conn: &Connection, ep: &Episode) -> Result<(), Error> {
     let data = serde_json::to_string(ep)?;
     if data.len() > MAX_EPISODE_BYTES {
+        // push_event keeps episodes below this. Reaching it is a defect.
         return Err("hook episode exceeds 512 KiB; capture is fenced until recovery".into());
     }
     conn.execute("INSERT INTO hook_episode(id,session,data) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![ep.id,ep.session,data])?;
     Ok(())
+}
+
+fn upsert_grant(
+    conn: &Connection,
+    client: &str,
+    root: &Path,
+    enabled: bool,
+    profile_client: Option<&str>,
+    recover: bool,
+) -> Result<Grant, Error> {
+    conn.execute("INSERT INTO hook_grant(client,project_root,generation,enabled,profile_client) VALUES(?1,?2,1,?3,?4)
+        ON CONFLICT(client,project_root) DO UPDATE SET
+        generation=hook_grant.generation + CASE WHEN hook_grant.enabled != excluded.enabled OR ?5 THEN 1 ELSE 0 END,
+        enabled=excluded.enabled, profile_client=excluded.profile_client,
+        pending=CASE WHEN ?5 THEN 0 ELSE hook_grant.pending END,
+        gap=CASE WHEN ?5 THEN '' ELSE hook_grant.gap END",
+        params![client,root.to_string_lossy(),enabled,profile_client,recover])?;
+    Ok(read_grant(conn, client, root)?.ok_or("capture grant unavailable")?)
 }
 
 fn read_grant(conn: &Connection, client: &str, root: &Path) -> Result<Option<Grant>, Error> {
@@ -1861,7 +1982,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            500
+            2000
         );
         assert_eq!(
             journal
@@ -2027,6 +2148,122 @@ mod tests {
             "repository",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_journal_records_its_format_and_refuses_a_newer_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        drop(Journal::open_target(&path, true).unwrap());
+        let version = |path: &Path| -> i64 {
+            Connection::open(path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(version(&path), JOURNAL_VERSION);
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", JOURNAL_VERSION + 1)
+            .unwrap();
+        for write in [true, false] {
+            let error = Journal::open_target(&path, write).err().unwrap();
+            assert!(error.to_string().contains("newer"), "{error}");
+        }
+        assert_eq!(version(&path), JOURNAL_VERSION + 1);
+    }
+
+    #[test]
+    fn delivery_compaction_stops_at_its_deadline_after_one_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut db = Journal::open_target(&directory.path().join("events.db"), true).unwrap();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        for turn in 0..4 {
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":turn.to_string(), "hook_event_name":"UserPromptSubmit", "prompt":"Inspect it"}),
+            );
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":turn.to_string(), "hook_event_name":"Stop"}),
+            );
+        }
+        let tx = db.conn.transaction().unwrap();
+        // The deadline has passed before the first archive. One still happens,
+        // so each prompt frees at least the episode it adds.
+        assert_eq!(
+            archive::compact(&tx, None, 32, Some(Instant::now())).unwrap(),
+            1
+        );
+        assert_eq!(archive::compact(&tx, None, 32, None).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_long_turn_drops_further_text_with_an_episode_gap_and_keeps_capture_open() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = journal();
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        let prompt = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"Review the module"}),
+        );
+        let report = "report line about the module ".repeat(560)[..15_800].to_owned();
+        for agent in 0..40 {
+            let grant = db.begin_capture("codex", root.path()).unwrap().unwrap();
+            let event = json!({"session_id":"s", "hook_event_name":"SubagentStop",
+                "agent_id":format!("a{agent}"), "last_assistant_message":report});
+            let receipt = db.receive(
+                &grant,
+                super::super::normalize(&event).unwrap(),
+                "project",
+                "repository",
+            );
+            assert!(receipt.is_ok(), "agent {agent}: {receipt:?}");
+        }
+        for tool in 0..MAX_EVENTS + 8 {
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "hook_event_name":"PreToolUse",
+                    "tool_use_id":format!("{tool:0>250}"), "tool_name":"Bash"}),
+            );
+        }
+        let stored = db.episode(prompt["episode"].as_str().unwrap()).unwrap();
+        assert!(serde_json::to_string(&stored).unwrap().len() <= MAX_EPISODE_BYTES);
+        assert!(stored.gaps.contains(&"episode_size_limit".to_owned()));
+        assert!(stored.gaps.contains(&"episode_tool_limit".to_owned()));
+        assert!(stored.open_tools.len() <= MAX_EVENTS);
+        let retained = stored
+            .events
+            .iter()
+            .filter(|event| event.kind == "SubagentStop")
+            .collect::<Vec<_>>();
+        assert!(retained.first().is_some_and(|event| event.text == report));
+        assert!(retained.last().is_some_and(|event| event.text.is_empty()));
+        let grant = db.grant("codex", root.path()).unwrap().unwrap();
+        assert_eq!((grant.gap.as_str(), grant.pending), ("", 0));
+        let next = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"t", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Next request"}),
+        );
+        assert_eq!(next["status"], "recorded");
     }
 
     #[test]

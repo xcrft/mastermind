@@ -125,6 +125,7 @@ enum HandlerError {
     SnapshotChanged,
     WorkLimitExceeded,
     RebuildRequired,
+    IndexBusy,
     BudgetTooSmall {
         minimum_tokens: u32,
     },
@@ -479,6 +480,7 @@ fn spawn_watchdog(
             std::thread::sleep(tick);
             if watchdog.exit_when_reparented && parent_pid() != original_parent {
                 eprintln!("[mmcg] watchdog: parent {original_parent} is gone, exiting");
+                crate::store::remove_snapshot_directories();
                 std::process::exit(0);
             }
             let guard = in_flight
@@ -510,6 +512,7 @@ fn spawn_watchdog(
                         current.id,
                         elapsed.as_secs()
                     );
+                    crate::store::remove_snapshot_directories();
                     std::process::exit(1);
                 }
             }
@@ -1291,9 +1294,13 @@ fn handle_tools_call_inner(
         )
     };
 
-    // The expired deadline that stopped a forced rebuild stays expired, so the
-    // budget check below would replace the more specific rebuild guidance.
-    let rebuild_required = matches!(handled, Some(Err(HandlerError::RebuildRequired)));
+    // The expired deadline that stopped a forced rebuild, or a wait for the
+    // writer lock, stays expired, so the budget check below would replace the
+    // more specific guidance.
+    let keeps_its_code = matches!(
+        handled,
+        Some(Err(HandlerError::RebuildRequired | HandlerError::IndexBusy))
+    );
     let mut result = match handled {
         Some(Ok(payload)) => tool_result(version, payload, false),
         Some(Err(handler_error)) => match handler_error {
@@ -1338,6 +1345,7 @@ fn handle_tools_call_inner(
             HandlerError::RebuildRequired => {
                 tool_result(version, rebuild_required_payload(budget), true)
             }
+            HandlerError::IndexBusy => tool_result(version, index_busy_payload(), true),
             HandlerError::WorkLimitExceeded => {
                 tool_result(version, work_limit_payload(budget), true)
             }
@@ -1354,7 +1362,7 @@ fn handle_tools_call_inner(
     }
     match store.interrupt_source() {
         Some(InterruptSource::Cancel) => result = tool_result(version, cancelled_payload(), true),
-        Some(InterruptSource::Budget) if !rebuild_required => {
+        Some(InterruptSource::Budget) if !keeps_its_code => {
             result = tool_result(version, work_limit_payload(budget), true)
         }
         _ => {}
@@ -1539,6 +1547,16 @@ fn rebuild_required_payload(budget: WorkBudget) -> Value {
         "code": "index_rebuild_required",
         "budget_ms": budget.deadline.map(|d| d.as_millis() as u64),
         "guidance": "the index needs a full rebuild that does not fit the request budget; run `mastermind index .` or raise MMCG_QUERY_BUDGET_MS"
+    })
+}
+
+/// Another process holds the index writer lock, so the refresh this query
+/// needed did not run. Nothing is wrong with the request itself.
+fn index_busy_payload() -> Value {
+    json!({
+        "code": "index_busy",
+        "retryable": true,
+        "guidance": "another process is writing the index; retry shortly"
     })
 }
 
@@ -2483,7 +2501,7 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, `freshness_error` explains when the scan could not establish a count, and `unindexable_sources` names up to 20 stale paths that are not regular files, such as symlinks. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, `freshness_error` explains when the scan could not establish a count, and `unindexable_sources` names up to 20 stale paths that are not regular files, such as symlinks. `skipped_submodules` counts Git submodules, which are never indexed. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
     })
 }
@@ -3329,6 +3347,7 @@ fn map_query_error(store: &Store, error: crate::query_service::Error) -> Handler
         Error::SnapshotChanged => HandlerError::SnapshotChanged,
         Error::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
         Error::RebuildRequired => HandlerError::RebuildRequired,
+        Error::IndexBusy => HandlerError::IndexBusy,
         Error::RefreshLimit { dimension, cap } => HandlerError::RefreshLimit { dimension, cap },
         Error::Internal { class } => HandlerError::Internal { class },
         Error::Brief(error) => map_brief_error(store, error),
@@ -3355,6 +3374,7 @@ fn map_brief_error(store: &Store, error: queries::BriefError) -> HandlerError {
         queries::BriefError::SchemaIncompatible => HandlerError::SchemaIncompatible,
         queries::BriefError::SnapshotChanged => HandlerError::SnapshotChanged,
         queries::BriefError::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
+        queries::BriefError::IndexBusy => HandlerError::IndexBusy,
         queries::BriefError::Serialization => HandlerError::Internal {
             class: "serialize_brief",
         },
@@ -3460,6 +3480,7 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
                 stale_files_truncated: false,
                 freshness_error: Some("freshness_check_failed"),
                 unindexable_sources: Vec::new(),
+                skipped_submodules: 0,
                 extractor_contract_current: true,
                 concept_contract_current: false,
             });
@@ -3468,6 +3489,7 @@ fn map_concept_error(store: &Store, error: queries::ConceptError) -> HandlerErro
         queries::ConceptError::SchemaIncompatible => HandlerError::SchemaIncompatible,
         queries::ConceptError::SnapshotChanged => HandlerError::SnapshotChanged,
         queries::ConceptError::WorkLimitExceeded => HandlerError::WorkLimitExceeded,
+        queries::ConceptError::IndexBusy => HandlerError::IndexBusy,
         queries::ConceptError::Internal => HandlerError::Internal {
             class: "concept_query",
         },
@@ -5531,6 +5553,30 @@ mod tests {
             drop(store);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn a_refresh_blocked_by_another_writer_reports_a_retryable_busy_index() {
+        let (root, mut store) = impact_fixture("busy-refresh");
+        std::fs::write(root.join("src/new.py"), "def new_value():\n    return 3\n").unwrap();
+        let writer = rusqlite::Connection::open(store.db_path()).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = handle_tools_call(
+            ProtocolVersion::Current,
+            &mut store,
+            &json!({ "name": "mmcg_search", "arguments": { "name": "new_value" } }),
+        )
+        .unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["code"], "index_busy",
+            "{result}"
+        );
+        assert_eq!(result["structuredContent"]["retryable"], true, "{result}");
+        drop(writer);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

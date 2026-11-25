@@ -5,7 +5,6 @@ use super::{influence::Influence, local, semantic, Error};
 use crate::bounded_fs::{self, ReadControl};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -201,7 +200,7 @@ pub(super) fn run(path: &Path) -> Result<Value, Error> {
     )?;
     let input: Input = serde_json::from_value(crate::setup::parse_json_unique(&file.bytes)?)?;
     let mut result = evaluate(input)?;
-    result["corpus_sha256"] = json!(crate::hex::encode(&Sha256::digest(&file.bytes)));
+    result["corpus_sha256"] = json!(crate::hex::sha256(&file.bytes));
     Ok(result)
 }
 

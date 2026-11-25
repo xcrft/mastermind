@@ -17,7 +17,6 @@ updates:
       - rust
     commit-message:
       prefix: "chore(deps)"
-      include: scope
     groups:
       tree-sitter:
         patterns:
@@ -40,7 +39,6 @@ updates:
       - github-actions
     commit-message:
       prefix: "chore(deps)"
-      include: scope
 
   # Digest-pinned base images for the Docker Action.
   - package-ecosystem: docker
@@ -56,7 +54,6 @@ updates:
       - docker
     commit-message:
       prefix: "chore(deps)"
-      include: scope
 
   # Python deps used by the validator and audit-workflow fixture tests
   - package-ecosystem: pip
@@ -72,4 +69,3 @@ updates:
       - python
     commit-message:
       prefix: "chore(deps)"
-      include: scope

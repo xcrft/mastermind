@@ -4,7 +4,6 @@ use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
 use crate::diff::{self, WorkingTreeChangedFile};
 use crate::onboarding;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -104,7 +103,7 @@ impl ByteBudget {
 
     fn exhausted(&self, size: u64, path: Option<&str>) -> String {
         let next = match path {
-            Some(path) => format!("next file `{path}`"),
+            Some(path) => format!("next file `{}`", crate::terminal::escape(path)),
             None => "this file".into(),
         };
         format!(
@@ -193,9 +192,9 @@ impl InitialWorktree {
     }
 
     pub(crate) fn revision(&self) -> Result<String, String> {
-        Ok(crate::hex::encode(&Sha256::digest(
+        Ok(crate::hex::sha256(
             serde_json::to_vec(self).map_err(|e| e.to_string())?,
-        )))
+        ))
     }
 
     pub(crate) fn preimages(
@@ -218,7 +217,8 @@ impl InitialWorktree {
                             ReadControl::default(),
                         )
                         .map_err(|_| "initial_worktree_preimage_unavailable")?;
-                        if file.declared_len != *bytes || sha(&file.bytes) != *sha256 {
+                        if file.declared_len != *bytes || crate::hex::sha256(&file.bytes) != *sha256
+                        {
                             return Err("initial_worktree_preimage_changed".into());
                         }
                         Some(file.bytes)
@@ -235,8 +235,6 @@ fn blob_path(root: &Path, spec: &Path, hash: &str) -> PathBuf {
         .with_file_name("preflight-inputs")
         .join(hash)
 }
-
-use crate::hex::sha256 as sha;
 
 fn artifacts(root: &Path, spec: &Path) -> Result<BTreeSet<String>, String> {
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
@@ -276,7 +274,7 @@ fn state(
     ) {
         Ok(file) => {
             let state = PathState::Regular {
-                sha256: sha(&file.bytes),
+                sha256: crate::hex::sha256(&file.bytes),
                 bytes: file.declared_len,
                 executable: file.identity.attributes() & 0o111 != 0,
             };
@@ -286,12 +284,14 @@ fn state(
             Ok((PathState::Missing, None))
         }
         Err(error @ BoundedReadError::TooLarge { .. }) => Err(format!(
-            "initial_worktree_file_unavailable: {path}: {error}. The task keeps a copy of \
+            "initial_worktree_file_unavailable: {}: {error}. The task keeps a copy of \
              every uncommitted file, so add this one to .gitignore, commit it or move it \
-             out of the worktree"
+             out of the worktree",
+            crate::terminal::escape(path)
         )),
         Err(error) => Err(format!(
-            "initial_worktree_file_unavailable: {path}: {error}"
+            "initial_worktree_file_unavailable: {}: {error}",
+            crate::terminal::escape(path)
         )),
     }
 }
@@ -345,7 +345,7 @@ pub(crate) fn capture(
         });
         initial.validate(baseline)?;
         if let Some(bytes) = bytes {
-            let path = blob_path(root, spec, &sha(&bytes));
+            let path = blob_path(root, spec, &crate::hex::sha256(&bytes));
             match bounded_fs::read_regular_file(
                 root,
                 &path,
@@ -585,7 +585,10 @@ mod tests {
         let initial: InitialWorktree = serde_json::from_str(&legacy).unwrap();
         assert_eq!(initial.max_total_bytes, None);
         assert_eq!(serde_json::to_string(&initial).unwrap(), legacy);
-        assert_eq!(initial.revision().unwrap(), sha(legacy.as_bytes()));
+        assert_eq!(
+            initial.revision().unwrap(),
+            crate::hex::sha256(legacy.as_bytes())
+        );
     }
 
     #[test]
@@ -605,6 +608,25 @@ mod tests {
                  repeat `mastermind run-task <spec> --pre-only`"
                     .into()
             )
+        );
+    }
+
+    #[test]
+    fn file_names_from_git_reach_the_message_with_terminal_controls_escaped() {
+        let name = "big\u{1b}[2J.bin";
+        let error = ByteBudget::snapshot(0).charge(1, Some(name)).unwrap_err();
+        assert!(error.contains("next file `big\\u{1b}[2J.bin`"), "{error}");
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::File::create(directory.path().join(name))
+            .unwrap()
+            .set_len(FILE_LIMIT + 1)
+            .unwrap();
+        let root = RootCapability::open(directory.path()).unwrap();
+        let error = state(&root, name, Instant::now() + diff::git_timeout()).unwrap_err();
+        assert!(
+            error.starts_with("initial_worktree_file_unavailable: big\\u{1b}[2J.bin: "),
+            "{error}"
         );
     }
 

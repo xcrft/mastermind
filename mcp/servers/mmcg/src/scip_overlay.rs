@@ -465,21 +465,21 @@ fn hash_file(
     logical_path: &str,
     control: crate::bounded_fs::ReadControl<'_>,
 ) -> Result<HashedFile, ScipOverlayError> {
-    let mut digest = DigestWriter::new(std::io::sink());
+    let mut hasher = Sha256::new();
     let source = crate::bounded_fs::copy_regular_file_with_capability(
         root,
         path,
         MAX_DOCUMENT_BYTES,
         control,
         None,
-        &mut digest,
+        &mut crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: std::io::sink(),
+        },
     )
     .map_err(|error| document_read_error(logical_path, error))?;
-    let sha256 = digest
-        .finish()
-        .map_err(|error| ScipOverlayError::Io(format!("hash {logical_path:?}: {error}")))?;
     Ok(HashedFile {
-        sha256,
+        sha256: crate::hex::encode(&hasher.finalize()),
         bytes: source.declared_len,
         identity: source.identity,
     })
@@ -570,39 +570,6 @@ fn source_for_store(source: &SemanticSourceInput) -> SemanticSource {
     }
 }
 
-struct DigestWriter<W> {
-    inner: W,
-    hasher: Sha256,
-}
-
-impl<W> DigestWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            hasher: Sha256::new(),
-        }
-    }
-}
-
-impl<W: Write> DigestWriter<W> {
-    fn finish(mut self) -> std::io::Result<String> {
-        self.inner.flush()?;
-        Ok(crate::hex::encode(&self.hasher.finalize()))
-    }
-}
-
-impl<W: Write> Write for DigestWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(bytes)?;
-        self.hasher.update(&bytes[..written]);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 struct DocumentSourceReceipt {
     resolved_relative: Option<PathBuf>,
     identity: crate::bounded_fs::StableFileIdentity,
@@ -671,22 +638,20 @@ fn verify_document_sources(
                 document.path
             )));
         }
-        let mut digest = DigestWriter::new(std::io::sink());
+        let mut hasher = Sha256::new();
         let observed = crate::bounded_fs::copy_regular_file_with_capability(
             root,
             &expected,
             MAX_DOCUMENT_BYTES,
             control,
             Some(source.identity),
-            &mut digest,
+            &mut crate::hex::Sha256Writer {
+                hasher: &mut hasher,
+                inner: std::io::sink(),
+            },
         )
         .map_err(|error| document_read_error(&document.path, error))?;
-        let sha256 = digest.finish().map_err(|error| {
-            ScipOverlayError::Io(format!(
-                "verify repository document {:?}: {error}",
-                document.path
-            ))
-        })?;
+        let sha256 = crate::hex::encode(&hasher.finalize());
         if observed.declared_len != source.bytes || sha256 != document.content_sha256 {
             return Err(ScipOverlayError::InvalidIndex(format!(
                 "repository file changed while SCIP evidence was being verified: {:?}",
@@ -721,7 +686,11 @@ impl ScipArtifactSnapshot {
         let mut file = tempfile::tempfile().map_err(|error| {
             ScipOverlayError::Io(format!("create private SCIP snapshot: {error}"))
         })?;
-        let mut writer = DigestWriter::new(&mut file);
+        let mut hasher = Sha256::new();
+        let mut writer = crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: &mut file,
+        };
         let source = crate::bounded_fs::copy_regular_file_with_capability(
             &source_root,
             &path,
@@ -731,9 +700,10 @@ impl ScipArtifactSnapshot {
             &mut writer,
         )
         .map_err(|error| artifact_read_error(&path, error))?;
-        let sha256 = writer.finish().map_err(|error| {
+        writer.flush().map_err(|error| {
             ScipOverlayError::Io(format!("write private SCIP snapshot: {error}"))
         })?;
+        let sha256 = crate::hex::encode(&hasher.finalize());
         Ok(Self {
             path,
             source_root,
@@ -756,20 +726,20 @@ impl ScipArtifactSnapshot {
         &self,
         control: crate::bounded_fs::ReadControl<'_>,
     ) -> Result<(), ScipOverlayError> {
-        let mut digest = DigestWriter::new(std::io::sink());
+        let mut hasher = Sha256::new();
         crate::bounded_fs::copy_regular_file_with_capability(
             &self.source_root,
             &self.path,
             MAX_SCIP_BYTES,
             control,
             Some(self.source_identity),
-            &mut digest,
+            &mut crate::hex::Sha256Writer {
+                hasher: &mut hasher,
+                inner: std::io::sink(),
+            },
         )
         .map_err(|error| artifact_read_error(&self.path, error))?;
-        if digest.finish().map_err(|error| {
-            ScipOverlayError::Io(format!("verify SCIP artifact digest: {error}"))
-        })? != self.sha256
-        {
+        if crate::hex::encode(&hasher.finalize()) != self.sha256 {
             return Err(ScipOverlayError::InvalidIndex(
                 "SCIP artifact changed while it was being imported".into(),
             ));
@@ -1322,7 +1292,7 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
                     text_verified_documents += 1;
                     (
                         HashedFile {
-                            sha256: crate::hex::encode(&Sha256::digest(&file.bytes)),
+                            sha256: crate::hex::sha256(&file.bytes),
                             bytes: file.declared_len,
                             identity: file.identity,
                         },
@@ -1828,7 +1798,8 @@ fn stale_diagnostic(stale: &BTreeSet<String>) -> Option<SemanticDiagnostic> {
     })
 }
 
-pub fn for_lens(
+#[cfg(test)]
+fn for_lens(
     store: &Store,
     root: &Path,
     relevant_paths: impl IntoIterator<Item = String>,

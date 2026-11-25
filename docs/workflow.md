@@ -104,8 +104,11 @@ Close a task before approving the next one in the same checkout.
 
 ### 2. Implement and record checks
 
-Give the approved spec to an implementation client. The executor writes
-`executor-report.md` with changed files, observed results, defects, and gaps.
+Give the approved spec to an implementation client. The executor writes the
+report at the path `run-task --pre-only` printed, with changed files, observed
+results, defects, and gaps. For `<task>/spec.md` that is
+`<task>/executor-report.md`. A spec with another name, such as
+`docs/specs/a.md`, reads `docs/specs/a.executor-report.md`.
 For UI work, include browser observations or the reason they were not collected.
 
 #### Observed verification commands (opt-in)

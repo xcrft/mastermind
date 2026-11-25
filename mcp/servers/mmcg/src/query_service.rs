@@ -36,6 +36,8 @@ pub(crate) enum Error {
     /// request budget. A forced rebuild restarts from zero on every attempt, so
     /// only a manual `mastermind index .` or a larger budget converges.
     RebuildRequired,
+    /// Another process holds the index writer lock. Retrying later succeeds.
+    IndexBusy,
     RefreshLimit {
         dimension: &'static str,
         cap: u64,
@@ -60,6 +62,7 @@ impl Error {
             Self::WorkLimitExceeded | Self::RebuildRequired | Self::RefreshLimit { .. } => {
                 queries::BriefError::WorkLimitExceeded
             }
+            Self::IndexBusy => queries::BriefError::IndexBusy,
             _ => queries::BriefError::IndexStale,
         }
     }
@@ -71,6 +74,7 @@ impl Error {
             Self::WorkLimitExceeded | Self::RebuildRequired | Self::RefreshLimit { .. } => {
                 queries::ConceptError::WorkLimitExceeded
             }
+            Self::IndexBusy => queries::ConceptError::IndexBusy,
             _ => queries::ConceptError::IndexStale,
         }
     }
@@ -115,16 +119,16 @@ fn index_status_with_limits(
         .meta_value("index_root")
         .map_err(|error| Error::internal("index_root_query", error))?
         .map(PathBuf::from);
-    let (stale_files, stale_files_truncated, freshness_error, unindexable_sources) =
+    let (stale_files, stale_files_truncated, freshness_error, unindexable_sources, submodules) =
         match index_root {
             Some(index_root) => match index_root.canonicalize() {
-                Err(_) => (1, false, Some("index_root_unavailable"), Vec::new()),
+                Err(_) => (1, false, Some("index_root_unavailable"), Vec::new(), 0),
                 Ok(root)
                     if store
                         .serve_root()
                         .is_some_and(|authorized| authorized != root.as_path()) =>
                 {
-                    (1, false, Some("index_root_mismatch"), Vec::new())
+                    (1, false, Some("index_root_mismatch"), Vec::new(), 0)
                 }
                 Ok(root) => {
                     let interrupted = || store.work_interrupted();
@@ -146,6 +150,7 @@ fn index_status_with_limits(
                                 scan.paths.len() > queries::STATUS_STALE_FILE_LIMIT,
                                 None,
                                 scan.unindexable,
+                                scan.submodules,
                             ),
                             Ok(false) => return Err(Error::SnapshotChanged),
                             Err(error) => {
@@ -165,11 +170,11 @@ fn index_status_with_limits(
                                 "request interrupted",
                             ))
                         }
-                        Err(_) => (1, false, Some("freshness_scan_failed"), Vec::new()),
+                        Err(_) => (1, false, Some("freshness_scan_failed"), Vec::new(), 0),
                     }
                 }
             },
-            None => (1, false, Some("index_root_missing"), Vec::new()),
+            None => (1, false, Some("index_root_missing"), Vec::new(), 0),
         };
     Ok(queries::StatusResponse {
         db_path,
@@ -181,6 +186,7 @@ fn index_status_with_limits(
         stale_files_truncated,
         freshness_error,
         unindexable_sources,
+        skipped_submodules: submodules,
         extractor_contract_current,
         concept_contract_current,
     })
@@ -222,9 +228,13 @@ fn refresh(store: &mut Store) -> Result<Refresh, Error> {
     );
     match indexed {
         Ok(stats) if stats.files_failed == 0 => Ok(Refresh::Completed),
+        // A finished run reports its failed paths, such as unindexable ones,
+        // even when it used up the budget.
+        Ok(_) => Ok(Refresh::Incomplete),
         Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
             Err(Error::RefreshLimit { dimension, cap })
         }
+        Err(crate::indexer::IndexError::Busy) => Err(Error::IndexBusy),
         _ if forced && out_of_budget => Err(Error::RebuildRequired),
         Err(crate::indexer::IndexError::Cancelled)
         | Err(crate::indexer::IndexError::DeadlineExceeded) => Err(Error::WorkLimitExceeded),

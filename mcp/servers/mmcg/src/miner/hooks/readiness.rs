@@ -5,6 +5,40 @@ use super::{background, fence, install, journal, journal::Journal, Error};
 use serde_json::{json, Value};
 use std::path::Path;
 
+pub(super) fn age_seconds(modified_millis: Option<i64>) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let modified = u128::try_from(modified_millis?).ok()?;
+    Some((now.saturating_sub(modified) / 1000) as u64)
+}
+
+/// The shared marker directory across every grant, for doctor. A prefix with
+/// no grant in the journal belongs to a removed grant or a removed journal;
+/// recover cannot reach those markers.
+pub fn capture_fence_directory() -> Result<Value, Error> {
+    let prefixes = fence::directory_summary()?;
+    let known = match open_journal()? {
+        Some(db) => db
+            .grant_keys()?
+            .into_iter()
+            .filter_map(|(client, root)| fence::grant_prefix(&client, &root).ok())
+            .collect(),
+        None => std::collections::BTreeSet::new(),
+    };
+    let oldest = prefixes
+        .values()
+        .filter_map(|summary| summary.oldest_modified_millis)
+        .min();
+    Ok(json!({
+        "markers":prefixes.values().map(|summary| summary.count).sum::<usize>(),
+        "prefixes":prefixes.len(),
+        "unknown_prefixes":prefixes.keys().filter(|prefix| !known.contains(*prefix)).count(),
+        "oldest_marker_age_seconds":age_seconds(oldest),
+    }))
+}
+
 fn open_journal() -> Result<Option<Journal>, Error> {
     match std::fs::symlink_metadata(journal::path()?) {
         Ok(_) => Ok(Some(Journal::open(false)?)),
@@ -60,8 +94,9 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         Ok(None) => Ok(None),
         Err(_) => Err("capture_journal_unavailable".into()),
     };
-    let pending = fence::pending(client, &root);
-    let capture = match &grant {
+    let markers = fence::summary(client, &root);
+    let pending = markers.as_ref().map(|markers| markers.count > 0);
+    let mut capture = match &grant {
         Ok(Some(grant)) => {
             let blocked = grant.pending != 0
                 || !grant.gap.is_empty()
@@ -79,6 +114,14 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         Err(_) => json!({"status":"unavailable","enabled":null,"generation":null,
             "pending":null,"filesystem_pending":pending.as_ref().ok(),"reason":"capture_journal_unavailable"}),
     };
+    match &markers {
+        Ok(markers) => {
+            capture["markers"] = json!(markers.count);
+            capture["oldest_marker_age_seconds"] =
+                json!(age_seconds(markers.oldest_modified_millis));
+        }
+        Err(error) => capture["marker_error"] = json!(error.to_string()),
+    }
     let mut activation = match (&database, &grant) {
         (Ok(Some(db)), Ok(Some(grant))) if grant.enabled => db
             .capture_activation(client, &root, grant.generation)
@@ -298,19 +341,26 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     }
     let mut next_actions = Vec::new();
     if native["status"] == "missing_or_stale" {
-        next_actions.push("Refresh the generated definitions with miner hooks setup --write.");
+        next_actions
+            .push("Refresh the generated definitions with miner hooks setup --write.".to_owned());
     }
     if capture["enabled"] == true && activation["status"] != "session_start_observed" {
-        next_actions.push("Review /hooks in the trusted project, then start a new client session to observe SessionStart. Existing gaps remain recorded.");
+        next_actions.push("Review /hooks in the trusted project, then start a new client session to observe SessionStart. Existing gaps remain recorded.".to_owned());
     }
     if capture["status"] == "incomplete" {
-        next_actions.push("Inspect capture delivery gaps before using miner hooks recover; recovery does not restore missing events.");
+        if capture["gap_present"] == false && capture["filesystem_pending"] == true {
+            next_actions.push(format!(
+                "A capture marker has no journal gap: its event never reached the journal (a busy journal or a killed hook), or the delivery is still running. If the oldest marker age keeps growing, run mastermind miner hooks recover --client {client}. Recovery starts a new capture generation, so earlier evidence counts as old, and it does not restore the missing event."
+            ));
+        } else {
+            next_actions.push("Inspect capture delivery gaps before using miner hooks recover; recovery does not restore missing events.".to_owned());
+        }
     }
     if blocked_episodes {
-        next_actions.push("Inspect affected episodes with miner hooks episodes and miner hooks show. Capture gaps withhold mining; start a new client chat when session lifecycle events are missing or ambiguous. Existing gaps remain recorded.");
+        next_actions.push("Inspect affected episodes with miner hooks episodes and miner hooks show. Capture gaps withhold mining; start a new client chat when session lifecycle events are missing or ambiguous. Existing gaps remain recorded.".to_owned());
     }
     if warnings.contains(&"task_mining_has_missing_reports") {
-        next_actions.push("Inspect task_mining.result and task_mining.reason with miner hooks show. Load the current MCP catalog and trusted hooks in a new chat; old missing reports cannot be counted as no-signal analysis.");
+        next_actions.push("Inspect task_mining.result and task_mining.reason with miner hooks show. Load the current MCP catalog and trusted hooks in a new chat; old missing reports cannot be counted as no-signal analysis.".to_owned());
     }
     let pipeline = json!({
         "requested_mode":requested_mode,"analysis_requested":analysis_requested,

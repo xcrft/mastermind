@@ -120,6 +120,7 @@ npm-smoke-native:
 # Test audit publication, document snapshots, and eval harnesses without a model or build.
 eval-harness:
     {{PY}} -m unittest discover -s tests -t .
+    {{PY}} -m evals.benchmark.corpus --source-repo .
 
 # Check completion invariants and sampled CLI behavior without model calls.
 eval-control output:
@@ -139,7 +140,26 @@ sync-templates:
     cp agents/claude-md/mastermind-workflow.md {{MMCG}}/templates/workflow.md
     @echo "Templates synced to {{MMCG}}/templates/. Run `just validate` to confirm parity."
 
-# Everything deterministic that should pass before pushing.
+# Set VERSION in every file that carries it and move [Unreleased] to VERSION.
+bump VERSION:
+    python3 scripts/release_version.py bump {{VERSION}}
+
+# Tag the pushed release commit once its CI is green. Pushes nothing.
+release-tags VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/release_version.py check
+    test "$(python3 -c 'from scripts import release_version as r; print(r.source_version())')" = "{{VERSION}}" \
+      || { echo "Cargo.toml is not at {{VERSION}}; run just bump {{VERSION}} first" >&2; exit 1; }
+    git fetch --quiet origin main
+    sha=$(git rev-parse HEAD)
+    test "$sha" = "$(git rev-parse origin/main)" \
+      || { echo "HEAD is not origin/main; push the release commit first" >&2; exit 1; }
+    bash scripts/require-green-ci.sh xcrft/mastermind "$sha"
+    git tag "mmcg-v{{VERSION}}" "$sha"
+    git tag "npm-v{{VERSION}}" "$sha"
+    echo "Tagged $sha. Publish with: git push origin mmcg-v{{VERSION}} npm-v{{VERSION}}"
+
 check: fmt-check lint test validate npm-test lens-ui-test eval-harness security
 
 # ---- dev smoke / one-shot queries ----

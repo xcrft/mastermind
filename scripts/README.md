@@ -67,6 +67,58 @@ The runtime helper and its contract live in
 These tests establish source identity and freshness behavior. They do not judge
 the meaning of a declared relation.
 
+## Cutting a release
+
+Use this when `[Unreleased]` in `CHANGELOG.md` is ready to ship. You need push
+access to `main`, an eligible reviewer for the `prod` and `npm-prod`
+environments, and `gh` authenticated for the repository. Run the commands from
+the repository root.
+
+1. Read `[Unreleased]` again. Mark incompatible changes under **Changed** and
+   pick the version by SemVer: an incompatible CLI, schema, file or workflow
+   change is a major version.
+2. Set the version everywhere and move the notes:
+
+   ```bash
+   just bump 4.0.0
+   ```
+
+   This rewrites the 16 files listed in `scripts/release_version.py`, adds the
+   `## [4.0.0] - <date>` heading and the CHANGELOG links. It refuses to run if
+   the files already disagree. `python3 scripts/validate.py` fails a pull
+   request whose versions drift.
+3. Run the gate outside the Bash sandbox, then commit and push:
+
+   ```bash
+   just check
+   git commit -am "Release 4.0.0"
+   git push origin main
+   ```
+
+4. Tag the pushed commit. The recipe waits for CI on that commit and refuses to
+   tag a red or unfinished run:
+
+   ```bash
+   just release-tags 4.0.0
+   git push origin mmcg-v4.0.0 npm-v4.0.0
+   ```
+
+5. Approve the `prod` (crates.io) and `npm-prod` deployments. Each publish job
+   checks again that CI is green on the tagged commit, so approval does not need
+   a manual CI check.
+6. Wait for both registry smokes. The npm workflow then creates the GitHub
+   Release `npm-v4.0.0` with the CHANGELOG section as its notes.
+
+| Symptom | What to do |
+|---|---|
+| `release-tags` says HEAD is not origin/main | Push the release commit, or check out `main` |
+| `require-green-ci.sh` reports a failed workflow | Fix `main`, bump nothing, push the fix, then tag the new commit |
+| npm publish failed partway | Follow [npm publication and recovery](#npm-publication-and-recovery) |
+| A tag points at the wrong commit and nothing was published | Delete the local and remote tag, then tag again |
+
+Never move a tag after a package with that version was published. Ship a new
+patch version instead.
+
 ## GitHub release controls
 
 `configure-github-protections.sh` previews settings by default. Applying them
@@ -77,8 +129,10 @@ scripts/configure-github-protections.sh
 scripts/configure-github-protections.sh --apply
 ```
 
-It configures the `main` ruleset, `npm-v*` tag boundary and `npm-prod` environment
-reviewer. It does not replace environment secrets. Self-review prevention is
+It configures the `main` ruleset and two release boundaries. `npm-prod` deploys
+only from `npm-v*` tags and `prod` only from `mmcg-v*` tags, each with its
+reviewer and an immutable tag ruleset. Branch deployment policies on those
+environments are removed. It does not replace environment secrets. Self-review prevention is
 disabled by default. Enable it with a distinct eligible reviewer:
 
 ```bash

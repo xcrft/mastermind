@@ -173,7 +173,7 @@ pub(crate) fn normalize_repository_relative_path(path: &Path) -> Result<String, 
 }
 
 #[cfg(unix)]
-fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
+pub(crate) fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
     Ok(StableFileIdentity {
@@ -187,7 +187,7 @@ fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdent
 }
 
 #[cfg(windows)]
-fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
+pub(crate) fn stable_file_identity(file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
     use std::os::windows::io::AsRawHandle;
     stable_windows_handle_identity(file.as_raw_handle())
 }
@@ -217,7 +217,7 @@ pub(crate) fn stable_windows_handle_identity(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn stable_file_identity(_file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
+pub(crate) fn stable_file_identity(_file: &std::fs::File) -> std::io::Result<StableFileIdentity> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "stable file identity is unavailable on this platform",
@@ -380,14 +380,9 @@ impl RootCapability {
             relative_path(&self.canonical_root, path)
                 .or_else(|_| relative_path(&self.requested_root, path))
         } else {
-            // Callers may pass either `src/lib.rs` or a path produced by
-            // `relative_root.join("src/lib.rs")`. Recognize the latter before
-            // treating the input as repository-relative, otherwise a relative
-            // root named `repo` would resolve `repo/src` as `repo/repo/src`.
-            let absolute = std::path::absolute(path).map_err(BoundedReadError::Io)?;
-            relative_path(&self.requested_root, &absolute)
-                .or_else(|_| relative_path(&self.canonical_root, &absolute))
-                .or_else(|_| relative_path(&self.requested_root, path))
+            // A relative path is repository-relative, whatever the working
+            // directory. The command line makes working-directory paths absolute.
+            relative_path(&self.requested_root, path)
         }
     }
 
@@ -2208,23 +2203,17 @@ mod tests {
     }
 
     #[test]
-    fn relative_root_joined_path_is_not_prefixed_twice() {
+    fn a_relative_path_names_a_file_from_the_root_not_the_working_directory() {
+        // Unit tests run in the crate directory, inside this root, so resolving
+        // from the working directory would give `<crate>/src/lib.rs`.
         let current = std::env::current_dir().unwrap();
-        let root = tempfile::tempdir_in(&current).unwrap();
-        let relative_root = root.path().strip_prefix(&current).unwrap();
-        std::fs::create_dir(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("src/lib.rs"), b"fn main() {}\n").unwrap();
-
-        let capability = RootCapability::open(relative_root).unwrap();
-        let read = read_regular_file_with_capability(
-            &capability,
-            &relative_root.join("src/lib.rs"),
-            1024,
-            1024,
-            ReadControl::default(),
-        )
-        .unwrap();
-        assert_eq!(read.bytes, b"fn main() {}\n");
+        let capability = RootCapability::open(current.parent().unwrap()).unwrap();
+        assert_eq!(
+            capability
+                .repository_relative(Path::new("src/lib.rs"))
+                .unwrap(),
+            Path::new("src/lib.rs")
+        );
     }
 
     #[cfg(unix)]

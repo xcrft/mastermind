@@ -319,7 +319,7 @@ fn verification_coverage_audit_rejects_missing_partial_and_different_commands() 
         assert!(report
             .render_text()
             .contains("verification_requirement_unmet"));
-        let bundle = Bundle::from_report(&report, None);
+        let bundle = Bundle::from_report_full(&report, None, None, None, None);
         assert_eq!(bundle.verdict, "broken");
         assert!(bundle
             .human_summary

@@ -57,6 +57,7 @@ pub mod spec;
 mod spec_removals;
 mod spec_symbols;
 pub mod store;
+mod strict_json;
 mod task_approval;
 pub mod task_review;
 pub mod task_scaffold;

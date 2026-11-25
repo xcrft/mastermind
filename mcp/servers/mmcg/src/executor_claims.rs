@@ -9,7 +9,6 @@ use crate::queries::{lang_precision, EdgePrecision};
 use crate::spec_symbols::{self, Resolved, Scope, Unresolved};
 use crate::store::{CallCandidateEvidence, Store, WorkBudget};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
@@ -210,7 +209,7 @@ fn current_source(
             },
         )
         .map_err(|_| "current_file_unavailable")?;
-        if indexed != crate::hex::encode(&Sha256::digest(&read.bytes)) {
+        if indexed != crate::hex::sha256(&read.bytes) {
             return Err("index_source_mismatch");
         }
         let extractor = extractor_for_path(Path::new(file)).ok_or("source_language_unavailable")?;

@@ -477,14 +477,23 @@ pub struct IndexStats {
     pub files_scanned: u32,
     /// Files parsed and committed (re-indexed this run).
     pub files_indexed: u32,
-    /// Files that failed to parse or commit.
+    /// Files that failed to read, parse or commit, including unindexable ones.
     pub files_failed: u32,
     /// Bounded deterministic sample of source paths that failed to index.
     pub failed_paths: Vec<String>,
+    /// Failed source paths that are not regular files, such as symlinks. They
+    /// never index, so they do not keep extractor and concept contracts dirty.
+    pub files_unindexable: u32,
+    /// Bounded deterministic sample of unindexable source paths.
+    pub unindexable_paths: Vec<String>,
     /// Unsupported extensions — skipped before parsing.
     pub files_skipped: u32,
     /// Bounded deterministic sample of unsupported-extension paths.
     pub skipped_paths: Vec<String>,
+    /// Git submodules, skipped because their files belong to another repository.
+    pub files_skipped_submodule: u32,
+    /// Bounded deterministic sample of skipped submodule paths.
+    pub skipped_submodule_paths: Vec<String>,
     /// Supported files rejected because their content appears binary.
     pub files_skipped_binary: u32,
     /// Bounded deterministic sample of binary-classified source paths.
@@ -607,6 +616,10 @@ impl Indexer {
         }
     }
 
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     #[cfg(test)]
     fn with_after_file_commit(mut self, callback: impl Fn() + Send + Sync + 'static) -> Self {
         self.after_file_commit = Some(Box::new(callback));
@@ -614,29 +627,18 @@ impl Indexer {
     }
 
     fn bind_or_validate_index_root(&self, store: &Store) -> Result<(), IndexError> {
-        let existing_root = store
-            .meta_value("index_root")
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let existing_root = store.meta_value("index_root").map_err(store_error)?;
         if existing_root.is_some() {
             return validate_index_root(store, &self.root).map_err(IndexError::Other);
         }
 
-        let has_unbound_data = store
-            .file_count()
-            .map_err(|error| IndexError::Other(error.to_string()))?
-            > 0
-            || store
-                .project_history_count()
-                .map_err(|error| IndexError::Other(error.to_string()))?
-                > 0
+        let has_unbound_data = store.file_count().map_err(store_error)? > 0
+            || store.project_history_count().map_err(store_error)? > 0
             || !store
                 .scratchpad_read(None, None, None, 1)
-                .map_err(|error| IndexError::Other(error.to_string()))?
+                .map_err(store_error)?
                 .is_empty()
-            || store
-                .fact_source_count()
-                .map_err(|error| IndexError::Other(error.to_string()))?
-                > 0;
+            || store.fact_source_count().map_err(store_error)? > 0;
         if has_unbound_data {
             return Err(IndexError::Other(
                 "existing index has no repository identity; rebuild it in a new database"
@@ -655,7 +657,7 @@ impl Indexer {
         })?;
         store
             .set_meta("index_root", canonical_root)
-            .map_err(|error| IndexError::Other(error.to_string()))
+            .map_err(store_error)
     }
 
     /// Index everything reachable from `root`. Incremental by default — files whose
@@ -676,21 +678,18 @@ impl Indexer {
     ) -> Result<IndexStats, IndexError> {
         let start = SystemTime::now();
         ensure_indexing_active(store)?;
+        // Held to the end of the run: contract state read below must still be
+        // true when this run stamps or purges anything.
+        let _writer = store.lock_writer().map_err(store_error)?;
         self.bind_or_validate_index_root(store)?;
-        store
-            .ensure_concept_schema()
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+        store.ensure_concept_schema().map_err(store_error)?;
         let stored_extractor_contract = store
             .meta_value(EXTRACTOR_CONTRACT_META_KEY)
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+            .map_err(store_error)?;
         let extractor_contract_current =
             stored_extractor_contract.as_deref() == Some(EXTRACTOR_CONTRACT_VERSION);
-        let concept_contract_current = store
-            .concept_contract_current()
-            .map_err(|error| IndexError::Other(error.to_string()))?;
-        let indexed_file_count = store
-            .file_count()
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let concept_contract_current = store.concept_contract_current().map_err(store_error)?;
+        let indexed_file_count = store.file_count().map_err(store_error)?;
         let extractor_contract_rebuild_required =
             !extractor_contract_current && indexed_file_count > 0;
         let concept_contract_rebuild_required = !concept_contract_current && indexed_file_count > 0;
@@ -700,18 +699,24 @@ impl Indexer {
             // A full rebuild can replace graph rows incrementally. Persist the
             // derived-corpus dirty marker before the first replacement so an
             // interruption can never leave a partial corpus stamped current.
-            store
-                .mark_concept_contract_dirty()
-                .map_err(|error| IndexError::Other(error.to_string()))?;
+            store.mark_concept_contract_dirty().map_err(store_error)?;
         }
         let root_capability = if limits == IndexLimits::MANUAL {
             None
         } else {
             Some(RootCapability::open(&self.root).map_err(index_error_from_read)?)
         };
+        let manual_root;
+        let inspection_root = match root_capability.as_ref() {
+            Some(root) => root,
+            None => {
+                manual_root = RootCapability::open(&self.root).map_err(index_error_from_read)?;
+                &manual_root
+            }
+        };
 
         // Phase 1: walk filesystem
-        let candidates = {
+        let inventory = {
             let interrupted = || store.work_interrupted();
             let control = ReadControl {
                 deadline: store.request_deadline(),
@@ -725,9 +730,14 @@ impl Indexer {
         ensure_indexing_active(store)?;
 
         let mut stats = IndexStats {
-            files_scanned: candidates.len() as u32,
+            files_scanned: inventory.scanned(),
+            files_skipped: inventory.other_files.count,
+            skipped_paths: inventory.other_files.sample(),
+            files_skipped_submodule: inventory.submodules.count,
+            skipped_submodule_paths: inventory.submodules.sample(),
             ..Default::default()
         };
+        let candidates = inventory.sources;
 
         // Phase 2: classify candidates serially (cheap — one lookup per file).
         // Builds (to_parse, current_paths) for phases 3-5.
@@ -736,29 +746,19 @@ impl Indexer {
             std::collections::HashSet::with_capacity(candidates.len());
         let mut admitted_identities: HashMap<PathBuf, StableFileIdentity> = HashMap::new();
         let mut absent_candidates: Vec<(PathBuf, AbsentPath)> = Vec::new();
-        let mut manual_absence_root = None;
         let mut declared_source_bytes = 0_u64;
 
         for path in &candidates {
             ensure_indexing_active(store)?;
-            if extractor_for_path(path).is_none() {
-                stats.files_skipped += 1;
-                if let Ok(rel) = repository_relative_path(&self.root, path) {
-                    push_path_sample(&mut stats.skipped_paths, &rel);
-                }
-                continue;
-            }
             let rel = repository_relative_path(&self.root, path)?;
-            let admission = {
-                let interrupted = || store.work_interrupted();
-                let control = ReadControl {
-                    deadline: store.request_deadline(),
-                    interrupted: Some(&interrupted),
-                };
-                match root_capability.as_ref() {
-                    Some(root) => source_admission_with_capability(root, path, control),
-                    None => source_admission_controlled(&self.root, path, control),
-                }
+            let interrupted = || store.work_interrupted();
+            let control = ReadControl {
+                deadline: store.request_deadline(),
+                interrupted: Some(&interrupted),
+            };
+            let admission = match root_capability.as_ref() {
+                Some(root) => source_admission_with_capability(root, path, control),
+                None => source_admission_controlled(&self.root, path, control),
             };
             let admitted = match admission {
                 Ok(admitted) => admitted,
@@ -773,29 +773,9 @@ impl Indexer {
                     continue;
                 }
                 Err(IndexError::Missing) => {
-                    let absence_root = if let Some(root) = root_capability.as_ref() {
-                        root
-                    } else {
-                        if manual_absence_root.is_none() {
-                            manual_absence_root = Some(
-                                RootCapability::open(&self.root).map_err(index_error_from_read)?,
-                            );
-                        }
-                        manual_absence_root
-                            .as_ref()
-                            .expect("manual absence root was initialized")
-                    };
-                    let interrupted = || store.work_interrupted();
-                    let absence = inspect_absent_path(
-                        absence_root,
-                        path,
-                        ReadControl {
-                            deadline: store.request_deadline(),
-                            interrupted: Some(&interrupted),
-                        },
-                    )
-                    .map_err(index_error_from_read)?
-                    .ok_or(IndexError::SnapshotChanged)?;
+                    let absence = inspect_absent_path(inspection_root, path, control)
+                        .map_err(index_error_from_read)?
+                        .ok_or(IndexError::SnapshotChanged)?;
                     absent_candidates.push((path.clone(), absence));
                     continue;
                 }
@@ -804,6 +784,15 @@ impl Indexer {
                 Err(_) => {
                     stats.files_failed += 1;
                     push_path_sample(&mut stats.failed_paths, &rel);
+                    if is_unindexable_source(inspection_root, path, control) {
+                        // Never indexed, so phase 5 purges any old rows.
+                        stats.files_unindexable += 1;
+                        push_path_sample(&mut stats.unindexable_paths, &rel);
+                    } else {
+                        // A read error is not evidence of deletion. The old
+                        // rows stay until the path indexes or disappears.
+                        current_paths.insert(rel);
+                    }
                     continue;
                 }
             };
@@ -909,17 +898,24 @@ impl Indexer {
                                     callback();
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
+                                if matches!(store_error(error), IndexError::Busy) {
+                                    return Err(IndexError::Busy);
+                                }
                                 stats.files_failed += 1;
                                 push_path_sample(&mut stats.failed_paths, &rel);
                             }
                         }
                     }
+                    // Parsing checks the whole file, admission only a prefix.
+                    // A skipped source leaves the index in phase 5.
                     Err(IndexError::Skipped(IndexSkipReason::Binary)) => {
+                        current_paths.remove(&rel);
                         stats.files_skipped_binary += 1;
                         push_path_sample(&mut stats.skipped_binary_paths, &rel);
                     }
                     Err(IndexError::Skipped(IndexSkipReason::TooLarge { .. })) => {
+                        current_paths.remove(&rel);
                         stats.files_skipped_too_large += 1;
                         push_path_sample(&mut stats.skipped_too_large_paths, &rel);
                     }
@@ -936,15 +932,11 @@ impl Indexer {
         // Phase 5: purge orphans (in index, no longer on disk). Safe only after a
         // FULL root scan — a partial scan would wrongly purge the unscanned subtree.
         ensure_indexing_active(store)?;
-        let indexed = store
-            .indexed_paths()
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let indexed = store.indexed_paths().map_err(store_error)?;
         for path in indexed {
             ensure_indexing_active(store)?;
             if !current_paths.contains(&path) {
-                store
-                    .purge_file(&path)
-                    .map_err(|error| IndexError::Other(error.to_string()))?;
+                store.purge_file(&path).map_err(store_error)?;
                 stats.files_purged += 1;
             }
         }
@@ -953,7 +945,7 @@ impl Indexer {
         // are indexed as `task_spec` rows and queried through the same bounded
         // inventory and freshness contract as the rest of project history.
         ensure_indexing_active(store)?;
-        let history = self.index_project_history(store)?;
+        let history = self.project_history_locked(store)?;
         stats.history_entries_indexed = history.indexed;
         stats.task_specs_indexed = history.task_specs_indexed;
         stats.history_entries_skipped = history.skipped;
@@ -980,26 +972,22 @@ impl Indexer {
                 }
             }
         }
-        if stats.files_failed == 0 && contracts_need_finalization {
+        // An unindexable path is a property of the tree, not of this run, so it
+        // never keeps the contracts dirty. Any other failure does.
+        if stats.files_failed == stats.files_unindexable && contracts_need_finalization {
             ensure_indexing_active(store)?;
             let finalized = store
                 .finalize_index_contracts_current()
-                .map_err(|error| IndexError::Other(error.to_string()))?;
+                .map_err(store_error)?;
             stats.concept_orphans_purged = finalized.orphans_purged;
             stats.concept_rows_indexed = finalized.rows;
             stats.extractor_contract_rebuilt = extractor_contract_rebuild_required;
             stats.concept_contract_rebuilt = concept_contract_rebuild_required;
         } else {
-            stats.concept_orphans_purged = store
-                .purge_orphan_concepts()
-                .map_err(|error| IndexError::Other(error.to_string()))?;
-            stats.concept_rows_indexed = store
-                .concept_count()
-                .map_err(|error| IndexError::Other(error.to_string()))?;
+            stats.concept_orphans_purged = store.purge_orphan_concepts().map_err(store_error)?;
+            stats.concept_rows_indexed = store.concept_count().map_err(store_error)?;
         }
-        let documentation = store
-            .concept_documentation_stats()
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+        let documentation = store.concept_documentation_stats().map_err(store_error)?;
         stats.concept_documentation_supported_languages =
             crate::store::CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES.to_string();
         stats.concept_documentation_indexed = documentation.indexed_documents;
@@ -1020,6 +1008,14 @@ impl Indexer {
         store: &mut Store,
     ) -> Result<ProjectHistoryIndexStats, IndexError> {
         ensure_indexing_active(store)?;
+        let _writer = store.lock_writer().map_err(store_error)?;
+        self.project_history_locked(store)
+    }
+
+    fn project_history_locked(
+        &self,
+        store: &mut Store,
+    ) -> Result<ProjectHistoryIndexStats, IndexError> {
         self.bind_or_validate_index_root(store)?;
         let snapshot = {
             let interrupted = || store.work_interrupted();
@@ -1036,7 +1032,7 @@ impl Indexer {
                 snapshot.stats.truncated,
                 &snapshot.inventory_token,
             )
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+            .map_err(store_error)?;
         Ok(snapshot.stats)
     }
 
@@ -1085,7 +1081,7 @@ impl Indexer {
         };
         let stored = store
             .meta_value("project_history_inventory_token")
-            .map_err(|error| IndexError::Other(error.to_string()))?;
+            .map_err(store_error)?;
         let freshness = if stored.as_deref() != Some(snapshot.inventory_token.as_str()) {
             ProjectHistoryFreshness::Stale
         } else if snapshot.stats.skipped > 0 || snapshot.stats.truncated {
@@ -1244,15 +1240,27 @@ impl Indexer {
     }
 
     /// Re-index a single file. Used by the watcher.
+    /// A source that is now binary or too large leaves the index and the
+    /// skip reason is returned.
     pub fn index_one(&self, store: &mut Store, path: &Path) -> Result<(), IndexError> {
         ensure_indexing_active(store)?;
         let extractor = extractor_for_path(path)
             .ok_or_else(|| IndexError::Parse(format!("no extractor for {path:?}")))?;
-        let indexed = parse_one_with_concepts(path, &self.root, extractor.as_ref())?;
+        let parsed = parse_one_with_concepts(path, &self.root, extractor.as_ref());
         ensure_indexing_active(store)?;
-        store
-            .commit_file_with_concepts(indexed.pending, indexed.documentation)
-            .map_err(|e| IndexError::Other(e.to_string()))
+        let _writer = store.lock_writer().map_err(store_error)?;
+        match parsed {
+            Ok(indexed) => store
+                .commit_file_with_concepts(indexed.pending, indexed.documentation)
+                .map_err(store_error),
+            Err(skipped @ IndexError::Skipped(_)) => {
+                store
+                    .purge_file(&repository_relative_path(&self.root, path)?)
+                    .map_err(store_error)?;
+                Err(skipped)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1606,7 +1614,7 @@ pub(crate) fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
 }
 
-fn has_skipped_component(path: &Path) -> bool {
+pub(crate) fn has_skipped_component(path: &Path) -> bool {
     path.components()
         .any(|component| is_skipped_dir(component.as_os_str().to_str().unwrap_or("")))
 }
@@ -1671,7 +1679,7 @@ fn git_tracked_relative_paths(root: &Path) -> Vec<PathBuf> {
 pub(crate) fn tracked_relative_paths(
     root: &Path,
 ) -> Result<Vec<PathBuf>, crate::diff::WorkingTreeDiffError> {
-    let output = crate::diff::run_bounded_git_with_control(
+    let output = crate::diff::run_bounded_git_controlled(
         root,
         &["ls-files", "--cached", "-z", "--"],
         None,
@@ -1724,14 +1732,57 @@ fn source_walk_builder(root: &Path) -> WalkBuilder {
     builder
 }
 
+/// A count of listed paths and a sorted sample of the first
+/// [`SKIPPED_PATH_SAMPLE_LIMIT`] of them. The paths themselves are not kept.
+#[derive(Debug, Default)]
+pub(crate) struct PathTally {
+    pub(crate) count: u32,
+    sample: BTreeSet<String>,
+}
+
+impl PathTally {
+    fn add(&mut self, path: Option<String>) {
+        self.count = self.count.saturating_add(1);
+        if let Some(path) = path {
+            self.sample.insert(path);
+            if self.sample.len() > SKIPPED_PATH_SAMPLE_LIMIT {
+                self.sample.pop_last();
+            }
+        }
+    }
+
+    pub(crate) fn sample(&self) -> Vec<String> {
+        self.sample.iter().cloned().collect()
+    }
+}
+
+/// The listed paths of one inventory: the source files to index, and only a
+/// tally of everything else, so a large non-source tree costs no memory.
+#[derive(Debug, Default)]
+pub(crate) struct SourceInventory {
+    pub(crate) sources: Vec<PathBuf>,
+    pub(crate) other_files: PathTally,
+    /// Git submodules (gitlinks). Their files belong to another repository and
+    /// are never indexed.
+    pub(crate) submodules: PathTally,
+}
+
+impl SourceInventory {
+    pub(crate) fn scanned(&self) -> u32 {
+        (self.sources.len() as u32)
+            .saturating_add(self.other_files.count)
+            .saturating_add(self.submodules.count)
+    }
+}
+
 pub(crate) fn source_candidates_bounded(
     root: &RootCapability,
     limit: usize,
     control: ReadControl<'_>,
-) -> Result<Vec<PathBuf>, IndexError> {
+) -> Result<SourceInventory, IndexError> {
     control.check().map_err(index_error_from_read)?;
     root.verify().map_err(index_error_from_read)?;
-    let output = crate::diff::run_bounded_git_with_control(
+    let output = crate::diff::run_bounded_git_controlled(
         root.canonical_root(),
         &[
             "ls-files",
@@ -1760,10 +1811,10 @@ pub(crate) fn source_candidates_bounded(
         }
         return Err(IndexError::Other("git source inventory unavailable".into()));
     }
-    // Only files an extractor reads count toward the cap. Other files stay
-    // listed for scan stats, and the Git output byte limit bounds them.
-    let mut paths = BTreeSet::new();
-    let mut sources = 0_usize;
+    let submodule_paths = submodule_paths(root, control)?;
+    // Only files an extractor reads count toward the cap and are kept.
+    let mut sources = BTreeSet::new();
+    let mut inventory = SourceInventory::default();
     for raw in output.stdout.split(|byte| *byte == 0) {
         control.check().map_err(index_error_from_read)?;
         if raw.is_empty() {
@@ -1776,19 +1827,70 @@ pub(crate) fn source_candidates_bounded(
         if has_skipped_component(&relative) {
             continue;
         }
-        if extractor_for_path(&relative).is_some() {
-            sources += 1;
-        }
-        paths.insert(root.canonical_root().join(relative));
-        if sources > limit {
-            return Err(IndexError::LimitExceeded {
-                dimension: "source_candidates",
-                cap: limit as u64,
-            });
+        let display = relative.to_str().map(str::to_string);
+        if submodule_paths.contains(&relative) {
+            inventory.submodules.add(display);
+        } else if extractor_for_path(&relative).is_some() {
+            sources.insert(root.canonical_root().join(relative));
+            if sources.len() > limit {
+                return Err(IndexError::LimitExceeded {
+                    dimension: "source_candidates",
+                    cap: limit as u64,
+                });
+            }
+        } else {
+            inventory.other_files.add(display);
         }
     }
     root.verify().map_err(index_error_from_read)?;
-    Ok(paths.into_iter().collect())
+    inventory.sources = sources.into_iter().collect();
+    Ok(inventory)
+}
+
+/// Paths `.gitmodules` declares at the index root. Git lists each submodule
+/// as one entry, which is skipped and counted as a submodule.
+fn submodule_paths(
+    root: &RootCapability,
+    control: ReadControl<'_>,
+) -> Result<HashSet<PathBuf>, IndexError> {
+    if !root
+        .canonical_root()
+        .join(".gitmodules")
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Ok(HashSet::new());
+    }
+    let output = crate::diff::run_bounded_git_controlled(
+        root.canonical_root(),
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--no-includes",
+            "-z",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ],
+        None,
+        GIT_TRACKED_PATH_OUTPUT_LIMIT,
+        control.deadline,
+        control.interrupted,
+    )
+    .map_err(|error| git_inventory_error(error, control))?;
+    // A `.gitmodules` that Git cannot read declares nothing. Its gitlinks are
+    // still skipped, only counted as unsupported paths instead.
+    if !output.success {
+        return Ok(HashSet::new());
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let value = record.splitn(2, |byte| *byte == b'\n').nth(1)?;
+            git_relative_path(value).ok()
+        })
+        .collect())
 }
 
 fn git_inventory_error(
@@ -1815,7 +1917,7 @@ fn inside_git_work_tree(
     root: &RootCapability,
     control: ReadControl<'_>,
 ) -> Result<bool, IndexError> {
-    match crate::diff::run_bounded_git_with_control(
+    match crate::diff::run_bounded_git_controlled(
         root.canonical_root(),
         &["rev-parse", "--is-inside-work-tree"],
         None,
@@ -1834,36 +1936,51 @@ fn walked_source_candidates(
     root: &RootCapability,
     limit: usize,
     control: ReadControl<'_>,
-) -> Result<Vec<PathBuf>, IndexError> {
-    let mut paths = BTreeSet::new();
-    let mut sources = 0_usize;
+) -> Result<SourceInventory, IndexError> {
+    let mut sources = BTreeSet::new();
+    let mut inventory = SourceInventory::default();
     for entry in source_walk_builder(root.canonical_root()).build() {
         control.check().map_err(index_error_from_read)?;
-        let Ok(entry) = entry else {
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A path removed during the walk is absent from the inventory, as
+            // it is from the next walk.
+            Err(error)
+                if error
+                    .io_error()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue
+            }
+            // Skipping an unreadable directory would purge its sources as if
+            // they were deleted, and report the index as fresh.
+            Err(error) => return Err(IndexError::Other(format!("source walk failed: {error}"))),
         };
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
         if extractor_for_path(entry.path()).is_some() {
-            sources += 1;
-        }
-        paths.insert(entry.into_path());
-        if sources > limit {
-            return Err(IndexError::LimitExceeded {
-                dimension: "source_candidates",
-                cap: limit as u64,
-            });
+            sources.insert(entry.into_path());
+            if sources.len() > limit {
+                return Err(IndexError::LimitExceeded {
+                    dimension: "source_candidates",
+                    cap: limit as u64,
+                });
+            }
+        } else {
+            let display = repository_relative_path(root.canonical_root(), entry.path()).ok();
+            inventory.other_files.add(display);
         }
     }
     root.verify().map_err(index_error_from_read)?;
-    Ok(paths.into_iter().collect())
+    inventory.sources = sources.into_iter().collect();
+    Ok(inventory)
 }
 
 /// The one source inventory for manual indexing, auto-refresh and freshness:
 /// `git ls-files --cached --others --exclude-standard` inside a Git work
 /// tree, otherwise a walk with the same ignore rules.
-fn source_candidates(root: &Path, control: ReadControl<'_>) -> Result<Vec<PathBuf>, IndexError> {
+fn source_candidates(root: &Path, control: ReadControl<'_>) -> Result<SourceInventory, IndexError> {
     let root = RootCapability::open(root).map_err(index_error_from_read)?;
     source_candidates_bounded(&root, usize::MAX, control)
 }
@@ -1874,6 +1991,18 @@ fn source_candidates(root: &Path, control: ReadControl<'_>) -> Result<Vec<PathBu
 pub(crate) struct StaleScan {
     pub(crate) paths: Vec<String>,
     pub(crate) unindexable: Vec<String>,
+    /// Git submodules in the inventory. They are never indexed.
+    pub(crate) submodules: u32,
+}
+
+/// A listed source that exists but is not a regular file, such as a symlink.
+/// Read errors and concurrent replacements can clear on retry, so they are
+/// not unindexable.
+fn is_unindexable_source(root: &RootCapability, path: &Path, control: ReadControl<'_>) -> bool {
+    matches!(
+        inspect_path_kind_with_capability(root, path, control),
+        Ok(BoundedPathKind::Other | BoundedPathKind::Directory)
+    )
 }
 
 pub(crate) fn stale_paths_controlled(
@@ -1900,20 +2029,18 @@ pub(crate) fn stale_paths_controlled(
             cap: source_cap as u64,
         })?;
     let indexed: HashMap<String, i64> = indexed_entries.into_iter().collect();
-    let candidates =
+    let inventory =
         crate::indexer::source_candidates_bounded(&root_capability, source_cap, control)?;
+    let submodules = inventory.submodules.count;
     let mut declared_bytes = 0_u64;
     let mut seen = HashSet::new();
     let mut stale = Vec::new();
     let mut unindexable = Vec::new();
     let mut absent_candidates = Vec::new();
-    for path in candidates {
+    for path in inventory.sources {
         control
             .check()
             .map_err(crate::indexer::index_error_from_read)?;
-        if crate::indexer::extractor_for_path(&path).is_none() {
-            continue;
-        }
         let relative = path
             .strip_prefix(root_capability.canonical_root())
             .map_err(|_| crate::indexer::IndexError::SnapshotChanged)?;
@@ -1951,17 +2078,7 @@ pub(crate) fn stale_paths_controlled(
                 return Err(crate::indexer::IndexError::LimitExceeded { dimension, cap })
             }
             Err(_) => {
-                // Read errors and concurrent replacements can clear on retry, so
-                // only a path that is not a regular file is named as unindexable.
-                if matches!(
-                    crate::bounded_fs::inspect_path_kind_with_capability(
-                        &root_capability,
-                        &path,
-                        control,
-                    ),
-                    Ok(crate::bounded_fs::BoundedPathKind::Other
-                        | crate::bounded_fs::BoundedPathKind::Directory)
-                ) {
+                if is_unindexable_source(&root_capability, &path, control) {
                     push_path_sample(&mut unindexable, &relative);
                 }
                 stale.push(relative.clone());
@@ -2041,6 +2158,7 @@ pub(crate) fn stale_paths_controlled(
     Ok(StaleScan {
         paths: stale,
         unindexable,
+        submodules,
     })
 }
 
@@ -2401,7 +2519,7 @@ fn parse_blob_internal(
     let mut pending = PendingFile {
         path: rel_path.to_string(),
         mtime,
-        content_sha256: crate::hex::encode(&Sha256::digest(source)),
+        content_sha256: crate::hex::sha256(source),
         language,
         symbols: Vec::new(),
         edges: Vec::new(),
@@ -2462,7 +2580,23 @@ pub enum IndexError {
     SnapshotChanged,
     Cancelled,
     DeadlineExceeded,
-    LimitExceeded { dimension: &'static str, cap: u64 },
+    LimitExceeded {
+        dimension: &'static str,
+        cap: u64,
+    },
+    /// Another writer holds the index. Retrying later succeeds.
+    Busy,
+}
+
+/// A writer that finds the index locked gets a retryable [`IndexError::Busy`],
+/// whether it waited for the writer lock or for SQLite itself.
+pub(crate) fn store_error(error: rusqlite::Error) -> IndexError {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            IndexError::Busy
+        }
+        _ => IndexError::Other(error.to_string()),
+    }
 }
 
 fn ensure_indexing_active(store: &Store) -> Result<(), IndexError> {
@@ -2496,6 +2630,10 @@ impl std::fmt::Display for IndexError {
             IndexError::LimitExceeded { dimension, cap } => {
                 write!(f, "refresh limit exceeded: {dimension} > {cap}")
             }
+            IndexError::Busy => write!(
+                f,
+                "the index is busy: another process is writing it; retry when it finishes"
+            ),
             IndexError::Skipped(IndexSkipReason::Binary) => write!(f, "skipped binary source"),
             IndexError::Skipped(IndexSkipReason::TooLarge { size }) => write!(
                 f,
@@ -3399,7 +3537,7 @@ def placeholder():
         );
         assert_eq!(
             store.file_content_sha256("app.py").unwrap().as_deref(),
-            Some(crate::hex::encode(&Sha256::digest(bytes)).as_str())
+            Some(crate::hex::sha256(bytes).as_str())
         );
         fs::remove_dir_all(&dir).ok();
     }
@@ -3887,11 +4025,10 @@ def candidate(value: ImportantType) -> ResultType"#
         }
         git(&dir, &["init", "-q", "--initial-branch=main"]);
         let root = RootCapability::open(&dir).unwrap();
+        let inventory = source_candidates_bounded(&root, 2, ReadControl::default()).unwrap();
         assert_eq!(
-            source_candidates_bounded(&root, 2, ReadControl::default())
-                .unwrap()
-                .len(),
-            6
+            (inventory.sources.len(), inventory.other_files.count),
+            (1, 5)
         );
         for index in 0..2 {
             fs::write(dir.join(format!("more-{index}.py")), "def more(): pass\n").unwrap();
@@ -3921,7 +4058,9 @@ def candidate(value: ImportantType) -> ResultType"#
         );
         let root = RootCapability::open(&dir).unwrap();
         assert_eq!(
-            source_candidates_bounded(&root, 10, ReadControl::default()).unwrap(),
+            source_candidates_bounded(&root, 10, ReadControl::default())
+                .unwrap()
+                .sources,
             vec![root.canonical_root().join("good.rs")]
         );
         let mut store = Store::open(&db).unwrap();
@@ -4034,7 +4173,9 @@ def candidate(value: ImportantType) -> ResultType"#
         fs::write(&nested_ignored, "pub fn ignored() {}\n").unwrap();
         fs::write(&nested_kept, "pub fn kept() {}\n").unwrap();
 
-        let candidates = source_candidates(&dir, ReadControl::default()).unwrap();
+        let candidates = source_candidates(&dir, ReadControl::default())
+            .unwrap()
+            .sources;
         assert!(!candidates.contains(&generated));
         assert!(candidates.contains(&kept));
         assert!(!candidates.contains(&nested_ignored));
@@ -4658,5 +4799,245 @@ mod stale_path_tests {
         drop(snapshot);
         drop(store);
         fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod index_outcome_tests {
+    use super::*;
+    use crate::store::Store;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_at(path: &Path, content: impl AsRef<[u8]>, second: u64) {
+        fs::write(path, content).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + second))
+            .unwrap();
+    }
+
+    fn stale(store: &Store, root: &Path) -> StaleScan {
+        stale_paths_controlled(
+            store,
+            root,
+            10,
+            AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            ReadControl::default(),
+        )
+        .unwrap()
+    }
+
+    fn repository() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        (directory, root)
+    }
+
+    #[test]
+    fn a_source_that_gains_a_late_nul_byte_leaves_the_index() {
+        let (_directory, root) = repository();
+        let mut body = "def old_name():\n    return 1\n".to_string();
+        while body.len() < 12_000 {
+            body.push_str("# padding keeps the NUL after the sniffed prefix\n");
+        }
+        write_at(&root.join("big.py"), &body, 0);
+        write_at(&root.join("a.py"), "def alpha():\n    return 1\n", 0);
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        assert_eq!(
+            indexer.index_all(&mut store, false).unwrap().files_indexed,
+            2
+        );
+
+        body.push_str("x = '\0'\n");
+        write_at(&root.join("big.py"), &body, 1);
+        let stats = indexer.index_all(&mut store, false).unwrap();
+
+        assert_eq!(stats.files_skipped_binary, 1);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["a.py"]);
+        assert!(store
+            .search_symbols("old_name", None, None)
+            .unwrap()
+            .is_empty());
+        assert!(stale(&store, &root).paths.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_source_does_not_keep_the_contracts_dirty() {
+        let (_directory, root) = repository();
+        write_at(&root.join("real.py"), "def real():\n    return 1\n", 0);
+        std::os::unix::fs::symlink("real.py", root.join("alias.py")).unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+
+        indexer.index_all(&mut store, false).unwrap();
+        assert!(store.extractor_contract_current().unwrap());
+        assert!(store.concept_contract_current().unwrap());
+
+        let second = indexer.index_all(&mut store, false).unwrap();
+        assert_eq!((second.files_indexed, second.files_unchanged), (0, 1));
+        assert_eq!(stale(&store, &root).unindexable, vec!["alias.py"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_source_keeps_its_indexed_rows() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_directory, root) = repository();
+        write_at(&root.join("kept.py"), "def kept():\n    return 1\n", 0);
+        write_at(&root.join("other.py"), "def other():\n    return 1\n", 0);
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+
+        fs::set_permissions(root.join("kept.py"), fs::Permissions::from_mode(0o000)).unwrap();
+        let stats = indexer.index_all(&mut store, false);
+        fs::set_permissions(root.join("kept.py"), fs::Permissions::from_mode(0o644)).unwrap();
+        let stats = stats.unwrap();
+
+        assert_eq!(stats.files_failed, 1);
+        assert_eq!(stats.failed_paths, vec!["kept.py"]);
+        assert_eq!(store.indexed_paths().unwrap(), vec!["kept.py", "other.py"]);
+        assert_eq!(store.search_symbols("kept", None, None).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_outside_git_fails_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        write_at(&root.join("top.py"), "def top():\n    return 1\n", 0);
+        fs::create_dir(root.join("sub")).unwrap();
+        write_at(
+            &root.join("sub/hidden.py"),
+            "def hidden():\n    return 1\n",
+            0,
+        );
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+
+        fs::set_permissions(root.join("sub"), fs::Permissions::from_mode(0o000)).unwrap();
+        let indexed = indexer.index_all(&mut store, false);
+        let scan = stale_paths_controlled(
+            &store,
+            &root,
+            10,
+            AUTO_REFRESH_SOURCE_CANDIDATE_LIMIT,
+            AUTO_REFRESH_SOURCE_AGGREGATE_BYTES,
+            ReadControl::default(),
+        );
+        fs::set_permissions(root.join("sub"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(indexed.is_err(), "{indexed:?}");
+        assert!(scan.is_err(), "{scan:?}");
+        assert_eq!(
+            store.indexed_paths().unwrap(),
+            vec!["sub/hidden.py", "top.py"]
+        );
+    }
+
+    #[test]
+    fn the_source_inventory_holds_only_source_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("one.py"), "def one(): pass\n").unwrap();
+        fs::write(root.join("notes.txt"), "text\n").unwrap();
+        fs::write(root.join("README.md"), "# readme\n").unwrap();
+        for in_git in [false, true] {
+            if in_git {
+                git(&root, &["init", "-q", "--initial-branch=main"]);
+            }
+            let capability = RootCapability::open(&root).unwrap();
+            let inventory =
+                source_candidates_bounded(&capability, 10, ReadControl::default()).unwrap();
+            assert_eq!(inventory.sources, vec![root.join("one.py")], "git={in_git}");
+            assert_eq!(inventory.other_files.count, 2, "git={in_git}");
+        }
+    }
+
+    #[test]
+    fn a_submodule_is_reported_as_skipped_not_as_an_unsupported_path() {
+        let (_directory, root) = repository();
+        write_at(&root.join("top.py"), "def top():\n    return 1\n", 0);
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"vendor_sub\"]\n\tpath = vendor_sub\n\turl = ./vendor_sub\n",
+        )
+        .unwrap();
+        fs::create_dir(root.join("vendor_sub")).unwrap();
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,5fbb99b72a6217282bab1e1f6f0a8f336c34bbe9,vendor_sub",
+            ],
+        );
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let stats = Indexer::new(&root).index_all(&mut store, false).unwrap();
+        assert!(
+            !stats.skipped_paths.iter().any(|path| path == "vendor_sub"),
+            "{:?}",
+            stats.skipped_paths
+        );
+        assert_eq!(stats.files_skipped_submodule, 1);
+        assert_eq!(stats.skipped_submodule_paths, vec!["vendor_sub"]);
+        assert_eq!(stale(&store, &root).submodules, 1);
+    }
+
+    #[test]
+    fn two_index_writers_never_interleave() {
+        let (_directory, root) = repository();
+        for index in 0..3 {
+            write_at(
+                &root.join(format!("m{index}.py")),
+                format!("def f{index}():\n    return {index}\n"),
+                0,
+            );
+        }
+        let database = root.join(".mastermind/mmcg.db");
+        let mut first = Store::open(&database).unwrap();
+        type Outcome = std::sync::Arc<std::sync::Mutex<Option<Result<IndexStats, IndexError>>>>;
+        let nested: Outcome = Default::default();
+        let observed = std::sync::Arc::clone(&nested);
+        let nested_root = root.clone();
+        let nested_database = database.clone();
+        let indexer = Indexer::new(&root).with_after_file_commit(move || {
+            let mut slot = observed.lock().unwrap();
+            if slot.is_some() {
+                return;
+            }
+            let mut second = Store::open(&nested_database).unwrap();
+            second.push_work_budget(crate::store::WorkBudget::from_millis(300));
+            *slot = Some(Indexer::new(&nested_root).index_all(&mut second, true));
+            second.pop_work_budget();
+        });
+        indexer.index_all(&mut first, false).unwrap();
+        let nested = nested.lock().unwrap().take().unwrap();
+        assert!(matches!(nested, Err(IndexError::Busy)), "{nested:?}");
     }
 }

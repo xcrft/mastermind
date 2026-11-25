@@ -117,7 +117,7 @@ mod tests {
     #[cfg(unix)]
     use base64::Engine;
     use mmcg::audit_bundle::{
-        seal, sha256_hex, DiffBinding, InputBinding, Manifest, RepositoryBinding, ToolBinding,
+        seal, DiffBinding, InputBinding, Manifest, RepositoryBinding, ToolBinding,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -134,14 +134,14 @@ mod tests {
             },
             inputs: InputBinding {
                 spec_path: "spec.md".into(),
-                spec_sha256: format!("sha256:{}", sha256_hex(b"spec")),
+                spec_sha256: format!("sha256:{}", mmcg::hex::sha256(b"spec")),
                 executor_report_path: None,
                 executor_report_present: false,
                 executor_report_sha256: None,
             },
             diff: DiffBinding {
                 name_status: vec![],
-                binary_diff_sha256: format!("sha256:{}", sha256_hex(b"")),
+                binary_diff_sha256: format!("sha256:{}", mmcg::hex::sha256(b"")),
             },
             tool: ToolBinding {
                 name: "mastermind".into(),

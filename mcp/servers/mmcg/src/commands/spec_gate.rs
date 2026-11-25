@@ -66,7 +66,13 @@ fn gate_paths(
     let root = root
         .canonicalize()
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    Ok(super::task_paths(&std::path::absolute(spec)?, root)?)
+    let spec = gate_input(spec, &root)?;
+    Ok((root, spec))
+}
+
+/// Another gate input, such as the executor report, resolved like the spec.
+fn gate_input(path: &Path, root: &Path) -> std::io::Result<PathBuf> {
+    Ok(super::task_paths(&std::path::absolute(path)?, root.to_path_buf())?.1)
 }
 
 pub fn verify(
@@ -130,6 +136,10 @@ pub fn audit(
     let (root, spec) = gate_paths(spec, root)?;
     let parsed =
         mmcg::spec::parse_file(&spec).map_err(|e| format!("parse {}: {e}", spec.display()))?;
+    let executor_report_path = executor_report_path
+        .map(|path| gate_input(path, &root))
+        .transpose()?;
+    let executor_report_path = executor_report_path.as_deref();
     let executor_report_path_str = executor_report_path
         .map(|path| exact_path(path, "executor report"))
         .transpose()?;
@@ -168,11 +178,12 @@ pub fn audit(
         }
     }
 
+    // stderr keeps the JSON on stdout intact.
     match mmcg::lessons::append_audit_candidate(&root, &spec, &report) {
         Ok(true) if !json => {
             eprintln!("  appended lesson candidate → .mastermind/tasks/_lessons.md")
         }
-        Err(e) if !json => eprintln!("  warning: lessons append failed: {e}"),
+        Err(e) => eprintln!("  warning: lessons append failed: {e}"),
         _ => {}
     }
     if report.has_failures() {

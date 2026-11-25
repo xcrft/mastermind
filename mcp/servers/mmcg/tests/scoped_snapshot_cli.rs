@@ -154,7 +154,7 @@ fn ambiguous_snapshots_fail_cli_ci_controller_and_bundle() {
     assert!(!run_task::state_file_path(fixture.root(), &path).exists());
     let parsed = spec::parse_file(&path).unwrap();
     let report = audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
-    let bundle = audit_spec::Bundle::from_report(&report, None);
+    let bundle = audit_spec::Bundle::from_report_full(&report, None, None, None, None);
     assert_eq!(bundle.snapshot_drift.len(), 1);
     assert!(
         bundle.human_summary.contains("1 errors, 0 warnings"),

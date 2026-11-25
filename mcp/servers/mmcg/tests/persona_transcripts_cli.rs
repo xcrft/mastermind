@@ -52,6 +52,8 @@ impl Fixture {
             .current_dir(&self.project)
             // These child-only settings implement the fixture's home/history
             // locations; the test process and real user environment are untouched.
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(key, _)| key == "PATH" || key == "SystemRoot"))
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
             .env("CODEX_HOME", &self.codex)

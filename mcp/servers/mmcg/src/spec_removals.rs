@@ -439,12 +439,13 @@ fn regular_paths(
         check_deadline(deadline)?;
         let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", oid, "--"];
         args.extend(batch.iter().map(String::as_str));
-        let output = diff::run_bounded_git_with_limit_until(
+        let output = diff::run_bounded_git_controlled(
             root,
             &args,
             None,
             diff::GIT_OUTPUT_LIMIT,
             Some(deadline),
+            None,
         )
         .map_err(|error| Unresolved::unavailable(error.code()))?;
         if !output.success || (!output.stdout.is_empty() && output.stdout.last() != Some(&0)) {

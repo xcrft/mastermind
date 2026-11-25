@@ -7,7 +7,6 @@
 use crate::policy::PolicyReport;
 use crate::queries::{ChangeImpactResponse, ProjectMapResponse};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const CYCLE_RULE: &str = "mastermind/dependency-cycle";
@@ -291,7 +290,7 @@ pub fn architecture_policy(report: &PolicyReport) -> Value {
 
 fn stable_fingerprint(value: &Value) -> String {
     let bytes = serde_json::to_vec(value).expect("JSON value serialization is infallible");
-    let digest = crate::hex::encode(&Sha256::digest(bytes));
+    let digest = crate::hex::sha256(bytes);
     format!("{}:1", &digest[..16])
 }
 

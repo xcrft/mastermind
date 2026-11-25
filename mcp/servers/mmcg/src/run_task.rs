@@ -22,6 +22,7 @@ use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
 use crate::indexer::{validate_index_root, Indexer};
 use crate::spec::{self, ParsedSpec};
 use crate::store::Store;
+use crate::task_scaffold::is_task_entry;
 use crate::task_worktree::ByteBudget;
 use crate::verify_spec;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,8 @@ const STRICT_EVIDENCE_GIT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const HISTORY_REVIEW_BYTE_LIMIT: u64 = 1024 * 1024;
 const RUN_STATE_BYTE_LIMIT: u64 = 1024 * 1024;
 pub(crate) const STRICT_SNAPSHOT_VERSION: u32 = 2;
+/// The `state.json` format this binary reads and writes.
+pub const RUN_STATE_FORMAT_VERSION: u32 = 1;
 
 /// Controller-owned handshake between pre- and post-flight. Canonical task
 /// specs keep it beside the spec as `<task>/state.json`; legacy flat specs use
@@ -46,6 +49,9 @@ pub(crate) const STRICT_SNAPSHOT_VERSION: u32 = 2;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RunState {
+    /// State written before the field existed has the first format.
+    #[serde(default = "first_run_state_format")]
+    pub format_version: u32,
     /// User-facing lifecycle state consumed by `mastermind status` / `next`.
     #[serde(
         default = "default_run_status",
@@ -163,6 +169,12 @@ pub(crate) fn validate_run_status(status: &str) -> Result<(), String> {
 }
 
 pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
+    if state.format_version != RUN_STATE_FORMAT_VERSION {
+        return Err(format!(
+            "unsupported task state format {}",
+            state.format_version
+        ));
+    }
     validate_run_status(&state.status)?;
     if state
         .preflight_approval_sha256
@@ -239,8 +251,34 @@ pub(crate) fn validate_run_state(state: &RunState) -> Result<(), String> {
 }
 
 pub(crate) fn parse_run_state(bytes: &[u8]) -> Result<RunState, String> {
-    let state: RunState = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    validate_run_state(&state)?;
+    parse_versioned_run_state(bytes).map_err(|error| error.to_string())
+}
+
+/// A newer format can add fields this binary does not know, so its version is
+/// read first and refused by name rather than reported as a damaged file.
+fn parse_versioned_run_state(bytes: &[u8]) -> std::io::Result<RunState> {
+    #[derive(Deserialize)]
+    struct Format {
+        #[serde(default)]
+        format_version: Option<u64>,
+    }
+    let invalid = |error: String| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+    let format = serde_json::from_slice::<Format>(bytes)
+        .map_err(|error| invalid(error.to_string()))?
+        .format_version;
+    if let Some(format) = format.filter(|&format| format > u64::from(RUN_STATE_FORMAT_VERSION)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "task state format {format} was written by a newer mastermind; this binary \
+                 reads format {RUN_STATE_FORMAT_VERSION}, so continue the task with the newer \
+                 mastermind binary"
+            ),
+        ));
+    }
+    let state: RunState =
+        serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+    validate_run_state(&state).map_err(invalid)?;
     Ok(state)
 }
 
@@ -251,6 +289,10 @@ where
     let status = String::deserialize(deserializer)?;
     validate_run_status(&status).map_err(serde::de::Error::custom)?;
     Ok(status)
+}
+
+fn first_run_state_format() -> u32 {
+    1
 }
 
 fn legacy_snapshot_version() -> u32 {
@@ -380,22 +422,27 @@ enum SpecArtifactLayout {
     Noncanonical(String),
 }
 
+/// A relative spec path is repository-relative, whatever the working directory.
 fn exact_spec_identity(repo_root: &Path, spec_path: &Path) -> Option<String> {
-    let requested_root = std::path::absolute(repo_root).ok()?;
     let relative = if spec_path.is_absolute() {
+        let requested_root = std::path::absolute(repo_root).ok()?;
         std::path::absolute(spec_path)
             .ok()?
             .strip_prefix(&requested_root)
             .ok()?
             .to_path_buf()
     } else {
-        let absolute = std::path::absolute(spec_path).ok()?;
-        absolute
-            .strip_prefix(&requested_root)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|_| spec_path.to_path_buf())
+        spec_path.to_path_buf()
     };
     bounded_fs::normalize_repository_relative_path(&relative).ok()
+}
+
+/// The first name under `.mastermind/tasks` of a repository-relative path.
+fn task_entry(identity: &str) -> Option<&str> {
+    identity
+        .strip_prefix(".mastermind/tasks/")?
+        .split('/')
+        .next()
 }
 
 fn canonical_task_name(identity: &str) -> Option<&str> {
@@ -514,6 +561,48 @@ pub fn executor_report_path(spec_path: &Path) -> PathBuf {
 
 pub fn audit_file_path(spec_path: &Path) -> PathBuf {
     spec_artifact_path(spec_path, "audit.md")
+}
+
+/// Before each spec got its own report and audit, every spec wrote
+/// `executor-report.md` and `audit.md` beside it. A task started then must
+/// move them first: the controller would miss its report and audit the old
+/// `audit.md` as a file of the change.
+fn refuse_old_artifact_names(spec_path: &Path, state_path: &Path) -> Result<(), String> {
+    if spec_path.file_name() == Some(std::ffi::OsStr::new("spec.md")) || !state_path.exists() {
+        return Ok(());
+    }
+    let quote = |path: &Path| {
+        let text = crate::terminal::escape(&path.display().to_string());
+        format!("'{}'", text.replace('\'', "'\\''"))
+    };
+    let commands = [
+        ("executor-report.md", executor_report_path(spec_path)),
+        ("audit.md", audit_file_path(spec_path)),
+    ]
+    .into_iter()
+    .filter_map(|(old, new)| {
+        let old = spec_path.with_file_name(old);
+        std::fs::symlink_metadata(&old).ok()?;
+        Some(if std::fs::symlink_metadata(&new).is_ok() {
+            format!("rm {}", quote(&old))
+        } else {
+            format!("mv {} {}", quote(&old), quote(&new))
+        })
+    })
+    .collect::<Vec<_>>();
+    if commands.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "this task started before each spec got its own executor report and audit. \
+         Move the old files, then run the command again:\n  {}",
+        commands.join("\n  ")
+    ))
+}
+
+fn artifact_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// Canonical specs own `<task>/state.json`. Legacy top-level task specs retain
@@ -639,7 +728,7 @@ fn ensure_history_review(
             let archive = path.with_file_name(format!(
                 "{}.{}.md",
                 stem,
-                crate::hex::encode(&Sha256::digest(&previous.bytes)),
+                crate::hex::sha256(&previous.bytes),
             ));
             match bounded_fs::read_regular_file_with_capability(
                 &root,
@@ -670,10 +759,10 @@ fn ensure_history_review(
         Err(BoundedReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(std::io::Error::other(error)),
     }
-    let title = markdown_path(&spec_basename(spec_path));
-    let spec = markdown_path(&spec_identity);
-    let audit = markdown_path(&audit_identity);
-    let release = markdown_path(&release_identity);
+    let title = crate::lessons::markdown_path(&spec_basename(spec_path));
+    let spec = crate::lessons::markdown_path(&spec_identity);
+    let audit = crate::lessons::markdown_path(&audit_identity);
+    let release = crate::lessons::markdown_path(&release_identity);
     let body = if structured {
         format!(
             "# History review — {title}\n\n\
@@ -703,13 +792,14 @@ Complete this after semantic review. Replace each `pending` with `updated` or\n\
     Ok(true)
 }
 
-/// Return true only after both durable-knowledge dispositions were reviewed
-/// and the generated placeholder reason was replaced. The Markdown file remains
-/// authoritative for legacy tasks. Structured tasks consume typed decisions.
-pub fn history_review_complete(review_path: &Path) -> bool {
+#[cfg(test)]
+fn history_review_complete(review_path: &Path) -> bool {
     history_review_complete_for_snapshot(review_path, None)
 }
 
+/// Return true only after both durable-knowledge dispositions were reviewed
+/// and the generated placeholder reason was replaced. The Markdown file remains
+/// authoritative for legacy tasks. Structured tasks consume typed decisions.
 /// Legacy reviews have no binding. Newly audited reviews must retain the
 /// controller's snapshot marker as well as explicit semantic dispositions.
 pub fn history_review_complete_for_snapshot(review_path: &Path, snapshot: Option<&str>) -> bool {
@@ -720,8 +810,8 @@ pub fn history_review_complete_for_snapshot(review_path: &Path, snapshot: Option
 }
 
 /// A lifecycle state can be terminal only when its completed review is bound to
-/// the exact snapshot recorded in that state. `history_review_complete` keeps
-/// accepting unbound legacy review files for standalone callers.
+/// the exact snapshot recorded in that state. Passing no snapshot to
+/// `history_review_complete_for_snapshot` still accepts unbound legacy reviews.
 fn bound_history_review_complete(review_path: &Path, snapshot: Option<&str>) -> bool {
     let Some(snapshot) = snapshot else {
         return false;
@@ -1121,38 +1211,6 @@ fn repository_relative_identity(root: &RootCapability, path: &Path) -> Result<St
         .map_err(|_| "path must have an exact repository-relative UTF-8 identity".to_string())
 }
 
-fn markdown_path(path: &str) -> String {
-    let mut escaped = String::with_capacity(path.len());
-    for character in path.chars() {
-        match character {
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\\' => escaped.push_str("\\\\"),
-            character if character.is_control() => {
-                escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
-            }
-            character => escaped.push(character),
-        }
-    }
-    let mut longest_run = 0;
-    let mut current_run = 0;
-    for character in escaped.chars() {
-        if character == '`' {
-            current_run += 1;
-            longest_run = longest_run.max(current_run);
-        } else {
-            current_run = 0;
-        }
-    }
-    let delimiter = "`".repeat(longest_run + 1);
-    if escaped.starts_with('`') || escaped.ends_with('`') {
-        format!("{delimiter} {escaped} {delimiter}")
-    } else {
-        format!("{delimiter}{escaped}{delimiter}")
-    }
-}
-
 fn spec_basename(spec_path: &Path) -> String {
     if spec_path.file_name().and_then(|name| name.to_str()) == Some("spec.md") {
         if let Some(task_name) = spec_path
@@ -1173,6 +1231,7 @@ fn spec_basename(spec_path: &Path) -> String {
 /// Read + deserialize state. `Ok(None)` when the file is absent — "no prior
 /// pre-flight" is the dominant non-error case.
 pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
+    let path = &std::path::absolute(path)?;
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1190,15 +1249,12 @@ pub fn load_state(path: &Path) -> std::io::Result<Option<RunState>> {
         }
         Err(error) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
     };
-    let state = parse_run_state(&body)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok(Some(state))
+    parse_versioned_run_state(&body).map(Some)
 }
 
-/// Persist state for callers that selected an explicit state path. Controller
-/// flows should use `save_state_in_repository` so every path component remains
-/// bound to the selected repository capability.
-pub fn save_state(path: &Path, state: &RunState) -> std::io::Result<()> {
+#[cfg(test)]
+fn save_state(path: &Path, state: &RunState) -> std::io::Result<()> {
+    let path = &std::path::absolute(path)?;
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1229,16 +1285,9 @@ pub fn save_state_in_repository(
         .map_err(std::io::Error::other)
 }
 
-pub fn delete_state(path: &Path) -> std::io::Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
 /// Stable across toolchains and machines for persisted approval evidence.
 pub(crate) fn hash_text(text: &str) -> String {
-    crate::hex::encode(&Sha256::digest(text.as_bytes()))
+    crate::hex::sha256(text.as_bytes())
 }
 
 pub(crate) fn spec_hash_matches(expected: &str, text: &str) -> bool {
@@ -1320,6 +1369,26 @@ fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerI
         .map_err(|error| format!("resolving repository-relative spec path: {error}"))?;
     let spec_path = bounded_fs::normalize_repository_relative_path(&relative)
         .map_err(|_| "spec path is not canonical repository-relative UTF-8".to_string())?;
+    if let Some(entry) = task_entry(&spec_path).filter(|entry| !is_task_entry(entry)) {
+        return Err(format!(
+            "`{}` is not a task: names under .mastermind/tasks that start with `_` or `.` \
+             hold drafts and shared files. Rename it to start a task",
+            crate::terminal::escape(entry)
+        ));
+    }
+    // The state, lock and artifacts follow the spec path, so two spellings of
+    // one file, such as `SPEC.md` on a case-insensitive file system, would get
+    // two controllers.
+    let named = root.canonical_root().join(&relative);
+    if let Ok(on_disk) = named.canonicalize() {
+        if on_disk != named {
+            return Err(format!(
+                "spec `{}` is stored as `{}`; run the task with that path",
+                crate::terminal::escape(&named.display().to_string()),
+                crate::terminal::escape(&on_disk.display().to_string())
+            ));
+        }
+    }
     let repository = crate::facts::repository_identity(root.canonical_root())
         .map_err(|error| format!("resolving repository identity: {error}"))?;
     root.verify()
@@ -1406,11 +1475,13 @@ fn preflight_baseline(repo_root: &Path, previous: Option<&RunState>) -> Result<S
     if !crate::diff::is_full_git_oid(baseline) {
         return Err("saved baseline must be an exact Git object ID".into());
     }
-    let output = crate::diff::run_bounded_git_with_limit(
+    let output = crate::diff::run_bounded_git_controlled(
         repo_root,
         &["rev-parse", "--verify", &format!("{baseline}^{{commit}}")],
         None,
         STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+        None,
+        None,
     )
     .map_err(|error| format!("saved baseline lookup failed: {}", error.code()))?;
     if !output.success || String::from_utf8_lossy(&output.stdout).trim() != baseline.as_str() {
@@ -1620,11 +1691,13 @@ fn strict_snapshot_digest(
 }
 
 fn strict_snapshot_git(root: &RootCapability, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = crate::diff::run_bounded_git_with_limit(
+    let output = crate::diff::run_bounded_git_controlled(
         root.canonical_root(),
         args,
         None,
         STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+        None,
+        None,
     )
     .map_err(|error| format!("strict-workflow Git evidence failed: {}", error.code()))?;
     if !output.success {
@@ -1722,11 +1795,13 @@ fn git_diff_stat_for_files(
     files: Option<&[String]>,
 ) -> Result<String, String> {
     let run = |args: &[&str]| {
-        let output = crate::diff::run_bounded_git_with_limit(
+        let output = crate::diff::run_bounded_git_controlled(
             repo_root,
             args,
             None,
             STRICT_EVIDENCE_GIT_BYTE_LIMIT,
+            None,
+            None,
         )
         .map_err(|error| format!("release diff: {}", error.code()))?;
         if !output.success {
@@ -1905,23 +1980,6 @@ pub fn render_risk_report(r: &RiskReport) -> String {
     out
 }
 
-pub fn compute_release_notes(
-    spec: &ParsedSpec,
-    spec_body: &str,
-    repo_root: &Path,
-    baseline_ref: &str,
-    audit_verdict: &str,
-) -> ReleaseNotes {
-    compute_release_notes_for_files(
-        spec,
-        spec_body,
-        repo_root,
-        baseline_ref,
-        audit_verdict,
-        None,
-    )
-}
-
 fn compute_release_notes_for_files(
     spec: &ParsedSpec,
     spec_body: &str,
@@ -2024,6 +2082,10 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, mut opts: RunO
             return Outcome::PreFailed;
         }
     };
+    if let Err(error) = refuse_old_artifact_names(spec_path, &state_path) {
+        eprintln!("error: {error}");
+        return Outcome::PreFailed;
+    }
     if opts.exec && opts.invocation.profile_client.is_none() {
         match crate::miner::hooks::configured_profile_client(repo_root, "claude") {
             Ok(reader) => opts.invocation.profile_client = reader,
@@ -2044,6 +2106,10 @@ pub fn run(spec_path: &Path, repo_root: &Path, index_path: &Path, mut opts: RunO
     };
     let mut existing = match load_state(&state_path) {
         Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+            eprintln!("error: state file `{}`: {e}", state_path.display());
+            return Outcome::PreFailed;
+        }
         Err(e) => {
             eprintln!(
                 "error: state file `{}` unreadable ({e}); restore it before retrying to retain the task baseline and iteration budget",
@@ -3145,6 +3211,7 @@ fn run_pre(
         return Outcome::PreFailed;
     }
     let mut state = RunState {
+        format_version: RUN_STATE_FORMAT_VERSION,
         status: "approved".into(),
         risk: Some(declared_risk.into()),
         next_step: Some("run_executor".into()),
@@ -3358,7 +3425,7 @@ fn run_post_with_evidence(
             failed.risk = Some("medium".into());
             failed.next_step = Some("planner_review".into());
             failed.blocking_reason = Some(format!("executor report rejected: {error}"));
-            failed.last_artifact = Some("executor-report.md".into());
+            failed.last_artifact = artifact_name(&executor_report_path(spec_path));
             if let Err(state_error) = save_state_in_repository(repo_root, state_path, &failed) {
                 eprintln!("error: persisting rejected-report state: {state_error}");
             }
@@ -3399,7 +3466,7 @@ fn run_post_with_evidence(
         failed.risk = Some("high".into());
         failed.next_step = Some("planner_review".into());
         failed.blocking_reason = Some("failed to persist audit.md".into());
-        failed.last_artifact = Some("executor-report.md".into());
+        failed.last_artifact = artifact_name(&executor_report_path(spec_path));
         if let Err(state_error) = save_state_in_repository(repo_root, state_path, &failed) {
             eprintln!("error: persisting failed-audit-artifact state: {state_error}");
         }
@@ -3466,7 +3533,7 @@ fn run_post_with_evidence(
                         failed.next_step = Some("planner_review".into());
                         failed.blocking_reason =
                             Some(format!("strict workflow snapshot unavailable: {error}"));
-                        failed.last_artifact = Some("audit.md".into());
+                        failed.last_artifact = artifact_name(&audit_file_path(spec_path));
                         if let Err(state_error) =
                             save_state_in_repository(repo_root, state_path, &failed)
                         {
@@ -3593,7 +3660,7 @@ fn run_post_with_evidence(
         );
         failed.next_step = Some("planner_review".into());
         failed.blocking_reason = Some(format!("post-flight verdict: {verdict_label}"));
-        failed.last_artifact = Some("audit.md".into());
+        failed.last_artifact = artifact_name(&audit_file_path(spec_path));
         if let Err(error) = save_state_in_repository(repo_root, state_path, &failed) {
             eprintln!(
                 "error: persisting failed state `{}`: {error}",
@@ -3813,6 +3880,7 @@ verifications: []\n\
         let dir = tmp("state_roundtrip");
         let path = dir.join("s.json");
         let state = RunState {
+            format_version: RUN_STATE_FORMAT_VERSION,
             status: "approved".into(),
             risk: Some("low".into()),
             next_step: Some("run_executor".into()),
@@ -3922,7 +3990,7 @@ verifications: []\n\
             save_state(&path, &ambiguous_path).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-        delete_state(&path).unwrap();
+        fs::remove_file(&path).unwrap();
         assert!(load_state(&path).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
     }
@@ -4115,10 +4183,13 @@ verifications: []\n\
 
     #[test]
     fn history_review_paths_cannot_add_markdown_structure() {
-        assert_eq!(markdown_path("docs/a.md"), "`docs/a.md`");
-        assert_eq!(markdown_path("docs/a`b.md"), "``docs/a`b.md``");
+        assert_eq!(crate::lessons::markdown_path("docs/a.md"), "`docs/a.md`");
         assert_eq!(
-            markdown_path("docs/line\n- **Context:** updated.md"),
+            crate::lessons::markdown_path("docs/a`b.md"),
+            "``docs/a`b.md``"
+        );
+        assert_eq!(
+            crate::lessons::markdown_path("docs/line\n- **Context:** updated.md"),
             "`docs/line\\n- **Context:** updated.md`"
         );
     }
@@ -4277,7 +4348,7 @@ verifications: []\n\
         ));
         let archive = review.with_file_name(format!(
             "history-review.{}.md",
-            crate::hex::encode(&Sha256::digest(body.as_bytes()))
+            crate::hex::sha256(body.as_bytes())
         ));
         assert_eq!(fs::read_to_string(archive).unwrap(), body);
     }
@@ -4373,6 +4444,33 @@ verifications: []\n\
         assert_eq!(state.snapshot_limit(), 33_554_432);
         let written = serde_json::to_value(&state).unwrap();
         assert!(written.get("snapshot_max_total_bytes").is_none());
+    }
+
+    #[test]
+    fn state_from_a_newer_format_names_its_version_and_unversioned_state_is_current() {
+        let (root, _spec, state) = history_snapshot_fixture();
+        let mut written = serde_json::to_value(&state).unwrap();
+        assert_eq!(written["format_version"], RUN_STATE_FORMAT_VERSION);
+        written["format_version"] = serde_json::json!(RUN_STATE_FORMAT_VERSION + 1);
+        written["field_from_a_newer_release"] = serde_json::json!(true);
+        let path = root.path().join("newer-state.json");
+        fs::write(&path, written.to_string()).unwrap();
+        let error = load_state(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("format {}", RUN_STATE_FORMAT_VERSION + 1))
+                && message.contains("newer mastermind"),
+            "{message}"
+        );
+
+        let object = written.as_object_mut().unwrap();
+        object.remove("format_version");
+        object.remove("field_from_a_newer_release");
+        let legacy = parse_run_state(written.to_string().as_bytes()).unwrap();
+        assert_eq!(legacy.format_version, RUN_STATE_FORMAT_VERSION);
+        written["format_version"] = serde_json::json!(0);
+        assert!(parse_run_state(written.to_string().as_bytes()).is_err());
     }
 
     #[test]

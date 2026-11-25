@@ -2,7 +2,6 @@
 
 use crate::bounded_fs::{self, BoundedPathKind, ReadControl, RootCapability, StableFileIdentity};
 use crate::verification::{test_command, TestArgument, TestRunner};
-use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
@@ -304,7 +303,7 @@ impl<'a> TestScanner<'a> {
                             snapshot.files.push((
                                 path,
                                 source.identity,
-                                crate::hex::encode(&Sha256::digest(&source.bytes)),
+                                crate::hex::sha256(&source.bytes),
                             ));
                         }
                     }
@@ -340,9 +339,7 @@ impl<'a> TestScanner<'a> {
             }
         }
         for (path, identity, hash) in snapshot.files {
-            if crate::hex::encode(&Sha256::digest(&self.source(&path, Some(identity))?.bytes))
-                != hash
-            {
+            if crate::hex::sha256(&self.source(&path, Some(identity))?.bytes) != hash {
                 return None;
             }
         }

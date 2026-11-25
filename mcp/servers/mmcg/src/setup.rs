@@ -9,9 +9,8 @@
 //!
 //! Safe by default: prints what it will do and exits unless `--write`.
 
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -132,14 +131,6 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Opts {
-    /// Actually write the file. Else prints diff + advisory.
-    pub write: bool,
-    /// Overwrite an existing customized `mmcg` entry.
-    pub force: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -153,28 +144,6 @@ pub enum Outcome {
     RefusedOverwrite,
     /// I/O or parse error.
     Error,
-}
-
-/// Top-level entry point. Reads existing config, computes the merged proposal,
-/// renders a diff, optionally writes, optionally drops a CLAUDE.md.
-pub fn run_claude(target: &Target, mmcg_binary: &Path, opts: Opts) -> Outcome {
-    let request = Request {
-        client: Client::Claude,
-        scope: Scope::Project,
-        root: target
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf(),
-        config: None,
-        write: opts.write,
-        remove: false,
-        force: opts.force,
-    };
-    match mmcg_entry(mmcg_binary) {
-        Ok(entry) => run_json(&request, target, &entry),
-        Err(class) => finish_error(&request, &target.label, "install", &json!({}), class),
-    }
 }
 
 /// Decide `command` + `args` for the MCP config from how this binary was
@@ -266,6 +235,12 @@ fn npm_launcher_entry(platform: NpmLauncherPlatform, command: &str, args: Vec<St
     }
 }
 
+/// The `node <launcher> serve` entry setup writes for a project-local npm
+/// install. Doctor accepts a registration through the same rule.
+pub(crate) fn npm_project_launcher(node: &Path, launcher: &Path) -> bool {
+    node.is_absolute() && launcher.is_absolute() && launcher.ends_with("bin/mastermind.js")
+}
+
 fn mmcg_entry_for_platform(
     mmcg_binary: &Path,
     platform: NpmLauncherPlatform,
@@ -302,8 +277,8 @@ fn mmcg_entry_for_platform(
                 let node = std::env::var_os("MASTERMIND_NODE").ok_or("node_path_missing")?;
                 let launcher = PathBuf::from(launcher);
                 let node = PathBuf::from(node);
-                if !launcher.is_absolute() || !node.is_absolute() {
-                    return Err("npm_launcher_path_not_absolute");
+                if !npm_project_launcher(&node, &launcher) {
+                    return Err("npm_launcher_path_invalid");
                 }
                 return Ok(json!({"command":node,"args":[launcher,"serve"]}));
             }
@@ -1088,7 +1063,14 @@ fn run_native(request: &Request, entry: &Value) -> Outcome {
                 Err(class) => finish_error(request, "native", "install", entry, &class),
             }
         }
-        _ => finish_error(request, "native", "install", entry, "native_add_failed"),
+        _ => {
+            let class = if present {
+                failed_add_class(request.client, &program, &identity, entry, &inspected)
+            } else {
+                "native_add_failed"
+            };
+            finish_error(request, "native", "install", entry, class)
+        }
     }
 }
 
@@ -1377,6 +1359,64 @@ fn parse_codex_native_value(value: &Value) -> Result<ParsedNativeState, String> 
     })
 }
 
+// Setup removes the prior entry before it adds the new one. When that add fails,
+// it adds the removed entry back and confirms the result by inspecting again.
+fn failed_add_class(
+    client: Client,
+    program: &Path,
+    identity: &ExecutableIdentity,
+    entry: &Value,
+    prior: &NativeState,
+) -> &'static str {
+    let restored = restorable_entry(prior).is_some_and(|restore| {
+        run_native_checked(program, identity, &native_add_args(client, &restore))
+            .is_ok_and(|output| output.status.success())
+            && native_inspect(client, program, identity, entry).is_ok_and(|state| state == *prior)
+    });
+    if restored {
+        "native_add_failed_restored"
+    } else {
+        "native_add_failed_not_restored"
+    }
+}
+
+// Only an entry the add command can express is restorable: an enabled stdio
+// server with no settings beyond command, args and environment.
+fn restorable_entry(state: &NativeState) -> Option<Value> {
+    let (NativeState::Canonical(parsed)
+    | NativeState::ProfileUpgrade(parsed)
+    | NativeState::Customized(parsed)) = state
+    else {
+        return None;
+    };
+    let (command, args, profile) = match parsed {
+        // ponytail: `claude mcp get` joins args with spaces, so an argument that
+        // contains a space comes back split. Read the user config file directly
+        // if such entries need an exact restore.
+        ParsedNativeState::Claude {
+            command_fields,
+            args_fields,
+            profile,
+        } => match (command_fields.as_slice(), args_fields.as_slice()) {
+            ([command], [args]) => (
+                command.clone(),
+                args.split_whitespace().map(str::to_string).collect(),
+                profile,
+            ),
+            _ => return None,
+        },
+        ParsedNativeState::Codex {
+            enabled: true,
+            command,
+            args,
+            profile,
+        } => (command.clone(), args.clone(), profile),
+        ParsedNativeState::Codex { .. } => return None,
+    };
+    (profile.customized == json!({}))
+        .then(|| json!({"command": command, "args": args, "env": profile.environment}))
+}
+
 fn native_remove_args(client: Client) -> Vec<String> {
     match client {
         Client::Claude => vec![
@@ -1426,98 +1466,8 @@ fn native_add_args(client: Client, entry: &Value) -> Vec<String> {
 }
 
 pub(crate) fn parse_json_unique(bytes: &[u8]) -> Result<Value, String> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = UniqueValue::deserialize(&mut deserializer)
-        .map_err(|_| "invalid_or_duplicate_json".to_string())?;
-    deserializer
-        .end()
-        .map_err(|_| "invalid_or_duplicate_json".to_string())?;
-    Ok(value.0)
-}
-
-struct UniqueValue(Value);
-
-impl<'de> Deserialize<'de> for UniqueValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_any(UniqueVisitor)
-    }
-}
-
-struct UniqueVisitor;
-
-impl<'de> de::Visitor<'de> for UniqueVisitor {
-    type Value = UniqueValue;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON value without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::Bool(value)))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::Number(value.into())))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::Number(value.into())))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        serde_json::Number::from_f64(value)
-            .map(Value::Number)
-            .map(UniqueValue)
-            .ok_or_else(|| E::custom("non-finite JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::String(value.into())))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::String(value)))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::Null))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(UniqueValue(Value::Null))
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: de::SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = seq.next_element::<UniqueValue>()? {
-            values.push(value.0);
-        }
-        Ok(UniqueValue(Value::Array(values)))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: de::MapAccess<'de>,
-    {
-        let mut values = BTreeMap::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom("duplicate object key"));
-            }
-            let value = map.next_value::<UniqueValue>()?;
-            values.insert(key, value.0);
-        }
-        Ok(UniqueValue(Value::Object(values.into_iter().collect())))
-    }
+    crate::strict_json::parse(bytes, crate::strict_json::Floats::Accept)
+        .map_err(|_| "invalid_or_duplicate_json".to_string())
 }
 
 fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -1918,6 +1868,14 @@ fn error_hint(class: &str) -> Option<String> {
         ),
         "native_install_not_confirmed" => Some(
             "Codex accepted the add command but the requested active entry was not observed. Run `codex mcp list --json` before retrying."
+                .to_string(),
+        ),
+        "native_add_failed_restored" => Some(
+            "The new MCP entry could not be added, so setup put the previous mmcg entry back unchanged."
+                .to_string(),
+        ),
+        "native_add_failed_not_restored" => Some(
+            "The new MCP entry could not be added and the previous mmcg entry could not be put back, so the client may have no mmcg entry or a different one. Run `claude mcp get mmcg` or `codex mcp list --json` to see it, then rerun setup, or add the entry with the client's `mcp add` command."
                 .to_string(),
         ),
         "native_remove_not_confirmed" => Some(
@@ -2417,6 +2375,24 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Install the Claude project entry at `target` through the same path the
+    /// CLI uses, writing only when `write` is set.
+    fn run_claude(target: &Target, mmcg_binary: &Path, write: bool, force: bool) -> Outcome {
+        let request = Request {
+            client: Client::Claude,
+            scope: Scope::Project,
+            root: target.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            config: None,
+            write,
+            remove: false,
+            force,
+        };
+        match mmcg_entry(mmcg_binary) {
+            Ok(entry) => run_json(&request, target, &entry),
+            Err(class) => finish_error(&request, &target.label, "install", &json!({}), class),
+        }
+    }
+
     // `mmcg_entry` reads process-global MASTERMIND_* env vars. Cargo runs tests
     // in parallel in one process, so an env mutation in one test can leak into
     // another. Every test that sets OR depends on the default of these vars holds
@@ -2512,11 +2488,7 @@ mod tests {
             path: dir.join(".mcp.json"),
             label: "<test>".into(),
         };
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            Opts::default(), // write=false
-        );
+        let outcome = run_claude(&target, Path::new("/usr/local/bin/mmcg"), false, false);
         assert_eq!(outcome, Outcome::DryRun);
         assert!(!target.path.exists());
         fs::remove_dir_all(&dir).ok();
@@ -2530,14 +2502,7 @@ mod tests {
             path: dir.join(".mcp.json"),
             label: "<test>".into(),
         };
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            Opts {
-                write: true,
-                ..Default::default()
-            },
-        );
+        let outcome = run_claude(&target, Path::new("/usr/local/bin/mmcg"), true, false);
         assert_eq!(outcome, Outcome::Wrote);
         let body = fs::read_to_string(&target.path).unwrap();
         let v: Value = serde_json::from_str(&body).unwrap();
@@ -2572,14 +2537,7 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            Opts {
-                write: true,
-                ..Default::default()
-            },
-        );
+        let outcome = run_claude(&target, Path::new("/usr/local/bin/mmcg"), true, false);
         assert_eq!(outcome, Outcome::NoChange);
         fs::remove_dir_all(&dir).ok();
     }
@@ -2597,14 +2555,7 @@ mod tests {
             r#"{"mcpServers":{"mmcg":{"command":"/opt/custom/mmcg","args":["serve","--verbose"]}}}"#,
         )
         .unwrap();
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            Opts {
-                write: true,
-                ..Default::default()
-            },
-        );
+        let outcome = run_claude(&target, Path::new("/usr/local/bin/mmcg"), true, false);
         assert_eq!(outcome, Outcome::RefusedOverwrite);
         // Original entry intact.
         let body = fs::read_to_string(&target.path).unwrap();
@@ -2625,14 +2576,7 @@ mod tests {
             r#"{"mcpServers":{"mmcg":{"command":"/opt/custom/mmcg","args":["serve","--verbose"]}}}"#,
         )
         .unwrap();
-        let outcome = run_claude(
-            &target,
-            Path::new("/usr/local/bin/mmcg"),
-            Opts {
-                write: true,
-                force: true,
-            },
-        );
+        let outcome = run_claude(&target, Path::new("/usr/local/bin/mmcg"), true, true);
         assert_eq!(outcome, Outcome::Wrote);
         let body = fs::read_to_string(&target.path).unwrap();
         assert!(body.contains("/usr/local/bin/mmcg"));
@@ -2813,6 +2757,51 @@ mod tests {
     }
 
     #[test]
+    fn doctor_accepts_the_project_launcher_entry_setup_writes() {
+        let root = if cfg!(windows) {
+            r"C:\project"
+        } else {
+            "/project"
+        };
+        let launcher =
+            Path::new(root).join("node_modules/@xcraftmind/mastermind/bin/mastermind.js");
+        let node = Path::new(root).join("bin/node");
+        let launcher_text = launcher.to_str().unwrap();
+        let node_text = node.to_str().unwrap();
+        for platform in [NpmLauncherPlatform::Other, NpmLauncherPlatform::Windows] {
+            let _guard = EnvGuard::set(&[
+                ("MASTERMIND_INSTALL_MODE", "project"),
+                ("MASTERMIND_LAUNCHER_JS", launcher_text),
+                ("MASTERMIND_NODE", node_text),
+            ]);
+            let entry = mmcg_entry_for_platform(Path::new("/ignored"), platform).unwrap();
+            assert_eq!(
+                entry,
+                json!({"command": node_text, "args": [launcher_text, "serve"]})
+            );
+            assert!(crate::workflow_status::valid_mmcg_registration_entry(
+                &entry
+            ));
+        }
+        let other_script = Path::new(root).join("bin/other.js");
+        let _guard = EnvGuard::set(&[
+            ("MASTERMIND_INSTALL_MODE", "project"),
+            ("MASTERMIND_LAUNCHER_JS", other_script.to_str().unwrap()),
+            ("MASTERMIND_NODE", node_text),
+        ]);
+        assert_eq!(
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
+            Err("npm_launcher_path_invalid")
+        );
+        assert!(!crate::workflow_status::valid_mmcg_registration_entry(
+            &json!({"command": node_text, "args": [other_script, "serve"]})
+        ));
+        assert!(!crate::workflow_status::valid_mmcg_registration_entry(
+            &json!({"command": "node", "args": [launcher_text, "serve"]})
+        ));
+    }
+
+    #[test]
     fn windows_global_and_unknown_modes_run_the_cmd_shim_through_cmd_exe() {
         for mode in ["global", "unknown"] {
             let _guard = EnvGuard::set(&[("MASTERMIND_INSTALL_MODE", mode)]);
@@ -2917,14 +2906,7 @@ mod tests {
             r#"{"mcpServers":{"other":{"command":"x","args":[]}}}"#,
         )
         .unwrap();
-        let _ = run_claude(
-            &target,
-            Path::new("/bin/mmcg"),
-            Opts {
-                write: true,
-                ..Default::default()
-            },
-        );
+        let _ = run_claude(&target, Path::new("/bin/mmcg"), true, false);
         let body = fs::read_to_string(&target.path).unwrap();
         let v: Value = serde_json::from_str(&body).unwrap();
         let servers = v.get("mcpServers").and_then(|s| s.as_object()).unwrap();
@@ -2994,6 +2976,12 @@ mod tests {
         assert_eq!(value.pointer("/other/kept"), Some(&json!(true)));
         assert!(value.pointer("/mcpServers/other").is_some());
         assert!(value.pointer("/mcpServers/mmcg").is_some());
+
+        // Client configs carry fractional values such as cost totals.
+        fs::write(&config, br#"{"mcpServers":{},"cost":0.25}"#).unwrap();
+        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Wrote);
+        let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(value.pointer("/cost"), Some(&json!(0.25)));
 
         fs::write(&config, br#"{"mcpServers":{},"nested":{"x":1,"x":2}}"#).unwrap();
         assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
@@ -3968,6 +3956,87 @@ esac
                 "native_inspect_failed"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_native_add_restores_the_replaced_registration() {
+        let _entry = TestCanonicalEntryGuard::new(json!({
+            "command": "/bin/mmcg", "args": ["serve"],
+        }));
+        let root = tmp("native-restore");
+        let request_root = tmp("native-restore-project");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let _native = TestNativeBinGuard::new(bin.clone());
+        // Only the prior `/bin/old serve --verbose` entry can be added back.
+        // The `.restore-fails` file makes that restore fail as well.
+        let script = r#"#!/bin/sh
+state=old
+if [ -f "$0.state" ]; then read -r state < "$0.state" || :; fi
+case "$2" in
+  get)
+    [ "$state" != removed ] || exit 1
+    printf '  Scope: User config\n  Type: stdio\n  Command: /bin/old\n  Args: serve --verbose\n'
+    ;;
+  list)
+    if [ "$state" = removed ]; then printf '[]\n'; exit 0; fi
+    printf '[{"name":"mmcg","enabled":true,"transport":{"type":"stdio","command":"/bin/old","args":["serve","--verbose"],"env":null,"env_vars":[],"cwd":null}}]\n'
+    ;;
+  remove) printf 'removed\n' > "$0.state" ;;
+  add)
+    printf '%s\n' "$@" > "$0.argv"
+    for arg in "$@"; do
+      if [ "$arg" = /bin/old ] && [ ! -f "$0.restore-fails" ]; then
+        printf 'old\n' > "$0.state"
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
+  *) exit 2;;
+esac
+"#;
+        let entry = json!({"command": "/bin/mmcg", "args": ["serve"]});
+        for client in [Client::Claude, Client::Codex] {
+            let name = client_label(client);
+            let program = bin.join(name);
+            crate::test_executable::write_executable(&program, script);
+            let identity = ExecutableIdentity::capture(&program).unwrap();
+            let state = bin.join(format!("{name}.state"));
+            let request = Request {
+                client,
+                scope: Scope::User,
+                root: request_root.clone(),
+                config: None,
+                write: true,
+                remove: false,
+                force: true,
+            };
+            let failed_add = || {
+                let _ = fs::remove_file(&state);
+                let prior = native_inspect(client, &program, &identity, &entry).unwrap();
+                run_native_checked(&program, &identity, &native_remove_args(client)).unwrap();
+                failed_add_class(client, &program, &identity, &entry, &prior)
+            };
+
+            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+            assert_eq!(fs::read_to_string(&state).unwrap(), "old\n", "{name}");
+            let argv = fs::read_to_string(bin.join(format!("{name}.argv"))).unwrap();
+            assert!(
+                argv.ends_with("--\n/bin/old\nserve\n--verbose\n"),
+                "{name}: {argv}"
+            );
+            assert_eq!(failed_add(), "native_add_failed_restored", "{name}");
+
+            fs::write(bin.join(format!("{name}.restore-fails")), b"").unwrap();
+            fs::remove_file(&state).unwrap();
+            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+            assert_eq!(fs::read_to_string(&state).unwrap(), "removed\n", "{name}");
+            assert_eq!(failed_add(), "native_add_failed_not_restored", "{name}");
+        }
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(request_root).ok();
     }
 
     #[cfg(unix)]

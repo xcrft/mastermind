@@ -7,7 +7,6 @@ use super::store::{
     CollectedCandidate, CollectionBatch, CollectionSource, CollectionStats, ProfileStore,
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::ops::ControlFlow;
@@ -25,7 +24,7 @@ const MAX_LINES: usize = 1_000_000;
 const MAX_CANDIDATES: usize = 512;
 
 fn hash(value: Value) -> String {
-    crate::hex::encode(&Sha256::digest(value.to_string().as_bytes()))
+    crate::hex::sha256(value.to_string().as_bytes())
 }
 
 /// Match only short, complete, explicitly worded human segments. This is a

@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::bounded_fs::AtomicWriteExpectation;
-use sha2::{Digest, Sha256};
 
 // One hook delivery must stay short. Pressure repeats on later events, so a
 // large backlog drains over several compactions.
@@ -15,10 +14,6 @@ const MAX_DROPPED_RECEIPTS: i64 = 4096;
 const SUPERSEDED: &str = "json_extract(s.data,'$.generation') IS NOT (SELECT g.generation
     FROM hook_grant g WHERE g.client=json_extract(s.data,'$.client')
     AND g.project_root=json_extract(s.data,'$.project_root'))";
-
-fn digest(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
-}
 
 fn target(conn: &Connection, digest: &str) -> Result<PathBuf, Error> {
     if !super::super::collection::valid_id(digest) {
@@ -44,7 +39,7 @@ pub(super) fn read(conn: &Connection, expected: &str) -> Result<Episode, Error> 
         MAX_EPISODE_BYTES as u64,
         ReadControl::default(),
     )?;
-    if digest(&file.bytes) != expected {
+    if crate::hex::sha256(&file.bytes) != expected {
         return Err("episode archive digest changed".into());
     }
     Ok(serde_json::from_slice(&file.bytes)?)
@@ -55,7 +50,7 @@ fn write(conn: &Connection, episode: &Episode) -> Result<String, Error> {
     if bytes.len() > MAX_EPISODE_BYTES {
         return Err("episode archive exceeds its bound".into());
     }
-    let key = digest(&bytes);
+    let key = crate::hex::sha256(&bytes);
     let (root, path) = bounded_fs::prepare_file_target(&target(conn, &key)?)?;
     if let Some(identity) = bounded_fs::inspect_direct_regular_file_identity_with_capability(
         &root,
@@ -87,10 +82,14 @@ fn write(conn: &Connection, episode: &Episode) -> Result<String, Error> {
     Ok(key)
 }
 
+/// Archives at most `limit` episodes. With a deadline it stops once the
+/// deadline has passed, but only after one archive, so the caller always
+/// frees at least one active slot.
 pub(super) fn compact(
     conn: &Connection,
     root: Option<&Path>,
     limit: usize,
+    deadline: Option<Instant>,
 ) -> Result<usize, Error> {
     // The active episode can still receive Stop, tools or next-turn context.
     // Queued work and reviewed citations resolve through the same archive reader.
@@ -113,7 +112,12 @@ pub(super) fn compact(
         )?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
+    let mut archived = 0;
     for id in &ids {
+        if archived > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break;
+        }
+        archived += 1;
         let episode = load_episode(conn, id)?;
         let key = write(conn, &episode)?;
         let mut metadata = serde_json::to_value(&episode)?;
@@ -130,7 +134,7 @@ pub(super) fn compact(
         )?;
     }
     drop_tool_receipts(conn)?;
-    Ok(ids.len())
+    Ok(archived)
 }
 
 // A running session still pairs tool results and deduplicates replays through
@@ -195,7 +199,7 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count = compact(&tx, root, limit)?;
+        let count = compact(&tx, root, limit, None)?;
         tx.commit()?;
         Ok(count)
     }

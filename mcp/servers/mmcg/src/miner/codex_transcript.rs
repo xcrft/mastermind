@@ -4,7 +4,6 @@
 use super::feedback::{valid_session_id, HumanTurn};
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -24,10 +23,6 @@ pub(super) struct CodexSession {
     cwd: PathBuf,
     metadata_digest: String,
     contexts: HashMap<String, String>,
-}
-
-fn digest(text: &str) -> String {
-    crate::hex::encode(&Sha256::digest(text.as_bytes()))
 }
 
 fn project_path(value: &Value) -> Result<PathBuf, &'static str> {
@@ -115,7 +110,7 @@ impl CodexSession {
                     session = Some(Self {
                         id: id.to_string(),
                         cwd: project_path(&meta["cwd"])?,
-                        metadata_digest: digest(&meta.to_string()),
+                        metadata_digest: crate::hex::sha256(meta.to_string()),
                         contexts: HashMap::new(),
                     });
                 }
@@ -135,7 +130,7 @@ impl CodexSession {
                     }
                     // Outer record timestamps may change when a context is
                     // repeated. Its canonical payload must remain identical.
-                    let binding = digest(&context.to_string());
+                    let binding = crate::hex::sha256(context.to_string());
                     if session
                         .contexts
                         .get(turn_id)
@@ -182,8 +177,8 @@ impl CodexSession {
         if content.len() != kinds.len() {
             return None;
         }
-        let record_digest = digest(
-            &serde_json::json!([
+        let record_digest = crate::hex::sha256(
+            serde_json::json!([
                 "codex-human-turn-v1",
                 self.metadata_digest,
                 context_digest,

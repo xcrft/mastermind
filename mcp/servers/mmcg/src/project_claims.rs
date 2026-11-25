@@ -45,10 +45,6 @@ fn digest(parts: &[&str]) -> String {
     crate::hex::encode(&hasher.finalize())
 }
 
-pub fn source_file_digest(body: &str) -> String {
-    crate::hex::encode(&Sha256::digest(body.as_bytes()))
-}
-
 fn declared_status(value: &str) -> Option<String> {
     let value = value.to_ascii_lowercase();
     matches!(
@@ -100,7 +96,7 @@ pub fn extract(sections: &[DocumentSection], source_body: &str) -> ExtractedProj
     let mut extracted = ExtractedProjectClaims::default();
     let mut seen_ids = HashSet::new();
     let visible = crate::context_doctor::prose_lines(source_body);
-    let file_digest = source_file_digest(source_body);
+    let file_digest = crate::hex::sha256(source_body);
     for section in sections {
         let Some((root_heading, record_heading)) = decision_record_headings(section, &visible)
         else {
@@ -139,7 +135,7 @@ pub fn extract(sections: &[DocumentSection], source_body: &str) -> ExtractedProj
         let (line, statement) = decisions[0];
         let source_line = (line.index + 1) as u32;
         let raw_line = line.raw.strip_suffix('\n').unwrap_or(line.raw);
-        let record_digest = source_file_digest(raw_line);
+        let record_digest = crate::hex::sha256(raw_line);
         let claim_id = digest(&[
             EXTRACTOR_VERSION,
             &section.path,
@@ -237,7 +233,7 @@ mod tests {
         assert_eq!(result.candidates[0].source_line, 6);
         assert_eq!(
             result.candidates[0].record_digest,
-            source_file_digest("- **Decision:** Keep source bytes.\r")
+            crate::hex::sha256("- **Decision:** Keep source bytes.\r")
         );
     }
 
@@ -368,7 +364,7 @@ mod tests {
         assert_eq!(result.candidates[0].source_line, 4);
         assert_eq!(
             result.candidates[0].record_digest,
-            source_file_digest("- **Decision:** Keep bytes.\r")
+            crate::hex::sha256("- **Decision:** Keep bytes.\r")
         );
     }
 

@@ -21,12 +21,7 @@
 #     installs the public crates.io version into an isolated Cargo home and runs
 #     the shipped binary after publication.
 #
-# Release procedure:
-#   1. Bump version in mcp/servers/mmcg/Cargo.toml (+ README frontmatter)
-#   2. `just check` — validator passes (template mirrors in sync, etc.)
-#   3. Commit the bump on main
-#   4. Tag and push: `git tag mmcg-v0.6.0 && git push origin mmcg-v0.6.0`
-#   5. This workflow: verify → (approval if configured) → publish
+# Release procedure: scripts/README.md, "Cutting a release".
 
 name: Publish mmcg to crates.io
 
@@ -60,6 +55,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: 1.100.0
 
       - name: Install Python for validator and artifact publisher
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -151,6 +148,9 @@ jobs:
     # Pulls CARGO_REGISTRY_TOKEN from the `prod` environment and triggers any
     # protection rules configured on it (required reviewers, wait timer, etc.).
     environment: prod
+    permissions:
+      contents: read
+      actions: read
     defaults:
       run:
         working-directory: mcp/servers/mmcg
@@ -160,6 +160,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Require green CI on the release commit
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/require-green-ci.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA"
 
       - name: Download verified crate artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -209,6 +215,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: 1.100.0
 
       - name: Install from crates.io and run shipped binary smoke
         run: bash scripts/smoke-installed-crate-release.sh mcp/servers/mmcg/Cargo.toml

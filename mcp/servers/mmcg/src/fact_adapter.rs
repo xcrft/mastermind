@@ -11,7 +11,6 @@ use crate::facts::{self, FactFileRecord};
 use crate::store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -160,7 +159,7 @@ fn stable_fact_id(prefix: &str, fact: &Value) -> Result<String, AdapterError> {
         .map_err(|error| AdapterError::Contract(error.to_string()))?;
     Ok(format!(
         "adapter:{prefix}:sha256:{}",
-        crate::hex::encode(&Sha256::digest(canonical))
+        crate::hex::sha256(canonical)
     ))
 }
 

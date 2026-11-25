@@ -18,7 +18,7 @@ once with `just bootstrap`.
 | `evals/control` | Finite completion model and integration-result accounting |
 | `evals/intake` | Refiner envelopes, processor failures and retained evidence |
 | `evals/persona` | Git attribution and replay corpus membership |
-| `evals/shared` | Real process supervision and pipe limits |
+| `evals/shared` | Real process supervision, pipe limits and strict JSON parsing |
 | `evals/support` | Disposable repositories, fake runtimes and process-state helpers |
 | `validation` | Audit publication, packaging and document evidence |
 

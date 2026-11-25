@@ -129,7 +129,6 @@ impl NativeAssessment {
     }
 }
 
-use crate::hex::sha256 as sha;
 fn digest(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -207,7 +206,7 @@ pub(crate) fn validate_evidence(
     )
     .map_err(|_| "review_invocation_receipt_unavailable")?
     .bytes;
-    if sha(&bytes) != evidence.receipt_sha256 {
+    if crate::hex::sha256(&bytes) != evidence.receipt_sha256 {
         return Err("review_invocation_pin_mismatch".into());
     }
     let receipt: Receipt =
@@ -227,7 +226,7 @@ pub(crate) fn validate_evidence(
             .as_deref()
             .is_some_and(|hash| digest(hash, 64))
         || receipt.submission_sha256.as_deref() != Some(evidence.submission_sha256.as_str())
-        || evidence.submission_sha256 != sha(&submission)
+        || evidence.submission_sha256 != crate::hex::sha256(&submission)
         || receipt.target_revision.as_deref() != Some(report.target_revision.as_str())
         || receipt.expected_review_revision != report.expected_review_revision
         || native.invocation_id != evidence.invocation_id
@@ -402,10 +401,11 @@ fn execute(
     if report.expected_review_revision != request.expected_review_revision {
         return Err("semantic_review_conflict_prepare_again".into());
     }
-    let submission_sha256 =
-        sha(&serde_json::to_vec(&report).map_err(|_| "review_invocation_serialization_failed")?);
+    let submission_sha256 = crate::hex::sha256(
+        &serde_json::to_vec(&report).map_err(|_| "review_invocation_serialization_failed")?,
+    );
     receipt.status = Status::Passed;
-    receipt.response_sha256 = Some(sha(terminal.as_bytes()));
+    receipt.response_sha256 = Some(crate::hex::sha256(terminal.as_bytes()));
     receipt.submission_sha256 = Some(submission_sha256.clone());
     let bytes = journal.publish(receipt)?;
     let evidence = Evidence {
@@ -415,7 +415,7 @@ fn execute(
             .ok_or("review_invocation_init_missing")?
             .invocation_id
             .clone(),
-        receipt_sha256: sha(&bytes),
+        receipt_sha256: crate::hex::sha256(&bytes),
         submission_sha256,
     };
     task_review::submit_locked(spec, repository, report, Some(evidence))
@@ -444,12 +444,13 @@ fn source_changes(root: &RootCapability, baseline: &str) -> Result<Changes, Stri
     let git_limited = |args: &[&str], limit: usize| -> Result<Vec<u8>, String> {
         let mut controlled = vec!["-c", "core.fsmonitor=false", "-c", "diff.external="];
         controlled.extend_from_slice(args);
-        let output = crate::diff::run_bounded_git_with_limit_until(
+        let output = crate::diff::run_bounded_git_controlled(
             root.requested_root(),
             &controlled,
             None,
             limit,
             Some(deadline),
+            None,
         )
         .map_err(|_| "review_invocation_sources_unavailable")?;
         if !output.success {
@@ -921,7 +922,7 @@ mod tests {
     #[test]
     fn output_schema_text_is_pinned_so_an_edit_is_a_contract_change() {
         assert_eq!(
-            sha(invocation::REVIEW_OUTPUT_SCHEMA.as_bytes()),
+            crate::hex::sha256(invocation::REVIEW_OUTPUT_SCHEMA.as_bytes()),
             "1f61619955db2cd641467d4974895c450aefd493a90a1292028a2eac0875b9aa"
         );
     }

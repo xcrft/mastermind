@@ -27,13 +27,17 @@ import time
 
 if __package__:
     from evals.shared.process import run_bounded
+    from evals.shared.strict_json import strict_json as parse_strict_json
 else:
     from process import run_bounded
+    from strict_json import strict_json as parse_strict_json
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "evals/intake/cases.jsonl"
 CRATE = ROOT / "mcp/servers/mmcg"
+# The harness re-executes itself as the processor bridge from a copied runtime.
+RUNTIME_SOURCES = (Path(__file__).resolve(), ROOT / "evals/shared/process.py", ROOT / "evals/shared/strict_json.py")
 INTENTS = frozenset({"activate_mastermind", "continue_active", "ordinary", "unclear"})
 ACTIONS = frozenset({"passthrough", "refined", "ask"})
 CASE_FIELDS = frozenset({"id", "language", "raw_prompt", "has_active_task", "expected_intent", "why"})
@@ -54,21 +58,8 @@ def encoded(value: object) -> bytes:
 
 
 def strict_json(body: bytes):
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-
-    def nonfinite(_):
-        raise ValueError("nonfinite JSON number")
-
-    try:
-        return json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=nonfinite)
-    except (UnicodeError, RecursionError) as error:
-        raise ValueError("invalid bounded JSON") from error
+    # Decoding first refuses a BOM and non-UTF-8 encodings that json.loads would detect.
+    return parse_strict_json(body.decode("utf-8"))
 
 
 def read_regular(path: Path, limit: int) -> bytes:
@@ -156,7 +147,7 @@ def clean_environment(home: Path, temporary: Path) -> dict[str, str]:
 
 
 def source_identity(extra: list[Path] | None = None) -> dict:
-    paths = {Path(__file__).resolve(), Path(__file__).resolve().parents[1] / "shared/process.py"}
+    paths = set(RUNTIME_SOURCES)
     if extra is None:
         paths.update(CRATE / name for name in ("Cargo.toml", "Cargo.lock", "build.rs"))
         def fail_walk(error):
@@ -334,7 +325,7 @@ def summarize(attempts: list[dict]) -> dict:
         "label_agreement": {"compared": len(admitted), "matched": matched, "mismatched": len(admitted) - matched,
                             "not_comparable": len(attempts) - len(admitted), "confusion": confusion},
         "action_distribution": dict(Counter(row["response"]["action"] for row in admitted)),
-        "intent_evidence": {"required_admitted_attempts": len(required), "native_validated_attempts": len(required)},
+        "intent_evidence": {"required_admitted_attempts": len(required)},
         "independent_label_review": "missing", "real_world_semantic_quality": "not_established",
     }
 
@@ -442,7 +433,7 @@ def run_evaluation(*, binary: Path, processor: Path, processor_args: list[str], 
     output = output.resolve()
     runtime = output / "runtime"
     runtime.mkdir(mode=0o700)
-    for path in (Path(__file__), Path(__file__).resolve().parents[1] / "shared/process.py"):
+    for path in RUNTIME_SOURCES:
         write_new(runtime / path.name, read_regular(path, FILE_LIMIT))
     write_new(output / "corpus.jsonl", corpus_bytes)
     command = [str(processor), *processor_args]

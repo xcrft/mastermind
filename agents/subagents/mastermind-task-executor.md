@@ -117,8 +117,10 @@ task-critical evidence explicitly. Each receiving role retrieves its own slice.
    Keep task-specific check scripts under `<task>/verify/`; declare other ignored
    check files in `verify[].run.inputs` with repository-relative paths. Changes
    to these inputs require fresh recorded checks.
-8. Write `<task>/executor-report.md` with the prose evidence and canonical
-   schema-v1 tail from `mastermind-structured-report-contract`.
+8. Write the report at the path `run-task --pre-only` printed
+   (`<task>/executor-report.md` for a `spec.md`, `<stem>.executor-report.md`
+   beside any other spec) with the prose evidence and canonical schema-v1 tail
+   from `mastermind-structured-report-contract`.
 
 ## Failure classification
 

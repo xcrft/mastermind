@@ -36,15 +36,14 @@ use std::path::{Path, PathBuf};
 
 /// Resolves a task command's root and spec. The default root comes from the
 /// physical working directory, while an absolute spec may spell the same root
-/// through a linked alias, as `$PWD` does in a linked directory. Only the
-/// longest spec prefix that resolves to the root is rewritten, so the bounded
-/// readers still see and refuse links below it.
+/// through a linked alias, as `$PWD` does in a linked directory, or through
+/// `..`, as `sub/../spec.md` does. Only the longest spec prefix that resolves
+/// to the root is rewritten, so the bounded readers still see and refuse links
+/// below it.
 pub(crate) fn task_paths(spec: &Path, root: PathBuf) -> std::io::Result<(PathBuf, PathBuf)> {
     let root = std::path::absolute(root)?;
     let spec = if !spec.is_absolute() {
         root.join(spec)
-    } else if spec.starts_with(&root) {
-        spec.to_path_buf()
     } else {
         root_alias_suffix(spec, &root).map_or_else(|| spec.to_path_buf(), |rest| root.join(rest))
     };

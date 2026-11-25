@@ -46,14 +46,20 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
     let overflow = Arc::new(AtomicBool::new(false));
     let callback_overflow = Arc::clone(&overflow);
     let database_path = store.db_path().canonicalize()?;
-    let index_files: Vec<PathBuf> = ["", "-wal", "-shm", "-journal"]
-        .into_iter()
-        .map(|suffix| {
-            let mut path = database_path.as_os_str().to_os_string();
-            path.push(suffix);
-            PathBuf::from(path)
-        })
-        .collect();
+    let index_files: Vec<PathBuf> = [
+        "",
+        "-wal",
+        "-shm",
+        "-journal",
+        crate::store::WRITER_LOCK_SUFFIX,
+    ]
+    .into_iter()
+    .map(|suffix| {
+        let mut path = database_path.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    })
+    .collect();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
         queue_event(event, &index_files, &tx, &callback_overflow);
     })?;
@@ -178,10 +184,20 @@ fn handle_event(
     if pending.full_refresh.is_some() {
         return Ok(());
     }
+    // The inventory never lists a path under a skipped directory, so its
+    // events change nothing. Positions are kept for rename pairing.
+    let paths: Vec<(usize, PathBuf)> = event
+        .paths
+        .into_iter()
+        .enumerate()
+        .filter(|(_, path)| !in_skipped_directory(path, root))
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
 
     match event.kind {
         EventKind::Modify(ModifyKind::Name(rename_mode)) => {
-            let paths = event.paths;
             let indexed_paths = match store.indexed_paths() {
                 Ok(paths) => paths,
                 Err(error) => {
@@ -195,7 +211,8 @@ fn handle_event(
                     RenameMode::To | RenameMode::Any | RenameMode::Other
                 );
 
-            for (position, path) in paths.iter().enumerate() {
+            for (position, path) in &paths {
+                let position = *position;
                 pending.paths.remove(path);
                 if path.is_dir() {
                     full_refresh = true;
@@ -220,25 +237,15 @@ fn handle_event(
                     }
                 }
             }
-            purge_paths.sort();
-            purge_paths.dedup();
-            for rel in purge_paths {
-                if let Err(error) = store.purge_file(&rel) {
-                    return record_failure(
-                        pending,
-                        Instant::now(),
-                        format!("rename purge failed {rel}: {error}"),
-                    );
-                } else {
-                    eprintln!("[mastermind watch] rename purged {rel}");
-                }
+            if let Err(error) = purge(store, purge_paths, "rename purged") {
+                return record_failure(pending, Instant::now(), error);
             }
 
             if full_refresh {
                 return refresh_all(indexer, store, pending, Instant::now());
             }
 
-            for (position, path) in paths.into_iter().enumerate() {
+            for (position, path) in paths {
                 if rename_event_path_is_old(&rename_mode, position) {
                     continue;
                 }
@@ -251,7 +258,7 @@ fn handle_event(
             }
         }
         EventKind::Modify(_) | EventKind::Create(_) => {
-            for path in event.paths {
+            for (_, path) in paths {
                 if path.is_file()
                     && extractor_for_path(&path).is_some()
                     && !source_matcher.is_ignored(&path, false)
@@ -267,38 +274,23 @@ fn handle_event(
                     return record_failure(pending, Instant::now(), error);
                 }
             };
-            let mut purge_paths = Vec::new();
-            for path in event.paths {
-                // Drop descendants too — a directory remove otherwise leaves
+            // An editor's atomic save removes and recreates a path, so the
+            // purge waits for the debounce and checks the path is still gone.
+            for (_, path) in paths {
+                // Drop descendants too, a directory remove otherwise leaves
                 // debounced child paths able to re-enter the index.
                 pending
                     .paths
                     .retain(|candidate, _| !candidate.starts_with(&path));
-                if let Some(rel) = relative_path(&path, root) {
-                    let descendant_prefix = format!("{rel}/");
-                    let mut matched = false;
-                    for indexed in &indexed_paths {
-                        if indexed == &rel || indexed.starts_with(&descendant_prefix) {
-                            purge_paths.push(indexed.clone());
-                            matched = true;
-                        }
-                    }
-                    if !matched {
-                        purge_paths.push(rel);
-                    }
-                }
-            }
-            purge_paths.sort();
-            purge_paths.dedup();
-            for rel in purge_paths {
-                if let Err(error) = store.purge_file(&rel) {
-                    return record_failure(
-                        pending,
-                        Instant::now(),
-                        format!("purge failed {rel}: {error}"),
-                    );
-                } else {
-                    eprintln!("[mastermind watch] purged {rel}");
+                let Some(rel) = relative_path(&path, root) else {
+                    continue;
+                };
+                let descendant_prefix = format!("{rel}/");
+                if indexed_paths
+                    .iter()
+                    .any(|indexed| indexed == &rel || indexed.starts_with(&descendant_prefix))
+                {
+                    queue_change(pending, path, Instant::now())?;
                 }
             }
         }
@@ -322,11 +314,20 @@ fn queue_change(pending: &mut PendingChanges, path: PathBuf, now: Instant) -> st
 
 fn refresh_index(indexer: &Indexer, store: &mut Store) -> Result<IndexStats, IndexError> {
     let stats = indexer.index_all(store, false)?;
-    if stats.files_failed > 0 {
+    // A symlinked or otherwise unindexable source fails every retry the same
+    // way, so it is reported, not retried.
+    if stats.files_failed > stats.files_unindexable {
         return Err(IndexError::Other(format!(
             "refresh failed for {} file(s)",
-            stats.files_failed
+            stats.files_failed - stats.files_unindexable
         )));
+    }
+    if stats.files_unindexable > 0 {
+        eprintln!(
+            "[mastermind watch] {} path(s) are not regular files and stay unindexed: {}",
+            stats.files_unindexable,
+            stats.unindexable_paths.join(", ")
+        );
     }
     if !store
         .concept_contract_current()
@@ -406,8 +407,16 @@ fn flush_settled(
         .collect();
 
     for path in ready {
-        if !path.is_file() {
-            return refresh_all(indexer, store, pending, now);
+        match path.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                pending.paths.remove(&path);
+                if let Err(error) = purge_removed(store, &path, indexer.root()) {
+                    return record_failure(pending, now, error);
+                }
+                continue;
+            }
+            Ok(metadata) if metadata.is_file() && extractor_for_path(&path).is_some() => {}
+            _ => return refresh_all(indexer, store, pending, now),
         }
         match indexer.index_one(store, &path) {
             Ok(()) => {
@@ -424,6 +433,44 @@ fn flush_settled(
         }
     }
     Ok(())
+}
+
+/// Purge a removed path and every indexed path under it.
+fn purge_removed(store: &mut Store, path: &Path, root: &Path) -> Result<(), String> {
+    let Some(rel) = relative_path(path, root) else {
+        return Ok(());
+    };
+    let indexed_paths = store.indexed_paths().map_err(|error| error.to_string())?;
+    let descendant_prefix = format!("{rel}/");
+    let purge_paths: Vec<String> = indexed_paths
+        .into_iter()
+        .filter(|indexed| indexed == &rel || indexed.starts_with(&descendant_prefix))
+        .collect();
+    purge(store, purge_paths, "purged")
+}
+
+/// Purge under the writer lock, so a concurrent index never sees half of it.
+fn purge(store: &mut Store, mut paths: Vec<String>, done: &str) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    paths.sort();
+    paths.dedup();
+    let _writer = store
+        .lock_writer()
+        .map_err(|error| format!("purge failed: {error}"))?;
+    for rel in paths {
+        store
+            .purge_file(&rel)
+            .map_err(|error| format!("purge failed {rel}: {error}"))?;
+        eprintln!("[mastermind watch] {done} {rel}");
+    }
+    Ok(())
+}
+
+fn in_skipped_directory(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .is_ok_and(crate::indexer::has_skipped_component)
 }
 
 fn relative_path(absolute: &Path, root: &Path) -> Option<String> {
@@ -706,6 +753,13 @@ mod tests {
             &mut matcher,
             &mut pending,
             &mut store,
+        )
+        .unwrap();
+        flush_settled(
+            &indexer,
+            &mut store,
+            &mut pending,
+            Instant::now() + DEBOUNCE,
         )
         .unwrap();
         assert_eq!(pending.full_refresh.as_ref().unwrap().failures, 1);
@@ -1316,6 +1370,14 @@ mod tests {
             &mut store,
         )
         .unwrap();
+        assert_eq!(pending.paths.keys().collect::<Vec<_>>(), vec![&removed]);
+        flush_settled(
+            &indexer,
+            &mut store,
+            &mut pending,
+            Instant::now() + DEBOUNCE,
+        )
+        .unwrap();
 
         assert!(store.indexed_paths().unwrap().is_empty());
         assert_eq!(store.concept_count().unwrap(), 0);
@@ -1362,5 +1424,117 @@ mod tests {
             &root.join("docs/other"),
             root
         ));
+    }
+
+    fn indexed_repository() -> (tempfile::TempDir, PathBuf, Store, Indexer) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".mastermind")).unwrap();
+        std::fs::write(root.join("kept.rs"), "pub fn kept_handler() {}\n").unwrap();
+        let mut store = Store::open(root.join(".mastermind/mmcg.db")).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        (temp, root, store, indexer)
+    }
+
+    fn deliver(
+        event: notify::Event,
+        root: &Path,
+        indexer: &Indexer,
+        pending: &mut PendingChanges,
+        store: &mut Store,
+    ) {
+        let mut matcher = SourceMatcher::new(root);
+        handle_event(event, root, indexer, &mut matcher, pending, store).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_becomes_binary_leaves_the_index() {
+        let (_temp, root, mut store, indexer) = indexed_repository();
+        let source = root.join("kept.rs");
+        std::fs::write(&source, b"pub fn kept_handler() {}\n\0").unwrap();
+        let mut pending = PendingChanges::default();
+        deliver(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone()),
+            &root,
+            &indexer,
+            &mut pending,
+            &mut store,
+        );
+        let settled = pending.paths[&source];
+        flush_settled(&indexer, &mut store, &mut pending, settled).unwrap();
+
+        assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+        assert!(store.indexed_paths().unwrap().is_empty());
+        assert!(store
+            .search_symbols("kept_handler", None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn renames_under_skipped_directories_do_not_refresh_the_index() {
+        let (_temp, root, mut store, indexer) = indexed_repository();
+        std::fs::write(root.join("kept.rs"), "pub fn edited_handler() {}\n").unwrap();
+        for directory in ["target", "node_modules"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            let renamed = root.join(directory).join("renamed.tmp");
+            std::fs::write(&renamed, "scratch").unwrap();
+            let mut pending = PendingChanges::default();
+            deliver(
+                notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+                    .add_path(renamed),
+                &root,
+                &indexer,
+                &mut pending,
+                &mut store,
+            );
+            assert!(pending.paths.is_empty() && pending.full_refresh.is_none());
+        }
+        assert!(store
+            .search_symbols("edited_handler", None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_remove_event_for_a_recreated_source_keeps_its_rows() {
+        let (_temp, root, mut store, indexer) = indexed_repository();
+        let source = root.join("kept.rs");
+        let mut pending = PendingChanges::default();
+        deliver(
+            notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(source.clone()),
+            &root,
+            &indexer,
+            &mut pending,
+            &mut store,
+        );
+        assert_eq!(store.indexed_paths().unwrap(), vec!["kept.rs"]);
+        let now = Instant::now();
+        flush_settled(&indexer, &mut store, &mut pending, now + DEBOUNCE).unwrap();
+        assert_eq!(store.indexed_paths().unwrap(), vec!["kept.rs"]);
+        assert_eq!(
+            store
+                .search_symbols("kept_handler", None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_source_does_not_stop_the_watcher() {
+        let (_temp, root, mut store, indexer) = indexed_repository();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        std::os::unix::fs::symlink("kept.rs", root.join("alias.rs")).unwrap();
+        assert!(refresh_index(&indexer, &mut store).is_ok());
+        assert!(refresh_index(&indexer, &mut store).is_ok());
     }
 }

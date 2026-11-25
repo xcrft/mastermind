@@ -2,7 +2,6 @@
 
 use super::{collection, habit, profile, store};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 #[derive(Serialize)]
@@ -75,7 +74,7 @@ pub fn propose_preference(
                 candidate.project_root,
                 repository
             ]))?;
-            let request_digest = crate::hex::encode(&Sha256::digest(request));
+            let request_digest = crate::hex::sha256(request);
             Ok(db.propose_candidate_feedback(
                 &candidate,
                 &statement,
@@ -200,7 +199,7 @@ pub fn propose_habit(
                 None => request,
             };
             let request = serde_json::to_vec(&request)?;
-            let request_digest = crate::hex::encode(&Sha256::digest(request));
+            let request_digest = crate::hex::sha256(request);
             Ok(db.propose_candidate_habit(
                 &candidate,
                 &store::NewHabit {

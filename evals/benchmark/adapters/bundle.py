@@ -13,6 +13,7 @@ COMMON_BUNDLE = {
     "launch.py": "evals/benchmark/adapters/launch.py",
     **{path: path for path in (
         "evals/__init__.py", "evals/shared/__init__.py", "evals/shared/process.py",
+        "evals/shared/strict_json.py",
         "evals/benchmark/__init__.py", "evals/benchmark/artifacts.py",
         "evals/benchmark/conditions.py", "evals/benchmark/protocol.py",
         "evals/benchmark/runtime.py", "evals/benchmark/source.py",

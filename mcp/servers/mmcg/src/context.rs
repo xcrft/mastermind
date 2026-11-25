@@ -7,7 +7,6 @@ use crate::queries::{self, BriefRole};
 use crate::store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub const DEFAULT_BUDGET: u32 = 8_000;
@@ -64,11 +63,14 @@ pub enum ContextError {
     RootUnavailable,
     Serialization,
     BudgetTooSmall,
+    /// The index exists but kept changing while its snapshot was copied.
+    IndexSnapshotUnavailable,
 }
 
 impl ContextError {
     pub fn code(self) -> &'static str {
         match self {
+            Self::IndexSnapshotUnavailable => "context_index_snapshot_unavailable",
             Self::InvalidSelection => "invalid_context_selection",
             Self::RootUnavailable => "context_root_unavailable",
             Self::Serialization => "context_serialization_failed",
@@ -117,7 +119,7 @@ fn layer(status: &str, data: Value) -> Result<Value, ContextError> {
 
 fn digest(value: &Value) -> Result<String, ContextError> {
     let bytes = serde_json::to_vec(value).map_err(|_| ContextError::Serialization)?;
-    Ok(crate::hex::encode(&Sha256::digest(bytes)))
+    Ok(crate::hex::sha256(bytes))
 }
 
 /// Only CLI/server configuration may supply `profile_client`. This function
@@ -132,7 +134,7 @@ pub fn from_paths(
     let budget_ms = crate::store::query_budget_ms_from_env(crate::store::DEFAULT_CLI_BUDGET_MS);
     let deadline = (budget_ms > 0)
         .then(|| std::time::Instant::now() + std::time::Duration::from_millis(budget_ms));
-    let store = Store::open_read_only_with_deadline(index_path, deadline).ok();
+    let store = open_index(|| Store::open_read_only_with_deadline(index_path, deadline))?;
     if let Some(store) = store.as_ref() {
         store.push_work_budget(crate::store::WorkBudget::from_millis(budget_ms));
     }
@@ -141,6 +143,26 @@ pub fn from_paths(
         store.pop_work_budget();
     }
     result
+}
+
+/// A missing or unreadable index builds the context without one. A snapshot
+/// that a concurrent write invalidated is retried once and then reported, as
+/// the context built without it would fail delivery as changed sources.
+fn open_index(
+    mut open: impl FnMut() -> rusqlite::Result<Store>,
+) -> Result<Option<Store>, ContextError> {
+    let busy = |error: &rusqlite::Error| {
+        error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+    };
+    match open() {
+        Ok(store) => Ok(Some(store)),
+        Err(error) if busy(&error) => match open() {
+            Ok(store) => Ok(Some(store)),
+            Err(error) if busy(&error) => Err(ContextError::IndexSnapshotUnavailable),
+            Err(_) => Ok(None),
+        },
+        Err(_) => Ok(None),
+    }
 }
 
 /// Revalidate the evidence actually selected for delivery immediately before
@@ -584,6 +606,39 @@ fn stabilize_budget(packet: &mut Value) -> Result<(), ContextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changing_index_snapshot_is_retried_once_then_reported() {
+        let busy = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("index changed while creating a read-only snapshot".into()),
+            )
+        };
+        let mut attempts = 0;
+        let outcome = open_index(|| {
+            attempts += 1;
+            Err(busy())
+        });
+        assert_eq!(
+            (outcome.err(), attempts),
+            (Some(ContextError::IndexSnapshotUnavailable), 2)
+        );
+
+        let mut attempts = 0;
+        let retried = open_index(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(busy())
+            } else {
+                Store::open_ephemeral()
+            }
+        });
+        assert!(retried.unwrap().is_some());
+
+        let missing = open_index(|| Err(rusqlite::Error::InvalidPath("absent.db".into())));
+        assert!(missing.unwrap().is_none());
+    }
 
     #[test]
     fn shrink_person_budget_subtracts_overflow_plus_slack_from_the_views_own_size() {

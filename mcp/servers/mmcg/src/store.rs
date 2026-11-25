@@ -25,6 +25,20 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+/// SQL for the language family an import can resolve within. JavaScript,
+/// TypeScript, TSX and Vue import each other, other languages only themselves.
+macro_rules! import_family {
+    ($column:literal) => {
+        concat!(
+            "(CASE WHEN ",
+            $column,
+            " IN ('javascript','typescript','tsx','vue') THEN 'js' ELSE ",
+            $column,
+            " END)"
+        )
+    };
+}
+
 const SCHEMA_VERSION: &str = "9";
 /// Tables that query tools read without checking for them. Optional semantic
 /// and fact tables are checked where they are used.
@@ -203,6 +217,403 @@ static CONCEPT_SCHEMA_CONTRACT: OnceLock<Vec<(&'static str, &'static str, String
     OnceLock::new();
 const READ_ONLY_SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Sibling of the database file. It persists: removing a lock file lets two
+/// writers lock two different files.
+pub(crate) const WRITER_LOCK_SUFFIX: &str = "-writer.lock";
+const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const WRITER_LOCK_POLL: Duration = Duration::from_millis(25);
+
+/// The derived graph and auxiliary tables. Every object is created with
+/// `IF NOT EXISTS`, which is also how a current schema is recognized.
+const GRAPH_SCHEMA_DDL: &str = r#"
+            CREATE TABLE IF NOT EXISTS symbols (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT NOT NULL,
+                kind         TEXT NOT NULL,
+                file_path    TEXT NOT NULL,
+                line_start   INTEGER NOT NULL,
+                line_end     INTEGER NOT NULL,
+                signature    TEXT,
+                parent_id    INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+                language     TEXT,
+                decorators   TEXT,
+                production   INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+            CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_symbols_language ON symbols(language);
+            CREATE INDEX IF NOT EXISTS idx_symbols_production_file
+                ON symbols(production, file_path);
+            CREATE INDEX IF NOT EXISTS idx_symbols_production_name
+                ON symbols(production, name);
+
+            CREATE TABLE IF NOT EXISTS edges (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_id   INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+                to_id     INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+                to_name   TEXT NOT NULL,
+                to_path   TEXT,
+                to_type   TEXT,
+                target_kind TEXT,
+                kind      TEXT NOT NULL,
+                line      INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_name ON edges(to_name);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_path ON edges(to_path);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_type ON edges(to_type);
+            CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_name
+                ON edges(to_name, from_id) WHERE kind = 'calls';
+            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_type
+                ON edges(to_type, from_id)
+                WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> '';
+            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_name
+                ON edges(to_name, from_id) WHERE kind IN ('calls', 'references');
+            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_type
+                ON edges(to_type, from_id)
+                WHERE kind IN ('calls', 'references') AND to_type IS NOT NULL AND to_type <> '';
+
+            CREATE TABLE IF NOT EXISTS files (
+                path                    TEXT PRIMARY KEY,
+                indexed_at              INTEGER NOT NULL,
+                symbol_count            INTEGER NOT NULL,
+                structural_fingerprint  TEXT NOT NULL DEFAULT '',
+                content_sha256          TEXT NOT NULL DEFAULT '',
+                production              INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_files_production_path
+                ON files(production, path);
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            -- Rebuildable search view over durable project-history Markdown.
+            -- `kind` is metadata for exact filtering, not tokenized evidence.
+            CREATE VIRTUAL TABLE IF NOT EXISTS project_history_fts USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
+                title,
+                body,
+                tokenize = 'porter unicode61 remove_diacritics 2'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_section_fts USING fts5(
+                path UNINDEXED,
+                kind UNINDEXED,
+                section_id UNINDEXED,
+                heading,
+                start_line UNINDEXED,
+                end_line UNINDEXED,
+                body,
+                tokenize = 'porter unicode61 remove_diacritics 2'
+            );
+            -- Rebuildable candidate decisions from explicit CONTEXT.md fields.
+            -- Source-declared status never grants review authority.
+            CREATE TABLE IF NOT EXISTS project_evidence (
+                id                  TEXT PRIMARY KEY,
+                section_id          TEXT NOT NULL,
+                source_path         TEXT NOT NULL CHECK (source_path = 'CONTEXT.md'),
+                source_line         INTEGER NOT NULL CHECK (source_line > 0),
+                record_digest       TEXT NOT NULL,
+                source_file_digest  TEXT NOT NULL,
+                extractor_version   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS project_evidence_line
+                ON project_evidence(source_path, source_line);
+            CREATE TABLE IF NOT EXISTS project_claim (
+                id             TEXT PRIMARY KEY,
+                kind           TEXT NOT NULL CHECK (kind = 'decision'),
+                statement      TEXT NOT NULL,
+                status         TEXT NOT NULL CHECK (status = 'candidate'),
+                source_status  TEXT NOT NULL,
+                review_status  TEXT NOT NULL CHECK (review_status = 'unknown'),
+                evidence_id    TEXT NOT NULL UNIQUE REFERENCES project_evidence(id)
+            );
+
+            -- Cross-agent scratchpad. Live in-session channel between Mastermind
+            -- subagents (planner → executor → auditor); counterpart to the
+            -- cross-session `.mastermind/tasks/_lessons.md`.
+            -- Additive table — no SCHEMA_VERSION bump needed; IF NOT EXISTS lets
+            -- existing DBs adopt it without a rebuild.
+            CREATE TABLE IF NOT EXISTS scratchpad (
+                id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts    INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                kind  TEXT NOT NULL,
+                body  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scratchpad_ts ON scratchpad(ts);
+            CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
+
+            -- Optional SCIP semantic overlay. These tables are additive and
+            -- deliberately separate from `symbols` / `edges`: Tree-sitter is
+            -- still the default graph and remains usable when no overlay exists.
+            CREATE TABLE IF NOT EXISTS semantic_sources (
+                id                       INTEGER PRIMARY KEY CHECK (id = 1),
+                tool_name                TEXT NOT NULL,
+                tool_version             TEXT NOT NULL,
+                project_root             TEXT NOT NULL,
+                artifact_path            TEXT NOT NULL,
+                artifact_sha256          TEXT NOT NULL,
+                imported_at              INTEGER NOT NULL,
+                document_count           INTEGER NOT NULL,
+                definition_count         INTEGER NOT NULL,
+                edge_count               INTEGER NOT NULL,
+                text_verified_documents  INTEGER NOT NULL,
+                repository_verified      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS semantic_documents (
+                path                  TEXT PRIMARY KEY,
+                source_id             INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                language              TEXT NOT NULL,
+                position_encoding     TEXT NOT NULL,
+                content_sha256        TEXT NOT NULL,
+                source_text_verified  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_documents_source
+                ON semantic_documents(source_id);
+            CREATE TABLE IF NOT EXISTS semantic_definitions (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id      INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                symbol         TEXT NOT NULL,
+                display_name   TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                file_path      TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                line           INTEGER NOT NULL,
+                character      INTEGER NOT NULL,
+                end_line       INTEGER NOT NULL,
+                end_character  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_symbol
+                ON semantic_definitions(symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_display
+                ON semantic_definitions(display_name);
+            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_file
+                ON semantic_definitions(file_path);
+            CREATE TABLE IF NOT EXISTS semantic_edges (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id          INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
+                from_symbol        TEXT,
+                from_display_name  TEXT,
+                from_file          TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                from_line          INTEGER NOT NULL,
+                from_character     INTEGER NOT NULL,
+                occurrence_line    INTEGER NOT NULL,
+                occurrence_character INTEGER NOT NULL,
+                to_symbol          TEXT NOT NULL,
+                to_display_name    TEXT NOT NULL,
+                to_file            TEXT REFERENCES semantic_documents(path) ON DELETE CASCADE,
+                to_line            INTEGER,
+                to_character       INTEGER,
+                kind               TEXT NOT NULL,
+                UNIQUE (
+                    source_id, from_symbol, from_file, from_line, from_character,
+                    occurrence_line, occurrence_character, to_symbol, to_file, kind
+                )
+            );
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_symbol
+                ON semantic_edges(from_symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_symbol
+                ON semantic_edges(to_symbol);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_file
+                ON semantic_edges(from_file);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_file
+                ON semantic_edges(to_file);
+            CREATE INDEX IF NOT EXISTS idx_semantic_edges_kind
+                ON semantic_edges(kind);
+
+            -- Declarative community facts. Producers never receive SQLite
+            -- access: Mastermind validates a v1 manifest, normalizes every
+            -- record, and atomically owns these tables.
+            CREATE TABLE IF NOT EXISTS fact_sources (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_version          TEXT NOT NULL,
+                producer_name        TEXT NOT NULL,
+                producer_version     TEXT NOT NULL,
+                dataset              TEXT NOT NULL,
+                provenance_kind      TEXT NOT NULL,
+                capabilities         TEXT NOT NULL,
+                repository_identity  TEXT NOT NULL,
+                revision             TEXT NOT NULL,
+                manifest_sha256      TEXT NOT NULL,
+                manifest_bytes       INTEGER NOT NULL,
+                signature_status     TEXT NOT NULL DEFAULT 'unsigned',
+                signing_key_id       TEXT,
+                signature_sha256     TEXT,
+                signature_bytes      INTEGER,
+                signing_public_key   TEXT,
+                signature_value      TEXT,
+                signed_manifest_digest TEXT,
+                imported_at          INTEGER NOT NULL,
+                file_count           INTEGER NOT NULL,
+                annotation_count     INTEGER NOT NULL,
+                relationship_count   INTEGER NOT NULL,
+                UNIQUE (producer_name, dataset)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_sources_revision
+                ON fact_sources(repository_identity, revision);
+            CREATE TABLE IF NOT EXISTS fact_files (
+                source_id  INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                path       TEXT NOT NULL,
+                sha256     TEXT NOT NULL,
+                bytes      INTEGER NOT NULL,
+                PRIMARY KEY (source_id, path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_files_path ON fact_files(path);
+            CREATE TABLE IF NOT EXISTS fact_artifacts (
+                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                artifact_id  TEXT NOT NULL,
+                path         TEXT NOT NULL,
+                sha256       TEXT NOT NULL,
+                bytes        INTEGER NOT NULL,
+                PRIMARY KEY (source_id, artifact_id)
+            );
+            CREATE TABLE IF NOT EXISTS fact_annotations (
+                source_id   INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                fact_id     TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                line        INTEGER NOT NULL,
+                column_no   INTEGER,
+                end_line    INTEGER,
+                end_column  INTEGER,
+                severity    TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                message     TEXT NOT NULL,
+                PRIMARY KEY (source_id, fact_id),
+                FOREIGN KEY (source_id, path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_annotations_path
+                ON fact_annotations(path, line);
+            CREATE TABLE IF NOT EXISTS fact_relationships (
+                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
+                fact_id      TEXT NOT NULL,
+                relation     TEXT NOT NULL,
+                from_path    TEXT NOT NULL,
+                from_line    INTEGER NOT NULL,
+                from_column  INTEGER,
+                to_path      TEXT NOT NULL,
+                to_line      INTEGER NOT NULL,
+                to_column    INTEGER,
+                confidence   TEXT NOT NULL,
+                label        TEXT NOT NULL,
+                PRIMARY KEY (source_id, fact_id),
+                FOREIGN KEY (source_id, from_path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE,
+                FOREIGN KEY (source_id, to_path)
+                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_relationships_from
+                ON fact_relationships(from_path, from_line);
+            CREATE INDEX IF NOT EXISTS idx_fact_relationships_to
+                ON fact_relationships(to_path, to_line);
+            "#;
+
+/// Columns added after their table first shipped: (table, column, definition).
+const ADDED_COLUMNS: [(&str, &str, &str); 10] = [
+    (
+        "files",
+        "structural_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    ("files", "content_sha256", "TEXT NOT NULL DEFAULT ''"),
+    (
+        "semantic_sources",
+        "repository_verified",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "fact_sources",
+        "signature_status",
+        "TEXT NOT NULL DEFAULT 'unsigned'",
+    ),
+    ("fact_sources", "signing_key_id", "TEXT"),
+    ("fact_sources", "signature_sha256", "TEXT"),
+    ("fact_sources", "signature_bytes", "INTEGER"),
+    ("fact_sources", "signing_public_key", "TEXT"),
+    ("fact_sources", "signature_value", "TEXT"),
+    ("fact_sources", "signed_manifest_digest", "TEXT"),
+];
+
+fn graph_schema_object_names() -> Vec<&'static str> {
+    GRAPH_SCHEMA_DDL
+        .lines()
+        .filter_map(|line| line.split("--").next()?.split_once("IF NOT EXISTS"))
+        .filter_map(|(_, rest)| rest.split_whitespace().next())
+        .map(|name| name.trim_end_matches('('))
+        .collect()
+}
+
+fn stored_schema_version(connection: &Connection) -> SqlResult<Option<String>> {
+    let meta_exists: bool = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !meta_exists {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+/// A newer binary wrote this graph. Rebuilding it here would destroy data
+/// that binary still reads, so the open fails instead.
+fn refuse_newer_schema(stored: Option<&str>) -> SqlResult<()> {
+    let current: u64 = SCHEMA_VERSION.parse().expect("numeric schema version");
+    match stored.and_then(|stored| stored.parse::<u64>().ok()) {
+        Some(stored) if stored > current => Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "the index has schema version {stored}, newer than version {current} that this mmcg supports; use a newer mmcg binary"
+            )),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> SqlResult<bool> {
+    connection
+        .query_row(
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |_| Ok(true),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+}
+
+/// Read-only opens never migrate, so a table that exists without a column
+/// added later is not current.
+fn added_columns_present(connection: &Connection) -> SqlResult<bool> {
+    for (table, column, _) in ADDED_COLUMNS {
+        let table_exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |_| Ok(true),
+            )
+            .optional()?
+            .is_some();
+        if table_exists && !column_exists(connection, table, column)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> SqlResult<u64> {
     let value = row.get::<_, i64>(index)?;
@@ -2480,9 +2891,48 @@ pub(crate) enum CallCandidateEvidence {
     Unresolved(&'static str),
 }
 
+/// Private snapshot directories of live stores. `process::exit` runs no
+/// destructors, so an exiting process removes them through
+/// [`remove_snapshot_directories`].
+static SNAPSHOT_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct SnapshotDirectory(tempfile::TempDir);
+
+impl SnapshotDirectory {
+    fn new(directory: tempfile::TempDir) -> Self {
+        SNAPSHOT_DIRECTORIES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(directory.path().to_path_buf());
+        Self(directory)
+    }
+}
+
+impl Drop for SnapshotDirectory {
+    fn drop(&mut self) {
+        SNAPSHOT_DIRECTORIES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path| path != self.0.path());
+    }
+}
+
+/// Remove every live snapshot directory. Only for a process about to exit:
+/// stores that still use one fail afterwards.
+pub(crate) fn remove_snapshot_directories() {
+    // Best effort: the process exits next either way.
+    for path in SNAPSHOT_DIRECTORIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain(..)
+    {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
 pub struct Store {
     conn: Connection,
-    _snapshot_dir: Option<tempfile::TempDir>,
+    _snapshot_dir: Option<SnapshotDirectory>,
     db_path: PathBuf,
     source_snapshot_state: Option<IndexFileState>,
     guard_stack: RefCell<Vec<GuardFrame>>,
@@ -2531,6 +2981,13 @@ fn sqlite_io_error(context: &str, error: std::io::Error) -> rusqlite::Error {
         Some(format!("{context}: {error}")),
     )
 }
+
+/// Settings for a WAL-mode connection that writes the index.
+const WRITER_PRAGMAS: &str = "PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA cache_size = -65536;";
 
 fn sqlite_snapshot_changed() -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
@@ -3123,18 +3580,6 @@ impl Store {
             )
             .map_err(|error| sqlite_bounded_error("inspect managed index", error))?;
         validate_writable_sidecars(&state, &expected)?;
-        if existing_identity.is_some() {
-            let mut snapshot = Self::open_read_only(&expected)?;
-            let authorized = snapshot
-                .meta_value("index_root")?
-                .and_then(|stored| PathBuf::from(stored).canonicalize().ok())
-                .is_some_and(|stored| stored == root.canonical_root());
-            if !authorized {
-                snapshot.serve_root = Some(root.canonical_root().to_path_buf());
-                return Ok(snapshot);
-            }
-            drop(snapshot);
-        }
         let expected_identity = match existing_identity {
             Some(identity) => identity,
             None => {
@@ -3185,15 +3630,7 @@ impl Store {
                 return Ok(store);
             }
         }
-        connection.execute_batch(
-            r#"
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA busy_timeout = 5000;
-            PRAGMA cache_size = -65536;
-            "#,
-        )?;
+        connection.execute_batch(WRITER_PRAGMAS)?;
         let mut store = Self::from_connection(
             connection,
             expected,
@@ -3320,15 +3757,7 @@ impl Store {
             return Err(sqlite_snapshot_changed());
         }
         verify_sqlite_main_file_identity(&conn, expected_identity)?;
-        conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA busy_timeout = 5000;
-            PRAGMA cache_size = -65536;
-            "#,
-        )?;
+        conn.execute_batch(WRITER_PRAGMAS)?;
         let store = Self::from_connection(
             conn,
             db_path,
@@ -3536,15 +3965,7 @@ impl Store {
         if !opened_identity.same_object(expected_identity) {
             return Err(sqlite_snapshot_changed());
         }
-        conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA busy_timeout = 5000;
-            PRAGMA cache_size = -65536;
-            "#,
-        )?;
+        conn.execute_batch(WRITER_PRAGMAS)?;
         validate_writable_sidecars(&snapshot_root, &snapshot_path)?;
         // Sharing the marker lets the request's cancel handle stop work here.
         let snapshot = Self::from_connection(
@@ -3588,7 +4009,10 @@ impl Store {
             rusqlite::params_from_iter(TOOL_TABLES),
             |row| row.get(0),
         )?;
-        Ok(present == TOOL_TABLES.len() as i64)
+        if present != TOOL_TABLES.len() as i64 {
+            return Ok(false);
+        }
+        added_columns_present(&self.conn)
     }
 
     pub(crate) fn managed_root(&self) -> Option<&Path> {
@@ -3632,7 +4056,7 @@ impl Store {
     ) -> SqlResult<Self> {
         let mut store = Self {
             conn,
-            _snapshot_dir: snapshot_dir,
+            _snapshot_dir: snapshot_dir.map(SnapshotDirectory::new),
             db_path,
             source_snapshot_state,
             guard_stack: RefCell::new(Vec::new()),
@@ -3946,402 +4370,135 @@ impl Store {
         &self.db_path
     }
 
-    fn init_schema(&self) -> SqlResult<()> {
-        // If the derived graph schema changes, drop the rebuildable graph while
-        // preserving repository identity and the durable auxiliary channels.
-        // Keeping `index_root` is essential: otherwise retained history or
-        // scratchpad rows make the next in-place index run look like unsafe,
-        // unbound data and it correctly refuses to guess a repository.
-        let meta_exists: bool = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
-                [],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
+    /// Exclusive cross-process lock for one index write: an index run, a
+    /// refresh or a watcher update. Readers never take it. A writer waits
+    /// until the request deadline or [`WRITER_LOCK_TIMEOUT`], whichever comes
+    /// first, then gets a retryable busy error. Private snapshots and
+    /// in-memory stores have no other writer, so they need no lock.
+    pub(crate) fn lock_writer(&self) -> SqlResult<Option<crate::bounded_fs::StableFileLock>> {
+        if self._snapshot_dir.is_some() || self.db_path == Path::new(":memory:") {
+            return Ok(None);
+        }
+        let mut lock_path = self.db_path.as_os_str().to_os_string();
+        lock_path.push(WRITER_LOCK_SUFFIX);
+        let (root, lock_path) = crate::bounded_fs::prepare_file_target(Path::new(&lock_path))
+            .map_err(|error| sqlite_bounded_error("open index writer lock", error))?;
+        let timeout = Instant::now() + WRITER_LOCK_TIMEOUT;
+        let deadline = self
+            .request_deadline()
+            .map_or(timeout, |deadline| deadline.min(timeout));
+        loop {
+            match crate::bounded_fs::try_locked_regular_file_with_capability(&root, &lock_path) {
+                Ok(lock) => return Ok(Some(lock)),
+                Err(crate::bounded_fs::BoundedReadError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(sqlite_bounded_error("lock index writer", error)),
+            }
+            if self.interrupt_source.load(Ordering::SeqCst) == INTERRUPT_CANCEL {
+                return Err(Self::interrupted_error());
+            }
+            if Instant::now() >= deadline {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some("another process is writing the index".into()),
+                ));
+            }
+            // ponytail: polling, std has no timed file lock. 25 ms bounds the
+            // extra wait after the other writer finishes.
+            std::thread::sleep(WRITER_LOCK_POLL);
+        }
+    }
 
-        if meta_exists {
-            let stored: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM meta WHERE key='schema_version'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if stored.as_deref() != Some(SCHEMA_VERSION) {
-                eprintln!(
-                    "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mastermind index <root>` to repopulate.",
-                    stored, SCHEMA_VERSION
-                );
-                self.conn.execute_batch(CONCEPT_SCHEMA_DROP_SQL)?;
-                self.conn.execute_batch(
-                    r#"
-                    DROP TABLE IF EXISTS edges;
-                    DROP TABLE IF EXISTS symbols;
-                    DROP TABLE IF EXISTS files;
-                    DROP TABLE IF EXISTS task_specs;
-                    DROP TABLE IF EXISTS task_specs_fts;
-                    "#,
-                )?;
-            } else {
-                // Repair a partially missing FTS5 corpus before the general
-                // CREATE TABLE batch asks SQLite to initialize its broken
-                // virtual-table module. The rebuilt corpus remains dirty until
-                // a successful full index finalizes it.
-                self.ensure_concept_schema()?;
+    fn init_schema(&self) -> SqlResult<()> {
+        // A current schema needs no DDL, so opening it takes no write lock and
+        // never waits behind a running index.
+        if self.graph_schema_current()? && self.concept_schema_objects_current()? {
+            return self.with_work_budget(self.default_work_budget(), || {
+                self.ensure_production_classification()
+            });
+        }
+        let stored = stored_schema_version(&self.conn)?;
+        refuse_newer_schema(stored.as_deref())?;
+        if stored.as_deref() == Some(SCHEMA_VERSION) {
+            // Repair a partially missing FTS5 corpus before the general
+            // CREATE TABLE batch asks SQLite to initialize its broken
+            // virtual-table module. The rebuilt corpus remains dirty until
+            // a successful full index finalizes it.
+            self.ensure_concept_schema()?;
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        // Another process may have migrated while this one waited for the lock.
+        let stored = stored_schema_version(&tx)?;
+        refuse_newer_schema(stored.as_deref())?;
+        if stored.is_some() && stored.as_deref() != Some(SCHEMA_VERSION) {
+            // An older derived graph schema is dropped and rebuilt by the next
+            // index, while repository identity and the durable auxiliary
+            // channels stay. Keeping `index_root` is essential: otherwise
+            // retained history or scratchpad rows make the next in-place index
+            // run look like unsafe, unbound data.
+            eprintln!(
+                "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mastermind index <root>` to repopulate.",
+                stored, SCHEMA_VERSION
+            );
+            tx.execute_batch(CONCEPT_SCHEMA_DROP_SQL)?;
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS edges;
+                DROP TABLE IF EXISTS symbols;
+                DROP TABLE IF EXISTS files;
+                DROP TABLE IF EXISTS task_specs;
+                DROP TABLE IF EXISTS task_specs_fts;
+                "#,
+            )?;
+        }
+        tx.execute_batch(GRAPH_SCHEMA_DDL)?;
+        // CREATE TABLE IF NOT EXISTS keeps an older table as it is, so columns
+        // added later are added here. A failed add fails the open and rolls
+        // the whole migration back.
+        for (table, column, definition) in ADDED_COLUMNS {
+            if !column_exists(&tx, table, column)? {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))?;
             }
         }
-
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS symbols (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                name         TEXT NOT NULL,
-                kind         TEXT NOT NULL,
-                file_path    TEXT NOT NULL,
-                line_start   INTEGER NOT NULL,
-                line_end     INTEGER NOT NULL,
-                signature    TEXT,
-                parent_id    INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
-                language     TEXT,
-                decorators   TEXT,
-                production   INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
-            CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parent_id);
-            CREATE INDEX IF NOT EXISTS idx_symbols_language ON symbols(language);
-            CREATE INDEX IF NOT EXISTS idx_symbols_production_file
-                ON symbols(production, file_path);
-            CREATE INDEX IF NOT EXISTS idx_symbols_production_name
-                ON symbols(production, name);
-
-            CREATE TABLE IF NOT EXISTS edges (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                from_id   INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-                to_id     INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-                to_name   TEXT NOT NULL,
-                to_path   TEXT,
-                to_type   TEXT,
-                target_kind TEXT,
-                kind      TEXT NOT NULL,
-                line      INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
-            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
-            CREATE INDEX IF NOT EXISTS idx_edges_to_name ON edges(to_name);
-            CREATE INDEX IF NOT EXISTS idx_edges_to_path ON edges(to_path);
-            CREATE INDEX IF NOT EXISTS idx_edges_to_type ON edges(to_type);
-            CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
-            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_name
-                ON edges(to_name, from_id) WHERE kind = 'calls';
-            CREATE INDEX IF NOT EXISTS idx_edges_calls_to_type
-                ON edges(to_type, from_id)
-                WHERE kind = 'calls' AND to_type IS NOT NULL AND to_type <> '';
-            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_name
-                ON edges(to_name, from_id) WHERE kind IN ('calls', 'references');
-            CREATE INDEX IF NOT EXISTS idx_edges_impact_to_type
-                ON edges(to_type, from_id)
-                WHERE kind IN ('calls', 'references') AND to_type IS NOT NULL AND to_type <> '';
-
-            CREATE TABLE IF NOT EXISTS files (
-                path                    TEXT PRIMARY KEY,
-                indexed_at              INTEGER NOT NULL,
-                symbol_count            INTEGER NOT NULL,
-                structural_fingerprint  TEXT NOT NULL DEFAULT '',
-                content_sha256          TEXT NOT NULL DEFAULT '',
-                production              INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE INDEX IF NOT EXISTS idx_files_production_path
-                ON files(production, path);
-
-            CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            -- Rebuildable search view over durable project-history Markdown.
-            -- `kind` is metadata for exact filtering, not tokenized evidence.
-            CREATE VIRTUAL TABLE IF NOT EXISTS project_history_fts USING fts5(
-                path UNINDEXED,
-                kind UNINDEXED,
-                title,
-                body,
-                tokenize = 'porter unicode61 remove_diacritics 2'
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS document_section_fts USING fts5(
-                path UNINDEXED,
-                kind UNINDEXED,
-                section_id UNINDEXED,
-                heading,
-                start_line UNINDEXED,
-                end_line UNINDEXED,
-                body,
-                tokenize = 'porter unicode61 remove_diacritics 2'
-            );
-            -- Rebuildable candidate decisions from explicit CONTEXT.md fields.
-            -- Source-declared status never grants review authority.
-            CREATE TABLE IF NOT EXISTS project_evidence (
-                id                  TEXT PRIMARY KEY,
-                section_id          TEXT NOT NULL,
-                source_path         TEXT NOT NULL CHECK (source_path = 'CONTEXT.md'),
-                source_line         INTEGER NOT NULL CHECK (source_line > 0),
-                record_digest       TEXT NOT NULL,
-                source_file_digest  TEXT NOT NULL,
-                extractor_version   TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS project_evidence_line
-                ON project_evidence(source_path, source_line);
-            CREATE TABLE IF NOT EXISTS project_claim (
-                id             TEXT PRIMARY KEY,
-                kind           TEXT NOT NULL CHECK (kind = 'decision'),
-                statement      TEXT NOT NULL,
-                status         TEXT NOT NULL CHECK (status = 'candidate'),
-                source_status  TEXT NOT NULL,
-                review_status  TEXT NOT NULL CHECK (review_status = 'unknown'),
-                evidence_id    TEXT NOT NULL UNIQUE REFERENCES project_evidence(id)
-            );
-
-            -- Cross-agent scratchpad. Live in-session channel between Mastermind
-            -- subagents (planner → executor → auditor); counterpart to the
-            -- cross-session `.mastermind/tasks/_lessons.md`.
-            -- Additive table — no SCHEMA_VERSION bump needed; IF NOT EXISTS lets
-            -- existing DBs adopt it without a rebuild.
-            CREATE TABLE IF NOT EXISTS scratchpad (
-                id    INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts    INTEGER NOT NULL,
-                agent TEXT NOT NULL,
-                kind  TEXT NOT NULL,
-                body  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_scratchpad_ts ON scratchpad(ts);
-            CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
-
-            -- Optional SCIP semantic overlay. These tables are additive and
-            -- deliberately separate from `symbols` / `edges`: Tree-sitter is
-            -- still the default graph and remains usable when no overlay exists.
-            CREATE TABLE IF NOT EXISTS semantic_sources (
-                id                       INTEGER PRIMARY KEY CHECK (id = 1),
-                tool_name                TEXT NOT NULL,
-                tool_version             TEXT NOT NULL,
-                project_root             TEXT NOT NULL,
-                artifact_path            TEXT NOT NULL,
-                artifact_sha256          TEXT NOT NULL,
-                imported_at              INTEGER NOT NULL,
-                document_count           INTEGER NOT NULL,
-                definition_count         INTEGER NOT NULL,
-                edge_count               INTEGER NOT NULL,
-                text_verified_documents  INTEGER NOT NULL,
-                repository_verified      INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS semantic_documents (
-                path                  TEXT PRIMARY KEY,
-                source_id             INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
-                language              TEXT NOT NULL,
-                position_encoding     TEXT NOT NULL,
-                content_sha256        TEXT NOT NULL,
-                source_text_verified  INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_semantic_documents_source
-                ON semantic_documents(source_id);
-            CREATE TABLE IF NOT EXISTS semantic_definitions (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id      INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
-                symbol         TEXT NOT NULL,
-                display_name   TEXT NOT NULL,
-                kind           TEXT NOT NULL,
-                file_path      TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
-                line           INTEGER NOT NULL,
-                character      INTEGER NOT NULL,
-                end_line       INTEGER NOT NULL,
-                end_character  INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_symbol
-                ON semantic_definitions(symbol);
-            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_display
-                ON semantic_definitions(display_name);
-            CREATE INDEX IF NOT EXISTS idx_semantic_definitions_file
-                ON semantic_definitions(file_path);
-            CREATE TABLE IF NOT EXISTS semantic_edges (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id          INTEGER NOT NULL REFERENCES semantic_sources(id) ON DELETE CASCADE,
-                from_symbol        TEXT,
-                from_display_name  TEXT,
-                from_file          TEXT NOT NULL REFERENCES semantic_documents(path) ON DELETE CASCADE,
-                from_line          INTEGER NOT NULL,
-                from_character     INTEGER NOT NULL,
-                occurrence_line    INTEGER NOT NULL,
-                occurrence_character INTEGER NOT NULL,
-                to_symbol          TEXT NOT NULL,
-                to_display_name    TEXT NOT NULL,
-                to_file            TEXT REFERENCES semantic_documents(path) ON DELETE CASCADE,
-                to_line            INTEGER,
-                to_character       INTEGER,
-                kind               TEXT NOT NULL,
-                UNIQUE (
-                    source_id, from_symbol, from_file, from_line, from_character,
-                    occurrence_line, occurrence_character, to_symbol, to_file, kind
-                )
-            );
-            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_symbol
-                ON semantic_edges(from_symbol);
-            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_symbol
-                ON semantic_edges(to_symbol);
-            CREATE INDEX IF NOT EXISTS idx_semantic_edges_from_file
-                ON semantic_edges(from_file);
-            CREATE INDEX IF NOT EXISTS idx_semantic_edges_to_file
-                ON semantic_edges(to_file);
-            CREATE INDEX IF NOT EXISTS idx_semantic_edges_kind
-                ON semantic_edges(kind);
-
-            -- Declarative community facts. Producers never receive SQLite
-            -- access: Mastermind validates a v1 manifest, normalizes every
-            -- record, and atomically owns these tables.
-            CREATE TABLE IF NOT EXISTS fact_sources (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                api_version          TEXT NOT NULL,
-                producer_name        TEXT NOT NULL,
-                producer_version     TEXT NOT NULL,
-                dataset              TEXT NOT NULL,
-                provenance_kind      TEXT NOT NULL,
-                capabilities         TEXT NOT NULL,
-                repository_identity  TEXT NOT NULL,
-                revision             TEXT NOT NULL,
-                manifest_sha256      TEXT NOT NULL,
-                manifest_bytes       INTEGER NOT NULL,
-                signature_status     TEXT NOT NULL DEFAULT 'unsigned',
-                signing_key_id       TEXT,
-                signature_sha256     TEXT,
-                signature_bytes      INTEGER,
-                signing_public_key   TEXT,
-                signature_value      TEXT,
-                signed_manifest_digest TEXT,
-                imported_at          INTEGER NOT NULL,
-                file_count           INTEGER NOT NULL,
-                annotation_count     INTEGER NOT NULL,
-                relationship_count   INTEGER NOT NULL,
-                UNIQUE (producer_name, dataset)
-            );
-            CREATE INDEX IF NOT EXISTS idx_fact_sources_revision
-                ON fact_sources(repository_identity, revision);
-            CREATE TABLE IF NOT EXISTS fact_files (
-                source_id  INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
-                path       TEXT NOT NULL,
-                sha256     TEXT NOT NULL,
-                bytes      INTEGER NOT NULL,
-                PRIMARY KEY (source_id, path)
-            );
-            CREATE INDEX IF NOT EXISTS idx_fact_files_path ON fact_files(path);
-            CREATE TABLE IF NOT EXISTS fact_artifacts (
-                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
-                artifact_id  TEXT NOT NULL,
-                path         TEXT NOT NULL,
-                sha256       TEXT NOT NULL,
-                bytes        INTEGER NOT NULL,
-                PRIMARY KEY (source_id, artifact_id)
-            );
-            CREATE TABLE IF NOT EXISTS fact_annotations (
-                source_id   INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
-                fact_id     TEXT NOT NULL,
-                path        TEXT NOT NULL,
-                line        INTEGER NOT NULL,
-                column_no   INTEGER,
-                end_line    INTEGER,
-                end_column  INTEGER,
-                severity    TEXT NOT NULL,
-                category    TEXT NOT NULL,
-                title       TEXT NOT NULL,
-                message     TEXT NOT NULL,
-                PRIMARY KEY (source_id, fact_id),
-                FOREIGN KEY (source_id, path)
-                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_fact_annotations_path
-                ON fact_annotations(path, line);
-            CREATE TABLE IF NOT EXISTS fact_relationships (
-                source_id    INTEGER NOT NULL REFERENCES fact_sources(id) ON DELETE CASCADE,
-                fact_id      TEXT NOT NULL,
-                relation     TEXT NOT NULL,
-                from_path    TEXT NOT NULL,
-                from_line    INTEGER NOT NULL,
-                from_column  INTEGER,
-                to_path      TEXT NOT NULL,
-                to_line      INTEGER NOT NULL,
-                to_column    INTEGER,
-                confidence   TEXT NOT NULL,
-                label        TEXT NOT NULL,
-                PRIMARY KEY (source_id, fact_id),
-                FOREIGN KEY (source_id, from_path)
-                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE,
-                FOREIGN KEY (source_id, to_path)
-                    REFERENCES fact_files(source_id, path) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_fact_relationships_from
-                ON fact_relationships(from_path, from_line);
-            CREATE INDEX IF NOT EXISTS idx_fact_relationships_to
-                ON fact_relationships(to_path, to_line);
-            "#,
-        )?;
-
-        // Idempotent column add for pre-0.28 DBs (CREATE TABLE IF NOT EXISTS
-        // above is a no-op once the table exists). SQLite raises `duplicate
-        // column name` if already present — the steady-state case, so we discard.
-        let _ = self.conn.execute(
-            "ALTER TABLE files ADD COLUMN structural_fingerprint TEXT NOT NULL DEFAULT ''",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE files ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE semantic_sources ADD COLUMN repository_verified INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signature_status TEXT NOT NULL DEFAULT 'unsigned'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signing_key_id TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signature_sha256 TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signature_bytes INTEGER",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signing_public_key TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signature_value TEXT",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE fact_sources ADD COLUMN signed_manifest_digest TEXT",
-            [],
-        );
-
         // Stamp the active version on first init and after a derived-schema
         // rebuild. Other metadata — especially index_root — remains intact.
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SCHEMA_VERSION],
         )?;
+        tx.commit()?;
         self.ensure_concept_schema()?;
         self.with_work_budget(self.default_work_budget(), || {
             self.ensure_production_classification()
         })?;
         Ok(())
+    }
+
+    /// Every object and column the graph DDL creates exists at the current
+    /// schema version.
+    fn graph_schema_current(&self) -> SqlResult<bool> {
+        if stored_schema_version(&self.conn)?.as_deref() != Some(SCHEMA_VERSION) {
+            return Ok(false);
+        }
+        let names = graph_schema_object_names();
+        let present: i64 = self.conn.query_row(
+            &format!(
+                "SELECT count(DISTINCT name) FROM sqlite_master WHERE name IN ({})",
+                vec!["?"; names.len()].join(",")
+            ),
+            rusqlite::params_from_iter(&names),
+            |row| row.get(0),
+        )?;
+        if present != names.len() as i64 {
+            return Ok(false);
+        }
+        added_columns_present(&self.conn)
     }
 
     /// Update a derived path classification without reparsing or replacing graph rows.
@@ -6429,28 +6586,7 @@ impl Store {
     /// name-collision graph can't run away even under a generous outer guard
     /// — nested budgets compose by min, so an outer guard installed by the
     /// MCP/CLI dispatch boundary only ever *tightens* this, never loosens it.
-    pub fn impact_of_many(
-        &self,
-        names: &[String],
-        max_depth: u32,
-        row_limit: usize,
-        language: Option<&str>,
-    ) -> SqlResult<Vec<SeedImpact>> {
-        self.impact_of_many_rows(names, max_depth, row_limit, language)
-            .map(|(_, rows)| rows)
-    }
-
-    pub(crate) fn impact_of_many_bounded(
-        &self,
-        names: &[String],
-        max_depth: u32,
-        row_limit: usize,
-        language: Option<&str>,
-    ) -> SqlResult<(u32, Vec<SeedImpact>)> {
-        self.impact_of_many_rows(names, max_depth, row_limit, language)
-    }
-
-    fn impact_of_many_rows(
+    pub fn impact_of_many_bounded(
         &self,
         names: &[String],
         max_depth: u32,
@@ -6706,15 +6842,7 @@ impl Store {
     /// most depended-on files. Name-based like `callers`/`impact`, so it pools
     /// across same-named symbols in different files; a ranking heuristic, not an
     /// exact reference count. Bounded by `limit`; `module` synthetics excluded.
-    pub fn file_in_degrees(
-        &self,
-        production_only: bool,
-        limit: usize,
-    ) -> SqlResult<Vec<FileInDegree>> {
-        self.file_in_degrees_scoped("", "root", production_only, limit)
-    }
-
-    pub(crate) fn file_in_degrees_scoped(
+    pub fn file_in_degrees_scoped(
         &self,
         scope: &str,
         kind: &str,
@@ -7037,7 +7165,8 @@ impl Store {
         Ok((total.clamp(0, i64::from(u32::MAX)) as u32, results))
     }
 
-    pub fn map_paths(&self, scope: &str, kind: &str, limit: usize) -> SqlResult<Vec<String>> {
+    #[cfg(test)]
+    fn map_paths(&self, scope: &str, kind: &str, limit: usize) -> SqlResult<Vec<String>> {
         self.map_paths_filtered(scope, kind, limit, false)
     }
 
@@ -7066,15 +7195,6 @@ impl Store {
             row.get(0)
         })?;
         rows.collect()
-    }
-
-    pub fn map_boundaries(
-        &self,
-        components: &[MapBoundaryScope],
-        limit_per_component: usize,
-        global_limit: usize,
-    ) -> SqlResult<Vec<MapBoundaryRow>> {
-        self.map_boundaries_filtered(components, limit_per_component, global_limit, false)
     }
 
     pub fn map_boundaries_filtered(
@@ -7188,15 +7308,6 @@ impl Store {
         Ok(result)
     }
 
-    pub fn map_centrality(
-        &self,
-        scope: &str,
-        kind: &str,
-        top_probe: usize,
-    ) -> SqlResult<Vec<MapCentralityRow>> {
-        self.map_centrality_filtered(scope, kind, top_probe, false)
-    }
-
     pub fn map_centrality_filtered(
         &self,
         scope: &str,
@@ -7284,7 +7395,8 @@ impl Store {
         rows.collect()
     }
 
-    pub fn map_import_edges(
+    #[cfg(test)]
+    fn map_import_edges(
         &self,
         scope: &str,
         kind: &str,
@@ -7293,7 +7405,8 @@ impl Store {
         self.map_import_edges_filtered(scope, kind, limit, false)
     }
 
-    pub fn map_import_edges_filtered(
+    #[cfg(test)]
+    fn map_import_edges_filtered(
         &self,
         scope: &str,
         kind: &str,
@@ -7525,10 +7638,11 @@ impl Store {
         Ok((pairs, raw_truncated || pair_truncated))
     }
 
-    /// Atomically replace the derived project-history corpus. The indexer calls
-    /// this after scanning the supported Markdown sources, which also removes
-    /// stale rows after a rename or deletion.
-    pub fn replace_project_history(&mut self, entries: &[ProjectHistoryEntry]) -> SqlResult<()> {
+    #[cfg(test)]
+    pub(crate) fn replace_project_history(
+        &mut self,
+        entries: &[ProjectHistoryEntry],
+    ) -> SqlResult<()> {
         self.replace_project_history_snapshot(entries, 0, false, "")
     }
 
@@ -7843,7 +7957,10 @@ impl Store {
     /// Strongly-connected components of size ≥ `min_size` in the file-level
     /// import graph. A returned SCC = a circular-import group.
     ///
-    /// Non-C++ edges are resolved by leaf-name match. C/C++ `#include` edges
+    /// Non-C++ edges are resolved by leaf-name match within one language
+    /// family, so a name shared across languages never closes a cycle. A
+    /// same-named symbol in an unrelated file of that family still can.
+    /// C/C++ `#include` edges
     /// resolve to indexed header paths (exact, source-relative, then a
     /// deterministic suffix fallback); `using` declarations are excluded from
     /// the C++ file graph.
@@ -7869,7 +7986,7 @@ impl Store {
         // same-named symbols within a file is identical to the previous
         // per-edge fanout join, one pass over `symbols` instead of joining
         // every edge to every same-named symbol.
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(concat!(
             "WITH to_files AS (
                  SELECT DISTINCT name, file_path, language
                  FROM symbols
@@ -7885,9 +8002,14 @@ impl Store {
                AND s_from.file_path != t.file_path
                AND (?1 IS NULL OR s_from.language = ?1)
                AND (s_from.language IS NULL OR s_from.language != 'cpp')
+               AND ",
+            import_family!("s_from.language"),
+            " IS ",
+            import_family!("t.language"),
+            "
              ORDER BY from_file, to_file
              LIMIT ?2",
-        )?;
+        ))?;
         let cap = DEPENDENCY_CYCLE_PAIR_LIMIT;
         let rows = stmt.query_map(params![language, (cap + 1) as i64], |r| {
             let from: String = r.get(0)?;
@@ -8038,7 +8160,8 @@ impl Store {
         visit: &mut impl FnMut(Rc<str>) -> bool,
     ) -> SqlResult<()> {
         let sql = if reverse {
-            "SELECT DISTINCT source.file_path
+            concat!(
+                "SELECT DISTINCT source.file_path
              FROM symbols target INDEXED BY idx_symbols_file
              CROSS JOIN edges e INDEXED BY idx_edges_to_name
              CROSS JOIN symbols source
@@ -8046,9 +8169,16 @@ impl Store {
                AND source.id = e.from_id AND e.kind = 'imports'
                AND (source.language IS NULL OR source.language != 'cpp')
                AND source.file_path != target.file_path
+               AND ",
+                import_family!("source.language"),
+                " IS ",
+                import_family!("target.language"),
+                "
              ORDER BY source.file_path"
+            )
         } else {
-            "SELECT DISTINCT target.file_path
+            concat!(
+                "SELECT DISTINCT target.file_path
              FROM symbols source INDEXED BY idx_symbols_file
              CROSS JOIN edges e INDEXED BY idx_edges_from
              CROSS JOIN symbols target INDEXED BY idx_symbols_name
@@ -8056,7 +8186,13 @@ impl Store {
                AND target.name = e.to_name AND e.kind = 'imports'
                AND (source.language IS NULL OR source.language != 'cpp')
                AND source.file_path != target.file_path
+               AND ",
+                import_family!("source.language"),
+                " IS ",
+                import_family!("target.language"),
+                "
              ORDER BY target.file_path"
+            )
         };
         let mut statement = self.conn.prepare_cached(sql)?;
         let mut rows = statement.query(params![file])?;
@@ -9571,18 +9707,24 @@ mod tests {
             .insert_edge(a, Some(helper), "helper", "calls", 4)
             .unwrap();
 
-        let all = store.file_in_degrees(false, 10).unwrap();
+        let all = store.file_in_degrees_scoped("", "root", false, 10).unwrap();
         assert_eq!(all[0].file, "src/core.rs");
         assert_eq!(all[0].in_degree, 2);
         assert!(all
             .iter()
             .any(|r| r.file == "tests/helper.rs" && r.in_degree == 1));
 
-        let prod = store.file_in_degrees(true, 10).unwrap();
+        let prod = store.file_in_degrees_scoped("", "root", true, 10).unwrap();
         assert!(prod.iter().any(|r| r.file == "src/core.rs"));
         assert!(!prod.iter().any(|r| r.file == "tests/helper.rs"));
 
-        assert_eq!(store.file_in_degrees(false, 1).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .file_in_degrees_scoped("", "root", false, 1)
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -9595,7 +9737,9 @@ mod tests {
             seed_calls_graph(&store, &symbols, &edges);
 
             for production_only in [false, true] {
-                let actual = store.file_in_degrees(production_only, 1000).unwrap();
+                let actual = store
+                    .file_in_degrees_scoped("", "root", production_only, 1000)
+                    .unwrap();
                 let mut expected = BTreeMap::<String, u32>::new();
                 for symbol in &symbols {
                     if symbol.kind == "module"
@@ -10756,7 +10900,9 @@ mod tests {
         assert_eq!(degrees.len(), 300);
         assert!(degrees.iter().all(|(_, degree, _)| *degree == 300));
         let files = store
-            .with_work_budget(budget, || store.file_in_degrees(false, 300))
+            .with_work_budget(budget, || {
+                store.file_in_degrees_scoped("", "root", false, 300)
+            })
             .unwrap();
         assert_eq!(files.len(), 300);
         assert!(files.iter().all(|row| row.in_degree == 300));
@@ -10909,7 +11055,8 @@ mod tests {
 
         // impact of c should include b (depth 1) and a (depth 2).
         let imp = store
-            .impact_of_many(&["c".to_string()], 5, 5001, None)
+            .impact_of_many_bounded(&["c".to_string()], 5, 5001, None)
+            .map(|(_, rows)| rows)
             .unwrap();
         let names: Vec<&str> = imp.iter().map(|row| row.symbol.name.as_str()).collect();
         assert!(names.contains(&"b"));
@@ -12071,7 +12218,7 @@ mod tests {
             .unwrap();
 
         let rows = store
-            .map_boundaries(
+            .map_boundaries_filtered(
                 &[
                     MapBoundaryScope {
                         label: "src/app".into(),
@@ -12086,6 +12233,7 @@ mod tests {
                 ],
                 20,
                 400,
+                false,
             )
             .unwrap();
         assert_eq!(rows.len(), 2);
@@ -12128,7 +12276,7 @@ mod tests {
                     deadline: None,
                     op_ticks: Some(30),
                 },
-                || store.map_boundaries(&components, 10, 10),
+                || store.map_boundaries_filtered(&components, 10, 10, false),
             )
             .expect("boundary lookup must use target indexes");
         assert_eq!(rows.len(), 1);
@@ -12173,7 +12321,7 @@ mod tests {
                     deadline: None,
                     op_ticks: Some(300),
                 },
-                || store.map_boundaries(&components, 5, 5),
+                || store.map_boundaries_filtered(&components, 5, 5, false),
             )
             .expect("duplicate definitions must share one boundary-name lookup");
         assert_eq!(rows.len(), 5);
@@ -12209,7 +12357,9 @@ mod tests {
             .insert_edge(caller, Some(alpha), "alpha", "calls", 3)
             .unwrap();
 
-        let ranked = store.map_centrality("src", "directory", 1).unwrap();
+        let ranked = store
+            .map_centrality_filtered("src", "directory", 1, false)
+            .unwrap();
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].symbol.name, "alpha");
         std::fs::remove_file(&path).ok();
@@ -12244,7 +12394,9 @@ mod tests {
             .insert_edge(second, Some(shared), "shared", "calls", 2)
             .unwrap();
 
-        let ranked = store.map_centrality("src", "directory", 1).unwrap();
+        let ranked = store
+            .map_centrality_filtered("src", "directory", 1, false)
+            .unwrap();
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].symbol.name, "unique");
         assert_eq!(ranked[0].name_collision, 1);
@@ -12281,7 +12433,9 @@ mod tests {
                 .unwrap();
         }
 
-        let rows = store.map_centrality("src/app", "directory", 10).unwrap();
+        let rows = store
+            .map_centrality_filtered("src/app", "directory", 10, false)
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].symbol.name, "shared");
         assert_eq!(rows[0].name_collision, 2);
@@ -12349,7 +12503,7 @@ mod tests {
                     deadline: None,
                     op_ticks: Some(200),
                 },
-                || store.map_centrality("src/app", "directory", 10),
+                || store.map_centrality_filtered("src/app", "directory", 10, false),
             )
             .expect("scope-seeded degree lookup must stay inside the work cap");
         assert_eq!(rows.len(), 1);
@@ -12388,7 +12542,7 @@ mod tests {
                 .unwrap();
 
             let boundaries = store
-                .map_boundaries(
+                .map_boundaries_filtered(
                     &[MapBoundaryScope {
                         label: ".".into(),
                         path: "src".into(),
@@ -12396,13 +12550,14 @@ mod tests {
                     }],
                     21,
                     401,
+                    false,
                 )
                 .unwrap()
                 .into_iter()
                 .map(|row| (row.symbol.kind, row.symbol.signature))
                 .collect();
             let centrality = store
-                .map_centrality("src", "directory", 10)
+                .map_centrality_filtered("src", "directory", 10, false)
                 .unwrap()
                 .into_iter()
                 .map(|row| (row.symbol.kind, row.symbol.signature))
@@ -12430,7 +12585,7 @@ mod tests {
         let second_after = {
             let store = Store::open(&second_path).unwrap();
             let boundaries = store
-                .map_boundaries(
+                .map_boundaries_filtered(
                     &[MapBoundaryScope {
                         label: ".".into(),
                         path: "src".into(),
@@ -12438,13 +12593,14 @@ mod tests {
                     }],
                     21,
                     401,
+                    false,
                 )
                 .unwrap()
                 .into_iter()
                 .map(|row| (row.symbol.kind, row.symbol.signature))
                 .collect::<Vec<_>>();
             let centrality = store
-                .map_centrality("src", "directory", 10)
+                .map_centrality_filtered("src", "directory", 10, false)
                 .unwrap()
                 .into_iter()
                 .map(|row| (row.symbol.kind, row.symbol.signature))
@@ -12570,7 +12726,8 @@ mod tests {
             .unwrap();
 
         let rows = store
-            .impact_of_many(&["beta".to_string(), "alpha".to_string()], 3, 5001, None)
+            .impact_of_many_bounded(&["beta".to_string(), "alpha".to_string()], 3, 5001, None)
+            .map(|(_, rows)| rows)
             .unwrap();
         assert!(rows
             .iter()
@@ -12585,18 +12742,25 @@ mod tests {
     fn impact_of_many_enforces_seed_and_row_limits() {
         let path = tmp_db("impact_many_limits");
         let store = Store::open(&path).unwrap();
-        assert!(store.impact_of_many(&[], 1, 1, None).is_err());
         assert!(store
-            .impact_of_many(&vec!["seed".to_string(); 201], 1, 1, None)
+            .impact_of_many_bounded(&[], 1, 1, None)
+            .map(|(_, rows)| rows)
             .is_err());
         assert!(store
-            .impact_of_many(&["seed".to_string()], 0, 1, None)
+            .impact_of_many_bounded(&vec!["seed".to_string(); 201], 1, 1, None)
+            .map(|(_, rows)| rows)
             .is_err());
         assert!(store
-            .impact_of_many(&["seed".to_string()], 11, 1, None)
+            .impact_of_many_bounded(&["seed".to_string()], 0, 1, None)
+            .map(|(_, rows)| rows)
             .is_err());
         assert!(store
-            .impact_of_many(&["seed".to_string()], 1, 5002, None)
+            .impact_of_many_bounded(&["seed".to_string()], 11, 1, None)
+            .map(|(_, rows)| rows)
+            .is_err());
+        assert!(store
+            .impact_of_many_bounded(&["seed".to_string()], 1, 5002, None)
+            .map(|(_, rows)| rows)
             .is_err());
         std::fs::remove_file(&path).ok();
     }
@@ -12611,7 +12775,8 @@ mod tests {
         // max_depth=10 must be accepted — it is the `mmcg_impact` tool's
         // advertised cap.
         assert!(store
-            .impact_of_many(&["seed".to_string()], 10, 5001, None)
+            .impact_of_many_bounded(&["seed".to_string()], 10, 5001, None)
+            .map(|(_, rows)| rows)
             .is_ok());
         std::fs::remove_file(&path).ok();
     }
@@ -12639,7 +12804,9 @@ mod tests {
                     .unwrap();
             }
         }
-        let result = store.impact_of_many(&["node0".to_string()], 5, 5001, None);
+        let result = store
+            .impact_of_many_bounded(&["node0".to_string()], 5, 5001, None)
+            .map(|(_, rows)| rows);
         assert!(result.is_err() || result.as_ref().is_ok_and(|rows| rows.len() <= 5001));
         std::fs::remove_file(&path).ok();
     }
@@ -12668,7 +12835,11 @@ mod tests {
                     deadline: None,
                     op_ticks: Some(50),
                 },
-                || store.impact_of_many(&["needle".to_string()], 1, 10, None),
+                || {
+                    store
+                        .impact_of_many_bounded(&["needle".to_string()], 1, 10, None)
+                        .map(|(_, rows)| rows)
+                },
             )
             .expect("unique target lookup must not scan every call edge");
         assert_eq!(rows.len(), 1);
@@ -13397,12 +13568,15 @@ mod tests {
     fn bruteforce_dependency_pairs(
         symbols: &[GenSymbol],
         edges: &[GenImportEdge],
+        language: impl Fn(&str) -> Option<&'static str>,
     ) -> BTreeSet<(String, String)> {
         let mut pairs = BTreeSet::new();
         for edge in edges {
             let from_file = GEN_IMPORT_FILES[edge.from_file];
             for target in symbols.iter().filter(|s| s.name == edge.to_name) {
-                if from_file == target.file_path {
+                if from_file == target.file_path
+                    || language(from_file) != language(&target.file_path)
+                {
                     continue;
                 }
                 pairs.insert((from_file.to_string(), target.file_path.clone()));
@@ -13428,7 +13602,11 @@ mod tests {
 
             let (actual, truncated) = store.dependency_cycles(None, 2).unwrap();
             assert!(!truncated);
-            let pairs = bruteforce_dependency_pairs(&symbols, &edges);
+            let pairs = bruteforce_dependency_pairs(&symbols, &edges, |file| match file {
+                "src/a.py" => Some("rust"),
+                "src/b.py" => Some("python"),
+                _ => None,
+            });
             let mut adj: std::collections::BTreeMap<String, Vec<String>> = Default::default();
             for (from, to) in &pairs {
                 adj.entry(from.clone()).or_default().push(to.clone());
@@ -14251,5 +14429,180 @@ mod tests {
             assert!(store.concept_contract_current().unwrap());
             std::fs::remove_file(path).ok();
         }
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_without_dropping_the_graph() {
+        let path = tmp_db("newer_schema_refused");
+        {
+            let store = Store::open(&path).unwrap();
+            store.upsert_file("src/lib.rs", 1, 1).unwrap();
+            store
+                .insert_symbol("kept", "function", "src/lib.rs", 1, 2, None, None)
+                .unwrap();
+            store.set_meta("schema_version", "10").unwrap();
+        }
+        let error = match Store::open(&path) {
+            Ok(_) => panic!("a newer schema must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("10") && error.contains(SCHEMA_VERSION),
+            "{error}"
+        );
+        assert!(error.contains("newer"), "{error}");
+        let raw = Connection::open(&path).unwrap();
+        let symbols: i64 = raw
+            .query_row("SELECT count(*) FROM symbols", [], |row| row.get(0))
+            .unwrap();
+        let version: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((symbols, version.as_str()), (1, "10"));
+        drop(raw);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_schema_missing_an_added_column_is_not_current() {
+        let path = tmp_db("added_column_missing");
+        let store = Store::open(&path).unwrap();
+        assert!(store.schema_current().unwrap());
+        store
+            .conn
+            .execute_batch("ALTER TABLE fact_sources DROP COLUMN signature_value")
+            .unwrap();
+        assert!(!store.schema_current().unwrap());
+        drop(store);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_failed_column_migration_fails_the_open_and_keeps_the_old_schema() {
+        let path = tmp_db("failed_column_migration");
+        {
+            let store = Store::open(&path).unwrap();
+            store.upsert_file("src/lib.rs", 1, 1).unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     DROP TABLE semantic_sources;
+                     CREATE VIEW semantic_sources AS SELECT 1 AS id;",
+                )
+                .unwrap();
+            store.set_meta("schema_version", "8").unwrap();
+        }
+        assert!(Store::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let files: i64 = raw
+            .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        let version: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((files, version.as_str()), (1, "8"));
+        drop(raw);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_live_snapshot_directory_is_registered_for_exit_cleanup() {
+        let path = tmp_db("snapshot_directory_registry");
+        drop(Store::open(&path).unwrap());
+        let snapshot = Store::open_read_only(&path).unwrap();
+        let directory = snapshot
+            ._snapshot_dir
+            .as_ref()
+            .unwrap()
+            .0
+            .path()
+            .to_path_buf();
+        let registered = || SNAPSHOT_DIRECTORIES.lock().unwrap().contains(&directory);
+        assert!(registered());
+        drop(snapshot);
+        assert!(!registered() && !directory.exists());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opening_a_current_index_needs_no_write_lock() {
+        let path = tmp_db("current_open_without_write_lock");
+        drop(Store::open(&path).unwrap());
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reopened = Store::open(&path);
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
+        drop(reopened);
+        drop(writer);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn dependency_cycles_never_join_imports_across_languages() {
+        let path = tmp_db("dep_cycles_cross_language");
+        let store = Store::open(&path).unwrap();
+        let python = store
+            .insert_symbol("<module>", "module", "a.py", 1, 100, None, None)
+            .unwrap();
+        let rust = store
+            .insert_symbol("<module>", "module", "b.rs", 1, 100, None, None)
+            .unwrap();
+        store
+            .insert_symbol("run", "function", "a.py", 10, 20, None, None)
+            .unwrap();
+        store
+            .insert_symbol("helper", "function", "b.rs", 10, 20, None, None)
+            .unwrap();
+        store
+            .insert_edge(python, None, "helper", "imports", 1)
+            .unwrap();
+        store.insert_edge(rust, None, "run", "imports", 1).unwrap();
+        let typescript = store
+            .insert_symbol("<module>", "module", "c.ts", 1, 100, None, None)
+            .unwrap();
+        let javascript = store
+            .insert_symbol("<module>", "module", "d.js", 1, 100, None, None)
+            .unwrap();
+        store
+            .insert_symbol("render", "function", "c.ts", 10, 20, None, None)
+            .unwrap();
+        store
+            .insert_symbol("mount", "function", "d.js", 10, 20, None, None)
+            .unwrap();
+        store
+            .insert_edge(typescript, None, "mount", "imports", 1)
+            .unwrap();
+        store
+            .insert_edge(javascript, None, "render", "imports", 1)
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "UPDATE symbols SET language = CASE substr(file_path, -3)
+                 WHEN '.py' THEN 'python' WHEN '.rs' THEN 'rust'
+                 WHEN '.ts' THEN 'typescript' ELSE 'javascript' END",
+            )
+            .unwrap();
+
+        let (cycles, truncated) = store.dependency_cycles(None, 2).unwrap();
+        assert!(!truncated);
+        assert_eq!(cycles, vec![vec!["c.ts".to_string(), "d.js".to_string()]]);
+        let (members, truncated) = store
+            .dependency_cycle_members(&["a.py".to_string(), "c.ts".to_string()])
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(members, vec!["c.ts".to_string()]);
+        drop(store);
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -394,7 +394,7 @@ fn unresolved_removal_acknowledgements_fail_ci_bundle_and_controller() {
             let parsed = spec::parse_file(&path).unwrap();
             let report =
                 audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
-            let bundle = audit_spec::Bundle::from_report(&report, None);
+            let bundle = audit_spec::Bundle::from_report_full(&report, None, None, None, None);
             assert_eq!(bundle.verdict, "broken");
             assert!(bundle.discrepancies.iter().any(|finding| matches!(
                 finding,

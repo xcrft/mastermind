@@ -1,7 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -206,12 +205,10 @@ pub fn canonical_json(value: &Value) -> Result<Vec<u8>, BundleError> {
     serde_json::to_vec(&normalize(value)?).map_err(|e| BundleError::Json(e.to_string()))
 }
 
-pub use crate::hex::sha256 as sha256_hex;
-
 pub fn seal(mut manifest: Manifest) -> Result<Envelope, BundleError> {
     sort_manifest(&mut manifest);
     let value = serde_json::to_value(&manifest).map_err(|e| BundleError::Json(e.to_string()))?;
-    let digest = sha256_hex(&canonical_json(&value)?);
+    let digest = crate::hex::sha256(&canonical_json(&value)?);
     Ok(Envelope {
         schema_version: ENVELOPE_SCHEMA,
         manifest,
@@ -335,7 +332,7 @@ pub fn verify_envelope(envelope: &Envelope, policy: &VerifyPolicy) -> Verificati
             return report;
         }
     };
-    let expected_digest = format!("sha256:{}", sha256_hex(&canonical));
+    let expected_digest = format!("sha256:{}", crate::hex::sha256(&canonical));
     if envelope.integrity.manifest_digest != expected_digest {
         report.reasons.push("manifest_digest_mismatch".into());
         return report;
@@ -467,7 +464,7 @@ pub fn sign_detached(
     let seed = read_key(private_key_path, true)?;
     let signing = SigningKey::from_bytes(&seed);
     let public = signing.verifying_key().to_bytes();
-    let key_id = format!("sha256:{}", sha256_hex(&public));
+    let key_id = format!("sha256:{}", crate::hex::sha256(public));
     let statement = signature_statement(&key_id, &envelope.integrity.manifest_digest)?;
     let signature = signing.sign(&statement);
     Ok(DetachedSignature {
@@ -496,7 +493,7 @@ pub fn verify_detached(
     let public = read_key(public_key_path, false)?;
     let verifying = VerifyingKey::from_bytes(&public)
         .map_err(|_| BundleError::Crypto("invalid public key".into()))?;
-    let key_id = format!("sha256:{}", sha256_hex(&public));
+    let key_id = format!("sha256:{}", crate::hex::sha256(public));
     if signature.key_id != key_id {
         return Err(BundleError::Crypto("key ID mismatch".into()));
     }
@@ -880,7 +877,8 @@ fn recompute_inputs(envelope: &Envelope, root: &Path) -> Result<(), String> {
         false,
     )
     .map_err(|_| "spec_read_failed".to_string())?;
-    if format!("sha256:{}", sha256_hex(&spec_bytes)) != envelope.manifest.inputs.spec_sha256 {
+    if format!("sha256:{}", crate::hex::sha256(&spec_bytes)) != envelope.manifest.inputs.spec_sha256
+    {
         return Err("spec_digest_mismatch".into());
     }
     match (
@@ -891,7 +889,7 @@ fn recompute_inputs(envelope: &Envelope, root: &Path) -> Result<(), String> {
         (true, Some(path), Some(digest)) => {
             let bytes = read_bounded_relative(&canonical_root, path, false, false)
                 .map_err(|_| "executor_report_read_failed".to_string())?;
-            if format!("sha256:{}", sha256_hex(&bytes)) != digest {
+            if format!("sha256:{}", crate::hex::sha256(&bytes)) != digest {
                 return Err("executor_report_digest_mismatch".into());
             }
         }
@@ -916,7 +914,8 @@ fn recompute_inputs(envelope: &Envelope, root: &Path) -> Result<(), String> {
         ],
     )
     .map_err(|_| "diff_recompute_failed".to_string())?;
-    if format!("sha256:{}", sha256_hex(&diff)) != envelope.manifest.diff.binary_diff_sha256 {
+    if format!("sha256:{}", crate::hex::sha256(&diff)) != envelope.manifest.diff.binary_diff_sha256
+    {
         return Err("diff_digest_mismatch".into());
     }
     let range = format!(
@@ -1241,79 +1240,8 @@ pub(crate) fn read_key(path: &Path, private: bool) -> Result<[u8; 32], BundleErr
 pub(crate) fn from_json_strict<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
 ) -> Result<T, BundleError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = NoDuplicates
-        .deserialize(&mut deserializer)
-        .map_err(|e| BundleError::Json(e.to_string()))?;
-    deserializer
-        .end()
-        .map_err(|e| BundleError::Json(e.to_string()))?;
-    serde_json::from_value(value).map_err(|e| BundleError::Json(e.to_string()))
-}
-
-struct NoDuplicates;
-
-impl<'de> DeserializeSeed<'de> for NoDuplicates {
-    type Value = Value;
-
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
-        deserializer.deserialize_any(NoDuplicateVisitor)
-    }
-}
-
-struct NoDuplicateVisitor;
-
-impl<'de> Visitor<'de> for NoDuplicateVisitor {
-    type Value = Value;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("strict JSON")
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Value, E> {
-        Ok(Value::Bool(value))
-    }
-    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Value, E> {
-        Ok(Value::Number(value.into()))
-    }
-    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Value, E> {
-        Ok(Value::Number(value.into()))
-    }
-    fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Value, E> {
-        Err(E::custom("floating-point numbers are forbidden"))
-    }
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {
-        Ok(Value::String(value.to_string()))
-    }
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Value, E> {
-        Ok(Value::String(value))
-    }
-    fn visit_none<E: serde::de::Error>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
-        NoDuplicates.deserialize(d)
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        let mut values = Vec::new();
-        while let Some(value) = seq.next_element_seed(NoDuplicates)? {
-            values.push(value);
-        }
-        Ok(Value::Array(values))
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        let mut values = serde_json::Map::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(A::Error::custom(format!("duplicate key: {key}")));
-            }
-            values.insert(key, map.next_value_seed(NoDuplicates)?);
-        }
-        Ok(Value::Object(values))
-    }
+    crate::strict_json::from_slice(bytes, crate::strict_json::Floats::Reject)
+        .map_err(|e| BundleError::Json(e.to_string()))
 }
 
 fn valid_repository_identity(value: &str) -> bool {
@@ -1345,8 +1273,9 @@ thread_local! {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Vec<u8>, BundleError> {
-    let output = crate::diff::run_bounded_git_with_limit(root, args, None, BUNDLE_INPUT_MAX)
-        .map_err(|error| BundleError::Invalid(format!("audit_git_{}", error.code())))?;
+    let output =
+        crate::diff::run_bounded_git_controlled(root, args, None, BUNDLE_INPUT_MAX, None, None)
+            .map_err(|error| BundleError::Invalid(format!("audit_git_{}", error.code())))?;
     if !output.success {
         return Err(BundleError::Invalid("audit_git_failed".into()));
     }
@@ -1501,14 +1430,14 @@ mod tests {
         };
         value.inputs = InputBinding {
             spec_path: "spec.md".into(),
-            spec_sha256: format!("sha256:{}", sha256_hex(b"spec-v1")),
+            spec_sha256: format!("sha256:{}", crate::hex::sha256(b"spec-v1")),
             executor_report_path: Some("report.md".into()),
             executor_report_present: true,
-            executor_report_sha256: Some(format!("sha256:{}", sha256_hex(b"report-v1"))),
+            executor_report_sha256: Some(format!("sha256:{}", crate::hex::sha256(b"report-v1"))),
         };
         value.diff = DiffBinding {
             name_status,
-            binary_diff_sha256: format!("sha256:{}", sha256_hex(&binary_diff)),
+            binary_diff_sha256: format!("sha256:{}", crate::hex::sha256(&binary_diff)),
         };
         value
             .audit_configuration
@@ -1564,14 +1493,14 @@ mod tests {
             },
             inputs: InputBinding {
                 spec_path: "spec.md".into(),
-                spec_sha256: format!("sha256:{}", sha256_hex(b"spec")),
+                spec_sha256: format!("sha256:{}", crate::hex::sha256(b"spec")),
                 executor_report_path: None,
                 executor_report_present: false,
                 executor_report_sha256: None,
             },
             diff: DiffBinding {
                 name_status: Vec::new(),
-                binary_diff_sha256: format!("sha256:{}", sha256_hex(b"")),
+                binary_diff_sha256: format!("sha256:{}", crate::hex::sha256(b"")),
             },
             tool: ToolBinding {
                 name: "mastermind".into(),
@@ -1670,12 +1599,12 @@ mod tests {
             value.inputs.spec_sha256,
             format!(
                 "sha256:{}",
-                sha256_hex(&std::fs::read(root.join("spec.md")).unwrap())
+                crate::hex::sha256(std::fs::read(root.join("spec.md")).unwrap())
             )
         );
         let report_digest = format!(
             "sha256:{}",
-            sha256_hex(&std::fs::read(root.join("report.md")).unwrap())
+            crate::hex::sha256(std::fs::read(root.join("report.md")).unwrap())
         );
         assert_eq!(
             value.inputs.executor_report_sha256.as_deref(),
@@ -1983,6 +1912,8 @@ mod tests {
         assert!(from_json_strict::<Envelope>(duplicate.as_bytes()).is_err());
         let unknown = raw.replacen("{", "{\"unknown\":true,", 1);
         assert!(from_json_strict::<Envelope>(unknown.as_bytes()).is_err());
+        assert!(from_json_strict::<Value>(br#"{"weight":1.5}"#).is_err());
+        assert!(from_json_strict::<Value>(br#"{"weight":1}"#).is_ok());
     }
 
     #[test]
@@ -1995,7 +1926,7 @@ mod tests {
         let signature = DetachedSignature {
             schema_version: 1,
             algorithm: "ed25519".into(),
-            key_id: format!("sha256:{}", sha256_hex(&[1_u8; 32])),
+            key_id: format!("sha256:{}", crate::hex::sha256([1_u8; 32])),
             manifest_digest: envelope.integrity.manifest_digest.clone(),
             signature: BASE64.encode([0_u8; 64]),
         };

@@ -3,7 +3,7 @@
 
 use super::{
     journal::{Grant, Journal},
-    profile, refiner, Error,
+    profile, Error,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -74,7 +74,7 @@ pub(super) fn deliver(
         )
     };
     let metadata = json!({"source":source,"event_id":prompt.id,
-        "prompt_digest":refiner::prompt_digest(&prompt.text),
+        "prompt_digest":crate::hex::sha256(&prompt.text),
         "task_binding_revision":bound.as_ref().map(|(_, revision, _)| revision)});
     let Some(available) =
         MAX_CONTEXT.checked_sub(used + PREFIX.len() + metadata.to_string().len() + 32)

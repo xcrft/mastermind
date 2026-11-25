@@ -650,12 +650,13 @@ pub(crate) fn repository_identity_until(
     root: &Path,
     deadline: Option<Instant>,
 ) -> Result<String, RepositoryIdentityError> {
-    let output = crate::diff::run_bounded_git_with_limit_until(
+    let output = crate::diff::run_bounded_git_controlled(
         root,
         &["config", "--get", "remote.origin.url"],
         None,
         4 * 1024,
         deadline,
+        None,
     )
     .map_err(RepositoryIdentityError::Git)?;
     let remote = if output.success {
@@ -678,10 +679,7 @@ pub(crate) fn remote_identity(url: &str) -> Option<String> {
 }
 
 fn hashed_identity(kind: &str, identity: &str) -> String {
-    format!(
-        "{kind}:sha256:{}",
-        crate::hex::encode(&Sha256::digest(identity.as_bytes()))
-    )
+    format!("{kind}:sha256:{}", crate::hex::sha256(identity.as_bytes()))
 }
 
 fn repository_contract(store: &Store) -> Result<FactRepository, FactError> {
@@ -751,7 +749,7 @@ pub(crate) fn indexed_file_binding(
         &format!("source file `{path}`"),
         None,
     )?;
-    let digest = crate::hex::encode(&Sha256::digest(&bytes));
+    let digest = crate::hex::sha256(&bytes);
     if digest != expected {
         return Err(invalid(format!(
             "file `{path}` does not match the current codegraph index"
@@ -830,7 +828,7 @@ fn verified_file(
             "file `{path}` size does not match manifest"
         )));
     }
-    let digest = crate::hex::encode(&Sha256::digest(&bytes));
+    let digest = crate::hex::sha256(&bytes);
     if digest != file.sha256 {
         return Err(invalid(format!(
             "file `{path}` digest does not match manifest"
@@ -872,7 +870,7 @@ fn verified_artifact(
             artifact.id
         )));
     }
-    let digest = crate::hex::encode(&Sha256::digest(&bytes));
+    let digest = crate::hex::sha256(&bytes);
     if digest != artifact.sha256 {
         return Err(invalid(format!(
             "artifact `{}` digest does not match manifest",
@@ -1131,7 +1129,7 @@ fn build_batch_from_bytes(
         capabilities: capabilities.join(","),
         repository_identity: contract.repository.identity.clone(),
         revision: contract.repository.revision.clone(),
-        manifest_sha256: crate::hex::encode(&Sha256::digest(bytes)),
+        manifest_sha256: crate::hex::sha256(bytes),
         manifest_bytes: bytes.len() as u64,
         signature_status: "unsigned".into(),
         signing_key_id: None,
@@ -1311,9 +1309,7 @@ fn validate_stored_files(
                 &format!("source file `{}`", file.path),
                 None,
             )?;
-            if bytes.len() as u64 != file.bytes
-                || crate::hex::encode(&Sha256::digest(&bytes)) != file.sha256
-            {
+            if bytes.len() as u64 != file.bytes || crate::hex::sha256(&bytes) != file.sha256 {
                 return Err(FactError::InvalidQuery(format!(
                     "source file `{}` changed after fact ingestion",
                     file.path
@@ -1386,9 +1382,7 @@ fn verify_artifact_record(
 ) -> Result<(), FactError> {
     let label = format!("provenance artifact `{}`", artifact.id);
     let bytes = read_contained_regular(root, &artifact.path, MAX_ARTIFACT_BYTES, &label, deadline)?;
-    if bytes.len() as u64 != artifact.bytes
-        || crate::hex::encode(&Sha256::digest(&bytes)) != artifact.sha256
-    {
+    if bytes.len() as u64 != artifact.bytes || crate::hex::sha256(&bytes) != artifact.sha256 {
         return Err(FactError::InvalidQuery(format!(
             "provenance artifact `{}` changed after fact ingestion",
             artifact.path
@@ -1776,7 +1770,7 @@ mod tests {
     }
 
     fn digest(path: &Path) -> String {
-        crate::hex::encode(&Sha256::digest(fs::read(path).unwrap()))
+        crate::hex::sha256(fs::read(path).unwrap())
     }
 
     fn file_binding(root: &Path, path: &str) -> Value {

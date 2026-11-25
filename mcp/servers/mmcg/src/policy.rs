@@ -11,7 +11,6 @@ mod evidence;
 use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -772,7 +771,7 @@ fn load_config(store: &Store, root: &Path, requested: &Path) -> Result<LoadedCon
     Ok(LoadedConfig {
         identity: PolicyConfigIdentity {
             path: identity_path,
-            sha256: crate::hex::encode(&Sha256::digest(&source.bytes)),
+            sha256: crate::hex::sha256(&source.bytes),
             version: config.version,
         },
         file_identity: source.identity,

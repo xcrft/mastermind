@@ -227,10 +227,14 @@ remain missing, and changed evidence needs review again.
 | What you see | What it means | What to do |
 |---|---|---|
 | `grant.gap` is `capture_delivery_failed` | A journal write failed, and capture for this client and project stopped | Fix the cause, then recover |
+| `capture.markers` is above 0, `grant.gap` is empty, and a next action names `recover` | A delivery stopped before it reached the journal, for example a killed hook or a journal that did not open. `oldest_marker_age_seconds` shows how long ago | When no turn is running, run `mastermind miner hooks recover --client CLIENT` |
+| `grant.gap` is `capture_recovery_incomplete` | Recovery could not remove every marker, so capture stays stopped | Make `~/.mastermind/.persona-capture` writable for your user, then recover again |
+| Hook error or `capture_fence_error` names an unexpected entry | A file such as `.DS_Store` is in `~/.mastermind/.persona-capture`. No marker was created | Move that entry out of the directory |
+| Doctor `capture fence markers` reports prefixes with no known grant | Markers belong to a client and project that no longer have a grant | Recover the projects that have one. Remove the other marker files by hand once no session of that client runs |
 | Hook error `capture fence limit reached` | This client and project have 1,024 unfinished deliveries | Recover this client and project |
 | Hook error `capture fence directory is full` | Other projects hold 4,096 markers | Recover each client and project that has a `capture_delivery_failed` gap or pending deliveries |
 | `database_bytes` stays near `database_byte_limit` | Tool receipts or active episodes hold the journal | Run `mmcg miner hooks archive --project-root .` for each captured project, and repeat until `archived` is 0 and `database_bytes` stops falling. Then recover each stopped client and project |
-| Hook status reports `capture_journal_unavailable` | The journal is unreadable or over 64 MiB, or `~/.mastermind/.persona-capture` has an unexpected entry or too many markers | Look at the marker directory first. If the journal is too large, back it up and run `VACUUM` on it with `sqlite3` |
+| Hook status reports `capture_journal_unavailable` | The journal is unreadable, over 64 MiB or written by a newer mmcg | Upgrade mmcg if the error names a newer format version. If the journal is too large, back it up and run `VACUUM` on it with `sqlite3` |
 
 Ending a session while capture is stopped records nothing, so do not wait for it.
 Recovery releases sessions of the old generation, and the next archive run

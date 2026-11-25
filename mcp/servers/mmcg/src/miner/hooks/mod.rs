@@ -23,10 +23,10 @@ use super::{collection, curation, profile, store};
 use crate::bounded_fs::BoundedReadError;
 use journal::{Draft, Incoming, Journal};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::io::{IsTerminal, Read};
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 type Error = Box<dyn std::error::Error>;
 pub(super) const EXTRACTOR: &str = "persona-hooks-semantic-v1";
@@ -34,9 +34,13 @@ pub(super) const EXTRACTOR: &str = "persona-hooks-semantic-v1";
 // bounded envelope, then retain user prose and tool receipts separately.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 const MAX_TEXT: usize = 16 * 1024;
+// Another session's delivery in the same project shares this grant's pending
+// count and markers. A decision that needs complete capture waits this long
+// after the hook started for it to finish, inside install::HOOK_TIMEOUT_SECS.
+const DELIVERY_WAIT: Duration = Duration::from_millis(1500);
 
 fn hash(value: &Value) -> String {
-    crate::hex::encode(&Sha256::digest(value.to_string().as_bytes()))
+    crate::hex::sha256(value.to_string().as_bytes())
 }
 
 fn print(value: &Value) -> Result<(), Error> {
@@ -223,6 +227,9 @@ pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {
     client(client_id)?;
     let root = root.canonicalize()?;
     let observed = readiness::report(client_id, &root)?;
+    // A refused marker directory is not an unavailable journal. Report each
+    // with its own reason.
+    let fence = fence::pending(client_id, &root);
     let legacy = (|| -> Result<Value, Error> {
         match std::fs::symlink_metadata(journal::path()?) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -234,7 +241,8 @@ pub fn status(client_id: &str, root: &Path) -> Result<(), Error> {
         let db = Journal::open(false)?;
         let config = db.refiner_config(client_id, &root)?;
         Ok(
-            json!({"grant":db.grant(client_id,&root)?,"capture_pending":fence::pending(client_id,&root)?,"journal":journal::path()?,
+            json!({"grant":db.grant(client_id,&root)?,"capture_pending":fence.as_ref().ok(),
+        "capture_fence_error":fence.as_ref().err().map(ToString::to_string),"journal":journal::path()?,
         "coverage":"Native hook events only; no hidden reasoning, complete transcript or universal tool mediation.",
         "protection":"capture_only","source_attribution":"user_channel_requires_attestation",
         "refiner":refiner_status(config.as_ref())}),
@@ -312,24 +320,14 @@ pub(crate) fn review_queue(root: &Path, audience: &str) -> Value {
 pub fn recover(client_id: &str, root: &Path) -> Result<(), Error> {
     client(client_id)?;
     let root = root.canonicalize()?;
-    let mut db = Journal::open(true)?;
-    let old = db
-        .grant(client_id, &root)?
-        .ok_or("capture is not configured")?;
-    let grant = db.configure(
-        client_id,
-        &root,
-        old.enabled,
-        old.profile_client.as_deref(),
-        true,
-    )?;
-    fence::recover(client_id, &root)?;
+    let grant = Journal::open(true)?.recover(client_id, &root)?;
     print(
         &json!({"grant":grant,"note":"A new capture generation invalidates earlier evidence. Restart the client session; this does not declare a missing event recovered."}),
     )
 }
 
 pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
+    let started = Instant::now();
     client(client_id)?;
     // Controller prompts contain generated instructions and may include mined
     // preferences. Inherited native hooks must not turn that input into new
@@ -346,16 +344,26 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         return print(&json!({}));
     }
     let root = root.canonicalize()?;
+    // The marker exists before the journal is opened. If opening or
+    // begin_capture fails (a busy journal), or the process is killed, the
+    // marker stays without a journal gap; status reports such markers.
     let delivery = fence::begin(client_id, &root)?;
     let mut db = Journal::open(true)?;
     let Some(grant) = db.begin_capture(client_id, &root)? else {
         delivery.clear()?;
         return print(&json!({}));
     };
-    // Every failure after admission records one durable gap and keeps its
-    // marker until recovery. Later events then clear their own marker at once,
-    // so a persistent journal failure cannot exhaust the fence directory.
-    let delivered = match deliver(&mut db, &grant, &delivery, client_id, &root) {
+    // A failure in deliver records one durable gap and keeps its marker until
+    // recovery. Later events then clear their own marker at once, so a
+    // persistent journal failure cannot exhaust the fence directory.
+    let delivered = match deliver(
+        &mut db,
+        &grant,
+        &delivery,
+        client_id,
+        &root,
+        started + DELIVERY_WAIT,
+    ) {
         Ok(delivered) => delivered,
         Err(failure) => {
             db.finish_ignored(&grant, failure.gap)?;
@@ -433,17 +441,23 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
             value["prompt"].as_str(),
         ) {
             if let Some((config, mut intake)) =
-                db.begin_intake(&grant, episode, event_id, original)?
+                db.begin_intake(&grant, episode, event_id, original, started + DELIVERY_WAIT)?
             {
                 if intake.status == "pending" {
-                    let started = std::time::Instant::now();
+                    let processing = Instant::now();
                     let _cancel = worker::Cancellation::install()?;
                     let result = refiner::process(&intake.input, &config);
+                    // Another delivery gets the same short wait after
+                    // processing, within the refiner timeout this hook's
+                    // client allows on top of the ordinary budget.
+                    let deadline = (Instant::now() + DELIVERY_WAIT)
+                        .min(started + Duration::from_secs(config.timeout_secs) + DELIVERY_WAIT);
                     intake = db.finish_intake(
                         &grant,
                         &intake,
                         result,
-                        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                        processing.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                        deadline,
                     )?;
                 }
                 if intake.status == "offered" {
@@ -516,6 +530,7 @@ fn deliver(
     delivery: &fence::Fence,
     client_id: &str,
     root: &Path,
+    deadline: Instant,
 ) -> Result<Option<Delivered>, DeliveryFailure> {
     if !delivery.current()? {
         return Err(DeliveryFailure {
@@ -596,6 +611,12 @@ fn deliver(
     let kind = incoming.kind.clone();
     let native_session = incoming.native_session.clone();
     let repository = profile::persona_repository_id(root).unwrap_or_default();
+    if kind == "Stop" {
+        // The task mining decision under the writer lock needs this delivery
+        // to be the only one admitted, and checks that itself. A failed or
+        // timed out wait only means that decision fails closed.
+        let _ = db.await_other_deliveries(grant, 1, deadline);
+    }
     if !delivery.current()? {
         return Err(DeliveryFailure {
             gap: None,
@@ -990,7 +1011,7 @@ fn mine_page_controlled(
     timeout: u64,
     limit: usize,
     after: Option<&str>,
-    mut control: Option<&mut dyn background::BatchControl>,
+    mut control: Option<&mut background::Runtime>,
 ) -> Result<Value, Error> {
     let root = root.canonicalize()?;
     if let Some(after) = after {

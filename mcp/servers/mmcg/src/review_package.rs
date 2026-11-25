@@ -502,11 +502,11 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
         .map(|document| ArtifactBinding {
             path: document.path,
             media_type: document.media_type,
-            sha256: sha256_hex(&document.body),
+            sha256: crate::hex::sha256(&document.body),
             bytes: document.body.len() as u64,
         })
         .collect::<Vec<_>>();
-    let content_sha256 = sha256_hex(
+    let content_sha256 = crate::hex::sha256(
         &serde_json::to_vec(&artifacts)
             .map_err(|error| ReviewPackageError::Serialization(error.to_string()))?,
     );
@@ -525,7 +525,7 @@ pub fn export(options: &ReviewExportOptions) -> Result<ReviewExportResult, Revie
             head_oid: head_oid.clone(),
             includes_worktree: snapshot.impact.baseline.includes_worktree,
             includes_untracked: snapshot.impact.baseline.includes_untracked,
-            snapshot_token_sha256: sha256_hex(snapshot.impact.snapshot_token.as_bytes()),
+            snapshot_token_sha256: crate::hex::sha256(snapshot.impact.snapshot_token.as_bytes()),
         },
         scope: ScopeBinding {
             path: snapshot.options.path.clone(),
@@ -693,7 +693,7 @@ fn read_source(root: &Path, request: &SourceRequest) -> Result<SourceIdentity, R
     .map_err(|error| evidence_read_error(error, &fallback_label))?;
     let (label, repository_relative) = crate::evidence::artifact_source_identity(root, &resolved)
         .ok_or(ReviewPackageError::InvalidEvidenceIdentity)?;
-    let sha256 = sha256_hex(&source.bytes);
+    let sha256 = crate::hex::sha256(&source.bytes);
     let bytes = source.declared_len;
     Ok(SourceIdentity {
         id: request.id.clone(),
@@ -1541,8 +1541,6 @@ fn pretty_json(value: &Value) -> Result<Vec<u8>, ReviewPackageError> {
     Ok(body)
 }
 
-use crate::hex::sha256 as sha256_hex;
-
 fn sha256_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1623,22 +1621,7 @@ fn markdown_code(value: &str) -> String {
     if value.is_empty() {
         return "` `".to_string();
     }
-    let mut longest_run = 0_usize;
-    let mut current_run = 0_usize;
-    for character in value.chars() {
-        if character == '`' {
-            current_run += 1;
-            longest_run = longest_run.max(current_run);
-        } else {
-            current_run = 0;
-        }
-    }
-    let delimiter = "`".repeat(longest_run + 1);
-    if value.starts_with('`') || value.ends_with('`') {
-        format!("{delimiter} {value} {delimiter}")
-    } else {
-        format!("{delimiter}{value}{delimiter}")
-    }
+    crate::lessons::code_span(&value)
 }
 
 #[cfg(test)]
@@ -1646,7 +1629,6 @@ mod tests {
     use super::*;
     use crate::indexer::Indexer;
     use crate::store::Store;
-    use sha2::{Digest, Sha256};
     use std::process::Command;
 
     #[test]
@@ -1892,7 +1874,7 @@ mod tests {
         assert_eq!(source["analysis_status"], "loaded");
         assert_eq!(
             source["sha256"],
-            sha256_hex(&std::fs::read(state.path().join("semgrep.sarif")).unwrap())
+            crate::hex::sha256(std::fs::read(state.path().join("semgrep.sarif")).unwrap())
         );
         assert_eq!(manifest["artifacts"].as_array().unwrap().len(), 4);
         let package_sarif: Value =
@@ -1978,7 +1960,7 @@ mod tests {
             .unwrap();
         assert_eq!(source["label"], "CODEOWNERS");
         assert_eq!(source["analysis_status"], "loaded");
-        assert_eq!(source["sha256"], sha256_hex(b"* @root-team\n"));
+        assert_eq!(source["sha256"], crate::hex::sha256(b"* @root-team\n"));
     }
 
     #[test]
@@ -2211,13 +2193,13 @@ mod tests {
                 "provenance": {"kind": "static-analysis", "artifacts": ["arch-lint"]},
                 "files": [{
                     "path": "src/lib.rs",
-                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "sha256": crate::hex::sha256(&source),
                     "bytes": source.len()
                 }],
                 "artifacts": [{
                     "id": "arch-lint",
                     "path": "reports/arch-lint.json",
-                    "sha256": crate::hex::encode(&Sha256::digest(&artifact)),
+                    "sha256": crate::hex::sha256(&artifact),
                     "bytes": artifact.len()
                 }],
                 "facts": [
@@ -2266,11 +2248,11 @@ mod tests {
             .any(|binding| binding["sha256"] == manifest_digest));
         assert!(bindings.iter().any(|binding| {
             binding["label"] == "reports/arch-lint.json"
-                && binding["sha256"] == crate::hex::encode(&Sha256::digest(&artifact))
+                && binding["sha256"] == crate::hex::sha256(&artifact)
         }));
         let html = std::fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("arch.checkout-charge"));
-        assert!(html.contains(&crate::hex::encode(&Sha256::digest(&artifact))));
+        assert!(html.contains(&crate::hex::sha256(&artifact)));
     }
 
     #[test]
@@ -2312,13 +2294,13 @@ mod tests {
                 "provenance": {"kind": "static-analysis", "artifacts": ["arch-lint"]},
                 "files": [{
                     "path": "src/lib.rs",
-                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "sha256": crate::hex::sha256(&source),
                     "bytes": source.len()
                 }],
                 "artifacts": [{
                     "id": "arch-lint",
                     "path": "reports/arch-lint.json",
-                    "sha256": crate::hex::encode(&Sha256::digest(artifact)),
+                    "sha256": crate::hex::sha256(artifact),
                     "bytes": artifact.len()
                 }],
                 "facts": facts
@@ -2374,7 +2356,7 @@ mod tests {
                 "provenance": {"kind": "static-analysis", "artifacts": []},
                 "files": [{
                     "path": "src/lib.rs",
-                    "sha256": crate::hex::encode(&Sha256::digest(&source)),
+                    "sha256": crate::hex::sha256(&source),
                     "bytes": source.len()
                 }],
                 "artifacts": [],
@@ -2457,7 +2439,7 @@ mod tests {
         );
         assert_eq!(
             manifest["evidence_binding"]["sources"][0]["sha256"],
-            sha256_hex(&std::fs::read(report).unwrap())
+            crate::hex::sha256(std::fs::read(report).unwrap())
         );
         assert!(manifest["analysis"]["states"]
             .as_array()
@@ -2497,7 +2479,7 @@ mod tests {
             label: "evidence-attestation.json".into(),
             resolved: root.join("evidence-attestation.json"),
             repository_relative: true,
-            sha256: sha256_hex(&body),
+            sha256: crate::hex::sha256(&body),
             bytes: body.len() as u64,
             identity: None,
             body,
@@ -2532,7 +2514,7 @@ mod tests {
             r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep"}},"results":[]}]}"#,
         )
         .unwrap();
-        let digest = sha256_hex(&std::fs::read(&report).unwrap());
+        let digest = crate::hex::sha256(std::fs::read(&report).unwrap());
         let head = git(repository.path(), &["rev-parse", "HEAD"]);
         let attestation = repository.path().join("reports/evidence-attestation.json");
         std::fs::write(
@@ -2582,7 +2564,7 @@ mod tests {
             label: "attestation.json".into(),
             resolved: PathBuf::from("attestation.json"),
             repository_relative: true,
-            sha256: sha256_hex(&body),
+            sha256: crate::hex::sha256(&body),
             bytes: body.len() as u64,
             identity: None,
             body,

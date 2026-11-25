@@ -56,6 +56,11 @@ export function resolveBinary() {
 // Long-running watch/serve commands need asynchronous signal propagation.
 export function runBinary(bin, args, env) {
   const child = spawn(bin, args, env ? { stdio: "inherit", env } : { stdio: "inherit" });
+  // An MCP client stops the server by signalling this process. The child owns
+  // the work and decides how to exit, and the wrapper reports that exit.
+  const forwarded = ["SIGTERM", "SIGINT", "SIGHUP"];
+  const forward = (signal) => child.kill(signal);
+  for (const signal of forwarded) process.on(signal, forward);
 
   child.on("error", (err) => {
     console.error(`failed to launch mmcg binary at ${bin}: ${err.message}`);
@@ -63,6 +68,7 @@ export function runBinary(bin, args, env) {
   });
 
   child.on("exit", (code, signal) => {
+    for (const name of forwarded) process.off(name, forward);
     if (signal) {
       process.kill(process.pid, signal);
     } else {

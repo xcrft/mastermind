@@ -2,7 +2,6 @@
 
 use crate::bounded_fs::{self, BoundedReadError, ReadControl};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::path::Path;
 
@@ -71,7 +70,7 @@ pub(crate) fn load(root: &Path, path: &str, control: ReadControl<'_>) -> Result<
     let file =
         bounded_fs::read_repository_file(root, Path::new(path), BYTE_LIMIT, BYTE_LIMIT, control)
             .map_err(Error::Read)?;
-    let digest = crate::hex::encode(&Sha256::digest(&file.bytes));
+    let digest = crate::hex::sha256(&file.bytes);
     let text = String::from_utf8(file.bytes).map_err(|_| Error::Encoding)?;
     let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     let last = lines.len().saturating_sub(1);

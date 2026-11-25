@@ -334,7 +334,7 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
         intake_revision: state.intake_revision,
         repository_identity: repository,
         spec_path,
-        spec_sha256: sha(body.as_bytes()),
+        spec_sha256: crate::hex::sha256(body.as_bytes()),
         baseline_oid: state.baseline_ref,
         iteration: state.iteration,
         preflight_started_at: state.started_at,
@@ -348,10 +348,8 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
     })
 }
 
-use crate::hex::sha256 as sha;
-
 fn declaration_hash(command: &str, run: &RunDeclaration) -> String {
-    sha(&serde_json::to_vec(&(command, run)).expect("serializable declaration"))
+    crate::hex::sha256(serde_json::to_vec(&(command, run)).expect("serializable declaration"))
 }
 
 #[cfg(unix)]
@@ -361,7 +359,7 @@ fn read_receipt(
     deadline: Instant,
 ) -> Result<Option<(Receipt, String)>, String> {
     read_receipt_bytes(context, id, deadline)?
-        .map(|bytes| decode_receipt(&bytes).map(|receipt| (receipt, sha(&bytes))))
+        .map(|bytes| decode_receipt(&bytes).map(|receipt| (receipt, crate::hex::sha256(&bytes))))
         .transpose()
 }
 
@@ -560,7 +558,7 @@ pub(crate) fn repair_executable_revisions(
             .map_err(|_| format!("{}: receipt_executable_unavailable", run.id))?;
         let bytes = serde_json::to_vec(&executable)
             .map_err(|_| format!("{}: receipt_executable_unavailable", run.id))?;
-        revisions.insert(run.id.clone(), sha(&bytes));
+        revisions.insert(run.id.clone(), crate::hex::sha256(&bytes));
     }
     recheck_inspection_context(&current, &spec_path, root, deadline)?;
     Ok(revisions)
@@ -696,7 +694,7 @@ fn inspect_receipt(
     let mut evidence = CheckEvidence {
         id: run.id.clone(),
         status: CheckEvidenceStatus::Missing,
-        receipt_revision: bytes.map(sha),
+        receipt_revision: bytes.map(crate::hex::sha256),
         run_id: None,
         reason: Some("receipt_missing".into()),
     };
@@ -905,7 +903,7 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Snapsho
         "diff.external=",
     ];
     controlled.extend_from_slice(args);
-    let result = crate::diff::run_bounded_git_with_control(
+    let result = crate::diff::run_bounded_git_controlled(
         root,
         &controlled,
         None,
@@ -1082,6 +1080,7 @@ fn snapshot_once(
                         }
                         _ => "verification_snapshot_symlink_unavailable",
                     };
+                    let path = crate::terminal::escape(&path);
                     return Err(SnapshotFailure::read(error, &format!("{reason}: `{path}`")));
                 }
             };
@@ -1106,6 +1105,7 @@ fn snapshot_once(
                 digest.update(b"missing\0");
             }
             Err(error) => {
+                let path = crate::terminal::escape(&path);
                 let reason = match &error {
                     bounded_fs::BoundedReadError::TooLarge { size, .. } => format!(
                         "verification_snapshot_total_byte_limit: `{path}` has {size} bytes, over \
@@ -1122,19 +1122,6 @@ fn snapshot_once(
     root.verify()
         .map_err(|error| SnapshotFailure::read(error, "verification_snapshot_root_unavailable"))?;
     Ok(crate::hex::encode(&digest.finalize()))
-}
-
-struct DigestWriter<'a>(&'a mut Sha256);
-
-impl std::io::Write for DigestWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 fn snapshot_file(
@@ -1158,7 +1145,10 @@ fn snapshot_file(
         limit,
         control,
         Some(header.identity),
-        &mut DigestWriter(digest),
+        &mut crate::hex::Sha256Writer {
+            hasher: digest,
+            inner: std::io::sink(),
+        },
     )
     .map_err(|error| match error {
         bounded_fs::BoundedReadError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
@@ -1238,7 +1228,7 @@ fn resolve_executable(
             .ok_or("executable_non_utf8_path")?
             .into(),
         resolved_path: resolved.to_str().ok_or("executable_non_utf8_path")?.into(),
-        sha256: sha(&file.bytes),
+        sha256: crate::hex::sha256(&file.bytes),
     })
 }
 
@@ -1570,7 +1560,7 @@ fn read_pipe<R: std::io::Read + Send + 'static>(
                 } else {
                     Ok(StreamDigest {
                         bytes: bytes.len() as u64,
-                        sha256: sha(&bytes),
+                        sha256: crate::hex::sha256(&bytes),
                     })
                 }
             });
@@ -1846,6 +1836,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_snapshot_failure_escapes_terminal_controls_in_the_file_name() {
+        let (directory, spec, context, _) = repair_fixture();
+        let gitignore = std::fs::metadata(directory.path().join(".gitignore"))
+            .unwrap()
+            .len();
+        std::fs::File::create(directory.path().join("esc\u{1b}[2J.bin"))
+            .unwrap()
+            .set_len(64)
+            .unwrap();
+        let reason = snapshot_once(
+            &context.root,
+            &context.binding.baseline_oid,
+            &spec,
+            Instant::now() + Duration::from_secs(20),
+            gitignore + 10,
+        )
+        .err()
+        .map(|failure| failure.reason)
+        .unwrap();
+        assert!(
+            reason.starts_with("verification_snapshot_total_byte_limit: `esc\\u{1b}[2J.bin`"),
+            "{reason}"
+        );
+    }
+
     fn receipt_fixture() -> (tempfile::TempDir, Context, Receipt) {
         let directory = tempfile::tempdir().unwrap();
         let root = RootCapability::open(directory.path()).unwrap();
@@ -1854,7 +1870,7 @@ mod tests {
             intake_revision: None,
             repository_identity: "test-repository".into(),
             spec_path: "spec.md".into(),
-            spec_sha256: sha(b"spec"),
+            spec_sha256: crate::hex::sha256(b"spec"),
             baseline_oid: "a".repeat(40),
             iteration: 1,
             preflight_started_at: 1,
@@ -1886,22 +1902,22 @@ mod tests {
             executable: Some(Executable {
                 invocation_path: "/usr/bin/true".into(),
                 resolved_path: "/usr/bin/true".into(),
-                sha256: sha(b"executable"),
+                sha256: crate::hex::sha256(b"executable"),
             }),
             snapshot_version: SNAPSHOT_VERSION,
-            snapshot_before: Some(sha(b"snapshot")),
-            snapshot_after: Some(sha(b"snapshot")),
+            snapshot_before: Some(crate::hex::sha256(b"snapshot")),
+            snapshot_after: Some(crate::hex::sha256(b"snapshot")),
             started_at: 1,
             duration_ms: 1,
             exit_code: Some(0),
             signal: None,
             stdout: Some(StreamDigest {
                 bytes: 0,
-                sha256: sha(b""),
+                sha256: crate::hex::sha256(b""),
             }),
             stderr: Some(StreamDigest {
                 bytes: 0,
-                sha256: sha(b""),
+                sha256: crate::hex::sha256(b""),
             }),
             runner_version: env!("CARGO_PKG_VERSION").into(),
             platform: std::env::consts::OS.into(),
@@ -1968,7 +1984,7 @@ mod tests {
         assert_eq!(malformed.status, CheckEvidenceStatus::Unavailable);
         assert_eq!(
             malformed.receipt_revision.as_deref(),
-            Some(sha(b"{ malformed /private/secret }").as_str())
+            Some(crate::hex::sha256(b"{ malformed /private/secret }").as_str())
         );
         assert_eq!(malformed.run_id, None);
         assert!(!serde_json::to_string(&malformed)
@@ -1983,7 +1999,7 @@ mod tests {
         assert_eq!(current.run_id, Some(receipt.run_id.clone()));
         assert_eq!(
             current_digests(std::slice::from_ref(&current)).unwrap(),
-            vec![sha(&bytes)]
+            vec![crate::hex::sha256(&bytes)]
         );
         let serialized = serde_json::to_string(&current).unwrap();
         for forbidden in [
@@ -2030,16 +2046,22 @@ mod tests {
                 "binding" => changed.binding.iteration += 1,
                 "declaration" => changed.declaration.timeout_secs += 1,
                 "snapshot" => {
-                    changed.snapshot_before = Some(sha(b"different"));
+                    changed.snapshot_before = Some(crate::hex::sha256(b"different"));
                     changed.snapshot_after = changed.snapshot_before.clone();
                 }
-                "executable" => changed.executable.as_mut().unwrap().sha256 = sha(b"different"),
+                "executable" => {
+                    changed.executable.as_mut().unwrap().sha256 = crate::hex::sha256(b"different")
+                }
                 _ => unreachable!(),
             }
             let bytes = serde_json::to_vec(&changed).unwrap();
             let observed = inspect(Some(&bytes));
             assert_eq!(observed.status, status, "{case}");
-            assert_eq!(observed.receipt_revision, Some(sha(&bytes)), "{case}");
+            assert_eq!(
+                observed.receipt_revision,
+                Some(crate::hex::sha256(&bytes)),
+                "{case}"
+            );
             assert!(
                 current_digests(std::slice::from_ref(&observed)).is_err(),
                 "{case}"
@@ -2103,7 +2125,7 @@ mod tests {
         let repository = crate::facts::repository_identity_until(root, Some(deadline)).unwrap();
         let state = serde_json::json!({
             "status":"approved", "next_step":"run_executor", "spec_path":relative,
-            "repository_identity":repository, "spec_hash":sha(body.as_bytes()),
+            "repository_identity":repository, "spec_hash":crate::hex::sha256(body.as_bytes()),
             "baseline_ref":baseline, "started_at":1, "iteration":1,
         });
         std::fs::write(
@@ -2219,7 +2241,7 @@ mod tests {
         assert_eq!(revisions.len(), 1);
         assert_eq!(
             revisions["test"],
-            sha(&serde_json::to_vec(receipt.executable.as_ref().unwrap()).unwrap())
+            crate::hex::sha256(serde_json::to_vec(receipt.executable.as_ref().unwrap()).unwrap())
         );
         assert!(valid_hex(&revisions["test"], 64));
         let check = inspect_repair_checks(&spec, root, baseline, deadline)
@@ -2364,7 +2386,9 @@ mod tests {
                 "signal" => changed.signal = Some(libc::SIGTERM),
                 "reason" => changed.reason = Some("/private/untrusted-output".into()),
                 "missing_before" => changed.snapshot_before = None,
-                "mismatched_snapshots" => changed.snapshot_before = Some(sha(b"different")),
+                "mismatched_snapshots" => {
+                    changed.snapshot_before = Some(crate::hex::sha256(b"different"))
+                }
                 "missing_executable" => changed.executable = None,
                 "missing_stdout" => changed.stdout = None,
                 "oversized_stream" => changed.stderr.as_mut().unwrap().bytes = 1024 * 1024 + 1,

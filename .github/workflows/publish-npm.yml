@@ -13,14 +13,7 @@
 #   Settings → Environments → `npm-prod` → Required reviewers (recommended)
 #     Adds a human approval gate between matrix-build and publish.
 #
-# Release procedure:
-#   1. Bump version in mcp/servers/mmcg/Cargo.toml AND all 8 npm package.jsons
-#      (root @xcraftmind/mastermind + 7 @xcraftmind/mmcg-* platform packages).
-#      The build helper hard-fails on Cargo↔platform version mismatch.
-#   2. Validate: `just check`
-#   3. Commit on main: `git commit -am "mastermind <version>"`
-#   4. Tag: `git tag npm-v<version> && git push origin main npm-v<version>`
-#   5. This workflow: matrix-build → assemble → smoke → (approval) → publish
+# Release procedure: scripts/README.md, "Cutting a release".
 #
 # Tag-version-match guard prevents shipping a mismatched release.
 
@@ -90,6 +83,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - name: Install musl-tools
@@ -156,20 +150,18 @@ jobs:
       - name: Assemble all 7 platform packages
         run: |
           set -e
-          # Maps each artifact directory back to its Rust target triple.
+          # Each build uploads its binary as artifact `mmcg-<target>`.
           # MUST stay in lockstep with the build matrix + npm/platforms/ dirs —
           # the consistency check below enforces it.
-          declare -A TARGETS=(
-            [mmcg-x86_64-unknown-linux-gnu]=x86_64-unknown-linux-gnu
-            [mmcg-aarch64-unknown-linux-gnu]=aarch64-unknown-linux-gnu
-            [mmcg-aarch64-apple-darwin]=aarch64-apple-darwin
-            [mmcg-x86_64-apple-darwin]=x86_64-apple-darwin
-            [mmcg-x86_64-pc-windows-msvc]=x86_64-pc-windows-msvc
-            [mmcg-x86_64-unknown-linux-musl]=x86_64-unknown-linux-musl
-            [mmcg-aarch64-unknown-linux-musl]=aarch64-unknown-linux-musl
-          )
-          for art_dir in "${!TARGETS[@]}"; do
-            target="${TARGETS[$art_dir]}"
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl; do
+            art_dir="mmcg-$target"
             # Windows artifact is `mmcg.exe`; everyone else `mmcg`.
             if [[ "$target" == *windows* ]]; then
               bin_path="build-artifacts/$art_dir/mmcg.exe"
@@ -284,10 +276,16 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Require green CI on the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/require-green-ci.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -331,6 +329,27 @@ jobs:
 
       - name: Install from npm registry and run functional smoke
         run: bash scripts/smoke-installed-npm-release.sh npm/mastermind/package.json
+
+  github-release:
+    name: GitHub Release from CHANGELOG
+    needs: registry-smoke
+    if: github.repository == 'xcrft/mastermind' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create the release with the CHANGELOG section as notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#npm-v}"
+          python3 scripts/release_version.py notes "$version" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "$version" --notes-file "$RUNNER_TEMP/notes.md"
 
   dry-run-notice:
     name: Dry-run notice

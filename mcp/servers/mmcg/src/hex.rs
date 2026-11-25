@@ -7,6 +7,9 @@
 //! the index (`files.content_sha256`), in snapshot tokens, and in audit-bundle
 //! attestations, so a changed encoding would invalidate stored state.
 
+use sha2::{Digest, Sha256};
+use std::io::Write;
+
 pub fn encode(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -18,15 +21,32 @@ pub fn encode(bytes: &[u8]) -> String {
 }
 
 /// The lowercase hex SHA-256 of `bytes`, the digest every stored binding uses.
-pub fn sha256(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
+pub fn sha256(bytes: impl AsRef<[u8]>) -> String {
     encode(&Sha256::digest(bytes))
+}
+
+/// Feeds every byte `inner` accepts to `hasher`. `sha2` 0.11 hashers no longer
+/// implement `io::Write`, and the bounded copy helpers write into one.
+pub struct Sha256Writer<'a, W> {
+    pub hasher: &'a mut Sha256,
+    pub inner: W,
+}
+
+impl<W: Write> Write for Sha256Writer<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::encode;
-    use sha2::{Digest, Sha256};
+    use super::*;
 
     #[test]
     fn encodes_known_sha256_vector() {

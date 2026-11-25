@@ -91,7 +91,9 @@ inventory. Inside a Git worktree it is `git ls-files --cached --others
 --exclude-standard`, so Git decides which ignore rules apply. Outside a Git
 worktree, or when `git` is not on `PATH`, a walk applies repository, parent,
 global, and `.git/info/exclude` Git ignore rules. `.ignore` files are not read
-in either case. Untracked files whose names are not valid UTF-8 are skipped
+in either case. A directory the walk cannot read fails the run instead of
+being skipped, because skipping it would purge its sources as if they were
+deleted. Untracked files whose names are not valid UTF-8 are skipped
 unless their extension is a supported language, which fails the run instead.
 Git's path list is capped at 64 MiB, about a million paths. Past that, indexing
 fails with `source_inventory_bytes`.
@@ -104,7 +106,13 @@ An unrepresentable root is rejected before source rows are written instead of
 being stored under a lossy path that could name another repository.
 These directories are always skipped: `.git`, `.mastermind`, `.venv`, `venv`,
 `__pycache__`, `node_modules`, `target`, `dist`, `build`, `.tox`, `.pytest_cache`,
-`.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`.
+`.mypy_cache`, `.ruff_cache`, `.next`, `.turbo`, `.cache`. The watcher ignores
+events under them.
+
+Git submodules are not indexed. Their files belong to another repository, so
+index the submodule on its own when you need it. `mmcg index` prints each one
+as `skipped submodule:`, and `mmcg_status` counts them in `skipped_submodules`.
+Paths in an unsupported language are counted and sampled, not stored.
 
 ## Design scope
 
@@ -314,7 +322,7 @@ mmcg run-task .mastermind/tasks/042-feature/spec.md --post-only
 | `verify-spec` | Checks the pre-edit contract. `--strict` forces strict checks. `--require-index` rejects a missing, empty or stale index. Without it, skipped checks are explicitly `not_evaluated` and the reason is printed on stderr. |
 | `verification run` | Explicitly executes one declared `verify[].run` after preflight. Records task/file-bound observations on macOS/Linux. Every result except pass exits nonzero. |
 | `acceptance status` | Read-only criterion → declared check → current receipt projection. Exit 0 means `requirements_satisfied`. An absent contract is `not_declared`. |
-| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files and edits hidden by `assume-unchanged` or `skip-worktree`. A broken verdict exits nonzero. A change list over 10,000 files or with a non-UTF-8 path is refused with `change_inventory_incomplete`. An index that does not match the files is refused. Run `mastermind index .` first. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. |
+| `audit-spec SPEC --since REF` | Compares the contract with the working tree, including uncommitted and untracked files and edits hidden by `assume-unchanged` or `skip-worktree`. A broken verdict exits nonzero. A change list over 10,000 files or with a non-UTF-8 path is refused with `change_inventory_incomplete`. An index that does not match the files is refused. Run `mastermind index .` first. `--bundle` instead seals a commit-range diff and requires baseline different from HEAD. The spec and `--executor-report` resolve the same way: a relative path from the working directory, an absolute one also through a link or `..` that reaches the root. A lesson candidate that cannot be written is reported on stderr, also with `--json`. |
 | `run-task` | Persists preflight, consumes the executor report, audits, then closes only through the applicable review and final evidence gates. |
 
 The [workflow guide](../workflow.md) describes the sequence and report files.
@@ -366,6 +374,15 @@ filesystem/network sandbox.
 Task state binds the repository identity and exact UTF-8 relative spec path.
 Foreign state is rejected. Legacy unbound state requires explicit preflight or
 reset before reuse. Missing audit snapshot bindings require another audit.
+A relative spec path names a file from `--root`, not from the working
+directory. `run-task` refuses a spec path that differs from the file's name on
+disk, such as `SPEC.md` for `spec.md` on a case-insensitive file system, and
+names the path to use. It also refuses a folder under `.mastermind/tasks` that
+starts with `_` or `.`, because `status`, `ci` and the index never treat such
+entries as tasks.
+`state.json` carries `format_version`. State without it is read as format 1.
+State from a newer format is refused with its version and a request to use the
+newer binary, instead of being reported as damaged.
 Canonical task folders keep their own state and review files. Legacy flat specs
 keep basename paths. Other specs use path-SHA-256 keys under
 `.mastermind/run-state/.noncanonical/` and `.mastermind/releases/.noncanonical/`.
@@ -373,7 +390,10 @@ The executor report and the audit sit beside the spec. A spec named `spec.md`
 uses `executor-report.md` and `audit.md`. Any other spec adds its file stem, so
 `docs/specs/a.md` uses `a.executor-report.md` and `a.audit.md`, and two specs
 in one folder never share them. `run-task --pre-only` prints the exact report
-path.
+path. When a task of such a spec has state and an `executor-report.md` or
+`audit.md` from a release before these names sits beside the spec, `run-task`
+stops before it changes the state and prints the `mv` or `rm` command for each
+file.
 
 ### Semantic task review
 
@@ -540,7 +560,7 @@ selected client integrations and mining. Unattended runs without a selected
 client stay local. `--no-index` skips that refresh, `--workflow off` skips bundled
 workflows, and `--seed-style` explicitly seeds Git observations during scaffolding.
 Profile-enabled client setup also refreshes authored Git observations locally. Drafting requires
-`--draft-with claude`. `--no-claude` remains a compatibility flag.
+`--draft-with claude`.
 First native client setup selects task mining and profile access, with refinement
 off. Separate background mining requires `--mining on --provider native`.
 Saved choices survive repeated init. See [onboarding](../getting-started.md).
@@ -873,8 +893,10 @@ mmcg --index /path/to/index.db index /path/to/repository --force
 ```
 
 Stable query failures also include `invalid_arguments`, `snapshot_changed`,
-`index_replaced`, `index_rebuild_required`,
-`work_limit_exceeded`, `cancelled`, and `internal_error`.
+`index_replaced`, `index_rebuild_required`, `index_busy`,
+`work_limit_exceeded`, `cancelled`, and `internal_error`. `index_busy` carries
+`retryable: true`: another process was writing the index, so the refresh did
+not run. Retry the same query.
 
 This is deterministic local retrieval, not semantic inference: no embeddings,
 model calls, network access, broad grep, or canonical-equivalence matching are
@@ -950,8 +972,13 @@ When you run `mmcg index`, mmcg compares each file's filesystem mtime against th
 | Mtime differs in either direction | Reparse and commit, counted as `indexed` |
 | Mtime matches | Skip parsing, counted as `unchanged` |
 | Indexed but absent from disk | Remove, counted as `purged` |
-| Binary-looking or larger than 5 MiB | Skip, report count and bounded path sample |
+| Binary-looking or larger than 5 MiB | Skip, report count and bounded path sample. An indexed file that becomes one is removed |
 | Unsupported extension | Skip, report count and bounded path sample |
+| Not a regular file, such as a symlink | Never indexes, counted as `failed` and printed as `not a regular file` |
+| Read error | Counted as `failed`, its indexed rows stay until it indexes or disappears |
+
+`mmcg index` exits 1 when any source fails to index, after it prints the
+failed paths. The rest of the run is still committed.
 
 The database also stores extractor and concept-corpus contract versions. When
 parser, extractor, or concept-normalization semantics change, the next ordinary
@@ -1840,8 +1867,10 @@ and the index and remains absent through the check. Non-regular and non-UTF-8
 tracked paths make the inventory incomplete. These and other failed or
 unavailable refreshes return `index_stale`. A source path that exists but is
 not a regular file inside the root, such as a `.py` symlink, never indexes and
-keeps the index stale. `mmcg index` prints it as `failed source:`, and
-`index_stale` lists up to 20 such paths in `unindexable_sources`. Delete the
+keeps the index stale. `mmcg index` prints it as `failed source:` and exits 1, and
+`index_stale` lists up to 20 such paths in `unindexable_sources`. It does not
+keep the extractor and concept contracts dirty, so the rest of the index stays
+usable. Delete the
 path, or stop tracking it and list it in `.gitignore`.
 Structural tools, concept queries, review preparation/completion and brief
 queries share one freshness owner across CLI and MCP. Each managed operation makes at most one
@@ -1933,7 +1962,7 @@ or stdin, with a 16 KiB input limit. Neither interface changes an active chat.
 | `mmcg_map` | optional `path` (default `.`), `depth` (1–6, default 2), `top` (1–100, default 20), `production_only` (default `false`) | Schema-v1 architecture briefing: entry points, components, boundaries, hotspots and import cycles for a lexical file or directory scope. JSON, text, Mermaid and CLI SARIF are projections of the same result. Every truncated section names its cause. See [Map scope and caps](#map-scope-and-caps) |
 | `mmcg_temporal` | `since`, optional `root`, `path` (default `.`), `depth` (1–5, default 2), `top` (1–100, default 20), `production_only`, `codeowners` | Schema-v1 base-vs-indexed-worktree architecture delta. It rewinds changed Git blobs only in a private SQLite snapshot and reports components, public boundaries/API, cycles, centrality/hotspot drift, base/head CODEOWNERS changes, history review candidates, provenance, limits, and partial diagnostics. Collection totals and summary counts are exact only when their source projections are complete. Otherwise they are null. A truncated 10,000-file change set fails closed. |
 | `mmcg_centrality` | optional `prefix`, `language`, `kind`, `top` (default 20, max 200) | Rank symbols by in-degree (distinct callers). Responses report the exact filtered `total`, returned `count`, `truncated`, effective filters, and precision notes, so a full `top` page is not mistaken for the whole ranking. Excludes synthetic `<module>` rows and zero-degree symbols. Name-based resolution can pool collisions. Ranking is a structural reading-order hint, not runtime importance proof. |
-| `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists. A cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges. Above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Name-based import resolution can over-approximate, so verify before refactoring. |
+| `mmcg_dependency_cycles` | optional `language`, `min_size` (default 2), `top` (default 50, max 200) | Detect circular imports as strongly-connected components in the file-level import graph. MCP responses return at most 500 file memberships across complete SCC lists. A cycle that cannot fit is omitted rather than returned partially, with `truncation_reason: member_limit`. `total` and `total_members` remain exact when cycle detection ran. The CLI retains every cycle. Work is capped at 50,000 file-pair edges. Above that, Tarjan is skipped, totals are null, and `graph_work_limit` marks the result incomplete. Imports resolve by leaf name within one language family. JavaScript, TypeScript, TSX and Vue form one family, every other language its own. A same-named symbol in another file of the family can still add an edge, so verify before refactoring. |
 | `mmcg_symbols_changed_since` | `git_ref`, optional `root`, `top` (default 100, max 500) | Symbol-level diff between a git ref and the current index. The existing flat arrays remain available, while `coverage` reports exact observed totals, returned counts, and per-collection truncation. MCP returns at most `top` items from each of `files_in_diff`, `added`, `removed`, `signature_changed`, and `errors`. The CLI stays complete. Re-parses old blobs using the same extractor. Git subprocesses are time-bounded and the file loop stops at 10,000. When that source cap is reached, complete totals are null and `source_truncated` prevents treating the observed prefix as the full change set. |
 | `mmcg_change_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Stable schema-v1 analysis of the resolved baseline against staged, unstaged, and untracked content. Reports added/removed/signature/body-changed symbols, batched dependency candidates through calls and references, component crossings, ranked test candidates, a `disciplines` block routing the change to an evidence set, exact collection metadata, caps, and precision notes. Stable file-limit projections remain partial. Non-UTF-8 paths are omitted, counted, and mark the file collection partial. Root, SHA-256 index freshness, Git snapshot, and SQLite snapshot checks fail closed with stable codes. |
 | `mmcg_test_impact` | `since`, optional `root`, `depth` (1–5), `top` (1–500) | Exact test-focused projection of `mmcg_change_impact`. Changed tests and depth-1 graph tests are direct static candidates, deeper graph tests are transitive, and same-component candidates without graph evidence in this response are heuristic. The classification ranks source-level candidates. It does not establish a test run, line coverage, assertion quality, or runtime reachability. Explicit supported test attributes identify candidates independently of filename, including inline Rust `test`, `tokio::test`, and `async_std::test`. Name heuristics still require test-like paths. Fixtures and lifecycle hooks remain excluded. Fallback evidence is `same_component_test_filename` for test-like paths or `same_component_test_attribute` otherwise. Focused candidates never replace the repository's full required gate. |
@@ -2232,8 +2261,13 @@ resolved identity. Two removals need no acknowledgement:
 
 | Removal | Why it is not an API removal |
 |---|---|
-| A declaration inside a function or method body | It is local, so no caller can reach it |
-| Every declaration of a deleted file whose exact bytes appear at a new or changed path in the same diff | The file moved and its declarations still exist. A move with any content change counts the old path's declarations as removed |
+| A function declared inside a function or method body in Python, Rust or C# | It stays in that body's scope, so no caller can reach it |
+| Every declaration of a deleted file whose exact bytes appear at a new or changed path in the same diff, when that path is indexed source | The file moved and its declarations still exist. Each destination covers one deleted file. A move with any content change, or to a path the index skips, such as `api.py.orig` or `build/api.py`, counts the old path's declarations as removed |
+
+Other nested declarations can become API, so their removal needs an
+acknowledgement: methods of an object literal or class expression that a JS or
+TS function returns, a nested PHP function, which is global once the outer one
+runs, and members of a type declared inside a function.
 
 A deleted path cannot also be an ordinary touch, a creation
 or an `expected_docs` requirement, including normalized aliases.
@@ -2384,7 +2418,7 @@ framing and request ID. If even the empty fixed packet cannot fit, the tool
 returns `{"code":"budget_too_small","minimum_tokens":N}` within the requested
 budget. Other stable failures are `invalid_arguments`, `invalid_ref`,
 `root_mismatch`, `index_stale`, `schema_incompatible`, `snapshot_changed`,
-`work_limit_exceeded`, and `cancelled`. Managed structural or history drift gets
+`work_limit_exceeded`, `index_busy`, and `cancelled`. Managed structural or history drift gets
 at most one refresh and one retry under the original deadline. Custom indexes
 remain read-only.
 
@@ -2399,8 +2433,12 @@ A long-running process that:
 
 A failed update stays pending for up to three attempts, with one second between
 retries. Recovery can rebuild the index to restore the concept corpus after a
-failed write. A new source edit is not required for a retry. Database and
-sidecar writes are excluded from the event queue.
+failed write. A new source edit is not required for a retry. Database,
+sidecar and writer lock writes are excluded from the event queue. A removed
+path is purged after the same debounce, and only when it is still gone, so an
+editor that saves by replacing the file keeps its rows. A source that is not
+a regular file, such as a symlink, is reported on each refresh and does not
+count as a failed update.
 
 The event queue and pending paths each hold at most 4,096 entries. Overflow or
 an exhausted retry budget stops the watcher with an error. Resolve the reported
@@ -2410,6 +2448,13 @@ original watch command. Preserve its working directory, root and `--index` or
 the index is current.
 
 Architecture: separate process from `mmcg serve`. Both can run concurrently against the same SQLite file thanks to WAL mode (writers don't block readers).
+
+Index writes from `mmcg index`, MCP refresh and `mmcg watch` take an exclusive
+lock file next to the database, such as `.mastermind/mmcg.db-writer.lock`, for
+the whole run. A second writer waits up to 30 seconds or until its request
+deadline. Then `mmcg index` fails with `the index is busy` and MCP returns
+`index_busy`. Readers never take the lock. Opening an index whose schema is
+current writes nothing, so `serve` starts while an index runs.
 
 ```bash
 # Terminal 1: keep the index fresh
@@ -2597,7 +2642,10 @@ provenance and does not silently upgrade these default graph queries.
   It does not rescan the entire new subtree as one special event.
 - A schema-version change rebuilds derived graph and task-search tables.
   Repository identity, project-history search, and scratchpad entries are
-  retained so `mmcg index .` can repopulate the graph in place.
+  retained so `mmcg index .` can repopulate the graph in place. The migration
+  runs in one transaction, so a failed step leaves the old schema.
+- An index written by a newer mmcg is refused, never rebuilt. The error names
+  the stored and the supported schema version. Use the newer binary.
 
 ## CI
 

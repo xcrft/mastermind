@@ -235,7 +235,7 @@ fn contract() -> AgentContract {
     AgentContract {
         role: "executor".into(),
         duty: DUTY.into(),
-        contract_sha256: sha(DUTY.as_bytes()),
+        contract_sha256: crate::hex::sha256(DUTY.as_bytes()),
     }
 }
 
@@ -306,7 +306,7 @@ pub(crate) fn review_contract() -> AgentContract {
     AgentContract {
         role: "reviewer".into(),
         duty: REVIEW_DUTY.into(),
-        contract_sha256: sha(REVIEW_DUTY.as_bytes()),
+        contract_sha256: crate::hex::sha256(REVIEW_DUTY.as_bytes()),
     }
 }
 
@@ -499,7 +499,7 @@ pub(crate) fn review_receipt_historical_valid(receipt: &InvocationReceipt) -> bo
         && receipt.agent.role == "reviewer"
         && !receipt.agent.duty.trim().is_empty()
         && receipt.agent.duty.len() <= 16 * 1024
-        && receipt.agent.contract_sha256 == sha(receipt.agent.duty.as_bytes())
+        && receipt.agent.contract_sha256 == crate::hex::sha256(receipt.agent.duty.as_bytes())
         && json_sha(&receipt.policy).is_ok_and(|hash| hash == receipt.policy_sha256)
         && (1..=7200).contains(&receipt.options.wall_timeout_secs)
         && (1..=100).contains(&receipt.options.max_turns)
@@ -656,7 +656,7 @@ fn task(spec_path: &Path, root: &Path, approved: &RunState) -> Result<Task, Stri
         )?;
         crate::run_task::validate_bound_state_identity(&repository, &spec_path, saved)
             .map_err(|_| "invocation_task_binding_mismatch")?;
-        if saved.spec_hash != sha(&bytes)
+        if saved.spec_hash != crate::hex::sha256(&bytes)
             || !crate::diff::is_full_git_oid(&saved.baseline_ref)
             || saved.iteration == 0
             || saved.next_step.as_deref() == Some("run_preflight")
@@ -678,7 +678,7 @@ fn task(spec_path: &Path, root: &Path, approved: &RunState) -> Result<Task, Stri
         intake_revision: approved.intake_revision.clone(),
         repository_identity: repository,
         spec_path,
-        spec_sha256: sha(&bytes),
+        spec_sha256: crate::hex::sha256(&bytes),
         baseline_oid: approved.baseline_ref.clone(),
         iteration: approved.iteration,
         preflight_started_at: approved.started_at,
@@ -767,10 +767,9 @@ pub fn validate_completed(
     Ok(receipt)
 }
 
-use crate::hex::sha256 as sha;
 fn json_sha(value: &impl Serialize) -> Result<String, String> {
     serde_json::to_vec(value)
-        .map(|bytes| sha(&bytes))
+        .map(|bytes| crate::hex::sha256(&bytes))
         .map_err(|_| "invocation_serialization_failed".into())
 }
 fn hex(value: &str, length: usize) -> bool {
@@ -1036,9 +1035,9 @@ pub(crate) fn execute_review_native(
             input_origin: "controller_generated".into(),
             model_use: "unknown".into(),
             context_revision: Some(context_revision.into()),
-            context_wire_sha256: Some(sha(context_wire)),
+            context_wire_sha256: Some(crate::hex::sha256(context_wire)),
             context_bytes: Some(context_wire.len() as u64),
-            prompt_sha256: Some(sha(input)),
+            prompt_sha256: Some(crate::hex::sha256(input)),
             prompt_bytes: Some(input.len() as u64),
             bytes_offered: 0,
         };
@@ -1289,9 +1288,9 @@ pub(crate) fn execute_with_feedback(
             input_origin: "controller_generated".into(),
             model_use: "unknown".into(),
             context_revision: Some(revision),
-            context_wire_sha256: Some(sha(&wire)),
+            context_wire_sha256: Some(crate::hex::sha256(&wire)),
             context_bytes: Some(wire.len() as u64),
-            prompt_sha256: Some(sha(&input)),
+            prompt_sha256: Some(crate::hex::sha256(&input)),
             prompt_bytes: Some(input.len() as u64),
             bytes_offered: 0,
         };
@@ -1556,7 +1555,7 @@ fn resolve_executable(root: &Path) -> Result<Executable, String> {
     Ok(Executable {
         invocation_path: name.clone(),
         resolved_path: name,
-        sha256: sha(&bytes),
+        sha256: crate::hex::sha256(&bytes),
     })
 }
 
@@ -1980,11 +1979,11 @@ fn run_child(
         bytes_offered: 0,
         stdout: StreamDigest {
             bytes: 0,
-            sha256: sha(&[]),
+            sha256: crate::hex::sha256([]),
         },
         stderr: StreamDigest {
             bytes: 0,
-            sha256: sha(&[]),
+            sha256: crate::hex::sha256([]),
         },
     };
     if interrupted() {
@@ -2319,19 +2318,19 @@ mod tests {
             input_origin: "controller_generated".into(),
             model_use: "unknown".into(),
             context_revision: Some("4".repeat(64)),
-            context_wire_sha256: Some(sha(b"{}")),
+            context_wire_sha256: Some(crate::hex::sha256(b"{}")),
             context_bytes: Some(2),
-            prompt_sha256: Some(sha(b"{}")),
+            prompt_sha256: Some(crate::hex::sha256(b"{}")),
             prompt_bytes: Some(2),
             bytes_offered: 2,
         };
         receipt.stdout = Some(StreamDigest {
             bytes: 1,
-            sha256: sha(b"x"),
+            sha256: crate::hex::sha256(b"x"),
         });
         receipt.stderr = Some(StreamDigest {
             bytes: 0,
-            sha256: sha(b""),
+            sha256: crate::hex::sha256(b""),
         });
         receipt
     }
@@ -2632,7 +2631,8 @@ mod tests {
                 "runner" => historical.runner_version = "99.7.3+other-release".into(),
                 "duty" => {
                     historical.agent.duty = "A prior schema-v1 read-only reviewer duty.".into();
-                    historical.agent.contract_sha256 = sha(historical.agent.duty.as_bytes());
+                    historical.agent.contract_sha256 =
+                        crate::hex::sha256(historical.agent.duty.as_bytes());
                 }
                 "platform" => historical.platform = "historical-os".into(),
                 _ => unreachable!(),
@@ -2656,7 +2656,7 @@ mod tests {
             let mut historical = current.clone();
             historical.runner_version = "99.7.3+other-release".into();
             historical.agent.duty = "A prior schema-v1 read-only reviewer duty.".into();
-            historical.agent.contract_sha256 = sha(historical.agent.duty.as_bytes());
+            historical.agent.contract_sha256 = crate::hex::sha256(historical.agent.duty.as_bytes());
             match field {
                 "role" => historical.agent.role = "executor".into(),
                 "tools" => historical

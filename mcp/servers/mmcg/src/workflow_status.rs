@@ -981,74 +981,19 @@ fn open_nofollow(path: &Path) -> std::io::Result<File> {
     File::open(path)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StableFileIdentity {
-    volume: u64,
-    index: u64,
-    length: u64,
-    modified_seconds: i64,
-    modified_fraction: i64,
-    attributes: u64,
-}
-
-#[cfg(unix)]
-fn stable_file_identity(file: &File) -> std::io::Result<StableFileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata()?;
-    Ok(StableFileIdentity {
-        volume: metadata.dev(),
-        index: metadata.ino(),
-        length: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_fraction: metadata.mtime_nsec(),
-        attributes: metadata.mode() as u64,
-    })
-}
-
-#[cfg(windows)]
-fn stable_file_identity(file: &File) -> std::io::Result<StableFileIdentity> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-    };
-
-    let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    let success = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle(), std::ptr::addr_of_mut!(information))
-    };
-    if success == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(StableFileIdentity {
-        volume: information.dwVolumeSerialNumber as u64,
-        index: ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64,
-        length: ((information.nFileSizeHigh as u64) << 32) | information.nFileSizeLow as u64,
-        modified_seconds: information.ftLastWriteTime.dwHighDateTime as i64,
-        modified_fraction: information.ftLastWriteTime.dwLowDateTime as i64,
-        attributes: information.dwFileAttributes as u64,
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn stable_file_identity(_file: &File) -> std::io::Result<StableFileIdentity> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "stable file identity is unavailable on this platform",
-    ))
-}
-
 fn verify_current_file_identity(
     path: &Path,
     file: &File,
-    opened_before: StableFileIdentity,
+    opened_before: crate::bounded_fs::StableFileIdentity,
 ) -> Result<(), FileReadFailure> {
-    let opened_after = stable_file_identity(file).map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "cannot re-establish file identity for {}: {error}",
-            path.display()
-        ),
-    })?;
+    let opened_after =
+        crate::bounded_fs::stable_file_identity(file).map_err(|error| FileReadFailure {
+            code: "file_identity_changed",
+            message: format!(
+                "cannot re-establish file identity for {}: {error}",
+                path.display()
+            ),
+        })?;
     let current_file = open_nofollow(path).map_err(|error| FileReadFailure {
         code: "file_identity_changed",
         message: format!(
@@ -1057,12 +1002,14 @@ fn verify_current_file_identity(
         ),
     })?;
     let current_identity =
-        stable_file_identity(&current_file).map_err(|error| FileReadFailure {
-            code: "file_identity_changed",
-            message: format!(
-                "cannot verify current file identity for {}: {error}",
-                path.display()
-            ),
+        crate::bounded_fs::stable_file_identity(&current_file).map_err(|error| {
+            FileReadFailure {
+                code: "file_identity_changed",
+                message: format!(
+                    "cannot verify current file identity for {}: {error}",
+                    path.display()
+                ),
+            }
         })?;
     if opened_before != opened_after || opened_after != current_identity {
         return Err(FileReadFailure {
@@ -1121,13 +1068,16 @@ fn read_bounded_directory(
             path.display()
         ),
     })?;
-    let opened_before = stable_file_identity(&directory_file).map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "cannot establish directory identity for {}: {error}",
-            path.display()
-        ),
-    })?;
+    let opened_before =
+        crate::bounded_fs::stable_file_identity(&directory_file).map_err(|error| {
+            FileReadFailure {
+                code: "file_identity_changed",
+                message: format!(
+                    "cannot establish directory identity for {}: {error}",
+                    path.display()
+                ),
+            }
+        })?;
     let directory = cap_std::fs::Dir::from_std_file(directory_file);
     let iterator = directory.entries().map_err(|error| FileReadFailure {
         code: "file_read_failed",
@@ -1151,13 +1101,16 @@ fn read_bounded_directory(
         entries.push(entry.file_name());
     }
     let directory_file = directory.into_std_file();
-    let opened_after = stable_file_identity(&directory_file).map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "cannot re-establish directory identity for {}: {error}",
-            path.display()
-        ),
-    })?;
+    let opened_after =
+        crate::bounded_fs::stable_file_identity(&directory_file).map_err(|error| {
+            FileReadFailure {
+                code: "file_identity_changed",
+                message: format!(
+                    "cannot re-establish directory identity for {}: {error}",
+                    path.display()
+                ),
+            }
+        })?;
     let after_path = path.canonicalize().map_err(|error| FileReadFailure {
         code: "file_identity_changed",
         message: format!(
@@ -1173,12 +1126,14 @@ fn read_bounded_directory(
         ),
     })?;
     let current_identity =
-        stable_file_identity(&current_directory).map_err(|error| FileReadFailure {
-            code: "file_identity_changed",
-            message: format!(
-                "cannot verify current directory identity for {}: {error}",
-                path.display()
-            ),
+        crate::bounded_fs::stable_file_identity(&current_directory).map_err(|error| {
+            FileReadFailure {
+                code: "file_identity_changed",
+                message: format!(
+                    "cannot verify current directory identity for {}: {error}",
+                    path.display()
+                ),
+            }
         })?;
     if before_path != after_path
         || !after_path.starts_with(allowed_root)
@@ -1202,90 +1157,14 @@ fn read_bounded_text(
     allowed_root: &Path,
     max_bytes: usize,
 ) -> Result<String, FileReadFailure> {
-    let before = fs::symlink_metadata(path).map_err(|error| FileReadFailure {
-        code: "file_read_failed",
-        message: format!("cannot inspect {}: {error}", path.display()),
-    })?;
-    if before.file_type().is_symlink() || !before.file_type().is_file() {
-        return Err(FileReadFailure {
-            code: "file_type_invalid",
-            message: format!(
-                "workflow input is not a regular no-follow file: {}",
-                path.display()
-            ),
-        });
-    }
-    if before.len() > max_bytes as u64 {
-        return Err(FileReadFailure {
-            code: "file_limit_exceeded",
-            message: format!(
-                "workflow input exceeds {max_bytes} bytes: {}",
-                path.display()
-            ),
-        });
-    }
-    let before_path = path.canonicalize().map_err(|error| FileReadFailure {
-        code: "file_read_failed",
-        message: format!("cannot canonicalize {}: {error}", path.display()),
-    })?;
-    if !before_path.starts_with(allowed_root) {
-        return Err(FileReadFailure {
-            code: "file_outside_root",
-            message: format!(
-                "workflow input escapes its allowed root: {}",
-                path.display()
-            ),
-        });
-    }
-
-    let mut file = open_nofollow(path).map_err(|error| FileReadFailure {
-        code: "file_read_failed",
+    let over_limit = || FileReadFailure {
+        code: "file_limit_exceeded",
         message: format!(
-            "cannot open {} without following links: {error}",
+            "workflow input exceeds {max_bytes} bytes: {}",
             path.display()
         ),
-    })?;
-    let opened_before = stable_file_identity(&file).map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "cannot establish file identity for {}: {error}",
-            path.display()
-        ),
-    })?;
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.by_ref()
-        .take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| FileReadFailure {
-            code: "file_read_failed",
-            message: format!("cannot read {}: {error}", path.display()),
-        })?;
-    if bytes.len() > max_bytes {
-        return Err(FileReadFailure {
-            code: "file_limit_exceeded",
-            message: format!(
-                "workflow input exceeds {max_bytes} bytes: {}",
-                path.display()
-            ),
-        });
-    }
-    verify_current_file_identity(path, &file, opened_before)?;
-    let after_path = path.canonicalize().map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "workflow input changed during read: {} ({error})",
-            path.display()
-        ),
-    })?;
-    if before_path != after_path || !after_path.starts_with(allowed_root) {
-        return Err(FileReadFailure {
-            code: "file_identity_changed",
-            message: format!(
-                "workflow input changed identity during read: {}",
-                path.display()
-            ),
-        });
-    }
+    };
+    let bytes = read_bounded_bytes(path, allowed_root, max_bytes, &over_limit)?;
     String::from_utf8(bytes).map_err(|_| FileReadFailure {
         code: "file_encoding_invalid",
         message: format!("workflow input is not valid UTF-8: {}", path.display()),
@@ -2384,7 +2263,13 @@ fn hash_artifact_file(
         });
     }
     let remaining = MAX_WORKFLOW_TEXT_BYTES.saturating_sub(budget.bytes);
-    let bytes = read_bounded_bytes(path, canonical_root, remaining)?;
+    let over_limit = || FileReadFailure {
+        code: "workflow_total_text_limit_exceeded",
+        message: format!(
+            "installed artifacts exceed the {MAX_WORKFLOW_TEXT_BYTES}-byte read limit"
+        ),
+    };
+    let bytes = read_bounded_bytes(path, canonical_root, remaining, &over_limit)?;
     budget.bytes = budget.bytes.saturating_add(bytes.len());
     if path.extension().and_then(|value| value.to_str()) == Some("md") {
         if bytes.len() > MAX_WORKFLOW_MARKDOWN_BYTES {
@@ -2410,10 +2295,13 @@ fn hash_artifact_file(
     Ok(())
 }
 
+/// Read a regular no-follow file under `allowed_root`, failing with
+/// `over_limit` when it holds more than `max_bytes`.
 fn read_bounded_bytes(
     path: &Path,
     allowed_root: &Path,
     max_bytes: usize,
+    over_limit: &dyn Fn() -> FileReadFailure,
 ) -> Result<Vec<u8>, FileReadFailure> {
     let before = fs::symlink_metadata(path).map_err(|error| FileReadFailure {
         code: "file_read_failed",
@@ -2429,12 +2317,7 @@ fn read_bounded_bytes(
         });
     }
     if before.len() > max_bytes as u64 {
-        return Err(FileReadFailure {
-            code: "workflow_total_text_limit_exceeded",
-            message: format!(
-                "installed artifacts exceed the {MAX_WORKFLOW_TEXT_BYTES}-byte read limit"
-            ),
-        });
+        return Err(over_limit());
     }
     let before_path = path.canonicalize().map_err(|error| FileReadFailure {
         code: "file_read_failed",
@@ -2456,13 +2339,14 @@ fn read_bounded_bytes(
             path.display()
         ),
     })?;
-    let opened_before = stable_file_identity(&file).map_err(|error| FileReadFailure {
-        code: "file_identity_changed",
-        message: format!(
-            "cannot establish file identity for {}: {error}",
-            path.display()
-        ),
-    })?;
+    let opened_before =
+        crate::bounded_fs::stable_file_identity(&file).map_err(|error| FileReadFailure {
+            code: "file_identity_changed",
+            message: format!(
+                "cannot establish file identity for {}: {error}",
+                path.display()
+            ),
+        })?;
     let mut bytes = Vec::with_capacity(before.len() as usize);
     file.by_ref()
         .take(max_bytes.saturating_add(1) as u64)
@@ -2472,12 +2356,7 @@ fn read_bounded_bytes(
             message: format!("cannot read {}: {error}", path.display()),
         })?;
     if bytes.len() > max_bytes {
-        return Err(FileReadFailure {
-            code: "workflow_total_text_limit_exceeded",
-            message: format!(
-                "installed artifacts exceed the {MAX_WORKFLOW_TEXT_BYTES}-byte read limit"
-            ),
-        });
+        return Err(over_limit());
     }
     verify_current_file_identity(path, &file, opened_before)?;
     let after_path = path.canonicalize().map_err(|error| FileReadFailure {
@@ -2614,7 +2493,7 @@ fn registration_config_candidates(
     candidates
 }
 
-fn valid_mmcg_registration_entry(value: &serde_json::Value) -> bool {
+pub(crate) fn valid_mmcg_registration_entry(value: &serde_json::Value) -> bool {
     let Some(entry) = value.as_object() else {
         return false;
     };
@@ -2668,6 +2547,11 @@ fn bounded_registration_string(value: &str) -> bool {
 }
 
 fn canonical_mmcg_launcher(command: &str, args: &[&str]) -> bool {
+    if let [launcher, "serve"] = args {
+        if crate::setup::npm_project_launcher(Path::new(command), Path::new(launcher)) {
+            return true;
+        }
+    }
     if cfg!(windows) {
         if args == ["serve"] && canonical_mmcg_command(command) {
             return true;
@@ -4993,7 +4877,7 @@ fn scan_tasks_bounded(root: &Path, limit: usize, deadline: Option<std::time::Ins
         let Some(folder) = file_name.to_str() else {
             return TaskScan::failed("task inventory contains a non-UTF-8 entry");
         };
-        if folder.starts_with('_') || folder.starts_with('.') || folder.ends_with(".md") {
+        if !crate::task_scaffold::is_task_entry(folder) || folder.ends_with(".md") {
             continue;
         }
         let task_dir = tasks_dir.join(file_name);
@@ -5241,9 +5125,7 @@ fn project_task_state(
 }
 
 fn task_state_revision(state: &crate::run_task::RunState) -> Option<String> {
-    serde_json::to_vec(state)
-        .ok()
-        .map(|bytes| crate::hex::encode(&Sha256::digest(bytes)))
+    serde_json::to_vec(state).ok().map(crate::hex::sha256)
 }
 
 fn held_task(folder: String, spec_path: PathBuf, reason: String) -> TaskInfo {
@@ -5386,6 +5268,7 @@ mod tests {
             .expect("canonical task spec must have a repository ancestor");
         let spec_path = spec.strip_prefix(root).unwrap();
         crate::run_task::RunState {
+            format_version: crate::run_task::RUN_STATE_FORMAT_VERSION,
             status: status.into(),
             risk: Some("low".into()),
             next_step: Some("run_executor".into()),

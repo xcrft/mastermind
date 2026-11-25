@@ -232,7 +232,7 @@ enum Cmd {
     /// Run as an MCP stdio server. Reads JSON-RPC from stdin, writes to stdout.
     Serve {
         /// Root for the default index and source reads from an external index.
-        #[arg(long)]
+        #[arg(long, value_parser = absolute_path)]
         root: Option<PathBuf>,
     },
     /// Watch a directory and re-index files as they change. Long-running.
@@ -343,7 +343,7 @@ enum Cmd {
 #[derive(clap::Args)]
 struct IndexArgs {
     /// Project root to index. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Re-parse every file regardless of mtime. Use after schema changes or to recover from a stale index.
     #[arg(long)]
@@ -427,7 +427,7 @@ struct ImpactArgs {
     depth: u32,
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=500))]
     top: u32,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
 }
 
@@ -441,7 +441,7 @@ struct BriefArgs {
     budget_tokens: u32,
     #[arg(long, value_enum, default_value_t = BriefFormat::Text)]
     format: BriefFormat,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
 }
 
@@ -494,7 +494,7 @@ struct TemporalArgs {
     since: String,
     #[arg(long, value_enum, default_value_t = TemporalFormat::Text)]
     format: TemporalFormat,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     #[arg(long, default_value = ".")]
     path: String,
@@ -512,14 +512,14 @@ struct TemporalArgs {
 #[derive(clap::Args)]
 struct WatchArgs {
     /// Project root to watch. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
 }
 
 #[derive(clap::Args)]
 struct StatusArgs {
     /// Project root. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Print observed component state as JSON.
     #[arg(long)]
@@ -550,14 +550,14 @@ struct WhyArgs {
 #[derive(clap::Args)]
 struct NextArgs {
     /// Project root. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
 }
 
 #[derive(clap::Args)]
 struct ResumeArgs {
     /// Project root. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Task folder name to resume (e.g. `042-payment-routing`). If omitted,
     /// picks the highest-priority pending task automatically.
@@ -568,7 +568,7 @@ struct ResumeArgs {
 #[derive(clap::Args)]
 struct UninstallArgs {
     /// Project root. Defaults to cwd. (Ignored for `--scope global`.)
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// What to remove: `project` (.mastermind/ + project .mcp.json),
     /// `global` (de-register from Claude Code user scope via `claude mcp remove`), or `all`.
@@ -584,7 +584,7 @@ struct VerifySpecArgs {
     /// Path to a `.mastermind/tasks/<NNN>-<name>/spec.md` file.
     spec: PathBuf,
     /// Project root the spec's file paths are relative to. Defaults to cwd.
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     #[arg(long)]
     json: bool,
@@ -605,7 +605,7 @@ struct AuditSpecArgs {
     #[arg(long)]
     since: String,
     /// Project root. Defaults to cwd.
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     #[arg(long)]
     json: bool,
@@ -625,7 +625,7 @@ struct AuditSpecArgs {
 #[derive(clap::Args)]
 struct DoctorArgs {
     /// Project root. Defaults to cwd.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Output JSON instead of human-readable text.
     #[arg(long)]
@@ -648,7 +648,7 @@ struct DemoArgs {
 struct PrCommentArgs {
     /// Path to the sealed schema-v3 bundle JSON.
     bundle: PathBuf,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     #[arg(long)]
     expected_repository: String,
@@ -664,7 +664,7 @@ struct CiArgs {
     #[arg(long, default_value = "origin/main")]
     since: String,
     /// Project root. Defaults to cwd.
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Write audit bundle JSONs to this directory (one per spec).
     #[arg(long)]
@@ -699,7 +699,7 @@ struct UiArgs {
     #[arg(long)]
     since: String,
     /// Project root. Defaults to cwd.
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Repository-relative map scope. Defaults to the repository root.
     #[arg(long, default_value = ".")]
@@ -761,7 +761,7 @@ struct RunTaskArgs {
     /// Path to the spec file (typically under `.mastermind/tasks/`).
     spec: PathBuf,
     /// Project root the spec's file paths resolve against. Defaults to cwd.
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     /// Restart pre-flight, preserving the task's original baseline and iteration count.
     #[arg(long)]
@@ -834,7 +834,7 @@ enum WorkflowCmd {
     /// Build a deterministic read-only graph of the owned workflow layout.
     Audit {
         /// Source repository or installed client workflow root.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Output the versioned schema-v1 report as JSON.
         #[arg(long)]
@@ -861,7 +861,7 @@ enum FactCmd {
         /// Full commit OID the producer analysed; it must equal the indexed HEAD.
         #[arg(long, value_name = "OID")]
         report_revision: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
     },
     /// Generate a local Ed25519 producer keypair without exposing the seed.
@@ -915,7 +915,7 @@ enum PolicyCmd {
         #[arg(long)]
         since: String,
         /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Repository-owned v1 policy file.
         #[arg(long, default_value = "mastermind-policy.yml")]
@@ -948,7 +948,7 @@ enum ReviewCmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// Project root. Defaults to cwd.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Repository-relative map scope. Defaults to the repository root.
         #[arg(long, default_value = ".")]
@@ -1003,7 +1003,7 @@ enum VerificationCmd {
     /// Execute one observed check from a spec with a completed preflight.
     Run {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         id: String,
@@ -1017,7 +1017,7 @@ enum AcceptanceCmd {
     /// Check every criterion's declared observed checks without executing them.
     Status {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         json: bool,
@@ -1029,7 +1029,7 @@ enum TaskReviewCmd {
     /// Read current review feedback and the next role/action; never writes or invokes a model.
     FollowUp {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// The portable follow-up packet is always JSON.
         #[arg(long)]
@@ -1038,7 +1038,7 @@ enum TaskReviewCmd {
     /// Run one bounded native reviewer against a mechanically held task revision.
     Run {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Wall-clock limit in seconds (1–7200). Defaults to the project's
         /// `init --review-timeout`, else 600.
@@ -1053,7 +1053,7 @@ enum TaskReviewCmd {
     /// Produce an evidence manifest and an unknown draft; never calls a model.
     Prepare {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// The portable request is always JSON.
         #[arg(long)]
@@ -1065,7 +1065,7 @@ enum TaskReviewCmd {
         /// Repository-contained JSON with the completed draft (use .mastermind/).
         #[arg(long)]
         report: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         json: bool,
@@ -1073,7 +1073,7 @@ enum TaskReviewCmd {
     /// Inspect the active review without executing a model or verification.
     Status {
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         json: bool,
@@ -1099,7 +1099,7 @@ enum ContextCmd {
         /// Opt in to the personal profile through this existing audience grant.
         #[arg(long)]
         profile_client: Option<String>,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
     },
 
@@ -1107,7 +1107,7 @@ enum ContextCmd {
     /// completed-task history reviews, and lesson lifecycle quality.
     Doctor {
         /// Project root. Defaults to cwd.
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Output JSON instead of human-readable text.
         #[arg(long)]
@@ -1120,7 +1120,7 @@ enum AuditCmd {
     /// Verify content integrity and one or more independent trust anchors.
     Verify {
         bundle: PathBuf,
-        #[arg(long)]
+        #[arg(long, value_parser = absolute_path)]
         root: Option<PathBuf>,
         #[arg(long)]
         expected_repository: Option<String>,
@@ -1153,7 +1153,7 @@ enum AuditCmd {
     },
     #[command(hide = true)]
     PrepareOutput {
-        #[arg(long)]
+        #[arg(long, value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         path: PathBuf,
@@ -1165,7 +1165,7 @@ enum AuditCmd {
 enum MinerCmd {
     /// Start a fresh bounded run using the settings saved by init.
     Start {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long, value_parser = ["claude", "codex"])]
         client: Option<String>,
@@ -1174,7 +1174,7 @@ enum MinerCmd {
     },
     /// Stop the selected project's managed miners without deleting evidence.
     Stop {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long, value_parser = ["claude", "codex"])]
         client: Option<String>,
@@ -1183,7 +1183,7 @@ enum MinerCmd {
     },
     /// Inspect miners selected by init without starting them.
     Status {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long, value_parser = ["claude", "codex"])]
         client: Option<String>,
@@ -1195,7 +1195,7 @@ enum MinerCmd {
     Hooks(HookCmd),
     /// Collect possible persona signals into a private review inbox.
     Collect {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         /// Explicit local Claude Code or Codex histories; repeat for up to 16 files.
         #[arg(long, required = true)]
@@ -1206,7 +1206,7 @@ enum MinerCmd {
     },
     /// Reread one page of previously collected sources for this project.
     Sync {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         /// Page position from sync; omit to start each new complete pass.
         #[arg(long)]
@@ -1229,7 +1229,7 @@ enum MinerCmd {
     /// cross-repo store; manual and interpreted sections survive normal re-mines.
     Profile {
         /// Repository to mine. Defaults to cwd.
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Author to profile — substring of name or email. Defaults to
         /// `git config user.name` (matches all the person's emails).
@@ -1273,14 +1273,14 @@ enum HookCmd {
     },
     /// Archive inactive source payloads, preserving citations and review bindings.
     Archive {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long, default_value_t=32, value_parser=clap::value_parser!(u16).range(1..=64))]
         limit: u16,
     },
     /// Extract explicit-statement candidates locally. No model or publication.
     MineLocal {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long, default_value_t=4, value_parser=clap::value_parser!(u16).range(1..=16))]
         limit: u16,
@@ -1298,7 +1298,7 @@ enum HookCmd {
     Receive {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     /// Inspect the immutable prompt and result of a hook refiner attempt.
@@ -1326,7 +1326,7 @@ enum HookCmd {
         intake: String,
         #[arg(long)]
         spec: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long)]
         expected_binding: Option<String>,
@@ -1334,18 +1334,18 @@ enum HookCmd {
     Status {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     /// Start a fresh generation after a capture failure; old receipts become stale.
     Recover {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     Episodes {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long, default_value_t=20, value_parser=clap::value_parser!(u16).range(1..=100))]
         limit: u16,
@@ -1388,7 +1388,7 @@ enum HookCmd {
 struct HookSetupArgs {
     #[arg(long, value_parser=["claude","codex"])]
     client: String,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     project_root: PathBuf,
     #[arg(long)]
     write: bool,
@@ -1442,7 +1442,7 @@ struct HookAnalyzeArgs {
 
 #[derive(clap::Args)]
 struct HookMineArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     project_root: PathBuf,
     #[arg(
         long,
@@ -1470,7 +1470,7 @@ enum HookWorkerCmd {
     Start {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long, conflicts_with = "provider")]
         processor: Option<PathBuf>,
@@ -1490,13 +1490,13 @@ enum HookWorkerCmd {
     Status {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     Stop {
         #[arg(long, value_parser=["claude","codex"])]
         client: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     #[command(hide = true)]
@@ -1513,18 +1513,18 @@ enum SourceCmd {
     /// Exclude a registered source from future sync; keep its evidence and history.
     Exclude {
         source: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     /// Explicitly include a previously excluded source in future sync.
     Include {
         source: String,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
     },
     /// List stored source snapshots for this exact project root.
     List {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long)]
         after: Option<String>,
@@ -1538,7 +1538,7 @@ enum CandidateCmd {
     /// Search retained inbox quotes locally; does not search claim definitions.
     Search {
         query: String,
-        #[arg(long)]
+        #[arg(long, value_parser = absolute_path)]
         project_root: Option<PathBuf>,
         /// Exact full source ID from sources list.
         #[arg(long)]
@@ -1610,14 +1610,14 @@ enum CandidateCmd {
 enum ProfileAccessCmd {
     /// Expose the entire current profile to one client in one project root.
     Grant {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         client: String,
     },
     /// Stop exposing the profile to that client and project root.
     Revoke {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         #[arg(long)]
         client: String,
@@ -1704,7 +1704,7 @@ enum HabitCmd {
     /// Propose a conditional behavior with one exact quote from a human turn.
     Propose {
         /// Project root matching the transcript's verified cwd.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long)]
         transcript: PathBuf,
@@ -1732,7 +1732,7 @@ enum HabitCmd {
     /// Cite support, a limitation, or a counterexample from a human turn.
     Cite {
         id: i64,
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         project_root: PathBuf,
         #[arg(long)]
         transcript: PathBuf,
@@ -1887,7 +1887,7 @@ enum QueryCmd {
         /// Git ref to diff against (tag, branch, commit, HEAD~3, etc.)
         git_ref: String,
         /// Project root — defaults to cwd. Symbol paths are relative to this.
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
     },
     /// Full-text search past task specs in `.mastermind/tasks/`.
@@ -1983,20 +1983,16 @@ struct SetupArgs {
     profile_client: Option<String>,
     #[arg(long, value_enum, default_value_t = SetupScope::User)]
     scope: SetupScope,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
     #[arg(long)]
     config: Option<PathBuf>,
-    #[arg(long, alias = "write-mcp")]
+    #[arg(long)]
     write: bool,
-    #[arg(long, hide = true)]
-    dry_run: bool,
     #[arg(long)]
     remove: bool,
     #[arg(long)]
     force: bool,
-    #[arg(long, hide = true)]
-    project: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -2022,27 +2018,6 @@ impl From<SetupScope> for mmcg::setup::Scope {
             SetupScope::User => Self::User,
         }
     }
-}
-
-fn normalize_setup_args(
-    client: mmcg::setup::Client,
-    mut args: SetupArgs,
-) -> Result<SetupArgs, String> {
-    if args.dry_run && args.write {
-        return Err("legacy --dry-run conflicts with --write".into());
-    }
-    if let Some(project) = args.project.take() {
-        if client != mmcg::setup::Client::Claude
-            || args.scope != SetupScope::User
-            || args.root.as_path() != std::path::Path::new(".")
-            || args.config.is_some()
-        {
-            return Err("legacy --project conflicts with client, scope, root, or config".into());
-        }
-        args.scope = SetupScope::Project;
-        args.root = project;
-    }
-    Ok(args)
 }
 
 fn default_index_path() -> PathBuf {
@@ -2147,17 +2122,25 @@ fn run_cli_inner(
             for path in &stats.skipped_paths {
                 eprintln!("skipped unsupported path: {path:?}");
             }
+            for path in &stats.skipped_submodule_paths {
+                eprintln!("skipped submodule: {path:?}");
+            }
             for path in &stats.failed_paths {
                 eprintln!("failed source: {path:?}");
             }
-            if stats.files_failed > 0 {
-                eprintln!(
-                    "warning: {} source files failed to index; the index stays stale until they index or are removed (symlinks and other non-regular files never index)",
-                    stats.files_failed
-                );
+            for path in &stats.unindexable_paths {
+                eprintln!("not a regular file, never indexes: {path:?}");
             }
             if stats.extractor_contract_rebuilt {
                 eprintln!("extractor contract changed: rebuilt all structural data");
+            }
+            if stats.files_failed > 0 {
+                eprintln!(
+                    "error: {} source files failed to index; the index stays stale until they index or are removed (symlinks and other non-regular files never index)",
+                    stats.files_failed
+                );
+                drop(store);
+                std::process::exit(1);
             }
         }
         Cmd::Workflow(WorkflowCmd::Audit { root, json }) => {
@@ -2817,7 +2800,6 @@ fn run_cli_inner(
                 SetupCmd::Continue { args } => (mmcg::setup::Client::Continue, args),
                 SetupCmd::Generic { args } => (mmcg::setup::Client::Generic, args),
             };
-            let args = normalize_setup_args(client, args)?;
             let scope = mmcg::setup::Scope::from(args.scope);
             let invalid = (client == mmcg::setup::Client::Codex
                 && scope == mmcg::setup::Scope::Project)
@@ -3645,6 +3627,12 @@ fn render_exit(
     }
 }
 
+/// Root arguments name a directory from the working directory. Making them
+/// absolute here lets the runtime read every relative path from the root.
+fn absolute_path(value: &str) -> Result<PathBuf, String> {
+    std::path::absolute(value).map_err(|error| error.to_string())
+}
+
 fn main() -> ExitCode {
     std::hint::black_box(BUILD_VERSION_MARKER);
     render_exit(run(), &mut std::io::stderr())
@@ -4048,30 +4036,13 @@ mod tests {
         ));
     }
 
-    fn claude_setup_args(argv: &[&str]) -> SetupArgs {
-        let cli = Cli::try_parse_from(argv).unwrap();
-        let Cmd::Setup(SetupCmd::Claude { args }) = cli.cmd else {
-            panic!("expected claude setup command");
-        };
-        args
-    }
-
     #[test]
-    fn legacy_claude_dry_run_flag_is_accepted_and_conflicts_with_write() {
-        let args = claude_setup_args(&["mastermind", "setup", "claude", "--dry-run"]);
-        assert!(normalize_setup_args(mmcg::setup::Client::Claude, args).is_ok());
-
-        let args = claude_setup_args(&["mastermind", "setup", "claude", "--dry-run", "--write"]);
-        assert_eq!(
-            normalize_setup_args(mmcg::setup::Client::Claude, args).unwrap_err(),
-            "legacy --dry-run conflicts with --write"
-        );
-    }
-
-    #[test]
-    fn claude_setup_keeps_write_mcp_as_an_alias_for_canonical_write() {
-        assert!(claude_setup_args(&["mastermind", "setup", "claude", "--write"]).write);
-        assert!(claude_setup_args(&["mastermind", "setup", "claude", "--write-mcp"]).write);
+    fn removed_compatibility_flags_are_rejected() {
+        for flag in ["--dry-run", "--write-mcp", "--project=."] {
+            assert!(Cli::try_parse_from(["mastermind", "setup", "claude", flag]).is_err());
+        }
+        assert!(Cli::try_parse_from(["mastermind", "init", "--no-claude"]).is_err());
+        assert!(Cli::try_parse_from(["mastermind", "init", "--no-seed-style"]).is_ok());
     }
 
     #[test]
@@ -4522,7 +4493,7 @@ mod tests {
                 production_only: true,
                 codeowners: Some(codeowners),
             }) if since == "origin/main"
-                && root.as_path() == std::path::Path::new(".")
+                && root == std::env::current_dir().unwrap()
                 && path == "services/payment"
                 && codeowners.as_path() == std::path::Path::new(".github/CODEOWNERS")
         ));
@@ -4564,7 +4535,7 @@ mod tests {
                 port: 0,
                 ..
             }) if since == "origin/main"
-                && root.as_path() == std::path::Path::new(".")
+                && root == std::env::current_dir().unwrap()
                 && path == "."
                 && sarif.is_empty()
                 && coverage.is_empty()

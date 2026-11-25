@@ -233,13 +233,17 @@ fn executor_report_required_parser_rejects_legacy_spoofing_and_preserves_input_b
     assert!(executor_report::parse_str(&oversized)
         .unwrap_err()
         .contains("1048576-byte limit"));
-    assert!(executor_report::parse_canonical_file(&path)
-        .unwrap_err()
-        .contains("1048576-byte limit"));
+    assert!(
+        executor_report::parse_canonical_repository_file(directory.path(), &path)
+            .unwrap_err()
+            .contains("1048576-byte limit")
+    );
     std::fs::write(&path, [0xff, 0xfe]).unwrap();
-    assert!(executor_report::parse_canonical_file(&path)
-        .unwrap_err()
-        .contains("not UTF-8"));
+    assert!(
+        executor_report::parse_canonical_repository_file(directory.path(), &path)
+            .unwrap_err()
+            .contains("not UTF-8")
+    );
 }
 
 struct Fixture {
@@ -364,7 +368,7 @@ fn executor_report_completion_and_task_identity_reach_the_shared_audit() {
         assert!(report.claim_checks.as_ref().unwrap().is_empty());
         if status != "complete" {
             assert!(rejected(&report, &format!("status_{status}")));
-            let bundle = Bundle::from_report(&report, None);
+            let bundle = Bundle::from_report_full(&report, None, None, None, None);
             assert_eq!(bundle.verdict, "broken");
             assert!(bundle.human_summary.contains("1 errors, 0 warnings"));
         }
@@ -438,7 +442,7 @@ fn executor_report_bundle_binds_metadata_verification_and_current_disk_input() {
     let executor = parsed(&value);
     let report = fixture.audit(&executor);
     assert_eq!(report.verdict, Verdict::Held);
-    let bundle = Bundle::from_report(&report, None);
+    let bundle = Bundle::from_report_full(&report, None, None, None, None);
     assert_eq!(bundle.commands, ["echo checked"]);
     assert_eq!(bundle.verified_claims.len(), 1);
     assert!(bundle
@@ -469,11 +473,11 @@ fn executor_report_bundle_binds_metadata_verification_and_current_disk_input() {
         assert!(bundle.discrepancies.iter().any(|finding| matches!(finding, Finding::ExecutorReportRejected { reason } if reason == "report_checks_mismatch")));
     }
     let path = fixture.report_path();
-    let valid = Bundle::from_report(&report, path.to_str());
+    let valid = Bundle::from_report_full(&report, None, None, path.to_str(), None);
     let manifest = valid.into_manifest(fixture.root()).unwrap();
     assert_eq!(manifest.verdict, "held");
     assert!(manifest.inputs.executor_report_present);
-    let pending = Bundle::from_report(&report, path.to_str());
+    let pending = Bundle::from_report_full(&report, None, None, path.to_str(), None);
     value["verifications"][0]["output_excerpt"] = json!("disk substitution");
     fixture.write_report(&value);
     assert!(pending

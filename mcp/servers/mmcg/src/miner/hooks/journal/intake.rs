@@ -17,6 +17,27 @@ pub(in crate::miner::hooks) struct IntakeReceipt {
     pub session_epoch: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_binding_revision: Option<String>,
+    /// Unix seconds by which the client has stopped the hook that runs the
+    /// processor. A pending attempt after this time was interrupted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_until: Option<u64>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The stored row stays pending, so a late finish still applies. Readers see
+/// an attempt whose hook can no longer be running as interrupted. Attempts
+/// stored before the deadline was recorded have no running hook either.
+fn observed(mut receipt: IntakeReceipt, now: u64) -> IntakeReceipt {
+    if receipt.status == "pending" && receipt.pending_until.is_none_or(|until| now > until) {
+        receipt.status = "degraded".into();
+        receipt.reason = Some("processor_interrupted".into());
+    }
+    receipt
 }
 
 impl Journal {
@@ -60,7 +81,7 @@ impl Journal {
                 .query_row("SELECT data FROM hook_intake WHERE id=?1", [id], |r| {
                     r.get(0)
                 })?;
-        Ok(serde_json::from_str(&data)?)
+        Ok(observed(serde_json::from_str(&data)?, unix_now()))
     }
 
     pub fn intake_for_episode(&self, episode: &str) -> Result<Option<Value>, Error> {
@@ -81,7 +102,7 @@ impl Journal {
             )
             .optional()?;
         data.map(|data| {
-            let receipt: IntakeReceipt = serde_json::from_str(&data)?;
+            let receipt = observed(serde_json::from_str(&data)?, unix_now());
             Ok(json!({"id":receipt.input.id,"status":receipt.status,"reason":receipt.reason,"elapsed_ms":receipt.elapsed_ms}))
         }).transpose()
     }
@@ -115,12 +136,13 @@ impl Journal {
         episode: &str,
         event_id: &str,
         original: &str,
+        deadline: Instant,
     ) -> Result<Option<(Config, IntakeReceipt)>, Error> {
         // A failed delivery may leave only its filesystem marker, before it
         // reached SQLite. Keep bounded filesystem I/O outside the writer lock.
-        let capture_clear =
-            !crate::miner::hooks::fence::pending(&grant.client, Path::new(&grant.project_root))
-                .unwrap_or(true);
+        let capture_clear = self
+            .await_other_deliveries(grant, 0, deadline)
+            .unwrap_or(false);
         let ep = load_episode(&self.conn, episode)?;
         let (session_epoch, active_task) = super::task::active(&self.conn, &ep.session)?;
         let tx = self
@@ -157,7 +179,7 @@ impl Journal {
             client: ep.client.clone(),
             project_root: ep.project_root.clone(),
             capture_generation: ep.generation,
-            prompt_digest: refiner::prompt_digest(&prompt.text),
+            prompt_digest: crate::hex::sha256(&prompt.text),
             original: prompt.text.clone(),
             active_task: active_task.as_ref().map(|task| task.spec_path.clone()),
         };
@@ -177,6 +199,9 @@ impl Journal {
             elapsed_ms: 0,
             session_epoch,
             task_binding_revision: active_task.map(|task| task.revision),
+            pending_until: admissible.then(|| {
+                unix_now() + config.timeout_secs + crate::miner::hooks::install::HOOK_TIMEOUT_SECS
+            }),
         };
         tx.execute(
             "INSERT INTO hook_intake(id,episode,data) VALUES(?1,?2,?3)",
@@ -192,10 +217,11 @@ impl Journal {
         receipt: &IntakeReceipt,
         result: Result<Response, Error>,
         elapsed_ms: u64,
+        deadline: Instant,
     ) -> Result<IntakeReceipt, Error> {
-        let capture_clear =
-            !crate::miner::hooks::fence::pending(&grant.client, Path::new(&grant.project_root))
-                .unwrap_or(true);
+        let capture_clear = self
+            .await_other_deliveries(grant, 0, deadline)
+            .unwrap_or(false);
         let (session_epoch, active_task) =
             super::task::active(&self.conn, &receipt.input.session_id)?;
         let task_current = session_epoch == receipt.session_epoch
@@ -319,7 +345,7 @@ pub(super) fn admitted_prompt(
                 && e.kind == "UserPromptSubmit"
                 && e.origin == "user_channel_unverified"
                 && e.text == input.original
-                && refiner::prompt_digest(&e.text) == input.prompt_digest
+                && crate::hex::sha256(&e.text) == input.prompt_digest
         }))
 }
 
@@ -389,6 +415,7 @@ mod tests {
                 captured["episode"].as_str().unwrap(),
                 captured["event_id"].as_str().unwrap(),
                 "Explain this error.",
+                Instant::now(),
             )
             .unwrap()
             .unwrap();
@@ -414,7 +441,7 @@ mod tests {
         let (_root, mut db, grant, _, receipt) = prepared();
         let original = receipt.input.original.clone();
         let result = db
-            .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7)
+            .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7, Instant::now())
             .unwrap();
         assert_eq!(result.status, "offered");
         assert_eq!(
@@ -431,12 +458,13 @@ mod tests {
                 &grant,
                 &receipt.input.episode_id,
                 &receipt.input.event_id,
-                &original
+                &original,
+                Instant::now()
             )
             .unwrap()
             .is_none());
         assert!(db
-            .finish_intake(&grant, &receipt, Ok(response(&receipt)), 9)
+            .finish_intake(&grant, &receipt, Ok(response(&receipt)), 9, Instant::now())
             .is_err());
     }
 
@@ -444,7 +472,7 @@ mod tests {
     fn repeated_refinement_has_constant_session_exposure_storage() {
         let (root, mut db, grant, _, mut receipt) = prepared();
         for index in 0..40 {
-            db.finish_intake(&grant, &receipt, Ok(response(&receipt)), 1)
+            db.finish_intake(&grant, &receipt, Ok(response(&receipt)), 1, Instant::now())
                 .unwrap();
             let current = db.episode(&receipt.input.episode_id).unwrap();
             assert!(current
@@ -473,6 +501,7 @@ mod tests {
                         prompt["episode"].as_str().unwrap(),
                         prompt["event_id"].as_str().unwrap(),
                         "Explain this error.",
+                        Instant::now(),
                     )
                     .unwrap()
                     .unwrap()
@@ -504,7 +533,7 @@ mod tests {
                     .unwrap();
             }
             let result = db
-                .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7)
+                .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7, Instant::now())
                 .unwrap();
             assert_eq!(result.status, "withheld");
             assert!(result.response.is_none());
@@ -521,7 +550,7 @@ mod tests {
                 json!({"session_id":"s","turn_id":if kind=="UserPromptSubmit" {"two"} else {"one"},"hook_event_name":kind,"prompt":"A new request"}),
             );
             let result = db
-                .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7)
+                .finish_intake(&grant, &receipt, Ok(response(&receipt)), 7, Instant::now())
                 .unwrap();
             assert_eq!(result.status, "withheld", "{kind}");
             assert!(result.response.is_none());
@@ -536,12 +565,19 @@ mod tests {
                 &grant,
                 &receipt.input.episode_id,
                 &receipt.input.event_id,
-                &receipt.input.original
+                &receipt.input.original,
+                Instant::now()
             )
             .unwrap()
             .is_none());
         let result = db
-            .finish_intake(&grant, &receipt, Err("private provider error".into()), 1000)
+            .finish_intake(
+                &grant,
+                &receipt,
+                Err("private provider error".into()),
+                1000,
+                Instant::now(),
+            )
             .unwrap();
         assert_eq!(result.status, "degraded");
         assert!(!serde_json::to_string(&result)
@@ -552,10 +588,49 @@ mod tests {
                 &grant,
                 &receipt.input.episode_id,
                 &receipt.input.event_id,
-                &receipt.input.original
+                &receipt.input.original,
+                Instant::now()
             )
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_pending_intake_past_its_hook_deadline_reads_as_interrupted() {
+        let receipt = |pending_until| IntakeReceipt {
+            schema: 1,
+            status: "pending".into(),
+            input: Input {
+                id: "intake".into(),
+                event_id: "event".into(),
+                episode_id: "episode".into(),
+                session_id: "session".into(),
+                client: "codex".into(),
+                model: None,
+                project_root: "/project".into(),
+                prompt_digest: "digest".into(),
+                capture_generation: 1,
+                original: "Explain this error.".into(),
+                active_task: None,
+            },
+            config_revision: 1,
+            response: None,
+            reason: None,
+            elapsed_ms: 0,
+            session_epoch: 0,
+            task_binding_revision: None,
+            pending_until,
+        };
+        let running = observed(receipt(Some(100)), 100);
+        assert_eq!((running.status.as_str(), running.reason), ("pending", None));
+        for (stored, now) in [(Some(100), 101), (None, 0)] {
+            let interrupted = observed(receipt(stored), now);
+            assert_eq!(interrupted.status, "degraded");
+            assert_eq!(interrupted.reason.as_deref(), Some("processor_interrupted"));
+        }
+        let mut finished = receipt(Some(100));
+        finished.status = "offered".into();
+        assert_eq!(observed(finished, 1_000).status, "offered");
     }
 
     #[test]

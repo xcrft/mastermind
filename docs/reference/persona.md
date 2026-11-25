@@ -132,6 +132,8 @@ no drafts. `pipeline.next_actions` describes recovery for missing evidence.
 | Lost retained text | Marks every episode using that event incomplete, including later context uses |
 | Tool body | Not retained. Native identity, digest and pairing remain recorded; a missing result still blocks evidence |
 | Ambiguous identity, unattributed loss, fork or delivery failure | Fences the session or capture grant |
+| Episode record over 320 KiB | Text of later events is dropped with an `episode_size_limit` gap. Capture stays open |
+| More than 128 open tool calls in a turn | Later calls are not paired, with an `episode_tool_limit` gap |
 | Earlier capture versions | Remain historical with their original gaps. Upgrading cannot repair them |
 | `MMCG_INPUT_ORIGIN=controller` or miner recursion guard | Skips generated input before journal writes |
 | `MMCG_INPUT_ORIGIN=automation` | Retains client/model observations, but labels input `automation_or_agent`, ineligible for personal quotes |
@@ -244,6 +246,14 @@ turn and mark that episode incomplete.
 ```bash
 mmcg miner hooks archive --project-root . --limit 32
 ```
+
+A hook delivery archives up to 32 episodes and stops after 250 ms once it has
+archived one, so the hook stays within its 3 s timeout. `hooks archive` has no
+time bound.
+
+`persona-events.db` and `style.db` record their format version in SQLite
+`user_version`. A store written by a newer mmcg is refused with an error that
+names both versions, and `style.db` data migrations run once per version.
 
 The 2,000-episode bound applies to active payloads. Metadata and other journal
 records share the 64 MiB database cap. Archive storage grows until an
@@ -413,7 +423,8 @@ Restart and trust the updated definitions.
 | Incomplete/redacted/generated input | No processor invocation |
 | Failure/invalid output | `degraded`, original retained, no workflow handoff |
 | Admission changes | Concurrent revocation, reconfiguration, new prompt or end withholds the result |
-| Crash with `pending` receipt | Unknown outcome, not automatically retried |
+| Another session's delivery in flight | Waits up to 1.5 s for it. A marker older than any hook can run fails closed at once |
+| Crash with `pending` receipt | Unknown outcome, not automatically retried. Reads as `degraded` with reason `processor_interrupted` once the processor timeout plus 3 s has passed |
 | Unstable native event identity | Ambiguous identical repeats quarantined |
 
 | Refiner bound | Value |

@@ -15,7 +15,6 @@ use super::profile::{profile_path, publish_profile};
 use super::store::{self, NewFeedback};
 use crate::bounded_fs::ReadControl;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
@@ -126,7 +125,7 @@ pub fn human_turns(transcript: &str) -> Vec<HumanTurn> {
             at,
             text,
             line_no: index + 1,
-            record_digest: crate::hex::encode(&Sha256::digest(line.as_bytes())),
+            record_digest: crate::hex::sha256(line.as_bytes()),
             cwd: record
                 .get("cwd")
                 .and_then(Value::as_str)
@@ -155,7 +154,7 @@ fn stable_session_id(transcript: &str) -> String {
         .filter(|id| valid_session_id(id).is_some())
         .unwrap_or_else(|| {
             // A renamed or copied transcript is still one source.
-            crate::hex::encode(&Sha256::digest(transcript.as_bytes()))
+            crate::hex::sha256(transcript.as_bytes())
         })
 }
 
@@ -578,7 +577,7 @@ pub(super) fn collection_transcript(
     Ok(CollectionTranscript {
         path: transcript.path,
         source: transcript.client.source(&session),
-        digest: crate::hex::encode(&Sha256::digest(text.as_bytes())),
+        digest: crate::hex::sha256(text.as_bytes()),
         bytes: text.len(),
         lines,
         turns,
@@ -1020,7 +1019,7 @@ fn quote_line_current(
     quote: &str,
     expected_source: Option<&str>,
 ) -> bool {
-    if crate::hex::encode(&Sha256::digest(line.as_bytes())) != record_digest {
+    if crate::hex::sha256(line.as_bytes()) != record_digest {
         return false;
     }
     quoted_turn(&human_turns(line), quote).is_some_and(|turn| {
@@ -1511,7 +1510,7 @@ mod tests {
         assert_eq!(turns[0].session_id.as_deref(), Some("session-a"));
         assert_eq!(turns[1].session_id, None);
         let first_line = transcript.lines().next().unwrap();
-        let digest = crate::hex::encode(&Sha256::digest(first_line.as_bytes()));
+        let digest = crate::hex::sha256(first_line.as_bytes());
         assert!(quote_line_current(
             first_line,
             &digest,
@@ -1530,7 +1529,7 @@ mod tests {
     fn cited_human_record_survives_append_but_not_rewrite() {
         let line = record(json!({"type": "user", "origin": {"kind": "human"},
             "message": {"content": "Check contract and rollout separately."}}));
-        let digest = crate::hex::encode(&Sha256::digest(line.as_bytes()));
+        let digest = crate::hex::sha256(line.as_bytes());
         assert!(quote_record_current(
             &format!("{line}\n{}", record(json!({"type": "assistant"}))),
             1,
@@ -1556,7 +1555,7 @@ mod tests {
         let first = record(json!({"type": "assistant"}));
         let second = record(json!({"type": "user", "origin": {"kind": "human"},
             "message": {"content": "Check contract and rollout separately."}}));
-        let digest = crate::hex::encode(&Sha256::digest(second.as_bytes()));
+        let digest = crate::hex::sha256(second.as_bytes());
         let cache = CachedTranscript::new(
             format!("{first}\r\n{second}\n"),
             2,

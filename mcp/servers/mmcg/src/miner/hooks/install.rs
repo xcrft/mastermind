@@ -4,11 +4,14 @@ use crate::bounded_fs::{
     self, AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
 const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
+/// Seconds a client gives each hook, plus the refiner timeout for a prompt.
+pub(super) const HOOK_TIMEOUT_SECS: u64 = 3;
+/// No generated hook runs longer than this before its client stops it.
+pub(super) const MAX_HOOK_SECS: u64 = HOOK_TIMEOUT_SECS + super::refiner::MAX_TIMEOUT_SECS;
 const COMMON_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -77,7 +80,7 @@ pub(super) fn configure(
         .join(" ");
     let registration = format!(
         "# mastermind-persona-hook-v1:{client}:{}",
-        crate::hex::encode(&Sha256::digest(project_text.as_bytes()))
+        crate::hex::sha256(project_text.as_bytes())
     );
     let command = format!(
         "{} miner hooks receive --client {} --project-root {} {registration}",
@@ -88,7 +91,7 @@ pub(super) fn configure(
     let handler = json!({
         "type": "command",
         "command": command,
-        "timeout": 3,
+        "timeout": HOOK_TIMEOUT_SECS,
     });
     let mut events = COMMON_EVENTS.to_vec();
     events.push(extra_event);
@@ -126,7 +129,7 @@ pub(super) fn configure(
         });
         if *event == "UserPromptSubmit" {
             if let Some(timeout) = refiner_timeout {
-                event_handler["timeout"] = json!(timeout + 3);
+                event_handler["timeout"] = json!(timeout + HOOK_TIMEOUT_SECS);
             }
         }
         generated.insert((*event).to_string(), json!([{ "hooks": [event_handler] }]));

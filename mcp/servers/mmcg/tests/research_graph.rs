@@ -18,7 +18,8 @@ fn receiver_calls_do_not_reference_a_free_function_with_the_same_name() {
     );
     assert!(store.callers_of("map", None, None).unwrap().is_empty());
     assert!(store
-        .impact_of_many(&["map".into()], 3, 100, None)
+        .impact_of_many_bounded(&["map".into()], 3, 100, None)
+        .map(|(_, rows)| rows)
         .unwrap()
         .is_empty());
     assert!(store
@@ -33,12 +34,15 @@ fn receiver_calls_do_not_reference_a_free_function_with_the_same_name() {
         .any(|(s, _, _)| s.name == "map"));
     for (scope, kind) in [(".", "root"), ("src", "directory"), ("src/lib.rs", "file")] {
         assert!(!store
-            .map_centrality(scope, kind, 100)
+            .map_centrality_filtered(scope, kind, 100, false)
             .unwrap()
             .iter()
             .any(|r| r.symbol.name == "map"));
     }
-    assert!(store.file_in_degrees(false, 100).unwrap().is_empty());
+    assert!(store
+        .file_in_degrees_scoped("", "root", false, 100)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -51,7 +55,9 @@ fn receiver_and_free_calls_keep_separate_degrees_even_with_the_same_name() {
     assert_eq!(runs.len(), 2);
     assert!(runs.iter().all(|(_, degree, _)| *degree == 1));
     for (scope, kind) in [(".", "root"), ("src", "directory")] {
-        let rows = store.map_centrality(scope, kind, 100).unwrap();
+        let rows = store
+            .map_centrality_filtered(scope, kind, 100, false)
+            .unwrap();
         let runs: Vec<_> = rows.iter().filter(|r| r.symbol.name == "run").collect();
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|r| r.in_degree == 1));
@@ -64,7 +70,8 @@ fn transitive_impact_does_not_jump_from_a_free_function_to_a_same_named_method()
         "fn changed() {}\nfn run() { changed(); }\nstruct Worker;\nimpl Worker { fn run(&self) {} }\nfn free_entry() { run(); }\nfn method_entry(w: Worker) { w.run(); }",
     );
     let impact = store
-        .impact_of_many(&["changed".into()], 3, 100, None)
+        .impact_of_many_bounded(&["changed".into()], 3, 100, None)
+        .map(|(_, rows)| rows)
         .unwrap();
     assert!(impact
         .iter()
@@ -109,7 +116,7 @@ fn external_receiver_calls_do_not_create_a_false_api_boundary() {
         match_mode: mmcg::store::MapBoundaryMatch::Recursive,
     }];
     assert!(store
-        .map_boundaries(&components, 10, 10)
+        .map_boundaries_filtered(&components, 10, 10, false)
         .unwrap()
         .is_empty());
 }
@@ -139,7 +146,8 @@ fn main() { registered_entry(); macro_entry(); }
             "a reference must not claim a proven call"
         );
         let impact = store
-            .impact_of_many(&[target.into()], 3, 100, None)
+            .impact_of_many_bounded(&[target.into()], 3, 100, None)
+            .map(|(_, rows)| rows)
             .unwrap();
         assert!(impact
             .iter()

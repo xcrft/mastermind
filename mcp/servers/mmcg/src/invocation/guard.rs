@@ -189,7 +189,7 @@ fn runner() -> Result<Executable, String> {
     Ok(Executable {
         invocation_path: path.clone(),
         resolved_path: path,
-        sha256: sha(&bytes),
+        sha256: crate::hex::sha256(&bytes),
     })
 }
 
@@ -589,7 +589,7 @@ fn current(
         Path::new(&manifest.binding.spec_path),
         &state,
     )?;
-    if sha(&read(
+    if crate::hex::sha256(&read(
         root,
         Path::new(&manifest.binding.spec_path),
         SPEC_LIMIT,

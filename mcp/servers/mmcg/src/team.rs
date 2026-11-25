@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -263,7 +262,7 @@ fn read_manifest(
     }
     if let Some(expected) = expected_digest {
         if !validate_digest(expected)
-            || expected != format!("sha256:{}", crate::hex::encode(&Sha256::digest(&bytes)))
+            || expected != format!("sha256:{}", crate::hex::sha256(&bytes))
         {
             return Err(TeamError::Contract(
                 "team manifest does not match its authorized SHA-256 digest".into(),
@@ -461,29 +460,6 @@ fn resolve_repositories(
     Ok(output)
 }
 
-struct DigestWriter(Sha256);
-
-impl DigestWriter {
-    fn new() -> Self {
-        Self(Sha256::new())
-    }
-
-    fn finish(self) -> String {
-        crate::hex::encode(&self.0.finalize())
-    }
-}
-
-impl Write for DigestWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn index_read_error(error: crate::bounded_fs::BoundedReadError) -> TeamError {
     match error {
         crate::bounded_fs::BoundedReadError::TooLarge { .. }
@@ -519,14 +495,17 @@ fn hash_regular(
     {
         return Ok(None);
     }
-    let mut writer = DigestWriter::new();
+    let mut hasher = Sha256::new();
     let source = crate::bounded_fs::copy_regular_file_with_capability(
         root,
         path,
         MAX_INDEX_FILE_BYTES,
         control,
         None,
-        &mut writer,
+        &mut crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: std::io::sink(),
+        },
     )
     .map_err(index_read_error)?;
     *total_bytes = total_bytes
@@ -537,7 +516,10 @@ fn hash_regular(
             "team indexes exceed the {MAX_INDEX_TOTAL_BYTES}-byte total limit"
         )));
     }
-    Ok(Some((writer.finish(), source.declared_len)))
+    Ok(Some((
+        crate::hex::encode(&hasher.finalize()),
+        source.declared_len,
+    )))
 }
 
 fn wal_path(index: &Path) -> PathBuf {
@@ -568,10 +550,7 @@ fn index_digest(
     });
     let canonical = crate::audit_bundle::canonical_json(&statement)
         .map_err(|error| TeamError::Contract(error.to_string()))?;
-    Ok(format!(
-        "sha256:{}",
-        crate::hex::encode(&Sha256::digest(canonical))
-    ))
+    Ok(format!("sha256:{}", crate::hex::sha256(canonical)))
 }
 
 fn inspect_repository(
@@ -645,7 +624,7 @@ pub fn lock(manifest_path: &Path, output: &Path) -> Result<TeamLockSummary, Team
     let mut bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|error| TeamError::Io(error.to_string()))?;
     bytes.push(b'\n');
-    let manifest_sha256 = format!("sha256:{}", crate::hex::encode(&Sha256::digest(&bytes)));
+    let manifest_sha256 = format!("sha256:{}", crate::hex::sha256(&bytes));
     crate::audit_bundle::write_atomic(output, &bytes, true)
         .map_err(|error| TeamError::Io(error.to_string()))?;
     Ok(TeamLockSummary {
@@ -656,17 +635,6 @@ pub fn lock(manifest_path: &Path, output: &Path) -> Result<TeamLockSummary, Team
         repositories: manifest.repositories.len() as u32,
         relationships: manifest.relationships.len() as u32,
     })
-}
-
-fn component_for_file(path: &str) -> String {
-    let parent = Path::new(path)
-        .parent()
-        .and_then(Path::to_str)
-        .unwrap_or("");
-    if parent.is_empty() {
-        return ".".into();
-    }
-    parent.split('/').take(2).collect::<Vec<_>>().join("/")
 }
 
 fn component_node_id(repository: &str, component: Option<&str>) -> String {
@@ -904,8 +872,8 @@ fn map_with_policy(
         })?;
         let mut aggregated = BTreeMap::<(String, String), u32>::new();
         for (from_file, to_file) in imports {
-            let from = component_for_file(&from_file);
-            let to = component_for_file(&to_file);
+            let from = crate::queries::component_for_file("", "directory", &from_file, 2);
+            let to = crate::queries::component_for_file("", "directory", &to_file, 2);
             if from == to
                 || !retained_components.contains(&from)
                 || !retained_components.contains(&to)
@@ -1212,10 +1180,7 @@ mod tests {
         .to_string()
         .contains("authorized SHA-256"));
         let lock_bytes = fs::read(&lock_path).unwrap();
-        let lock_digest = format!(
-            "sha256:{}",
-            crate::hex::encode(&Sha256::digest(&lock_bytes))
-        );
+        let lock_digest = format!("sha256:{}", crate::hex::sha256(&lock_bytes));
         assert_eq!(locked.manifest_sha256, lock_digest);
         let graph = map_authorized(&lock_path, parent.path(), &lock_digest).unwrap();
         assert!(!graph.partial);

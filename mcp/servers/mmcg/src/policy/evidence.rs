@@ -7,7 +7,7 @@ use super::{
 use crate::bounded_fs::{
     self, BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
-use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
+use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
 use crate::evidence::{EvidenceExtensionOptions, EvidenceOptions};
 use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::queries::{ChangeImpactResponse, ImpactEngine};
@@ -493,11 +493,13 @@ fn baseline_blobs(
         input.extend_from_slice(path.as_bytes());
         input.push(b'\n');
     }
-    let output = run_bounded_git_with_limit(
+    let output = run_bounded_git_controlled(
         root,
         &["cat-file", "--batch"],
         Some(&input),
         BASELINE_CYCLE_BYTE_LIMIT,
+        None,
+        None,
     )?;
     if !output.success {
         return Err(WorkingTreeDiffError::InvalidRef);
@@ -705,8 +707,7 @@ fn collect_workflow_evidence(
             ));
             continue;
         };
-        let auxiliary = task_name_text.starts_with('_')
-            || task_name_text.starts_with('.')
+        let auxiliary = !crate::task_scaffold::is_task_entry(&task_name_text)
             || task_name_text.ends_with(".md");
         if auxiliary {
             continue;
@@ -1030,7 +1031,6 @@ fn read_workflow_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::fs;
 
     fn external_workflow_fixture(version: u32) -> (tempfile::TempDir, tempfile::TempDir, String) {
@@ -1469,6 +1469,7 @@ mod tests {
         fs::write(
             task.join("state.json"),
             serde_json::to_vec(&RunState {
+                format_version: crate::run_task::RUN_STATE_FORMAT_VERSION,
                 status: "learned".into(),
                 risk: Some("low".into()),
                 next_step: Some("close".into()),
@@ -1714,7 +1715,7 @@ rules:
                 "provenance": {"kind": "test", "artifacts": []},
                 "files": [{
                     "path": "services/payment/charge.py",
-                    "sha256": crate::hex::encode(&Sha256::digest(&bound_source)),
+                    "sha256": crate::hex::sha256(&bound_source),
                     "bytes": bound_source.len()
                 }],
                 "artifacts": [],

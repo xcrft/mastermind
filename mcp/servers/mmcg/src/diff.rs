@@ -11,8 +11,9 @@
 //! 3. Parse the old blob through the same extractor (see [`parse_blob`])
 //! 4. Match declarations by lexical parent, name and kind against the index
 //!
-//! [`symbols_changed_since_worktree`] runs steps 2–4 over a `<ref>` → **working
-//! tree** file scope instead (uncommitted and untracked changes included).
+//! [`symbols_changed_in_worktree_controlled`] runs steps 2–4 over a `<ref>` →
+//! **working tree** file scope instead (uncommitted and untracked changes
+//! included).
 //! `audit-spec` uses it: post-flight runs before the commit step, so a
 //! commit-range scope is empty by construction there.
 //!
@@ -665,7 +666,8 @@ pub(crate) fn symbols_changed_since_controlled(
 /// `mastermind impact`); the symbol comparison is `git_ref`'s blobs against the
 /// live index, so a stale index under-reports symbol changes — it does not
 /// invent them.
-pub fn symbols_changed_since_worktree(
+#[cfg(test)]
+fn symbols_changed_since_worktree(
     store: &Store,
     repo_root: &Path,
     git_ref: &str,
@@ -755,7 +757,8 @@ fn symbol_diff_over_blobs(
     })
 }
 
-pub fn symbols_changed_in_worktree(
+#[cfg(test)]
+fn symbols_changed_in_worktree(
     store: &Store,
     repo_root: &Path,
     git_ref: &str,
@@ -788,8 +791,9 @@ pub(crate) type RemovedDeclarations = BTreeMap<String, Vec<usize>>;
 #[derive(Default)]
 pub(crate) struct DeclarationChanges {
     pub removed: RemovedDeclarations,
-    /// The removals that need an acknowledgement: declarations outside function
-    /// bodies, in files that did not move unchanged to another path.
+    /// The removals that need an acknowledgement: declarations other than
+    /// function-local helpers, in files that did not move unchanged to another
+    /// indexed code path.
     pub api_removed: RemovedDeclarations,
     /// `api_removed` as symbol references.
     pub api_removed_symbols: Vec<SymbolRef>,
@@ -810,13 +814,19 @@ impl DeclarationChanges {
     }
 }
 
-/// A declaration inside a function or method body is local to it. No caller
-/// can reach it, so removing it changes no interface.
-fn is_function_local(declarations: &[Declaration<'_>], index: usize) -> bool {
-    std::iter::successors(declarations[index].parent, |&parent| {
-        declarations[parent].parent
-    })
-    .any(|parent| matches!(declarations[parent].kind, "function" | "method"))
+/// A function declared inside a function or method body stays in that body's
+/// scope in these languages, so no caller can reach it. Any other nested
+/// declaration can become API: a JS or TS object-literal or class-expression
+/// member is called on the returned value, a nested PHP function is global once
+/// the outer one runs, and a nested type's members are reachable through its
+/// instances.
+fn is_function_local(language: &str, declarations: &[Declaration<'_>], index: usize) -> bool {
+    matches!(language, "python" | "rust" | "csharp")
+        && declarations[index].kind == "function"
+        && std::iter::successors(declarations[index].parent, |&parent| {
+            declarations[parent].parent
+        })
+        .any(|parent| matches!(declarations[parent].kind, "function" | "method"))
 }
 
 pub(crate) fn symbols_changed_in_worktree_with_declarations(
@@ -906,14 +916,15 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
     let mut body_changed = Vec::new();
     let mut errors = Vec::new();
     let mut declarations = DeclarationChanges::default();
-    // A deleted file whose exact bytes reappear at a changed path moved. Its
-    // declarations still exist, so deleting the old path removes none of them.
+    // A deleted file whose exact bytes reappear at a changed, indexed code path
+    // moved. Its declarations still exist there, so deleting the old path
+    // removes none of them. Each destination accounts for one deleted file.
     let deleted_contents: HashSet<&[u8]> = files
         .iter()
         .filter(|file| file.status == "deleted")
         .filter_map(|file| old_blobs.get(&file.path)?.as_deref())
         .collect();
-    let mut moved_contents = HashSet::new();
+    let mut move_destinations: HashMap<&[u8], usize> = HashMap::new();
     let mut deleted_removals = Vec::new();
 
     for file in &files {
@@ -943,10 +954,11 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
                 .removed
                 .insert(rel.clone(), matches.removed.clone());
         }
+        let language = extractor_for_path(Path::new(rel)).map_or("", |extractor| extractor.name());
         let api_removal = matches
             .removed
             .iter()
-            .filter(|&&index| !is_function_local(&old_declarations, index))
+            .filter(|&&index| !is_function_local(language, &old_declarations, index))
             .map(|&index| (index, old_declarations[index].symbol_ref(rel)))
             .collect::<Vec<_>>();
         for &index in &matches.added {
@@ -979,11 +991,14 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
                 .bytes,
             )
         };
+        let indexed_code =
+            declarations.current_files.contains(rel.as_str()) && !new_symbols.is_empty();
         if let Some(content) = current_bytes
             .as_deref()
+            .filter(|_| indexed_code)
             .and_then(|current| deleted_contents.get(current))
         {
-            moved_contents.insert(*content);
+            *move_destinations.entry(*content).or_default() += 1;
         }
         match old_blob {
             Some(old) if file.status == "deleted" => deleted_removals.push((old, rel, api_removal)),
@@ -1035,8 +1050,9 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
     }
 
     for (old, rel, api_removal) in deleted_removals {
-        if !moved_contents.contains(old) {
-            declarations.record_api_removal(rel, api_removal);
+        match move_destinations.get_mut(old) {
+            Some(destinations) if *destinations > 0 => *destinations -= 1,
+            _ => declarations.record_api_removal(rel, api_removal),
         }
     }
 
@@ -1245,40 +1261,10 @@ fn run_bounded_git(
     args: &[&str],
     input: Option<&[u8]>,
 ) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
-    run_bounded_git_with_limit(repo, args, input, GIT_OUTPUT_LIMIT)
+    run_bounded_git_controlled(repo, args, input, GIT_OUTPUT_LIMIT, None, None)
 }
 
-pub(crate) fn run_bounded_git_with_limit(
-    repo: &Path,
-    args: &[&str],
-    input: Option<&[u8]>,
-    output_limit: usize,
-) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
-    run_bounded_git_with_limit_until(repo, args, input, output_limit, None)
-}
-
-pub(crate) fn run_bounded_git_with_limit_until(
-    repo: &Path,
-    args: &[&str],
-    input: Option<&[u8]>,
-    output_limit: usize,
-    deadline: Option<Instant>,
-) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
-    run_bounded_git_controlled(repo, args, input, output_limit, deadline, None)
-}
-
-pub(crate) fn run_bounded_git_with_control(
-    repo: &Path,
-    args: &[&str],
-    input: Option<&[u8]>,
-    output_limit: usize,
-    deadline: Option<Instant>,
-    interrupted: Option<&dyn Fn() -> bool>,
-) -> Result<BoundedGitOutput, WorkingTreeDiffError> {
-    run_bounded_git_controlled(repo, args, input, output_limit, deadline, interrupted)
-}
-
-fn run_bounded_git_controlled(
+pub(crate) fn run_bounded_git_controlled(
     repo: &Path,
     args: &[&str],
     input: Option<&[u8]>,

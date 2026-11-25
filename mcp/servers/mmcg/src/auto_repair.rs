@@ -8,7 +8,6 @@ use crate::executor_report::ReportStatus;
 use crate::spec::{ParsedSpec, VerifyEntry};
 use crate::verification_receipts::{Binding, CheckEvidence, CheckEvidenceStatus};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
@@ -91,10 +90,6 @@ pub(crate) fn assess_semantic(
         return Err("auto_follow_up_no_concrete_criterion");
     }
     Ok(failed)
-}
-
-fn digest(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
 }
 
 fn source_bytes(
@@ -287,7 +282,7 @@ impl Feedback {
             source_invocation_id: invocation.invocation_id.clone(),
             source_inputs_sha256,
             source_verification_inputs_sha256,
-            source_audit_sha256: crate::hex::encode(&Sha256::digest(bytes)),
+            source_audit_sha256: crate::hex::sha256(bytes),
             max_iterations,
             failed_checks,
             unmet_criteria,
@@ -326,7 +321,7 @@ impl Feedback {
         let review_path = crate::task_review::record_path(root.canonical_root(), spec);
         let mut remaining = 64 * 1024 * 1024;
         let review = source_bytes(&root, &review_path, &mut remaining)?;
-        if digest(&review) != packet.review_revision {
+        if crate::hex::sha256(&review) != packet.review_revision {
             return Err("auto_follow_up_review_changed");
         }
         // follow_up has validated the native receipt's content and binding.
@@ -381,7 +376,7 @@ impl Feedback {
                 .clone()
                 .ok_or("auto_follow_up_native_executable_unavailable")?,
         };
-        semantic.source_feedback_sha256 = digest(
+        semantic.source_feedback_sha256 = crate::hex::sha256(
             &serde_json::to_vec(&("mastermind-semantic-follow-up-v1", &semantic))
                 .map_err(|_| "auto_follow_up_serialization_failed")?,
         );
@@ -410,7 +405,9 @@ impl Feedback {
         }
         let mut remaining = 64 * 1024 * 1024;
         for (path, expected) in &semantic.source_files {
-            if digest(&source_bytes(&root, Path::new(path), &mut remaining)?) != *expected {
+            if crate::hex::sha256(&source_bytes(&root, Path::new(path), &mut remaining)?)
+                != *expected
+            {
                 return Err("auto_follow_up_evidence_changed");
             }
         }

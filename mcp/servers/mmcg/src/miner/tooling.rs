@@ -8,7 +8,7 @@
 //! current configuration is applied to older commits as well, which errs toward
 //! withholding a personal claim rather than inventing one.
 
-use crate::diff::{run_bounded_git_with_limit, WorkingTreeDiffError};
+use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -137,11 +137,13 @@ pub(super) fn listing(
     root: &Path,
     history_ref: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    match run_bounded_git_with_limit(
+    match run_bounded_git_controlled(
         root,
         &["ls-tree", "-r", "-z", "--name-only", history_ref],
         None,
         LISTING_OUTPUT_LIMIT,
+        None,
+        None,
     ) {
         Ok(out) if out.success => Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned())),
         Ok(_) => Err("git ls-tree exited unsuccessfully".into()),
@@ -275,11 +277,13 @@ pub(super) fn read_snapshot_files(
         .iter()
         .map(|path| format!("{history_ref}:{path}\n"))
         .collect();
-    let out = match run_bounded_git_with_limit(
+    let out = match run_bounded_git_controlled(
         root,
         &["cat-file", "--batch"],
         Some(input.as_bytes()),
         CONTENT_OUTPUT_LIMIT,
+        None,
+        None,
     ) {
         Ok(out) if out.success => out.stdout,
         Ok(_) => return Err("git cat-file exited unsuccessfully".into()),

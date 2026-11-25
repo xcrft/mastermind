@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `pulldown-cmark` is updated to 0.13.6 for RUSTSEC-2026-0433. Mastermind
   does not enable wikilinks, so the quadratic parse was not reachable.
-- `rusqlite` is updated to 0.41.1 and the bundled SQLite to 3.54.1
-  (`libsqlite3-sys` 0.39.1) for RUSTSEC-2026-0459. Older SQLite could return
+- `rusqlite` is updated to 0.43.0 and the bundled SQLite to 3.54.1
+  (`libsqlite3-sys` 0.40.0) for RUSTSEC-2026-0459. Older SQLite could return
   uninitialized memory when a database and its `-wal` file had different page
   sizes. `mmcg` opens the index with its `-wal` from the checkout, so a
   repository that ships a crafted pair could reach it.
@@ -37,6 +37,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `mmcg index` exits 1 when a source file fails to index,
+  including a symlink or other non-regular file, after it prints the failed
+  paths. Scripts that treated a finished run as success need to handle the new
+  exit code.
+- **Breaking:** `facts adapt` requires `--report-revision OID`, the full
+  commit the report was produced from, such as `$GITHUB_SHA`. Existing adapt
+  scripts fail until they pass it. The adapter used to stamp the indexed HEAD
+  on a report of unknown revision. The OID must equal the indexed HEAD, and a
+  SARIF run that declares `versionControlProvenance` for this repository must
+  name the same revision (`artifact_revision_mismatch`).
+- **Breaking:** Setup accepts a project-local npm launcher only when it is an
+  absolute path ending in `bin/mastermind.js` run by an absolute `node`. Other
+  values fail with `npm_launcher_path_invalid`.
+- **Breaking:** `state.json` records `format_version`. State without it is
+  read as format 1. State with a newer format is refused with its version and
+  a request to use the newer binary, where it used to look damaged and the
+  advice was to restore it. A release before this one rejects all state this
+  release writes, so finish or close open tasks before going back.
+- **Breaking:** `mastermind ci` fails and names the files when a source file
+  fails to index. Before, it audited the partial graph and could pass.
+- **Breaking:** Legacy flat and other non-`spec.md` specs get their own
+  executor report and audit, named after the spec, such as
+  `050-a.executor-report.md`. Before, two such specs in one folder read and
+  overwrote each other's report and audit, and a finished task could fail its
+  audit with `task_mismatch`. When a task of such a spec already has state and
+  an old `executor-report.md` or `audit.md` sits beside the spec, `run-task`
+  stops before it changes the state and prints the `mv` command for each file,
+  or `rm` when the new name already exists. A `.gitignore` that lists
+  `executor-report.md` or `audit.md` for such specs needs the new names too.
+- **Breaking:** Reapproval of a task approved before this change fails with
+  `preflight_approval_schema_outdated`. Start a new task. The older parser
+  could have dropped preconditions that the edited files can no longer prove.
+- **Breaking:** A task started before this change fails preflight and
+  postflight with `initial_worktree_schema_outdated`. Its initial worktree
+  manifest missed the flagged edits, which would then be charged to the
+  executor. Start a new task. Its state stays readable.
+- **Breaking:** `audit-spec` and `ci` refuse a change list over 10,000 files
+  or with a non-UTF-8 path (`change_inventory_incomplete`). They used to
+  report Held for the files they could list.
+- **Breaking:** `verify-spec` no longer evaluates index checks against an
+  index that no longer matches the files. It reports `not_evaluated`, and
+  `--require-index` fails. Standalone `audit-spec` refuses such an index
+  instead of holding.
+- **Breaking:** `mastermind ci` fails when `--changed-only`,
+  `--require-executor-report` or `--bundle-dir` is set and no task contract
+  exists. It used to pass when `.mastermind/tasks/` was missing.
+- **Breaking:** The hidden compatibility flags are removed. `mastermind init`
+  no longer accepts `--no-claude`, since drafting is already off unless
+  `--draft-with claude` is set. `mastermind setup` no longer accepts
+  `--dry-run` (run it without `--write`), `--write-mcp` (use `--write`) or
+  `--project PATH` (use `--scope project --root PATH`).
+- `mmcg_dependency_cycles` resolves an import only within its language family.
+  JavaScript, TypeScript, TSX and Vue form one family. A name shared by a
+  Python and a Rust file no longer closes a cycle between them.
+- Index writes take an exclusive writer lock file next to the database, such as
+  `.mastermind/mmcg.db-writer.lock`. A refresh that waits too long for it
+  returns `index_busy` with `retryable: true` instead of
+  `work_limit_exceeded`, and `mmcg index` fails with `the index is busy`.
+- An index written by a newer mmcg is refused with an error that names both
+  schema versions. Before, the older binary dropped and rebuilt its graph.
 - Dependencies are on their latest releases: `rusqlite` 0.43,
   `tree-sitter-c-sharp` 0.24 and compatible updates of the other crates. The
   C# grammar reads C# 14 `extension` blocks, and their members are indexed as
@@ -50,12 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wait is not mistaken for a crashed finalizer. The finalizer tests set the
   wait themselves, so they no longer fail when a loaded machine runs them
   slower than that window.
-- `facts adapt` requires `--report-revision OID`, the full commit the report was
-  produced from, such as `$GITHUB_SHA`. Existing adapt scripts fail until they
-  pass it. The adapter used to stamp the indexed HEAD on a report of unknown
-  revision. The OID must equal the indexed HEAD, and a SARIF run that declares
-  `versionControlProvenance` for this repository must name the same revision
-  (`artifact_revision_mismatch`).
 - `init` keeps the workflow instructions in a managed block. It appends the
   block to an existing `CLAUDE.md` instead of skipping the file, refreshes an
   older block, and writes the same block to `AGENTS.md` for Codex.
@@ -70,7 +124,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mastermind-design-intake`.
 - The planner names a Strict review that works without subagents, such as in
   Codex: `mastermind-critical-review` in a fresh child agent.
-
+- `persona-events.db` and `style.db` record their format version in SQLite
+  `user_version`. A store written by a newer mmcg is refused with an error that
+  names both versions. The `style.db` feedback re-key runs once per format
+  version instead of on every open.
+- A hook delivery stops archiving after 250 ms once it has archived one
+  episode, so it stays within its 3 s timeout. The journal waits up to 2 s for
+  the writer lock instead of 0.5 s. `hooks archive` has no time bound.
 - The PR audit example pins `xcrft/mastermind` to a commit instead of
   `uses: ./`, which only worked inside this repository and let a pull request
   change the audit code. The publication comment shows the envelope verdicts
@@ -78,18 +138,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `.mastermind/.gitignore` that `init` writes carries the lines that commit
   task contracts and executor reports, commented out. The GitHub audit Action
   needs them, and the old `!path/to/file` advice did not work.
+- A relative path the runtime treats as repository-relative now always names a
+  file from the root, whatever the working directory. Before, a command run in
+  a subdirectory read `sub/.mastermind/...`, so `miner hooks bind-task` failed
+  there even with absolute arguments and the hooks lost the task binding.
+  Command-line paths that name files from the working directory, `--root`
+  among them, are made absolute first, so `workflow audit` prints the absolute
+  root.
+- Entries under `.mastermind/tasks` that start with `_` or `.` are never tasks.
+  `ci` no longer audits `_draft/spec.md`, which `status` did not show, and
+  `run-task` refuses such a spec instead of creating state that `status` and
+  `next` never list.
+- `run-task` refuses a spec path that names the file differently from disk,
+  such as `SPEC.md` for `spec.md` on macOS or Windows, and prints the path to
+  use. Before, the second spelling got its own state, lock, iteration budget
+  and artifacts for the same task. Refusing keeps one name per task without
+  rewriting the path the user gave: the on-disk name comes from the same
+  `canonicalize` that macOS and Windows use to report the stored case.
+- `setup` keeps the key order of the client config files it edits, such as
+  `~/.claude.json`. It used to rewrite them with the keys sorted.
+- A stored semantic review record with a repeated JSON key at any depth fails
+  with `semantic_review_record_invalid`.
 
 ### Fixed
 
+- `mmcg serve` starts while `mmcg index --force` runs. Opening a current index
+  no longer writes its schema, and serve no longer copies a snapshot just to
+  read the index root. Before, most starts during a rebuild failed with
+  `index changed while creating a read-only snapshot`.
+- Two index runs no longer interleave their writes. The second waits for the
+  writer lock.
+- A source that gains a NUL byte after its first 8 KiB leaves the index.
+  `mmcg watch` also drops a source that becomes binary or grows over 5 MiB.
+  Before, its old symbols stayed and the index looked fresh.
+- A symlinked source no longer keeps the extractor and concept contracts dirty
+  and no longer stops `mmcg watch` after three retries.
+- A source that fails to read keeps its indexed rows. Before, one transient
+  read error purged its symbols.
+- Outside Git, a directory the walk cannot read fails the index. Before, its
+  sources were purged as if deleted.
+- Git submodules are counted as skipped submodules in `mmcg index` and
+  `mmcg_status`, instead of as unsupported paths.
+- `mmcg watch` ignores renames under skipped directories such as `target` and
+  `node_modules`. Before, each one ran a full refresh.
+- `mmcg watch` purges a removed path only when it is still gone after the
+  debounce, so an editor's atomic save keeps the file's rows.
+- A schema migration runs in one transaction and fails the open when a column
+  cannot be added. Before, failed `ALTER TABLE` statements were ignored and an
+  index without the column passed as current.
+- A failed MCP refresh that finished its run reports `unindexable_sources`
+  instead of `index_rebuild_required` when it used up the budget.
+- `mmcg serve` removes its private index snapshots when the watchdog exits the
+  process.
+- The context packet retries a read-only index snapshot that a concurrent write
+  invalidated, then reports `context_index_snapshot_unavailable`. Before, it
+  was built without the index and delivery failed as changed sources.
+- A long turn no longer stops capture. Once an episode record reaches 320 KiB,
+  text of later events is dropped with an `episode_size_limit` gap, and more
+  than 128 open tool calls record `episode_tool_limit`.
+- `hooks recover` tolerates markers that other deliveries clear during its
+  listing. When it cannot remove every marker, it keeps the old generation and
+  stops capture with a `capture_recovery_incomplete` gap.
+- `hooks status` and doctor report the capture marker count and the oldest
+  marker age. A marker with no journal gap gets its own next action that names
+  `mastermind miner hooks recover`. Doctor's `capture fence markers` check
+  counts markers in every project and the prefixes with no known grant.
+- An unexpected entry such as `.DS_Store` in `~/.mastermind/.persona-capture`
+  is named before a marker is created. Markers no longer pile up, recovery
+  keeps the generation, and status no longer reports the journal as
+  unavailable.
+- Another session's delivery in flight no longer degrades prompt intake or
+  skips a task-mining offer. The hook waits up to 1.5 s for it, and fails
+  closed at once when the other delivery's marker is older than any hook can
+  run.
+- A `pending` intake whose processor timeout plus 3 s has passed reads as
+  `degraded` with reason `processor_interrupted`.
+- Doctor accepts the `node bin/mastermind.js serve` registration that setup
+  writes for a project-local npm install. Setup and doctor share one rule.
+- When native setup has removed the old registration and the new add fails,
+  setup adds the old entry back and reports `native_add_failed_restored` or
+  `native_add_failed_not_restored`.
+- The npm wrapper forwards SIGTERM, SIGINT and SIGHUP to `mmcg` and exits with
+  its status, so stopping an MCP server no longer leaves `mmcg` running.
+- Persona CLI tests clear the inherited environment, so an exported
+  `MMCG_INPUT_ORIGIN` or `CLAUDE_CONFIG_DIR` no longer breaks them.
 - Prompt intake no longer degrades because another project or client finished
   a capture at the same moment. The capture-pending check treats a marker
   cleared during its read as absent and rereads a listing that changed, instead
   of reporting the project as pending.
 - Post-flight no longer asks to acknowledge removals that are not API
-  removals. A declaration inside a function or method body is local, and a file
-  moved with its bytes unchanged keeps its declarations, so a pure `git mv` of
-  a component with local helpers passes without `removed_symbols`. A move with
-  content changes still counts the old path's declarations as removed.
+  removals. A function declared inside a function or method body in Python,
+  Rust or C# is local, and a file moved with its bytes unchanged to indexed
+  source keeps its declarations, so a pure `git mv` of a component with local
+  helpers passes without `removed_symbols`. Each destination covers one deleted
+  file. A move with content changes, or to a path the index skips such as
+  `api.py.orig`, still counts the old path's declarations as removed. Nested
+  declarations that callers can reach still need an acknowledgement: methods of
+  an object literal or class expression a JS or TS function returns, nested PHP
+  functions and members of a type declared in a function.
 - The observed verification snapshot now reads files up to its 512 MiB pass
   budget, so a tracked file over 128 MiB no longer stops pre-flight. When the
   budget runs out, the error names the file, its size and the bytes left. A
@@ -106,18 +252,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The 100,000-file auto refresh cap counts only files in a supported language.
   Before, a repository with many data or text files hit `refresh_limit_exceeded`
   on every MCP call, and `mastermind index .` did not clear it.
-- `mastermind ci` fails and names the files when a source file fails to index.
-  Before, it audited the partial graph and could pass.
-- Legacy flat and other non-`spec.md` specs get their own executor report and
-  audit, named after the spec, such as `050-a.executor-report.md`. Before, two
-  such specs in one folder read and overwrote each other's report and audit,
-  and a finished task could fail its audit with `task_mismatch`. A task already
-  in flight under one of these layouts needs its report moved to the new name.
 - `run-task`, `review-task`, `verification run`, `acceptance status`,
   `verify-spec` and `audit-spec` accept an absolute spec path that reaches the
   repository through a link, such as `$PWD` in a linked directory or `/var` on
-  macOS. Before, `audit-spec --bundle` refused such a spec and a failed audit
-  dropped its lesson candidate without an error.
+  macOS, or through `..`, as `../spec.md` does in a subdirectory. Before,
+  `audit-spec --bundle` refused such a spec and a failed audit dropped its
+  lesson candidate without an error. `audit-spec --executor-report` resolves
+  its path the same way as the spec.
+- `audit-spec --json` reports a lesson candidate it could not write on stderr.
+  It used to drop the error.
+- `init` counts a legacy flat spec once. Its own `050-a.audit.md` and
+  `050-a.executor-report.md` were counted as more specs, and the migration
+  example could name one of them.
+- Error messages that name a file from Git, such as a snapshot or initial
+  worktree file over its limit, escape terminal control characters in the name.
+- `status` names the real report or audit file of a failed post-flight, such
+  as `a.executor-report.md`, instead of `executor-report.md`.
+- The executor skill, its agent and the report contract tell the executor to
+  write the report at the path `run-task --pre-only` prints. They named
+  `<task>/executor-report.md`, which post-flight does not read for a spec with
+  another name.
 - `miner hooks show` no longer marks a fresh analysis as not current when the
   task finalizer binds the model and records the analysis while `show` reads.
   The episode revision and the analysis receipts are now read together.
@@ -163,9 +317,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer a declared command.
 - A heading indented past a list item's content no longer splits spec sections
   or resets the FIND target.
-- Reapproval of a task approved before this change fails with
-  `preflight_approval_schema_outdated`. Start a new task. The older parser could
-  have dropped preconditions that the edited files can no longer prove.
 - The audit change list now includes edits that `assume-unchanged` or
   `skip-worktree` hide from `git diff`. Git diffs those files again on a copy
   of the index with both flags cleared, so its own attribute, mode, symlink
@@ -175,16 +326,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Git reads for audits and inventories no longer run repository hooks. Git
   runs `post-index-change` on any index write, including the refresh `diff`
   may do.
-- A task started before this change fails preflight and postflight with
-  `initial_worktree_schema_outdated`. Its initial worktree manifest missed the
-  flagged edits, which would then be charged to the executor. Start a new
-  task. Its state stays readable.
-- `audit-spec` and `ci` refuse a change list over 10,000 files or with a
-  non-UTF-8 path (`change_inventory_incomplete`). They used to report Held for
-  the files they could list.
-- `verify-spec` no longer evaluates index checks against an index that no
-  longer matches the files. It reports `not_evaluated`, and `--require-index`
-  fails. Standalone `audit-spec` refuses such an index instead of holding.
 - CLI `query`, `map`, `repo-map` and `impact` warn on stderr when the index is
   not current. MCP tools use the same freshness rule.
 - `mmcg index`, automatic refresh and the freshness check share one source
@@ -206,9 +347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading the spec templates write. The section was ignored before, so symbol,
   caller and signature checks did not run on it. Existing specs with a filled
   snapshot now get these checks, and an unfilled `<symbol>` line is an error.
-- `mastermind ci` fails when `--changed-only`, `--require-executor-report` or
-  `--bundle-dir` is set and no task contract exists. It used to pass when
-  `.mastermind/tasks/` was missing.
 - Git commands from Mastermind no longer run the `core.fsmonitor` program from
   a repository's config.
 - `team map` keeps a lock valid after a member starts `mmcg serve`. Indexing

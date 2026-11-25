@@ -432,10 +432,6 @@ pub fn parse_str(text: &str) -> Result<ExecutorReport, String> {
     parse_legacy(trimmed)
 }
 
-pub fn parse_canonical_file(path: &Path) -> Result<ExecutorReport, String> {
-    require_canonical(parse_file(path)?)
-}
-
 #[doc(hidden)]
 pub fn parse_canonical_repository_file(
     repo_root: &Path,

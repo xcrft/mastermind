@@ -8,7 +8,7 @@
 mod junit;
 mod otel;
 
-use crate::diff::{run_bounded_git_with_limit_until, WorkingTreeDiffError};
+use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
 use crate::queries::ChangeImpactResponse;
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use globset::{GlobBuilder, GlobMatcher};
@@ -16,7 +16,6 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -1076,10 +1075,7 @@ impl Collector<'_> {
     fn register_artifact(&mut self, id: &str, input: &SourceInput) {
         self.artifact_identities.insert(
             id.to_string(),
-            (
-                crate::hex::encode(&Sha256::digest(&input.bytes)),
-                input.bytes.len() as u64,
-            ),
+            (crate::hex::sha256(&input.bytes), input.bytes.len() as u64),
         );
     }
 
@@ -1988,12 +1984,13 @@ impl Collector<'_> {
         ];
         args.extend(self.relevant.iter().cloned());
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let output = match run_bounded_git_with_limit_until(
+        let output = match run_bounded_git_controlled(
             self.root,
             &args,
             None,
             GIT_HISTORY_OUTPUT_LIMIT,
             self.deadline,
+            None,
         ) {
             Ok(output) if output.success => output.stdout,
             Ok(_) => {
@@ -3535,7 +3532,7 @@ mod tests {
 
         assert!(!snapshot.partial);
         let artifact = fs::read(root.path().join("findings.sarif")).unwrap();
-        let artifact_digest = crate::hex::encode(&Sha256::digest(&artifact));
+        let artifact_digest = crate::hex::sha256(&artifact);
         assert_eq!(
             snapshot.sources.items[0].artifact_sha256.as_deref(),
             Some(artifact_digest.as_str())

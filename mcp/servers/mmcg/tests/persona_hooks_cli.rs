@@ -108,13 +108,14 @@ fn episode_capacity_automatically_archives_closed_sources_before_new_capture() {
         json!({"prompt":"Inspect the service contract."}),
     );
     let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    let retention = &status["readiness"]["pipeline"]["retention"];
+    // One delivery archives up to 32 episodes within its time budget, and
+    // always at least one so the new turn has a slot.
+    let archived = retention["archived_episodes"].as_i64().unwrap();
+    assert!((1..=32).contains(&archived), "{retention}");
     assert_eq!(
-        status["readiness"]["pipeline"]["retention"]["archived_episodes"],
-        32
-    );
-    assert_eq!(
-        status["readiness"]["pipeline"]["retention"]["active_episodes"],
-        1969
+        retention["active_episodes"].as_i64().unwrap() + archived,
+        2001
     );
 }
 
@@ -411,6 +412,43 @@ fn a_failed_journal_write_stops_capture_with_one_marker_until_recovery() {
     f.event("resumed", "", "SessionStart", json!({"source":"startup"}));
     let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
     assert_eq!(status["readiness"]["capture"]["status"], "enabled");
+}
+
+#[test]
+fn a_foreign_fence_entry_is_named_without_piling_up_markers_or_bumping_the_generation() {
+    let f = Fixture::new();
+    f.capture("session", "turn");
+    let markers = f.home.join(".mastermind/.persona-capture");
+    fs::write(markers.join(".DS_Store"), b"finder").unwrap();
+    let generation = f.success(&["miner", "hooks", "status", "--client", "codex"])["grant"]
+        ["generation"]
+        .clone();
+    for turn in ["one", "two", "three"] {
+        let output = f.native(json!({"session_id":"session","turn_id":turn,
+            "hook_event_name":"UserPromptSubmit","prompt":"Inspect the callers."}));
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("\".DS_Store\""),
+            "{output:?}"
+        );
+    }
+    assert_eq!(fs::read_dir(&markers).unwrap().count(), 1);
+    let recover = f.run(&["miner", "hooks", "recover", "--client", "codex"]);
+    assert!(!recover.status.success());
+    assert!(String::from_utf8_lossy(&recover.stderr).contains("\".DS_Store\""));
+    let status = f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    assert_eq!(status["grant"]["generation"], generation);
+    assert!(status["capture_pending"].is_null());
+    assert!(status["capture_fence_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("\".DS_Store\"")));
+
+    fs::remove_file(markers.join(".DS_Store")).unwrap();
+    let recovered = f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    assert_eq!(
+        recovered["grant"]["generation"],
+        generation.as_i64().unwrap() + 1
+    );
 }
 
 #[test]
@@ -766,12 +804,11 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_mmcg"));
         c.current_dir(&self.project)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
-            .env("CODEX_HOME", self.home.join(".codex"))
-            .env_remove("MASTERMIND_MINER")
-            .env_remove("MMCG_PROFILE_CLIENT")
-            .env_remove("MMCG_INDEX_PATH");
+            .env("CODEX_HOME", self.home.join(".codex"));
         c
     }
     fn run(&self, args: &[&str]) -> Output {

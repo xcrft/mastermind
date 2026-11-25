@@ -1181,10 +1181,6 @@ pub struct Bundle {
 }
 
 impl Bundle {
-    pub fn from_report(report: &Report, executor_report_path: Option<&str>) -> Self {
-        Self::from_report_full(report, None, None, executor_report_path, None)
-    }
-
     pub fn from_report_full(
         report: &Report,
         executor_report: Option<&crate::executor_report::ExecutorReport>,
@@ -1346,8 +1342,8 @@ impl Bundle {
         root: &Path,
     ) -> Result<crate::audit_bundle::Manifest, Box<dyn std::error::Error>> {
         use crate::audit_bundle::{
-            normalize_repository_identity, sha256_hex, DiffBinding, InputBinding, Manifest,
-            RepositoryBinding, ToolBinding, BUNDLE_INPUT_MAX,
+            normalize_repository_identity, DiffBinding, InputBinding, Manifest, RepositoryBinding,
+            ToolBinding, BUNDLE_INPUT_MAX,
         };
 
         let root = root
@@ -1386,7 +1382,7 @@ impl Bundle {
                 (
                     Some(relative),
                     true,
-                    Some(format!("sha256:{}", sha256_hex(&bytes))),
+                    Some(format!("sha256:{}", crate::hex::sha256(&bytes))),
                 )
             } else {
                 if self.checked_executor_report.is_some() {
@@ -1454,14 +1450,14 @@ impl Bundle {
             },
             inputs: InputBinding {
                 spec_path,
-                spec_sha256: format!("sha256:{}", sha256_hex(&spec_bytes)),
+                spec_sha256: format!("sha256:{}", crate::hex::sha256(&spec_bytes)),
                 executor_report_path,
                 executor_report_present,
                 executor_report_sha256,
             },
             diff: DiffBinding {
                 name_status,
-                binary_diff_sha256: format!("sha256:{}", sha256_hex(&binary_diff)),
+                binary_diff_sha256: format!("sha256:{}", crate::hex::sha256(&binary_diff)),
             },
             tool: ToolBinding {
                 name: "mastermind".into(),
@@ -1515,7 +1511,7 @@ fn git_bytes(
     args: &[&str],
     limit: usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = crate::diff::run_bounded_git_with_limit(root, args, None, limit)
+    let output = crate::diff::run_bounded_git_controlled(root, args, None, limit, None, None)
         .map_err(|error| format!("audit_git_{}", error.code()))?;
     if !output.success {
         return Err("audit_git_failed".into());
@@ -2023,7 +2019,8 @@ mod tests {
             executor_report: None,
         };
 
-        let value = serde_json::to_value(Bundle::from_report(&report, None)).unwrap();
+        let value = serde_json::to_value(Bundle::from_report_full(&report, None, None, None, None))
+            .unwrap();
         assert_eq!(value["git_ref"], value["baseline"]);
         assert_eq!(value["files_diff"], value["changed_files"]);
     }
@@ -2467,25 +2464,133 @@ Edit `src/lib.py`
         git(&dir, &["commit", "-q", "-m", "baseline"]);
         git(&dir, &["tag", "baseline"]);
         git(&dir, &["mv", "src/old.py", "src/new.py"]);
-        let removed = |dir: &Path| {
-            let mut store = Store::open(dir.join("idx.db")).unwrap();
-            Indexer::new(dir).index_all(&mut store, false).unwrap();
-            let s = spec::parse_str("spec.md", "## Goals\n- Rename the module\n");
-            run(&s, &store, dir, "baseline")
-                .unwrap()
-                .findings
-                .into_iter()
-                .filter_map(|f| match f {
-                    Finding::RemovedSymbolNotAcknowledged { symbol, .. } => Some(symbol),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(removed(&dir), Vec::<String>::new());
+        assert_eq!(
+            unacknowledged_removals(&dir),
+            Vec::<(String, String)>::new()
+        );
         // Any edit makes it a different file, so the old path's removals count.
         write(&dir, "src/new.py", &source.replace("def build", "def make"));
-        assert!(removed(&dir).contains(&"build".to_string()));
+        assert!(unacknowledged_removals(&dir).contains(&("src/old.py".into(), "build".into())));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `(file, symbol)` of every removal the audit asks to acknowledge.
+    fn unacknowledged_removals(dir: &Path) -> Vec<(String, String)> {
+        let mut store = Store::open(dir.join("idx.db")).unwrap();
+        Indexer::new(dir).index_all(&mut store, false).unwrap();
+        let s = spec::parse_str("spec.md", "## Goals\n- Change the code\n");
+        let mut removed = run(&s, &store, dir, "baseline")
+            .unwrap()
+            .findings
+            .into_iter()
+            .filter_map(|f| match f {
+                Finding::RemovedSymbolNotAcknowledged { symbol, file } => Some((file, symbol)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        removed.sort();
+        removed
+    }
+
+    fn committed_repo(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = init_repo(name);
+        for (path, body) in files {
+            write(&dir, path, body);
+        }
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "baseline"]);
+        git(&dir, &["tag", "baseline"]);
+        dir
+    }
+
+    #[test]
+    fn a_move_counts_only_once_and_only_into_indexed_code() {
+        let api = "def public_api():\n    return 1\n";
+        for target in ["api.py.orig", "build/api.py"] {
+            let dir = committed_repo("moved_out_of_code", &[("api.py", api)]);
+            if let Some(parent) = Path::new(target).parent() {
+                fs::create_dir_all(dir.join(parent)).unwrap();
+            }
+            git(&dir, &["mv", "api.py", target]);
+            assert_eq!(
+                unacknowledged_removals(&dir),
+                [("api.py".to_string(), "public_api".to_string())],
+                "{target}"
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        let shared = "def shared():\n    return 1\n";
+        let dir = committed_repo("moved_duplicate", &[("a.py", shared), ("b.py", shared)]);
+        git(&dir, &["mv", "a.py", "c.py"]);
+        git(&dir, &["rm", "-q", "b.py"]);
+        assert_eq!(
+            unacknowledged_removals(&dir),
+            [("b.py".to_string(), "shared".to_string())]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nested_declarations_that_callers_can_reach_need_acknowledgement() {
+        for (file, before, after, symbol) in [
+            (
+                "store.ts",
+                "export function createStore() {\n  return {\n    dispatch(a: number) { return a; },\n    getState() { return 1; },\n  };\n}\n",
+                "export function createStore() {\n  return {\n    getState() { return 1; },\n  };\n}\n",
+                "dispatch",
+            ),
+            (
+                "mixin.ts",
+                "export function Timestamped(Base: any) {\n  return class extends Base {\n    stamp() { return 1; }\n    other() { return 2; }\n  };\n}\n",
+                "export function Timestamped(Base: any) {\n  return class extends Base {\n    other() { return 2; }\n  };\n}\n",
+                "stamp",
+            ),
+            (
+                "boot.php",
+                "<?php\nfunction boot() {\n  function helper_global() { return 1; }\n}\n",
+                "<?php\nfunction boot() {\n}\n",
+                "helper_global",
+            ),
+        ] {
+            let dir = committed_repo("nested_api", &[(file, before)]);
+            write(&dir, file, after);
+            assert_eq!(
+                unacknowledged_removals(&dir),
+                [(file.to_string(), symbol.to_string())]
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_local_helper_removed_in_a_moved_and_edited_component_needs_no_acknowledgement() {
+        for (old, new, before, after, outer) in [
+            (
+                "old.py",
+                "new.py",
+                "def outer():\n    def helper():\n        return 1\n    return helper()\n",
+                "def outer():\n    return 1\n",
+                "outer",
+            ),
+            (
+                "old.rs",
+                "new.rs",
+                "pub fn outer() -> u8 {\n    fn helper() -> u8 { 1 }\n    helper()\n}\n",
+                "pub fn outer() -> u8 {\n    1\n}\n",
+                "outer",
+            ),
+        ] {
+            let dir = committed_repo("moved_local", &[(old, before)]);
+            git(&dir, &["mv", old, new]);
+            write(&dir, new, after);
+            // The edited move still removes the old path's API, never its helper.
+            assert_eq!(
+                unacknowledged_removals(&dir),
+                [(old.to_string(), outer.to_string())]
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]

@@ -23,10 +23,10 @@ bash evals/run-verified.sh --model sonnet
 python3 -m evals.behavior.runner --suite critic --model opus \
   --report /tmp/mastermind-critic.json
 
-# Compare with a matching baseline.
+# Compare with a complete report retained from an earlier run.
 python3 -m evals.behavior.runner --suite critic --model opus \
   --report /tmp/mastermind-critic-current.json \
-  --baseline-report evals/baselines/critic-opus-pre-lean.json
+  --baseline-report /tmp/mastermind-critic.json
 ```
 
 Use `--case ID` for diagnosis, `--keep-fixtures` to inspect a temporary corpus,

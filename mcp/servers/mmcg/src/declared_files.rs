@@ -546,7 +546,7 @@ impl Checker<'_> {
                 "--",
             ];
             args.extend_from_slice(&paths[offset..end]);
-            let output = crate::diff::run_bounded_git_with_control(
+            let output = crate::diff::run_bounded_git_controlled(
                 root.requested_root(),
                 &args,
                 None,

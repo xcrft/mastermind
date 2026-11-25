@@ -611,8 +611,11 @@ mod tests {
         let mut db = ProfileStore::open(&path).unwrap();
         let (old, new) = pair(&mut db);
         replace(&mut db, &old, &new).unwrap();
+        // A store written before the current format version re-keys on open.
         db.conn
-            .execute("UPDATE feedback SET statement=statement||' please'", [])
+            .execute_batch(
+                "UPDATE feedback SET statement=statement||' please'; PRAGMA user_version=0;",
+            )
             .unwrap();
         drop(db);
         let mut db = ProfileStore::open(&path).unwrap();

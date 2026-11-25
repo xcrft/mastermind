@@ -57,7 +57,6 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVALS_DIR = REPO_ROOT / "evals"
 FIXTURES_DIR = REPO_ROOT / FIXTURES_RELATIVE_PATH
-LEGACY_CONSOLE_BASELINE = EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
 REPORT_KIND = "mastermind-eval-report"
 REPORT_SCHEMA_VERSION = 1
 REPORT_FILE_LIMIT_BYTES = 16 * 1024 * 1024
@@ -79,31 +78,26 @@ SUITES = {
     "critic": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-critic.md",
         "cases": EVALS_DIR / "behavior/cases/critic.jsonl",
-        "renderer": "render_critic_input",
         "uses_fixture": False,
     },
     "researcher": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-researcher.md",
         "cases": EVALS_DIR / "behavior/cases/researcher.jsonl",
-        "renderer": "render_researcher_input",
         "uses_fixture": True,
     },
     "auditor": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-auditor.md",
         "cases": EVALS_DIR / "behavior/cases/auditor.jsonl",
-        "renderer": "render_auditor_input",
         "uses_fixture": True,
     },
     "intake": {
         "subagent": REPO_ROOT / "agents/subagents/mastermind-prompt-refiner.md",
         "cases": EVALS_DIR / "behavior/cases/intake.jsonl",
-        "renderer": "render_intake_input",
         "uses_fixture": False,
     },
     "workflow": {
         "subagent": None,
         "cases": EVALS_DIR / "behavior/cases/workflow.jsonl",
-        "renderer": "render_workflow_input",
         "uses_fixture": False,
     },
 }
@@ -783,18 +777,8 @@ def validate_stream_runtime(
 def parse_claude_output(
     stdout: str,
     *,
-    streamed: bool,
     runtime_contract: StreamRuntimeContract | None = None,
 ) -> tuple[dict, list[str], list[ToolExecution]]:
-    if not streamed:
-        payload = json.loads(stdout)
-        if not isinstance(payload, dict):
-            raise ValueError("Claude JSON result is not an object")
-        model_usage = payload.get("modelUsage")
-        if isinstance(model_usage, dict) and len(model_usage) == 1:
-            payload["_resolved_model"] = next(iter(model_usage))
-        return payload, [], []
-
     events: list[dict] = []
     for line_number, line in enumerate(stdout.splitlines(), start=1):
         if not line.strip():
@@ -2456,15 +2440,6 @@ def _valid_generated_at(value: object) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
-def _valid_legacy_console_capture(value: object) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == {"mode", "limitations"}
-        and value["mode"] == "pre-report-console"
-        and _string_list(value["limitations"], allow_empty=False)
-    )
-
-
 def _valid_evaluation_runtime_controls(value: object) -> bool:
     if not isinstance(value, dict) or set(value) != {
         "effort",
@@ -2623,7 +2598,6 @@ def report_comparison_issues(
     require_repository_identity: bool = False,
     require_definition_stability: bool = False,
     require_case_runtime_controls: bool = False,
-    allow_legacy_capture: bool = False,
 ) -> list[str]:
     issues: list[str] = []
     if not isinstance(report, dict):
@@ -2644,7 +2618,6 @@ def report_comparison_issues(
         "filters",
         "suites",
         "cases",
-        "capture",
         "baseline_gate",
     }
     unexpected_top_level = set(report) - allowed_top_level
@@ -2672,15 +2645,6 @@ def report_comparison_issues(
         or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) is None
     ):
         issues.append(f"{label} report has invalid Git revision")
-    valid_legacy_console_capture = _valid_legacy_console_capture(
-        report.get("capture")
-    )
-    legacy_console_capture = allow_legacy_capture and valid_legacy_console_capture
-    if "capture" in report:
-        if not valid_legacy_console_capture:
-            issues.append(f"{label} report has invalid capture metadata")
-        elif not allow_legacy_capture:
-            issues.append(f"{label} report cannot use legacy capture metadata")
     if "baseline_gate" in report and not isinstance(report["baseline_gate"], dict):
         issues.append(f"{label} report has invalid baseline gate metadata")
     report_models = report.get("resolved_models")
@@ -2975,7 +2939,7 @@ def report_comparison_issues(
             issues.append(f"{label} case {case_id!r} has invalid tool calls")
 
         if "runtime_controls" not in case:
-            if require_case_runtime_controls and not legacy_console_capture:
+            if require_case_runtime_controls:
                 issues.append(
                     f"{label} case {case_id!r} has no effective runtime controls"
                 )
@@ -3175,26 +3139,7 @@ def report_comparison_issues(
             expected_summary = metric_summary(
                 [case[field_name] for case in suite_cases]
             )
-            observed_summary = summary.get(field_name)
-            if legacy_console_capture and field_name == "duration_api_ms":
-                continue
-            if legacy_console_capture and field_name == "cost_usd":
-                legacy_cost_matches = (
-                    isinstance(observed_summary, dict)
-                    and set(observed_summary) == {"total", "p50", "p95"}
-                    and observed_summary["p50"] == expected_summary["p50"]
-                    and observed_summary["p95"] == expected_summary["p95"]
-                    and _non_negative_number(observed_summary["total"])
-                    and math.isclose(
-                        float(observed_summary["total"]),
-                        float(expected_summary["total"]),
-                        rel_tol=0,
-                        abs_tol=0.0001,
-                    )
-                )
-                if legacy_cost_matches:
-                    continue
-            if observed_summary != expected_summary:
+            if summary.get(field_name) != expected_summary:
                 issues.append(
                     f"{label} suite {suite_name!r} {field_name} summary "
                     "does not match raw cases"
@@ -3281,14 +3226,8 @@ def _strict_report_issues(
     report: object,
     label: str,
     *,
-    allow_legacy_capture: bool = False,
     require_verification_runtime: bool | None = None,
 ) -> list[str]:
-    legacy_capture = (
-        allow_legacy_capture
-        and isinstance(report, dict)
-        and _valid_legacy_console_capture(report.get("capture"))
-    )
     verification_required = (
         _report_uses_cargo_verification(report)
         if require_verification_runtime is None
@@ -3297,55 +3236,30 @@ def _strict_report_issues(
     return report_comparison_issues(
         report,
         label,
-        require_target_identity=not legacy_capture,
-        require_runtime_identity=not legacy_capture,
-        require_harness_identity=not legacy_capture,
-        require_fixture_runtime=(
-            not legacy_capture and _report_uses_fixture_runtime(report)
-        ),
-        require_verification_runtime=(
-            not legacy_capture and verification_required
-        ),
+        require_target_identity=True,
+        require_runtime_identity=True,
+        require_harness_identity=True,
+        require_fixture_runtime=_report_uses_fixture_runtime(report),
+        require_verification_runtime=verification_required,
         require_repository_identity=True,
-        require_definition_stability=not legacy_capture,
+        require_definition_stability=True,
         require_case_runtime_controls=True,
-        allow_legacy_capture=allow_legacy_capture,
     )
 
 
-def _is_shipped_legacy_baseline(path: Path) -> bool:
-    try:
-        return (
-            not path.is_symlink()
-            and path.resolve(strict=True)
-            == LEGACY_CONSOLE_BASELINE.resolve(strict=True)
-        )
-    except (OSError, RuntimeError):
-        return False
-
-
-def load_report(path: Path, *, allow_legacy_capture: bool = False) -> dict:
+def load_report(path: Path) -> dict:
     try:
         body = _read_report(path, REPORT_FILE_LIMIT_BYTES)
         report = json.loads(body.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read eval report {path}: {error}") from error
-    issues = _strict_report_issues(
-        report,
-        f"eval report {path}",
-        allow_legacy_capture=allow_legacy_capture,
-    )
+    issues = _strict_report_issues(report, f"eval report {path}")
     if issues:
         raise ValueError("; ".join(issues))
     return report
 
 
-def compare_to_baseline(
-    current: dict,
-    baseline: dict,
-    *,
-    allow_legacy_baseline: bool = False,
-) -> dict:
+def compare_to_baseline(current: dict, baseline: dict) -> dict:
     checks: list[dict] = []
     verification_required = (
         _report_uses_cargo_verification(current)
@@ -3361,7 +3275,6 @@ def compare_to_baseline(
             baseline,
             "baseline",
             require_verification_runtime=verification_required,
-            allow_legacy_capture=allow_legacy_baseline,
         ),
     ]
     if failures:
@@ -3697,40 +3610,6 @@ def _read_report_file_at(parent_descriptor: int, name: str, limit: int) -> bytes
     return body
 
 
-def _read_stable_regular_file_portable(
-    path: Path, limit: int, *, label: str
-) -> tuple[bytes, os.stat_result]:
-    if path.is_symlink():
-        raise OSError(f"{label} cannot be a symbolic link")
-    canonical = path.resolve(strict=True)
-    with canonical.open("rb") as handle:
-        before = os.fstat(handle.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-            raise OSError(f"{label} is not a bounded regular file")
-        body = handle.read(limit + 1)
-        after = os.fstat(handle.fileno())
-    try:
-        current = canonical.stat(follow_symlinks=False)
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise OSError(f"{label} changed during reading") from error
-    if (
-        len(body) > limit
-        or resolved != canonical
-        or _file_identity(before) != _file_identity(after)
-        or _file_identity(after) != _file_identity(current)
-    ):
-        raise OSError(f"{label} changed during reading")
-    return body, after
-
-
-def _read_report_portable(path: Path, limit: int) -> bytes:
-    body, _ = _read_stable_regular_file_portable(
-        path, limit, label="eval report"
-    )
-    return body
-
-
 def _read_stable_regular_file(
     path: Path, limit: int, *, label: str
 ) -> tuple[bytes, os.stat_result]:
@@ -3740,7 +3619,7 @@ def _read_stable_regular_file(
     if limit <= 0:
         raise ValueError(f"{label} byte cap must be positive")
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
-        return _read_stable_regular_file_portable(target, limit, label=label)
+        raise OSError(f"reading {label} requires POSIX no-follow file access")
 
     requested_parent = target.parent
     try:
@@ -3812,29 +3691,6 @@ def _evaluation_definition_file_identity(path: Path, label: str) -> dict[str, st
     }
 
 
-def _write_report_portable(path: Path, body: bytes) -> None:
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-        temporary = None
-        if _read_report_portable(path, len(body)) != body:
-            raise OSError("published eval report changed during verification")
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
 def write_report(path: Path, report: dict) -> None:
     body = (
         json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -3846,8 +3702,7 @@ def write_report(path: Path, report: dict) -> None:
         raise OSError("invalid eval report path")
     target.parent.mkdir(parents=True, exist_ok=True)
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
-        _write_report_portable(target, body)
-        return
+        raise OSError("writing an eval report requires POSIX no-follow file access")
 
     requested_parent = target.parent
     try:
@@ -5097,7 +4952,6 @@ def evaluate_case(
             "max_output_tokens": int(runtime_controls["max_output_tokens"]),
         }
         effort = str(runtime_controls["effort"])
-        streamed_output = True
         cmd = [
             str(claude_binary),
             "-p",
@@ -5105,8 +4959,8 @@ def evaluate_case(
             "--effort", effort,
             *prompt_args,
             *agent_args,
-            "--output-format", "stream-json" if streamed_output else "json",
-            *(["--verbose"] if streamed_output else []),
+            "--output-format", "stream-json",
+            "--verbose",
             "--no-session-persistence",
             "--permission-mode", "dontAsk",
             "--max-turns", str(runtime_limits["max_turns"]),
@@ -5199,7 +5053,6 @@ def evaluate_case(
         try:
             payload, tool_calls, tool_executions = parse_claude_output(
                 stdout,
-                streamed=streamed_output,
                 runtime_contract=runtime_contract,
             )
             output = payload.get("result", "")
@@ -5939,18 +5792,8 @@ def main() -> int:
     gate_failed = False
     if args.baseline_report is not None:
         try:
-            allow_legacy_baseline = _is_shipped_legacy_baseline(
-                args.baseline_report
-            )
-            baseline = load_report(
-                args.baseline_report,
-                allow_legacy_capture=allow_legacy_baseline,
-            )
-            gate = compare_to_baseline(
-                report,
-                baseline,
-                allow_legacy_baseline=allow_legacy_baseline,
-            )
+            baseline = load_report(args.baseline_report)
+            gate = compare_to_baseline(report, baseline)
         except ValueError as error:
             gate = {"passed": False, "checks": [], "failures": [str(error)]}
         report["baseline_gate"] = {

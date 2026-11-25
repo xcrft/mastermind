@@ -78,7 +78,7 @@ mod tests {
             "session_id": "synthetic-session",
             "client": "codex",
             "project_root": directory.path(),
-            "prompt_digest": refiner::prompt_digest(original),
+            "prompt_digest": crate::hex::sha256(original),
             "capture_generation": 1,
             "original": original,
             "active_task": null,

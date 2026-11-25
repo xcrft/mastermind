@@ -92,7 +92,9 @@ fn profile_uses_only_the_explicit_continuation_scope_and_stays_separate_from_ref
             })
             .collect::<Vec<_>>();
         store
-            .upsert_repo(
+            .apply_mine(
+                false,
+                &[],
                 "/synthetic",
                 &mmcg::miner::store::RepoProvenance {
                     author: "Fixture".into(),
@@ -106,7 +108,6 @@ fn profile_uses_only_the_explicit_continuation_scope_and_stays_separate_from_ref
                 },
                 &[],
                 &commits,
-                &[],
             )
             .unwrap();
         drop(store);
@@ -1605,4 +1606,62 @@ fn disabling_refiner_revokes_processing_even_when_native_configuration_is_malfor
         1
     );
     f.assert_no_executor_or_profile_write();
+}
+
+#[test]
+fn another_sessions_delivery_in_flight_does_not_degrade_this_prompt() {
+    let f = Fixture::new("activation");
+    f.setup("codex", "8");
+    f.start("codex", "first");
+    let journal = || {
+        let db = Connection::open_with_flags(
+            f.home.join(".mastermind/persona-events.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db
+    };
+    let count = |sql: &str| journal().query_row(sql, [], |row| row.get::<_, i64>(0));
+    // The other session's hook is admitted and still reads its input.
+    let mut other = f
+        .cli()
+        .args(["miner", "hooks", "receive", "--client", "codex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while count("SELECT pending FROM hook_grant").unwrap() != 1 {
+        assert!(Instant::now() < deadline, "other delivery never admitted");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut prompt = f
+        .native_command(
+            "codex",
+            &f.prompt("first", "one", "Use Mastermind to plan this change."),
+        )
+        .spawn()
+        .unwrap();
+    // Release the other delivery once this prompt is captured, so the intake
+    // decision sees it still in flight.
+    while count("SELECT count(*) FROM hook_episode").unwrap() == 0 {
+        assert!(Instant::now() < deadline, "prompt never captured");
+        assert!(prompt.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    other
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(f.event("second", "", "SessionStart").to_string().as_bytes())
+        .unwrap();
+    assert!(other.wait_with_output().unwrap().status.success());
+    let output = prompt.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let receipts = f.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["status"], "offered", "{}", receipts[0]);
+    assert_eq!(f.calls().len(), 1);
 }

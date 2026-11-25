@@ -426,7 +426,7 @@ fn executor_claim_outcomes_keep_file_signature_and_order_identity_in_bundles() {
         assert_eq!(bundle.failed_claims.len(), 1);
         assert!(bundle.verified_claims[0].contains("caller@good.py"));
         assert!(bundle.failed_claims[0].contains("caller@bad.py"));
-        let derived = Bundle::from_report(&report, None);
+        let derived = Bundle::from_report_full(&report, None, None, None, None);
         assert_eq!(derived.verified_claims, bundle.verified_claims);
         let reordered = executor(er.claims.iter().cloned().rev().collect());
         let mismatch = Bundle::from_report_full(&report, Some(&reordered), None, None, None);
@@ -713,5 +713,74 @@ fn audit_spec_accepts_an_absolute_spec_through_a_linked_root_alias() {
             .join(".mastermind/tasks/_lessons.md")
             .is_file(),
         "the failed audit records its lesson candidate: {output:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_spec_resolves_the_executor_report_like_the_spec() {
+    let mut fixture = Fixture::new(&[("service.py", "def run():\n    return 1\n")]);
+    fixture.source("service.py", "def run():\n    return 2\n");
+    git(fixture.root(), &["commit", "-qam", "change"]);
+    let spec = fixture.spec(&["service.py"]);
+    fixture.executor_file(&spec, &[]);
+    let task = Path::new(".mastermind/tasks/001-claims");
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("repo");
+    std::os::unix::fs::symlink(fixture.root(), &alias).unwrap();
+    let linked = |file: &str| alias.join(task).join(file).display().to_string();
+    let bundle = fixture.root().join(task).join("linked.bundle.json");
+    let output = fixture.command(&[
+        "audit-spec",
+        &linked("spec.md"),
+        "--since",
+        "baseline",
+        "--executor-report",
+        &linked("executor-report.md"),
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(bundle.is_file(), "{output:?}");
+
+    // Relative paths name files from the working directory, as the spec does.
+    std::fs::create_dir(fixture.root().join("sub")).unwrap();
+    let bundle = fixture.root().join(task).join("relative.bundle.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_mmcg"))
+        .current_dir(fixture.root().join("sub"))
+        .args(["--index", "../graph.db", "audit-spec"])
+        .arg(Path::new("..").join(task).join("spec.md"))
+        .args(["--since", "baseline", "--root", "..", "--executor-report"])
+        .arg(Path::new("..").join(task).join("executor-report.md"))
+        .arg("--bundle")
+        .arg(&bundle)
+        .arg("--json")
+        .env("MMCG_QUERY_BUDGET_MS", "60000")
+        .output()
+        .unwrap();
+    assert!(bundle.is_file(), "{output:?}");
+}
+
+#[test]
+fn audit_spec_json_reports_a_lesson_it_could_not_record() {
+    let mut fixture = Fixture::new(&[("service.py", "def run():\n    return 1\n")]);
+    fixture.source("service.py", "def run():\n    return 2\n");
+    git(fixture.root(), &["commit", "-qam", "change"]);
+    let spec = fixture.spec(&[]);
+    std::fs::create_dir_all(fixture.root().join(".mastermind/tasks/_lessons.md")).unwrap();
+    let output = fixture.command(&[
+        "audit-spec",
+        spec.to_str().unwrap(),
+        "--since",
+        "baseline",
+        "--json",
+    ]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["verdict"],
+        "drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("lessons append failed"),
+        "{output:?}"
     );
 }

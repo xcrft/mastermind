@@ -35,6 +35,9 @@ pub(crate) use habit_review::fixture_habit;
 pub(super) use preferences::fixture_preference;
 
 const MAX_STYLE_STORE_SIZE: u64 = 64 * 1024 * 1024;
+// Raise this when a release changes stored data, for example `feedback_key`,
+// and migrate the older version in `open`.
+const STYLE_STORE_VERSION: i64 = 1;
 
 /// Raw per-detector tallies, summable across repos. Keys like `indent.space`.
 pub type Counts = BTreeMap<String, i64>;
@@ -469,6 +472,7 @@ impl ProfileStore {
             expected_identity,
             existing_identity.is_some(),
         )?;
+        let version = format_version(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS repo (
                  repo_key            TEXT PRIMARY KEY,
@@ -595,7 +599,9 @@ impl ProfileStore {
             conn.execute_batch("ALTER TABLE repo ADD COLUMN extractor TEXT NOT NULL DEFAULT ''")?;
         }
         collection::ensure_schema(&mut conn)?;
-        migrate_feedback_keys(&mut conn)?;
+        if version < STYLE_STORE_VERSION {
+            migrate_feedback_keys(&mut conn)?;
+        }
         verify_store_identity(&root, &target, expected_identity, false)?;
         Ok(Self { conn })
     }
@@ -642,21 +648,9 @@ impl ProfileStore {
         )?;
         verify_store_identity(&root, &target, expected, true)?;
         conn.execute_batch("PRAGMA query_only = ON;")?;
+        format_version(&conn)?;
         verify_store_identity(&root, &target, expected, true)?;
         Ok(Some(Self { conn }))
-    }
-
-    /// Replace `repo_key`'s contribution and remove its legacy checkout aliases
-    /// in one transaction, so re-mining never sums the old and new identities.
-    pub fn upsert_repo(
-        &mut self,
-        repo_key: &str,
-        prov: &RepoProvenance,
-        identities: &[String],
-        commits: &[CommitEvidence],
-        aliases: &[String],
-    ) -> SqlResult<()> {
-        self.apply_mine(false, aliases, repo_key, prov, identities, commits)
     }
 
     /// Apply the complete mutation for one mine in a single transaction. A
@@ -1568,8 +1562,22 @@ fn migrate_feedback_keys(conn: &mut Connection) -> SqlResult<()> {
             params![new, old],
         )?;
     }
+    tx.pragma_update(None, "user_version", STYLE_STORE_VERSION)?;
     collection::check_size(&tx)?;
     tx.commit()
+}
+
+fn format_version(conn: &Connection) -> SqlResult<i64> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > STYLE_STORE_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "style store format version {version} is newer than version {STYLE_STORE_VERSION} that this mmcg reads; upgrade mmcg"
+            )),
+        ));
+    }
+    Ok(version)
 }
 
 fn delete_repo(transaction: &rusqlite::Transaction<'_>, repo_key: &str) -> SqlResult<()> {
@@ -1674,22 +1682,24 @@ mod tests {
     fn aggregate_sums_across_repos() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo(
+        s.apply_mine(
+            false,
+            &[],
             "/a",
             &prov(Some("aaa"), 0),
             &["a@x".into()],
             &commit(&[("indent.space", 30), ("indent.tab", 2)]),
-            &[],
         )
         .unwrap();
         let mut second_commit = commit(&[("indent.space", 20), ("indent.tab", 8)]);
         second_commit[0].sha = "d".repeat(40);
-        s.upsert_repo(
+        s.apply_mine(
+            false,
+            &[],
             "/b",
             &prov(Some("bbb"), 0),
             &["b@x".into()],
             &second_commit,
-            &[],
         )
         .unwrap();
 
@@ -1730,10 +1740,10 @@ mod tests {
             ("diff.lines", 8),
         ]);
         store
-            .upsert_repo("/clone-a", &prov(None, 0), &[], &sampled, &[])
+            .apply_mine(false, &[], "/clone-a", &prov(None, 0), &[], &sampled)
             .unwrap();
         store
-            .upsert_repo("/clone-b", &prov(None, 0), &[], &sampled, &[])
+            .apply_mine(false, &[], "/clone-b", &prov(None, 0), &[], &sampled)
             .unwrap();
         let aggregate = store.aggregate().unwrap();
         assert_eq!(aggregate.repos, 2);
@@ -2300,6 +2310,39 @@ mod tests {
     }
 
     #[test]
+    fn the_store_migrates_once_per_format_version_and_refuses_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.db");
+        let store = ProfileStore::open(&path).unwrap();
+        let version = |store: &ProfileStore| -> i64 {
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(version(&store), STYLE_STORE_VERSION);
+        store
+            .conn
+            .execute("INSERT INTO feedback VALUES ('kept-key','Prefer small PRs','process','global','quote','2026-09-01','2026-09-01','active')", [])
+            .unwrap();
+        drop(store);
+        let reopened = ProfileStore::open(&path).unwrap();
+        assert_eq!(reopened.feedback().unwrap()[0].key, "kept-key");
+
+        reopened
+            .conn
+            .pragma_update(None, "user_version", STYLE_STORE_VERSION + 1)
+            .unwrap();
+        drop(reopened);
+        for error in [
+            ProfileStore::open(&path).err().unwrap(),
+            ProfileStore::open_read_only(&path).err().unwrap(),
+        ] {
+            assert!(error.to_string().contains("newer"), "{error}");
+        }
+    }
+
+    #[test]
     fn key_migration_rolls_back_before_exceeding_store_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("style.db");
@@ -2413,12 +2456,13 @@ mod tests {
         assert_eq!(legacy.commits_total, 0);
         assert!(legacy.counts.is_empty());
 
-        s.upsert_repo(
+        s.apply_mine(
+            false,
+            &[],
             "/new",
             &prov(None, 2),
             &[],
             &commit(&[("indent.tab", 3)]),
-            &[],
         )
         .unwrap();
         let mixed = s.aggregate().unwrap();
@@ -2431,9 +2475,9 @@ mod tests {
     fn reupsert_replaces_not_doubles() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &commit(&[("x", 10)]), &[])
+        s.apply_mine(false, &[], "/a", &prov(None, 0), &[], &commit(&[("x", 10)]))
             .unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &commit(&[("x", 99)]), &[])
+        s.apply_mine(false, &[], "/a", &prov(None, 0), &[], &commit(&[("x", 99)]))
             .unwrap();
         let agg = s.aggregate().unwrap();
         assert_eq!(agg.repos, 1);
@@ -2444,12 +2488,13 @@ mod tests {
     fn failed_alias_replacement_keeps_the_previous_contribution() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo(
+        s.apply_mine(
+            false,
+            &[],
             "/checkout",
             &prov(Some("old"), 0),
             &["author@example.test".into()],
             &commit(&[("x", 10)]),
-            &[],
         )
         .unwrap();
         s.conn
@@ -2461,12 +2506,13 @@ mod tests {
             .unwrap();
 
         assert!(s
-            .upsert_repo(
+            .apply_mine(
+                false,
+                &["/checkout".into()],
                 "/canonical.git",
                 &prov(Some("new"), 1),
                 &[],
-                &commit(&[("x", 99)]),
-                &["/checkout".into()],
+                &commit(&[("x", 99)])
             )
             .is_err());
         let aggregate = s.aggregate().unwrap();
@@ -2487,12 +2533,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ProfileStore::open(&dir.path().join("style.db")).unwrap();
         store
-            .upsert_repo(
+            .apply_mine(
+                false,
+                &[],
                 "/old",
                 &prov(Some("old"), 1),
                 &["old@example.test".into()],
                 &commit(&[("x", 10)]),
-                &[],
             )
             .unwrap();
         store
@@ -2532,7 +2579,7 @@ mod tests {
     fn reset_wipes_everything() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/a", &prov(None, 0), &[], &commit(&[("x", 10)]), &[])
+        s.apply_mine(false, &[], "/a", &prov(None, 0), &[], &commit(&[("x", 10)]))
             .unwrap();
         s.reset().unwrap();
         let agg = s.aggregate().unwrap();
@@ -2544,10 +2591,24 @@ mod tests {
     fn list_repos_reports_each_mine_time() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
-        s.upsert_repo("/fresh", &prov(None, 1000), &[], &commit(&[("x", 10)]), &[])
-            .unwrap();
-        s.upsert_repo("/old", &prov(None, 1), &[], &commit(&[("x", 5)]), &[])
-            .unwrap();
+        s.apply_mine(
+            false,
+            &[],
+            "/fresh",
+            &prov(None, 1000),
+            &[],
+            &commit(&[("x", 10)]),
+        )
+        .unwrap();
+        s.apply_mine(
+            false,
+            &[],
+            "/old",
+            &prov(None, 1),
+            &[],
+            &commit(&[("x", 5)]),
+        )
+        .unwrap();
 
         let listed = s.list_repos().unwrap();
         assert_eq!(listed.len(), 2);
@@ -2612,7 +2673,14 @@ mod tests {
         let path = dir.path().join("style.db");
         let mut writable = ProfileStore::open(&path).unwrap();
         writable
-            .upsert_repo("/repo", &prov(None, 1), &[], &commit(&[("x", 1)]), &[])
+            .apply_mine(
+                false,
+                &[],
+                "/repo",
+                &prov(None, 1),
+                &[],
+                &commit(&[("x", 1)]),
+            )
             .unwrap();
         drop(writable);
         let read_only = ProfileStore::open_read_only(&path).unwrap();

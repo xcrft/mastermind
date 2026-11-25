@@ -8,7 +8,6 @@ use crate::store::{
     ScratchpadEntry, Store, Symbol, TaskSpecHit,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -479,6 +478,10 @@ pub const FILES_MAX_TOP: u32 = 500;
 pub const STATUS_STALE_FILE_LIMIT: usize = 100;
 pub const STATUS_STALE_FILE_PROBE_LIMIT: usize = STATUS_STALE_FILE_LIMIT + 1;
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     /// Exact UTF-8 database identity. Null when the native path cannot be
@@ -506,6 +509,10 @@ pub struct StatusResponse {
     /// or ignored.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unindexable_sources: Vec<String>,
+    /// Git submodules in the inventory. Their files belong to another
+    /// repository and are never indexed.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_submodules: u32,
     /// False when extractor semantics changed after the stored index was built.
     pub extractor_contract_current: bool,
     /// False when the derived deterministic concept corpus is incomplete or was
@@ -2046,6 +2053,8 @@ pub enum ConceptError {
     SchemaIncompatible,
     SnapshotChanged,
     WorkLimitExceeded,
+    /// Another process is writing the index. Retrying later succeeds.
+    IndexBusy,
     Internal,
 }
 
@@ -2057,6 +2066,7 @@ impl ConceptError {
             Self::SchemaIncompatible => "schema_incompatible",
             Self::SnapshotChanged => "snapshot_changed",
             Self::WorkLimitExceeded => "work_limit_exceeded",
+            Self::IndexBusy => "index_busy",
             Self::Internal => "internal_error",
         }
     }
@@ -2420,8 +2430,12 @@ pub enum BriefError {
     SchemaIncompatible,
     SnapshotChanged,
     WorkLimitExceeded,
+    /// Another process is writing the index. Retrying later succeeds.
+    IndexBusy,
     Serialization,
-    BudgetTooSmall { minimum_tokens: u32 },
+    BudgetTooSmall {
+        minimum_tokens: u32,
+    },
 }
 
 impl BriefError {
@@ -2434,6 +2448,7 @@ impl BriefError {
             Self::SchemaIncompatible => "schema_incompatible",
             Self::SnapshotChanged => "snapshot_changed",
             Self::WorkLimitExceeded => "work_limit_exceeded",
+            Self::IndexBusy => "index_busy",
             Self::Serialization => "serialization_failed",
             Self::BudgetTooSmall { .. } => "budget_too_small",
         }
@@ -2884,12 +2899,6 @@ fn owning_repository(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn component_for(path: &str) -> String {
-    path.split_once('/')
-        .map(|(component, _)| component.to_string())
-        .unwrap_or_else(|| ".".to_string())
-}
-
 fn visible_precision(path: &str) -> Vec<String> {
     let precision = lang_precision(path);
     let mut values = vec![
@@ -3209,7 +3218,7 @@ pub fn change_impact(
             _ => ChangeImpactError::SnapshotChanged,
         })?
         .bytes;
-        let digest = crate::hex::encode(&Sha256::digest(bytes));
+        let digest = crate::hex::sha256(bytes);
         let stored = store
             .file_content_sha256(&file.path)
             .map_err(|_| ChangeImpactError::IndexStale)?;
@@ -3392,9 +3401,9 @@ pub fn change_impact(
 
     let mut crossings = Vec::new();
     for impact in &impacts {
-        let impacted_component = component_for(&impact.symbol.file);
+        let impacted_component = component_for_file("", "directory", &impact.symbol.file, 1);
         for seed in &impact.seeds {
-            let changed_component = component_for(&seed.file);
+            let changed_component = component_for_file("", "directory", &seed.file, 1);
             if changed_component != impacted_component {
                 crossings.push(ApiCrossing {
                     seed: seed.clone(),
@@ -3505,7 +3514,7 @@ pub fn change_impact(
 
     let affected_component_names: Vec<String> = changed_symbols
         .iter()
-        .map(|symbol| component_for(&symbol.file))
+        .map(|symbol| component_for_file("", "directory", &symbol.file, 1))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -3534,7 +3543,7 @@ pub fn change_impact(
                 }
                 .to_string(),
                 seed: None,
-                component: Some(component_for(&symbol.file_path)),
+                component: Some(component_for_file("", "directory", &symbol.file_path, 1)),
             };
             match tests_by_symbol.entry(evidence.clone()) {
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -3582,19 +3591,19 @@ pub fn change_impact(
     let mut component_counts: BTreeMap<String, (u32, u32, u32)> = BTreeMap::new();
     for symbol in &changed_symbols {
         component_counts
-            .entry(component_for(&symbol.file))
+            .entry(component_for_file("", "directory", &symbol.file, 1))
             .or_default()
             .0 += 1;
     }
     for impact in &impacts {
         component_counts
-            .entry(component_for(&impact.symbol.file))
+            .entry(component_for_file("", "directory", &impact.symbol.file, 1))
             .or_default()
             .1 += 1;
     }
     for test in &tests {
         component_counts
-            .entry(component_for(&test.symbol.file))
+            .entry(component_for_file("", "directory", &test.symbol.file, 1))
             .or_default()
             .2 += 1;
     }
@@ -4692,6 +4701,8 @@ fn format_dependency_cycles(
     let mut precision_notes = vec![
         "cycles_are_syntactic_import_graph_sccs_not_runtime_dependency_proof".to_string(),
         "every_returned_cycle_contains_its_complete_scc_membership".to_string(),
+        "imports_resolve_by_leaf_name_within_one_language_family_so_a_same_named_symbol_can_add_an_edge"
+            .to_string(),
     ];
     if graph_truncated {
         precision_notes.push(
@@ -8881,6 +8892,10 @@ mod tests {
         assert_eq!(graph_limited.count, 0);
         assert!(graph_limited.graph_truncated);
         assert_eq!(graph_limited.truncation_reason, Some("graph_work_limit"));
+        assert!(graph_limited
+            .precision_notes
+            .iter()
+            .any(|note| note.starts_with("imports_resolve_by_leaf_name_within_one_language")));
     }
 
     #[test]

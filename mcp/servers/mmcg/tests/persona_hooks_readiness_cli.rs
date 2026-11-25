@@ -72,15 +72,18 @@ impl Fixture {
     }
 
     fn doctor(&self, client: &str) -> Value {
+        self.doctor_check(if client == "codex" {
+            "Codex hook readiness"
+        } else {
+            "Claude hook readiness"
+        })
+    }
+
+    fn doctor_check(&self, name: &str) -> Value {
         // Unrelated index/MCP checks may fail in this intentionally empty repo.
         let output = self.run(&["doctor", "--json"]);
         let report: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{error}: {output:?}"));
-        let name = if client == "codex" {
-            "Codex hook readiness"
-        } else {
-            "Claude hook readiness"
-        };
         report["checks"]
             .as_array()
             .unwrap()
@@ -108,6 +111,30 @@ impl Fixture {
             .output()
             .unwrap();
         assert_eq!(parse(output), json!({}));
+    }
+
+    /// A hook killed after admission leaves its marker and no journal gap.
+    fn kill_admitted_delivery(&self) {
+        let mut delivery = self
+            .isolated(env!("CARGO_BIN_EXE_mmcg"))
+            .args(["miner", "hooks", "receive", "--client", "codex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.success(&["miner", "hooks", "status", "--client", "codex"])["grant"]["pending"]
+            != 1
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "delivery never admitted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        delivery.kill().unwrap();
+        delivery.wait().unwrap();
     }
 
     fn config(&self, client: &str) -> PathBuf {
@@ -482,4 +509,78 @@ fn configured_refiner_is_not_a_provider_test_or_a_background_miner() {
     );
     assert_eq!(f.doctor("codex")["status"], "warn");
     assert!(!marker.exists());
+}
+
+#[test]
+fn a_marker_without_a_journal_gap_reports_its_age_and_names_recover() {
+    let f = Fixture::new();
+    f.setup("codex");
+    f.session_start("codex", "first");
+    f.kill_admitted_delivery();
+    let unknown = f.home.join(format!(
+        ".mastermind/.persona-capture/codex-{}-{}.pending",
+        "0".repeat(64),
+        "0".repeat(32)
+    ));
+    fs::write(&unknown, b"").unwrap();
+
+    let report = f.report("codex");
+    assert_eq!(report["capture"]["status"], "incomplete");
+    assert_eq!(report["capture"]["gap_present"], false);
+    assert_eq!(report["capture"]["markers"], 1);
+    assert!(report["capture"]["oldest_marker_age_seconds"].is_u64());
+    let actions = report["pipeline"]["next_actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action
+            .as_str()
+            .unwrap()
+            .contains("mastermind miner hooks recover --client codex")),
+        "{actions:?}"
+    );
+    assert!(!actions.iter().any(|action| action
+        .as_str()
+        .unwrap()
+        .starts_with("Inspect capture delivery gaps")));
+
+    let fence = f.doctor_check("capture fence markers");
+    assert_eq!(fence["status"], "warn");
+    let message = fence["message"].as_str().unwrap();
+    assert!(message.contains("2 markers"), "{message}");
+    assert!(
+        message.contains("1 prefix with no known grant"),
+        "{message}"
+    );
+
+    fs::remove_file(unknown).unwrap();
+    f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    assert_eq!(f.report("codex")["capture"]["markers"], 0);
+    assert_eq!(f.doctor_check("capture fence markers")["status"], "ok");
+}
+
+#[test]
+fn a_recovery_that_cannot_remove_markers_keeps_the_generation_and_fences_capture() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.setup("codex");
+    f.session_start("codex", "first");
+    f.kill_admitted_delivery();
+    let status = || f.success(&["miner", "hooks", "status", "--client", "codex"]);
+    let generation = status()["grant"]["generation"].clone();
+    let markers = f.home.join(".mastermind/.persona-capture");
+    fs::set_permissions(&markers, fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = f.run(&["miner", "hooks", "recover", "--client", "codex"]);
+    fs::set_permissions(&markers, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    let after = status();
+    assert_eq!(after["grant"]["generation"], generation);
+    assert_eq!(after["grant"]["gap"], "capture_recovery_incomplete");
+    assert_eq!(after["readiness"]["capture"]["markers"], 1);
+
+    let recovered = f.success(&["miner", "hooks", "recover", "--client", "codex"]);
+    assert_eq!(
+        recovered["grant"]["generation"],
+        generation.as_i64().unwrap() + 1
+    );
+    assert_eq!(recovered["grant"]["gap"], "");
+    assert_eq!(status()["readiness"]["capture"]["markers"], 0);
 }

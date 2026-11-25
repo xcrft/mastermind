@@ -1078,3 +1078,52 @@ fn stop_never_requests_mining_from_incomplete_or_revoked_capture() {
     assert!(failed(&f.submit(&next, json!([]), "codex")));
     f.no_inference();
 }
+
+#[test]
+fn another_sessions_delivery_in_flight_does_not_skip_the_mining_offer() {
+    let f = Fixture::new();
+    f.offer("one", PROMPT);
+    let pending = || {
+        let db = f.journal();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.query_row("SELECT pending FROM hook_grant", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    let receive = || {
+        f.command(&["miner", "hooks", "receive", "--client", "codex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + WAIT;
+    // The other session's hook is admitted and still reads its input.
+    let mut other = receive();
+    while pending() != 1 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut stop = receive();
+    let event = json!({"cwd":f.root,"session_id":"task-session","turn_id":"one",
+        "hook_event_name":"Stop","last_assistant_message":"Reviewed."});
+    write!(stop.stdin.take().unwrap(), "{event}").unwrap();
+    // Release the other delivery once Stop is admitted too.
+    while pending() != 2 {
+        assert!(std::time::Instant::now() < deadline);
+        assert!(stop.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let start = json!({"cwd":f.root,"session_id":"other-session","hook_event_name":"SessionStart"});
+    write!(other.stdin.take().unwrap(), "{start}").unwrap();
+    assert!(other.wait_with_output().unwrap().status.success());
+    let output = stop.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let decision: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(decision["decision"], "block", "{decision}");
+    let shown = f.episode();
+    assert_eq!(shown["task_mining"]["status"], "offered", "{shown}");
+    f.no_inference();
+}

@@ -24,6 +24,7 @@
 //! | 14 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
 //! | 15 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
 //! | 16 | `Codex hook readiness` | the same independent boundaries for Codex |
+//! | 17 | `capture fence markers` | capture markers in every project, and prefixes with no known grant |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -266,8 +267,47 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
             "codex",
             crate::miner::hooks::readiness::report("codex", root),
         ),
+        capture_fence_check(crate::miner::hooks::readiness::capture_fence_directory()),
     ]);
     Report::from_checks(root, checks)
+}
+
+fn capture_fence_check(report: Result<serde_json::Value, Box<dyn std::error::Error>>) -> Check {
+    let name = "capture fence markers";
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            return Check {
+                name,
+                status: Status::Warn,
+                message: format!("the shared marker directory is unreadable: {error}"),
+                hint: None,
+            }
+        }
+    };
+    let markers = report["markers"].as_u64().unwrap_or(0);
+    if markers == 0 {
+        return Check {
+            name,
+            status: Status::Ok,
+            message: "no capture markers in any project".into(),
+            hint: None,
+        };
+    }
+    let unknown = report["unknown_prefixes"].as_u64().unwrap_or(0);
+    Check {
+        name,
+        status: Status::Warn,
+        message: format!(
+            "{markers} markers in {} prefixes, oldest {}s, {unknown} {} with no known grant",
+            report["prefixes"],
+            report["oldest_marker_age_seconds"],
+            if unknown == 1 { "prefix" } else { "prefixes" },
+        ),
+        hint: Some(
+            "a marker is a delivery that is running or never reached the journal; inspect `mastermind miner hooks status` in each project and run `mastermind miner hooks recover` there. Recover cannot reach a prefix with no known grant: once no client session uses that project, remove its files from ~/.mastermind/.persona-capture by hand".into(),
+        ),
+    }
 }
 
 fn hook_readiness_check(

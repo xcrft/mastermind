@@ -772,7 +772,7 @@ fn history_review_task_dirs(
         let Some(name_text) = name.to_str() else {
             return Err("task inventory contains a non-UTF-8 entry".into());
         };
-        if name_text.starts_with('_') || name_text.starts_with('.') || name_text.ends_with(".md") {
+        if !crate::task_scaffold::is_task_entry(name_text) || name_text.ends_with(".md") {
             continue;
         }
         let path = tasks_dir.join(name);
@@ -1170,6 +1170,7 @@ mod tests {
         }
         let spec_body = std::fs::read_to_string(&spec_path).unwrap();
         let state = crate::run_task::RunState {
+            format_version: crate::run_task::RUN_STATE_FORMAT_VERSION,
             status: status.into(),
             risk: Some("low".into()),
             next_step: Some(

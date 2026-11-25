@@ -89,11 +89,8 @@ pub struct Options {
     #[arg(long)]
     no_index: bool,
     /// Explicitly draft new scaffold documents with Claude. May edit files and use provider calls.
-    #[arg(long, value_parser = ["claude"], conflicts_with = "no_claude")]
+    #[arg(long, value_parser = ["claude"])]
     draft_with: Option<String>,
-    /// Compatibility flag. Automatic drafting is already disabled by default.
-    #[arg(long, hide = true)]
-    no_claude: bool,
     /// Skip installing global workflow files. Saved for subsequent init runs.
     #[arg(long)]
     no_global: bool,
@@ -393,7 +390,7 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
             index: !options.no_index,
             claude: options.draft_with.is_some(),
             instruction_files: settings.instruction_files(),
-            seed_style: options.seed_style && !options.no_seed_style,
+            seed_style: options.seed_style,
         },
     );
     match scaffold {

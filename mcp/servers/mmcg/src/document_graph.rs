@@ -277,11 +277,9 @@ struct CorpusInventory {
     directories: BTreeMap<String, StableFileIdentity>,
 }
 
-use crate::hex::sha256 as digest_bytes;
-
 fn canonical_digest(value: &Value) -> Result<String, DocumentGraphError> {
     serde_json::to_vec(value)
-        .map(|bytes| digest_bytes(&bytes))
+        .map(|bytes| crate::hex::sha256(&bytes))
         .map_err(|_| DocumentGraphError::new("invalid_schema"))
 }
 
@@ -744,7 +742,7 @@ fn current_file(
             Ok(CurrentFile {
                 record: Some(FileRecord {
                     path: path.to_string(),
-                    sha256: digest_bytes(&file.bytes),
+                    sha256: crate::hex::sha256(&file.bytes),
                     bytes: file.declared_len,
                     lines: lines as u64,
                 }),
@@ -1184,7 +1182,7 @@ pub(crate) fn check(
         root: canonical_root,
         packet: DocumentGraphPacket {
             path: logical_graph,
-            artifact_sha256: digest_bytes(&graph.bytes),
+            artifact_sha256: crate::hex::sha256(&graph.bytes),
             artifact_bytes: graph.declared_len,
             snapshot_sha256: snapshot.sha256().to_string(),
             snapshot_schema_version: snapshot.version(),
@@ -1264,7 +1262,7 @@ pub(crate) mod test_support {
             + usize::from(!normalized.is_empty() && !normalized.ends_with('\n'));
         FileRecord {
             path: path.to_string(),
-            sha256: digest_bytes(&bytes),
+            sha256: crate::hex::sha256(&bytes),
             bytes: bytes.len() as u64,
             lines: lines as u64,
         }
@@ -1421,7 +1419,7 @@ mod tests {
         let mut value = test_support::read_value(root.path());
         let record = FileRecord {
             path: path.into(),
-            sha256: digest_bytes(bytes),
+            sha256: crate::hex::sha256(bytes),
             bytes: bytes.len() as u64,
             lines: 1,
         };

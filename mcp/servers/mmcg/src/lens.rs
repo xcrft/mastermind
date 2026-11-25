@@ -609,7 +609,8 @@ fn run_lens_final_snapshot_test_hook() {
     }
 }
 
-pub fn build_snapshot(
+#[cfg(test)]
+fn build_snapshot(
     store: &Store,
     root: &Path,
     options: &LensOptions,
@@ -622,7 +623,8 @@ pub fn build_snapshot(
     )
 }
 
-pub fn build_snapshot_with_evidence(
+#[cfg(test)]
+fn build_snapshot_with_evidence(
     store: &Store,
     root: &Path,
     options: &LensOptions,
@@ -637,7 +639,8 @@ pub fn build_snapshot_with_evidence(
     )
 }
 
-pub fn build_snapshot_with_evidence_extensions(
+#[cfg(test)]
+fn build_snapshot_with_evidence_extensions(
     store: &Store,
     root: &Path,
     options: &LensOptions,
@@ -1018,7 +1021,7 @@ fn validated_index_paths(
             if source.declared_len != inspected.declared_len {
                 return Err(LensError::IndexStale);
             }
-            let digest = crate::hex::encode(&Sha256::digest(source.bytes));
+            let digest = crate::hex::sha256(source.bytes);
             let stored_digest = store
                 .file_content_sha256(&indexed_path)
                 .map_err(|_| LensError::IndexStale)?;
@@ -1453,7 +1456,7 @@ fn audit_narrative_binding(
         baseline_oid: impact.baseline.baseline_oid.clone(),
         head_oid: impact.baseline.head_oid.clone(),
         snapshot_token_sha256: impact.snapshot_token.clone(),
-        map_sha256: crate::hex::encode(&Sha256::digest(map_bytes)),
+        map_sha256: crate::hex::sha256(map_bytes),
     })
 }
 
@@ -1553,7 +1556,7 @@ fn authors_by_component(
 ) -> Option<Vec<LensComponentAuthors>> {
     const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
     let max_count = window_commits.to_string();
-    let output = crate::diff::run_bounded_git_with_limit_until(
+    let output = crate::diff::run_bounded_git_controlled(
         root,
         &[
             "log",
@@ -1569,6 +1572,7 @@ fn authors_by_component(
         None,
         OUTPUT_LIMIT,
         deadline,
+        None,
     )
     .ok()?;
     if !output.success {
@@ -1647,7 +1651,7 @@ fn churn_by_file(
 ) -> Option<HashMap<String, u32>> {
     const CHURN_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
     let max_count = window_commits.to_string();
-    let output = crate::diff::run_bounded_git_with_limit_until(
+    let output = crate::diff::run_bounded_git_controlled(
         root,
         &[
             "log",
@@ -1662,6 +1666,7 @@ fn churn_by_file(
         None,
         CHURN_OUTPUT_LIMIT,
         deadline,
+        None,
     )
     .ok()?;
     if !output.success {
@@ -2103,83 +2108,6 @@ fn build_snapshot_until(
         document_graph,
         audit,
     })
-}
-
-pub fn run(
-    root: PathBuf,
-    index_path: PathBuf,
-    options: LensOptions,
-    port: u16,
-) -> Result<(), LensError> {
-    run_with_evidence(
-        root,
-        index_path,
-        options,
-        crate::evidence::EvidenceOptions::default(),
-        port,
-    )
-}
-
-pub fn run_with_evidence(
-    root: PathBuf,
-    index_path: PathBuf,
-    options: LensOptions,
-    evidence: crate::evidence::EvidenceOptions,
-    port: u16,
-) -> Result<(), LensError> {
-    run_with_evidence_extensions(
-        root,
-        index_path,
-        options,
-        evidence,
-        crate::evidence::EvidenceExtensionOptions::default(),
-        port,
-    )
-}
-
-pub fn run_with_evidence_extensions(
-    root: PathBuf,
-    index_path: PathBuf,
-    options: LensOptions,
-    evidence: crate::evidence::EvidenceOptions,
-    extensions: crate::evidence::EvidenceExtensionOptions,
-    port: u16,
-) -> Result<(), LensError> {
-    run_with_evidence_extensions_and_document_graph(
-        root, index_path, options, evidence, extensions, None, port,
-    )
-}
-
-pub fn run_with_evidence_extensions_and_document_graph(
-    root: PathBuf,
-    index_path: PathBuf,
-    options: LensOptions,
-    evidence: crate::evidence::EvidenceOptions,
-    extensions: crate::evidence::EvidenceExtensionOptions,
-    document_graph: Option<PathBuf>,
-    port: u16,
-) -> Result<(), LensError> {
-    let private_context = PrivateContextOptions {
-        selection: crate::context::ContextOptions {
-            since: options.since.clone(),
-            paths: Vec::new(),
-            role: queries::BriefRole::Auditor,
-            workflow: None,
-            query: None,
-            budget_tokens: crate::context::DEFAULT_BUDGET,
-        },
-        profile_client: None,
-    };
-    run_with_private_context(
-        root,
-        index_path,
-        options,
-        evidence,
-        extensions,
-        document_graph,
-        private_context,
-        port,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3608,7 +3536,7 @@ mod tests {
         let writable = Store::open(&index_path).unwrap();
         let contract = crate::facts::contract(&writable).unwrap();
         let source = fs::read(repo.path().join("src/lib.rs")).unwrap();
-        let source_sha256 = crate::hex::encode(&Sha256::digest(&source));
+        let source_sha256 = crate::hex::sha256(&source);
         let manifest_path = repo.path().join("facts.json");
         fs::write(
             &manifest_path,

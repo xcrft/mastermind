@@ -66,10 +66,7 @@ pub(crate) fn verify_stored_proof(
     let public: [u8; 32] = public
         .try_into()
         .map_err(|_| FactSignatureError::Crypto("invalid stored public key length".into()))?;
-    let expected_key_id = format!(
-        "sha256:{}",
-        crate::audit_bundle::sha256_hex(public.as_slice())
-    );
+    let expected_key_id = format!("sha256:{}", crate::hex::sha256(public.as_slice()));
     if expected_key_id != key_id {
         return Err(FactSignatureError::Crypto(
             "stored public key ID mismatch".into(),
@@ -148,10 +145,7 @@ fn manifest_digest(bytes: &[u8]) -> Result<String, FactSignatureError> {
         .map_err(|error| FactSignatureError::Contract(error.to_string()))?;
     let value: Value = crate::audit_bundle::from_json_strict(bytes).map_err(input_error)?;
     let canonical = crate::audit_bundle::canonical_json(&value).map_err(input_error)?;
-    Ok(format!(
-        "sha256:{}",
-        crate::audit_bundle::sha256_hex(&canonical)
-    ))
+    Ok(format!("sha256:{}", crate::hex::sha256(&canonical)))
 }
 
 fn signature_statement(key_id: &str, manifest_digest: &str) -> Result<Vec<u8>, FactSignatureError> {
@@ -273,10 +267,7 @@ pub fn generate_keypair(
         algorithm: "ed25519",
         private_key: private_key_output,
         public_key: public_key_output,
-        key_id: format!(
-            "sha256:{}",
-            crate::audit_bundle::sha256_hex(public.as_slice())
-        ),
+        key_id: format!("sha256:{}", crate::hex::sha256(public.as_slice())),
     })
 }
 
@@ -312,10 +303,7 @@ pub fn sign(
     let seed = crate::audit_bundle::read_key(private_key_path, true).map_err(input_error)?;
     let signing = SigningKey::from_bytes(&seed);
     let public = signing.verifying_key().to_bytes();
-    let key_id = format!(
-        "sha256:{}",
-        crate::audit_bundle::sha256_hex(public.as_slice())
-    );
+    let key_id = format!("sha256:{}", crate::hex::sha256(public.as_slice()));
     let statement = signature_statement(&key_id, &manifest_digest)?;
     let signature = FactSignature {
         schema_version: SIGNATURE_SCHEMA,
@@ -399,10 +387,7 @@ pub(crate) fn verify_bytes(
         ));
     }
     let public = crate::audit_bundle::read_key(public_key_path, false).map_err(input_error)?;
-    let key_id = format!(
-        "sha256:{}",
-        crate::audit_bundle::sha256_hex(public.as_slice())
-    );
+    let key_id = format!("sha256:{}", crate::hex::sha256(public.as_slice()));
     if signature.key_id != key_id {
         return Err(FactSignatureError::Crypto("public key ID mismatch".into()));
     }
@@ -420,7 +405,7 @@ pub(crate) fn verify_bytes(
     Ok(VerifiedFactTrust {
         signature_status: "verified",
         signing_key_id: Some(key_id),
-        signature_sha256: Some(crate::audit_bundle::sha256_hex(&signature_bytes)),
+        signature_sha256: Some(crate::hex::sha256(&signature_bytes)),
         signature_bytes: Some(signature_bytes.len() as u64),
         signing_public_key: Some(BASE64.encode(public)),
         signature_value: Some(signature.signature),
@@ -501,10 +486,7 @@ mod tests {
             fs::set_permissions(&private_path, fs::Permissions::from_mode(0o600)).unwrap();
             fs::set_permissions(&public_path, fs::Permissions::from_mode(0o644)).unwrap();
         }
-        let key_id = format!(
-            "sha256:{}",
-            crate::audit_bundle::sha256_hex(public.as_slice())
-        );
+        let key_id = format!("sha256:{}", crate::hex::sha256(public.as_slice()));
         (root, manifest_path, private_path, public_path, key_id)
     }
 

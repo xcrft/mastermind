@@ -2090,3 +2090,162 @@ fn generated_follow_up_argv_executes_with_leading_dash_spec_and_check_id() {
         4
     );
 }
+
+fn quoted(path: &std::path::Path) -> String {
+    format!("'{}'", path.display())
+}
+
+#[test]
+fn old_artifact_names_beside_a_started_spec_are_refused_before_state_changes() {
+    const FLAT: &str = "docs/task.md";
+    let fixture = Fixture::new();
+    fixture.write(FLAT, &fs::read_to_string(fixture.path(SPEC)).unwrap());
+    assert_success(&fixture.run(&["run-task", FLAT, "--pre-only"]));
+    let state_path = mmcg::run_task::state_file_path(&fixture.root, &fixture.path(FLAT));
+    let started = fs::read(&state_path).unwrap();
+    fixture.write("docs/executor-report.md", "{}\n");
+    fixture.write("docs/audit.md", "# Audit\n");
+    fixture.write("docs/task.audit.md", "# Audit\n");
+    let output = fixture.run(&["run-task", FLAT]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for command in [
+        format!(
+            "mv {} {}",
+            quoted(&fixture.path("docs/executor-report.md")),
+            quoted(&fixture.path("docs/task.executor-report.md"))
+        ),
+        // The new name already holds this spec's audit, so the old one is stale.
+        format!("rm {}", quoted(&fixture.path("docs/audit.md"))),
+    ] {
+        assert!(stderr.contains(&command), "{command}\n{stderr}");
+    }
+    assert_eq!(fs::read(&state_path).unwrap(), started);
+
+    // A spec that was never started cannot own the old names, so they are left alone.
+    fixture.write(
+        "docs/other.md",
+        &fs::read_to_string(fixture.path(SPEC)).unwrap(),
+    );
+    assert_success(&fixture.run(&["run-task", "docs/other.md", "--pre-only"]));
+}
+
+#[test]
+fn a_rejected_report_names_the_file_the_spec_reads() {
+    const FLAT: &str = "docs/task.md";
+    let fixture = Fixture::new();
+    fixture.write(FLAT, &fs::read_to_string(fixture.path(SPEC)).unwrap());
+    assert_success(&fixture.run(&["run-task", FLAT, "--pre-only"]));
+    fixture.write("service.py", "def keep():\n    return 2\n");
+    fixture.index();
+    for id in ["unit", "integration"] {
+        assert_success(&fixture.run(&["verification", "run", FLAT, "--id", id, "--json"]));
+    }
+    fixture.write("docs/task.executor-report.md", "{}\n");
+    let post = fixture.run(&["run-task", FLAT, "--post-only"]);
+    assert!(!post.status.success(), "{post:?}");
+    let state_path = mmcg::run_task::state_file_path(&fixture.root, &fixture.path(FLAT));
+    let state: Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(
+        state["last_artifact"], "task.executor-report.md",
+        "{post:?}"
+    );
+}
+
+#[test]
+fn a_spec_named_in_another_case_does_not_get_a_second_controller() {
+    const UPPER: &str = ".mastermind/tasks/001-review/SPEC.md";
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["run-task", SPEC, "--pre-only"]));
+    let output = fixture.run(&["run-task", UPPER, "--pre-only"]);
+    assert!(!output.status.success(), "{output:?}");
+    if fixture.path(UPPER).exists() {
+        // A case-insensitive file system opens the same file under both names.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&fixture.path(SPEC).display().to_string()),
+            "{stderr}"
+        );
+    }
+    assert!(!fixture.path(".mastermind/run-state/.noncanonical").exists());
+}
+
+#[test]
+fn a_folder_that_is_not_a_task_cannot_start_one() {
+    const DRAFT: &str = ".mastermind/tasks/_draft/spec.md";
+    let fixture = Fixture::new();
+    fixture.write(DRAFT, &fs::read_to_string(fixture.path(SPEC)).unwrap());
+    let output = fixture.run(&["run-task", DRAFT, "--pre-only"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("`_draft` is not a task"),
+        "{output:?}"
+    );
+    assert!(!fixture.path(".mastermind/tasks/_draft/state.json").exists());
+    assert!(!fixture.path(".mastermind/run-state").exists());
+    let ci = fixture.run(&["ci", "--since", "HEAD"]);
+    assert!(
+        !String::from_utf8_lossy(&ci.stderr).contains("_draft"),
+        "{ci:?}"
+    );
+}
+
+#[test]
+fn repository_paths_resolve_against_the_root_from_a_subdirectory() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.path("sub")).unwrap();
+    let index = fixture.path(".mastermind/index.db");
+    let run_in = |directory: &std::path::Path, args: &[&str]| {
+        fixture
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(directory)
+            .arg("--index")
+            .arg(&index)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let spec = fixture.path(SPEC).display().to_string();
+    let root = fixture.root.display().to_string();
+    let missing_intake = "0".repeat(64);
+    let bind = [
+        "miner",
+        "hooks",
+        "bind-task",
+        &missing_intake,
+        "--spec",
+        &spec,
+        "--project-root",
+        &root,
+    ];
+    let at_root = run_in(&fixture.root, &bind);
+    let below = run_in(&fixture.path("sub"), &bind);
+    assert!(!below.status.success(), "{below:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&below.stderr),
+        String::from_utf8_lossy(&at_root.stderr)
+    );
+    assert_success(&run_in(
+        &fixture.path("sub"),
+        &["run-task", "--root", &root, SPEC, "--pre-only"],
+    ));
+    assert_eq!(fixture.state()["spec_path"], SPEC);
+}
+
+#[test]
+fn a_relative_root_names_the_repository_from_the_working_directory() {
+    let fixture = Fixture::new();
+    let parent = fixture.root.parent().unwrap();
+    let name = fixture.root.file_name().unwrap().to_str().unwrap();
+    assert_success(
+        &fixture
+            .command(env!("CARGO_BIN_EXE_mmcg"))
+            .current_dir(parent)
+            .arg("--index")
+            .arg(fixture.path(".mastermind/index.db"))
+            .args(["run-task", "--root", name, SPEC, "--pre-only"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fixture.state()["spec_path"], SPEC);
+}

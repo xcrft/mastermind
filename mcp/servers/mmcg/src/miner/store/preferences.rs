@@ -488,7 +488,7 @@ pub(crate) fn fixture_preference(
     statement: &str,
     scope: &str,
 ) -> CollectedCandidate {
-    let id = crate::hex::encode(&Sha256::digest(format!("{statement}:{scope}")));
+    let id = crate::hex::sha256(format!("{statement}:{scope}"));
     let candidate = CollectedCandidate {
         id: id.clone(),
         revision: "b".repeat(64),

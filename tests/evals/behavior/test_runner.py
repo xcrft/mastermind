@@ -1032,7 +1032,7 @@ action: passthrough
             },
         ]
         payload, tool_calls, tool_executions = runner.parse_claude_output(
-            "\n".join(json.dumps(event) for event in events), streamed=True
+            "\n".join(json.dumps(event) for event in events)
         )
 
         self.assertEqual(payload["result"], "done")
@@ -1072,7 +1072,7 @@ action: passthrough
         ]
         with self.assertRaisesRegex(ValueError, "without a result"):
             runner.parse_claude_output(
-                "\n".join(json.dumps(event) for event in base), streamed=True
+                "\n".join(json.dumps(event) for event in base)
             )
 
         unmatched = deepcopy(base)
@@ -1089,7 +1089,7 @@ action: passthrough
         )
         with self.assertRaisesRegex(ValueError, "unmatched tool result"):
             runner.parse_claude_output(
-                "\n".join(json.dumps(event) for event in unmatched), streamed=True
+                "\n".join(json.dumps(event) for event in unmatched)
             )
 
         before_init = deepcopy(base)
@@ -1098,7 +1098,7 @@ action: passthrough
         )
         with self.assertRaisesRegex(ValueError, "before its init"):
             runner.parse_claude_output(
-                "\n".join(json.dumps(event) for event in before_init), streamed=True
+                "\n".join(json.dumps(event) for event in before_init)
             )
 
         missing_error_state = deepcopy(base)
@@ -1106,7 +1106,6 @@ action: passthrough
         with self.assertRaisesRegex(ValueError, "invalid error state"):
             runner.parse_claude_output(
                 "\n".join(json.dumps(event) for event in missing_error_state),
-                streamed=True,
             )
 
         unsupported = deepcopy(base)
@@ -1114,7 +1113,6 @@ action: passthrough
         with self.assertRaisesRegex(ValueError, "unsupported event type"):
             runner.parse_claude_output(
                 "\n".join(json.dumps(event) for event in unsupported),
-                streamed=True,
             )
 
     def test_stream_parser_validates_the_observed_cli_runtime(self):
@@ -1146,7 +1144,6 @@ action: passthrough
 
         payload, tool_calls, executions = runner.parse_claude_output(
             "\n".join(json.dumps(event) for event in (init, result)),
-            streamed=True,
             runtime_contract=contract,
         )
         self.assertEqual(payload["result"], "done")
@@ -1174,7 +1171,6 @@ action: passthrough
                         "\n".join(
                             json.dumps(event) for event in (changed, result)
                         ),
-                        streamed=True,
                         runtime_contract=contract,
                     )
 
@@ -1207,7 +1203,6 @@ action: passthrough
         with self.assertRaisesRegex(ValueError, "outside its inventory"):
             runner.parse_claude_output(
                 "\n".join(json.dumps(event) for event in extra_tool_events),
-                streamed=True,
                 runtime_contract=contract,
             )
 
@@ -1963,29 +1958,10 @@ action: passthrough
             any("no definition stability" in issue for issue in gate["failures"])
         )
 
-    def test_legacy_capture_is_limited_to_baseline_evidence(self):
+    def test_pre_report_console_capture_is_not_a_loadable_baseline(self):
         baseline_path = runner.EVALS_DIR / "baselines" / "critic-opus-pre-lean.json"
-        with self.assertRaisesRegex(ValueError, "cannot use legacy capture"):
+        with self.assertRaisesRegex(ValueError, "unexpected fields: \\['capture'\\]"):
             runner.load_report(baseline_path)
-        legacy = runner.load_report(
-            baseline_path, allow_legacy_capture=True
-        )
-        self.assertEqual(legacy["capture"]["mode"], "pre-report-console")
-        self.assertTrue(runner._is_shipped_legacy_baseline(baseline_path))
-        with tempfile.TemporaryDirectory() as target:
-            copied = Path(target) / baseline_path.name
-            copied.write_bytes(baseline_path.read_bytes())
-            self.assertFalse(runner._is_shipped_legacy_baseline(copied))
-            with self.assertRaisesRegex(ValueError, "cannot use legacy capture"):
-                runner.load_report(copied)
-
-        current = valid_critic_report()
-        current["capture"] = deepcopy(legacy["capture"])
-        current["suites"]["critic"]["duration_api_ms"]["total"] = 1
-        issues = runner.report_comparison_issues(current, "current")
-
-        self.assertTrue(any("cannot use legacy capture" in issue for issue in issues))
-        self.assertTrue(any("duration_api_ms summary" in issue for issue in issues))
 
     def test_new_baseline_requires_complete_evidence(self):
         current = valid_critic_report()
@@ -2488,7 +2464,6 @@ action: passthrough
                 "critic": {
                     "subagent": subagent,
                     "cases": cases,
-                    "renderer": "render_critic_input",
                     "uses_fixture": False,
                 }
             }
@@ -2588,7 +2563,6 @@ action: passthrough
                 "critic": {
                     "subagent": subagent,
                     "cases": cases,
-                    "renderer": "render_critic_input",
                     "uses_fixture": False,
                 }
             }
@@ -2654,7 +2628,6 @@ action: passthrough
                 "critic": {
                     "subagent": subagent,
                     "cases": cases,
-                    "renderer": "render_critic_input",
                     "uses_fixture": False,
                 }
             }
@@ -2728,7 +2701,6 @@ action: passthrough
                 "critic": {
                     "subagent": subagent,
                     "cases": cases,
-                    "renderer": "render_critic_input",
                     "uses_fixture": False,
                 }
             }

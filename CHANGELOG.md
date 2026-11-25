@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-25
+
 ### Security
 
 - `pulldown-cmark` is updated to 0.13.6 for RUSTSEC-2026-0433. Mastermind
@@ -639,7 +641,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give each Mastermind native hook an event-specific label in the client review
   screen. Re-running hook setup updates previous labels without duplicate hooks.
 
-[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v3.4.2...HEAD
+[Unreleased]: https://github.com/xcrft/mastermind/compare/npm-v4.0.0...HEAD
+[4.0.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v4.0.0
 [3.4.2]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.2
 [3.4.1]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.1
 [3.4.0]: https://github.com/xcrft/mastermind/releases/tag/npm-v3.4.0

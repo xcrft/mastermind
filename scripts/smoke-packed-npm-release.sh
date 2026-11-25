@@ -48,7 +48,7 @@ node -e 'const assert = require("node:assert/strict"); const d = require("./manu
 
 # Emulate a direct registry dependency without replacing the candidate bytes.
 npm pkg set "devDependencies.@xcraftmind/mastermind=$VERSION"
-./node_modules/.bin/mastermind setup claude --project . --write
+./node_modules/.bin/mastermind setup claude --scope project --root . --write
 node <<'NODE'
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -68,7 +68,7 @@ assert.equal(d.package.command.cwd, process.cwd());
 assert.ok(d.package.command.argv.includes("--save-dev"));
 NODE
 
-./node_modules/.bin/mmcg setup claude --project "$SMOKE_ROOT/compat" --write
+./node_modules/.bin/mmcg setup claude --scope project --root "$SMOKE_ROOT/compat" --write
 node - "$SMOKE_ROOT/compat/.mcp.json" "@xcraftmind/mmcg-$VARIANT" <<'NODE'
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

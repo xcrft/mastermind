@@ -1378,16 +1378,20 @@ fn controller_identity(repo_root: &Path, spec_path: &Path) -> Result<ControllerI
     }
     // The state, lock and artifacts follow the spec path, so two spellings of
     // one file, such as `SPEC.md` on a case-insensitive file system, would get
-    // two controllers.
+    // two controllers. A missing spec fails here, before any lock is created.
     let named = root.canonical_root().join(&relative);
-    if let Ok(on_disk) = named.canonicalize() {
-        if on_disk != named {
-            return Err(format!(
-                "spec `{}` is stored as `{}`; run the task with that path",
-                crate::terminal::escape(&named.display().to_string()),
-                crate::terminal::escape(&on_disk.display().to_string())
-            ));
-        }
+    let on_disk = named.canonicalize().map_err(|error| {
+        format!(
+            "reading spec `{}`: {error}",
+            crate::terminal::escape(&named.display().to_string())
+        )
+    })?;
+    if on_disk != named {
+        return Err(format!(
+            "spec `{}` is stored as `{}`; run the task with that path",
+            crate::terminal::escape(&named.display().to_string()),
+            crate::terminal::escape(&on_disk.display().to_string())
+        ));
     }
     let repository = crate::facts::repository_identity(root.canonical_root())
         .map_err(|error| format!("resolving repository identity: {error}"))?;

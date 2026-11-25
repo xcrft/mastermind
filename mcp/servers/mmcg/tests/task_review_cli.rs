@@ -2171,6 +2171,18 @@ fn a_spec_named_in_another_case_does_not_get_a_second_controller() {
 }
 
 #[test]
+fn a_missing_spec_fails_without_creating_controller_files() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&["run-task", "docs/missing.md", "--pre-only"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("reading spec"),
+        "{output:?}"
+    );
+    assert!(!fixture.path(".mastermind/run-state").exists());
+}
+
+#[test]
 fn a_folder_that_is_not_a_task_cannot_start_one() {
     const DRAFT: &str = ".mastermind/tasks/_draft/spec.md";
     let fixture = Fixture::new();

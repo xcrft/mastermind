@@ -617,6 +617,10 @@ mod tests {
         let error = ByteBudget::snapshot(0).charge(1, Some(name)).unwrap_err();
         assert!(error.contains("next file `big\\u{1b}[2J.bin`"), "{error}");
 
+        // Windows refuses control characters in file names.
+        if cfg!(windows) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         std::fs::File::create(directory.path().join(name))
             .unwrap()

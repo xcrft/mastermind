@@ -162,6 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `run-task` with a spec path that does not exist fails before it takes the
+  controller lock. Before, it left a lock file under `.mastermind/run-state/`.
 - `mmcg serve` starts while `mmcg index --force` runs. Opening a current index
   no longer writes its schema, and serve no longer copies a snapshot just to
   read the index root. Before, most starts during a rebuild failed with

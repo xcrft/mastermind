@@ -27,6 +27,12 @@ class ReleaseVersionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             copy_release_files(root)
+            notes = "### Fixed\n\n- A release note.\n"
+            source = root / "CHANGELOG.md"
+            source.write_text(
+                source.read_text(encoding="utf-8").replace("## [Unreleased]\n", f"## [Unreleased]\n\n{notes}", 1),
+                encoding="utf-8",
+            )
             old = release_version.source_version(root)
             release_version.bump(root, "99.0.0", "2026-01-02")
             self.assertEqual(release_version.mismatches(root), [])
@@ -35,9 +41,7 @@ class ReleaseVersionTests(unittest.TestCase):
             self.assertIn("## [Unreleased]\n\n## [99.0.0] - 2026-01-02\n", changelog)
             self.assertIn("compare/npm-v99.0.0...HEAD", changelog)
             self.assertIn(f"[{old}]: ", changelog)
-            self.assertEqual(release_version.release_notes(changelog, "99.0.0"), release_version.release_notes(
-                (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").replace("## [Unreleased]", "## [99.0.0]", 1), "99.0.0"
-            ))
+            self.assertEqual(release_version.release_notes(changelog, "99.0.0"), notes)
             with self.assertRaisesRegex(ValueError, "no notes for 98.0.0"):
                 release_version.release_notes(changelog, "98.0.0")
             for relative in {path for path, _, _ in release_version.LOCATIONS}:

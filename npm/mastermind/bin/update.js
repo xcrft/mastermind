@@ -167,7 +167,7 @@ function npmEntry(nodePath) {
   const candidates = [];
   if (process.env.npm_execpath && path.basename(process.env.npm_execpath) === "npm-cli.js") candidates.push(process.env.npm_execpath);
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (!dir) continue;
+    if (!dir || !path.isAbsolute(dir)) continue;
     const command = path.join(dir, process.platform === "win32" ? "npm.cmd" : "npm");
     if (!entry(command)) continue;
     let actual;

@@ -240,6 +240,33 @@ fn workflow_init_adds_and_refreshes_a_managed_block_in_client_instructions() {
 }
 
 #[test]
+fn workflow_init_replaces_an_unmarked_section_from_an_older_release_and_says_so() {
+    let f = Fixture::new();
+    f.client("claude");
+    let older =
+        "# Project\n\n## Mastermind workflow\n\nOld rules from 3.x.\n\n## Team rules\nkept\n";
+    fs::write(f.root.join("CLAUDE.md"), older).unwrap();
+
+    let init = f.run(&["init", "--client", "claude", "--workflow", "on"]);
+    let stdout = String::from_utf8_lossy(&init.stdout);
+    assert!(
+        stdout.contains("Warning: CLAUDE.md: replaced the workflow section"),
+        "{init:?}"
+    );
+    let claude = fs::read_to_string(f.root.join("CLAUDE.md")).unwrap();
+    assert!(
+        claude.starts_with("# Project\n\n<!-- mastermind:workflow:begin"),
+        "{claude}"
+    );
+    assert!(claude.ends_with("<!-- mastermind:workflow:end -->\n\n## Team rules\nkept\n"));
+    assert!(!claude.contains("Old rules from 3.x."));
+    assert_eq!(
+        fs::read_to_string(f.root.join("CLAUDE.md.mastermind-backup")).unwrap(),
+        older
+    );
+}
+
+#[test]
 fn template_written_instruction_files_reach_the_draft_and_oversized_ones_warn() {
     let f = Fixture::new();
     f.client("claude");

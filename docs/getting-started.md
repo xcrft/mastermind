@@ -52,7 +52,7 @@ between `<!-- mastermind:workflow:begin ... -->` and
 | Missing | Writes a project header to fill in, then the block |
 | Present, no block | Appends the block. Your text stays |
 | Older block | Replaces only the block. Run `init` after an update |
-| Unmarked `## Mastermind workflow` section from an older `init` | Wraps it when it is unchanged. Otherwise warns and leaves the file. Delete the section and run `init` again |
+| Unmarked `## Mastermind workflow` section from a 3.x `init` | Replaces that section, up to the next `#` or `##` heading, with the block. Keeps the old file as `<name>.mastermind-backup` and prints a warning. Copy back anything you changed in that section |
 | Any state with `--force` | Replaces the whole file and keeps a backup |
 
 `--workflow off` writes no block. `mastermind doctor` checks the file of each

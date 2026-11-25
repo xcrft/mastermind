@@ -623,6 +623,11 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
                     .map(|reason| format!(" — {}", reason.escape_debug()))
                     .unwrap_or_default()
             );
+            for warning in step["detail"]["warnings"].as_array().into_iter().flatten() {
+                if let Some(warning) = warning.as_str() {
+                    println!("    Warning: {}", warning.escape_debug());
+                }
+            }
             if let Some(attempts) = step["detail"]["run"]["attempts"].as_u64() {
                 println!(
                     "    Calls: {attempts}/{}, runtime limit: {} s",

@@ -9,7 +9,7 @@
 //! | # | Name                  | Catches                                                |
 //! |---|-----------------------|--------------------------------------------------------|
 //! | 1 | `mmcg binary`          | sanity — we're running, report our version             |
-//! | 2 | `PATH entries`         | client setup cannot route through relative executables |
+//! | 2 | `PATH entries`         | names relative entries, which executable lookup skips   |
 //! | 3 | `index database`       | selected index is a valid current-schema database       |
 //! | 4 | `index repository`     | selected index belongs to the requested repository     |
 //! | 5 | `symbols indexed`      | non-empty index (catches "I ran init but not index")   |
@@ -222,9 +222,9 @@ impl Report {
         if self.summary.fail > 0 || self.summary.warn > 0 {
             out.push_str("\nCommon fixes:\n");
             out.push_str("  No index       run `mastermind init` or `mastermind index .`\n");
-            out.push_str("  No MCP config  run `mastermind setup claude --write`\n");
+            out.push_str("  No MCP config  run `mastermind init`\n");
             out.push_str("  Stale index    run `mastermind index .` or start `mastermind watch`\n");
-            out.push_str("  No .gitignore  add `.mastermind/` to your .gitignore\n");
+            out.push_str("  Not ignored    run `mastermind init`\n");
         }
         out
     }
@@ -305,7 +305,7 @@ fn capture_fence_check(report: Result<serde_json::Value, Box<dyn std::error::Err
             if unknown == 1 { "prefix" } else { "prefixes" },
         ),
         hint: Some(
-            "a marker is a delivery that is running or never reached the journal; inspect `mastermind miner hooks status` in each project and run `mastermind miner hooks recover` there. Recover cannot reach a prefix with no known grant: once no client session uses that project, remove its files from ~/.mastermind/.persona-capture by hand".into(),
+            "a marker is a delivery that is running or never reached the journal; inspect `mastermind miner hooks status --client <client>` in each project and run `mastermind miner hooks recover --client <client>` there. Recover cannot reach a prefix with no known grant: once no client session uses that project, remove its files from ~/.mastermind/.persona-capture by hand".into(),
         ),
     }
 }
@@ -550,12 +550,9 @@ fn check_path_entries() -> Check {
         },
         Some(detail) => Check {
             name: "PATH entries",
-            status: Status::Fail,
+            status: Status::Warn,
             message: detail,
-            hint: Some(
-                "`mastermind setup <client> --scope user` fails closed with `unsafe_path_entry` until every PATH entry is absolute"
-                    .into(),
-            ),
+            hint: None,
         },
     }
 }
@@ -689,11 +686,16 @@ fn check_symbols_indexed(index: &DoctorIndex) -> Check {
         }
     }
     if file_count == 0 || symbol_count == 0 {
+        // The root and freshness checks already cover an index built from the
+        // wrong place or out of date, so an empty current index means the
+        // project has no source in a supported language.
         Check {
             name: "symbols indexed",
-            status: Status::Fail,
-            message: format!("{file_count} files, {symbol_count} symbols"),
-            hint: Some("index is empty — run `mastermind index .` from the project root".into()),
+            status: Status::Ok,
+            message: format!(
+                "{file_count} files, {symbol_count} symbols: no source in a supported language, so code graph tools return nothing here"
+            ),
+            hint: None,
         }
     } else {
         Check {
@@ -842,6 +844,18 @@ fn read_project_text(root: &Path, path: &Path) -> Result<Option<String>, String>
 }
 
 fn check_gitignore(root: &Path) -> Check {
+    // `init` writes `.mastermind/.gitignore` with `*`, which keeps the whole
+    // directory out of Git without touching the project's own file.
+    if let Ok(Some(body)) = read_project_text(root, &root.join(".mastermind/.gitignore")) {
+        if body.lines().any(|line| line.trim() == "*") {
+            return Check {
+                name: "gitignore",
+                status: Status::Ok,
+                message: ".mastermind/ excluded by .mastermind/.gitignore".into(),
+                hint: None,
+            };
+        }
+    }
     let p = root.join(".gitignore");
     let body = match read_project_text(root, &p) {
         Ok(Some(body)) => body,
@@ -849,9 +863,9 @@ fn check_gitignore(root: &Path) -> Check {
             return Check {
                 name: "gitignore",
                 status: Status::Warn,
-                message: "no .gitignore at project root".into(),
+                message: ".mastermind/ is not ignored".into(),
                 hint: Some(
-                    "add `.mastermind/` to .gitignore — the index + specs are local state".into(),
+                    "run `mastermind init`, or add `.mastermind/` to .gitignore — the index and specs are local state".into(),
                 ),
             }
         }
@@ -883,9 +897,9 @@ fn check_gitignore(root: &Path) -> Check {
         Check {
             name: "gitignore",
             status: Status::Warn,
-            message: ".mastermind/ NOT in .gitignore".into(),
+            message: ".mastermind/ is not ignored".into(),
             hint: Some(
-                "add `.mastermind/` to .gitignore — leaking the local index pollutes commits"
+                "run `mastermind init`, or add `.mastermind/` to .gitignore — the index and specs are local state"
                     .into(),
             ),
         }
@@ -957,7 +971,7 @@ fn check_instructions(root: &Path, name: &'static str) -> Check {
         ),
         Ok(crate::templates::WorkflowBlock::Missing { legacy: true }) => warn(
             "workflow section has no managed-block markers".into(),
-            "run `mastermind init --workflow on`. It wraps the section when its text is unchanged. Otherwise delete the section first",
+            "run `mastermind init --workflow on`. It replaces the section with the managed block and keeps the old file as a `.mastermind-backup`",
         ),
         Ok(crate::templates::WorkflowBlock::Missing { legacy: false }) => {
             warn("no managed mastermind workflow block".into(), INIT_HINT)
@@ -1745,7 +1759,12 @@ mod tests {
         let index = DoctorIndex::inspect(&db);
         assert_eq!(check_index_db(&db, &index).status, Status::Ok);
         assert_eq!(check_index_root(&root, &db, &index).status, Status::Ok);
-        assert_eq!(check_symbols_indexed(&index).status, Status::Fail);
+        // A project with no supported source has an empty index, which is not a failure.
+        let symbols = check_symbols_indexed(&index);
+        assert_eq!(symbols.status, Status::Ok);
+        assert!(symbols
+            .message
+            .contains("no source in a supported language"));
         assert_eq!(check_index_freshness(&root, &index).status, Status::Warn);
         drop(index);
 
@@ -1833,6 +1852,20 @@ mod tests {
         assert_eq!(check_gitignore(&root).status, Status::Warn);
         // With .mastermind.
         fs::write(root.join(".gitignore"), ".mastermind/\n").unwrap();
+        assert_eq!(check_gitignore(&root).status, Status::Ok);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_gitignore_accepts_the_directory_ignore_file_init_writes() {
+        let root = tmp();
+        fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
+        fs::create_dir_all(root.join(".mastermind")).unwrap();
+        fs::write(
+            root.join(".mastermind/.gitignore"),
+            "# local\n*\n!.gitignore\n",
+        )
+        .unwrap();
         assert_eq!(check_gitignore(&root).status, Status::Ok);
         fs::remove_dir_all(&root).ok();
     }
@@ -2315,7 +2348,7 @@ mod tests {
     }
 
     #[test]
-    fn report_explain_uses_the_canonical_setup_write_flag() {
+    fn report_explain_points_mcp_fixes_at_init() {
         let root = PathBuf::from("/tmp/test");
         let report = Report::from_checks(
             &root,
@@ -2327,7 +2360,7 @@ mod tests {
             }],
         );
         let text = report.render_explain(Path::new("/tmp/mmcg"), Path::new("/tmp/mmcg.db"));
-        assert!(text.contains("mastermind setup claude --write"));
+        assert!(text.contains("No MCP config  run `mastermind init`"));
         assert!(!text.contains("--write-mcp"));
     }
 

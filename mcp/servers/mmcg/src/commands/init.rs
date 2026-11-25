@@ -158,6 +158,7 @@ pub fn scaffold(root: &Path, opts: InitOpts) -> Result<ScaffoldReport, Box<dyn s
         let path = root.join(name);
         let mut existed = false;
         let mut from_template = false;
+        let mut legacy = false;
         let outcome = mmcg::task_scaffold::update_project_file(root, &path, |current| {
             existed = current.is_some();
             let Some(current) = current.filter(|_| !force) else {
@@ -166,6 +167,10 @@ pub fn scaffold(root: &Path, opts: InitOpts) -> Result<ScaffoldReport, Box<dyn s
             };
             let text = std::str::from_utf8(current)
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not UTF-8"))?;
+            legacy = matches!(
+                templates::workflow_block_state(text),
+                Ok(templates::WorkflowBlock::Missing { legacy: true })
+            );
             templates::with_workflow_block(text)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         });
@@ -173,6 +178,13 @@ pub fn scaffold(root: &Path, opts: InitOpts) -> Result<ScaffoldReport, Box<dyn s
             Ok(outcome) => {
                 if let Some(backup) = &outcome.backup {
                     created.push(format!("preserved existing {name} → {}", backup.display()));
+                    if legacy {
+                        warnings.push(format!(
+                            "{name}: replaced the workflow section an older init wrote without markers with the managed block. \
+                             The previous file is at {}. Copy back anything you had changed in that section.",
+                            backup.display()
+                        ));
+                    }
                 }
                 match (outcome.written, existed, from_template) {
                     (false, _, _) => skipped.push(format!("{name} (workflow block is current)")),

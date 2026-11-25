@@ -1849,18 +1849,16 @@ pub(crate) fn describe_unsafe_path_entries(path: &std::ffi::OsStr) -> Option<Str
         return None;
     }
     Some(format!(
-        "PATH entry {}. A binary resolved through it depends on the working directory, \
-so setup refuses to record the command. An empty entry is usually a stray colon in a \
-shell profile — fix PATH and retry.",
+        "PATH entry {}. Mastermind skips it when it looks up `claude`, `codex` or a \
+verification command, because a binary found through it depends on the working directory. \
+`~` is not expanded inside PATH: write `$HOME/...` in the shell profile. An empty entry is \
+usually a stray colon.",
         offenders.join("; ")
     ))
 }
 
 fn error_hint(class: &str) -> Option<String> {
     match class {
-        "unsafe_path_entry" => {
-            describe_unsafe_path_entries(&std::env::var_os("PATH").unwrap_or_default())
-        }
         "path_unavailable" => Some("PATH is not set in this environment".to_string()),
         "native_inspect_failed" => Some(
             "Codex did not return a usable MCP list. Run `codex mcp list --json` directly, fix its configuration error, then retry."
@@ -1886,8 +1884,40 @@ fn error_hint(class: &str) -> Option<String> {
     }
 }
 
-/// Resolve a native CLI through absolute `PATH` entries and reject any binary
-/// whose canonical location is inside the repository it will operate on.
+/// Largest native client executable that gets fingerprinted. Claude Code ships
+/// as one self-contained binary of several hundred MiB, and it keeps growing.
+pub(crate) const NATIVE_CLI_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Stream a resolved native CLI through SHA-256 without holding it in memory.
+/// Returns the lowercase hex digest and the file's identity.
+pub(crate) fn fingerprint_native_cli(
+    path: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<(String, crate::bounded_fs::BoundedFile), crate::bounded_fs::BoundedReadError> {
+    use sha2::Digest;
+    let parent = crate::bounded_fs::RootCapability::open(
+        path.parent()
+            .ok_or(crate::bounded_fs::BoundedReadError::InvalidPath)?,
+    )?;
+    let mut hasher = sha2::Sha256::new();
+    let file = crate::bounded_fs::copy_regular_file_with_capability(
+        &parent,
+        path,
+        NATIVE_CLI_MAX_BYTES,
+        control,
+        None,
+        &mut crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: std::io::sink(),
+        },
+    )?;
+    Ok((crate::hex::encode(&hasher.finalize()), file))
+}
+
+/// Resolve a native CLI through the absolute `PATH` entries and reject any
+/// binary whose canonical location is inside the repository it will operate on.
+/// Relative and empty entries are skipped: searching them would make the
+/// result depend on the working directory.
 pub fn resolve_native_cli(name: &str, root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
@@ -1897,11 +1927,7 @@ pub fn resolve_native_cli(name: &str, root: &Path) -> Result<PathBuf, String> {
         return resolve_native_from_directories(name, &root, [directory]);
     }
     let path = std::env::var_os("PATH").ok_or_else(|| "path_unavailable".to_string())?;
-    let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    if entries.is_empty() || entries.iter().any(|entry| !entry.is_absolute()) {
-        return Err("unsafe_path_entry".into());
-    }
-    resolve_native_from_directories(name, &root, entries)
+    resolve_native_from_directories(name, &root, std::env::split_paths(&path))
 }
 
 fn resolve_native_from_directories(
@@ -1911,7 +1937,7 @@ fn resolve_native_from_directories(
 ) -> Result<PathBuf, String> {
     for directory in directories {
         if !directory.is_absolute() {
-            return Err("unsafe_path_entry".into());
+            continue;
         }
         #[cfg(not(windows))]
         let candidate = directory.join(name);
@@ -2303,7 +2329,7 @@ mod path_entry_tests {
     }
 
     #[test]
-    fn native_resolution_rejects_repository_and_relative_candidates() {
+    fn native_resolution_rejects_repository_binaries_and_skips_relative_entries() {
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("repo");
         let inside = root.join("bin");
@@ -2318,15 +2344,37 @@ mod path_entry_tests {
             resolve_native_from_directories("claude", &root, [inside]).unwrap_err(),
             "repository_native_rejected"
         );
+        // A `~/...` entry from a shell profile is relative. Lookup skips it and
+        // goes on to the absolute entries instead of failing.
         assert_eq!(
-            resolve_native_from_directories("claude", &root, [PathBuf::from("relative")])
-                .unwrap_err(),
-            "unsafe_path_entry"
-        );
-        assert_eq!(
-            resolve_native_from_directories("claude", &root, [outside.clone()]).unwrap(),
+            resolve_native_from_directories(
+                "claude",
+                &root,
+                [
+                    PathBuf::from("~").join(".dotnet"),
+                    PathBuf::new(),
+                    outside.clone()
+                ]
+            )
+            .unwrap(),
             outside.join("claude").canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn native_cli_fingerprint_streams_the_whole_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("claude");
+        let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let (digest, file) = super::fingerprint_native_cli(
+            &path.canonicalize().unwrap(),
+            crate::bounded_fs::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(digest, crate::hex::sha256(&bytes));
+        assert_eq!(file.declared_len, bytes.len() as u64);
+        assert!(file.bytes.is_empty(), "the executable must not be buffered");
     }
 
     #[test]

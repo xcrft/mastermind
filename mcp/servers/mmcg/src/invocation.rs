@@ -1539,15 +1539,23 @@ fn native_args(max_turns: u32, role: NativeRole) -> Vec<String> {
 fn resolve_executable(root: &Path) -> Result<Executable, String> {
     let path = crate::setup::resolve_native_cli("claude", root)
         .map_err(|_| "invocation_runtime_unavailable")?;
-    let parent = RootCapability::open(path.parent().ok_or("invocation_executable_invalid")?)
-        .map_err(|_| "invocation_executable_invalid")?;
-    let name = path.file_name().ok_or("invocation_executable_invalid")?;
-    let bytes = read(
-        &parent,
-        Path::new(name),
-        EXECUTABLE_LIMIT,
-        Instant::now() + Duration::from_secs(10),
-    )?;
+    let (sha256, _) = crate::setup::fingerprint_native_cli(
+        &path,
+        ReadControl {
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            interrupted: Some(&interrupted),
+        },
+    )
+    .map_err(|error| match error {
+        bounded_fs::BoundedReadError::TooLarge { size, limit } => format!(
+            "invocation_executable_too_large: {} is {size} bytes, the limit is {limit}",
+            path.display()
+        ),
+        error => format!(
+            "invocation_executable_unreadable: {}: {error}",
+            path.display()
+        ),
+    })?;
     let name = path
         .to_str()
         .ok_or("invocation_executable_invalid")?
@@ -1555,7 +1563,7 @@ fn resolve_executable(root: &Path) -> Result<Executable, String> {
     Ok(Executable {
         invocation_path: name.clone(),
         resolved_path: name,
-        sha256: crate::hex::sha256(&bytes),
+        sha256,
     })
 }
 

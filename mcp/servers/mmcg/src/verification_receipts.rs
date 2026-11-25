@@ -1192,13 +1192,11 @@ fn resolve_executable(
     } else if program.components().count() > 1 {
         directory.join(program)
     } else {
+        // Relative entries are skipped so the result cannot depend on the
+        // working directory. Native client lookup in setup follows the same rule.
         let value = std::env::var_os("PATH").ok_or("executable_path_unavailable")?;
-        let entries = std::env::split_paths(&value).collect::<Vec<_>>();
-        if entries.is_empty() || entries.iter().any(|entry| !entry.is_absolute()) {
-            return Err("executable_path_must_be_absolute".into());
-        }
-        entries
-            .into_iter()
+        std::env::split_paths(&value)
+            .filter(|entry| entry.is_absolute())
             .map(|entry| entry.join(program))
             .find(|candidate| candidate.is_file())
             .ok_or("executable_not_found")?

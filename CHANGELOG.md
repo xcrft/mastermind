@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Mining and native runs with Claude Code work again. The `claude` executable
+  is now hashed as a stream with a 2 GiB limit. It was read whole into memory
+  with a 256 MiB limit, and Claude Code ships as one binary of more than
+  350 MiB.
+- A relative or empty `PATH` entry, such as the `~/.dotnet/tools` entry the
+  .NET installer adds, no longer breaks `init`, setup or verification commands.
+  Executable lookup skips those entries, since what they find depends on the
+  working directory. `mastermind doctor` names them as a warning and explains
+  that `~` is not expanded inside `PATH`.
+- `mastermind doctor` accepts the `.mastermind/.gitignore` that `init` writes,
+  so the project's own `.gitignore` no longer needs a `.mastermind/` line.
+- `mastermind doctor` no longer fails a repository that has no source in a
+  supported language, such as one with only scripts, YAML or Terraform. The
+  empty index is reported as OK with the reason.
+- `mastermind init` replaces an unmarked `## Mastermind workflow` section left
+  by a 3.x `init` with the managed block, even when the section came from an
+  older template or was edited. The previous file is kept as
+  `CLAUDE.md.mastermind-backup` (or `AGENTS.md.mastermind-backup`). Before,
+  `init` left the file unchanged and only recorded a warning in `--json`.
+- `mastermind init` prints the project step's warnings in its normal output.
+- `mastermind doctor` hints name commands that run as written:
+  `miner hooks status` and `miner hooks recover` get `--client <client>`, and
+  missing MCP config or ignore rules point at `mastermind init`.
+
 ## [4.0.0] - 2026-11-25
 
 ### Security

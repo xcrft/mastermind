@@ -7,7 +7,6 @@ use crate::bounded_fs::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(unix)]
@@ -19,7 +18,6 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DOCUMENT_BYTES: u64 = 64 * 1024;
-const EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_secs(2);
 const START_WAIT: Duration = Duration::from_secs(8);
@@ -409,20 +407,11 @@ pub(super) fn processor_fingerprint(
         None => crate::setup::resolve_native_cli(provider.ok_or("worker_provider_missing")?, root)
             .map_err(|_| "worker_provider_executable_unavailable")?,
     };
-    let parent = RootCapability::open(path.parent().ok_or("worker_executable_invalid")?)?;
-    let mut hasher = Sha256::new();
-    let file = bounded_fs::copy_regular_file_with_capability(
-        &parent,
+    let (sha256, file) = crate::setup::fingerprint_native_cli(
         &path,
-        EXECUTABLE_BYTES,
         ReadControl {
             deadline: Some(Instant::now() + Duration::from_secs(10)),
             interrupted: Some(&worker::interrupted),
-        },
-        None,
-        &mut crate::hex::Sha256Writer {
-            hasher: &mut hasher,
-            inner: std::io::sink(),
         },
     )?;
     #[cfg(unix)]
@@ -432,7 +421,7 @@ pub(super) fn processor_fingerprint(
     let mut receipt = json!({
         "path":processor.map(|_| &path),"provider":provider,
         "arguments_digest":hash(&json!(args)),"protocol":EXTRACTOR,
-        "executable":{"path":path,"sha256":crate::hex::encode(&hasher.finalize()),"bytes":file.declared_len}
+        "executable":{"path":path,"sha256":sha256,"bytes":file.declared_len}
     });
     if provider.is_some() {
         receipt["native_adapter"] = json!(super::native::VERSION);

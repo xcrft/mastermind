@@ -82,7 +82,7 @@ fn block_span(text: &str) -> Result<Option<(usize, usize)>, String> {
 pub fn workflow_block_state(text: &str) -> Result<WorkflowBlock, String> {
     Ok(match block_span(text)? {
         None => WorkflowBlock::Missing {
-            legacy: text.lines().any(|line| line.trim_end() == WORKFLOW_HEADING),
+            legacy: legacy_section_span(text).is_some(),
         },
         Some((begin, end)) if text[begin..end].replace("\r\n", "\n") == workflow_block() => {
             WorkflowBlock::Current
@@ -91,11 +91,33 @@ pub fn workflow_block_state(text: &str) -> Result<WorkflowBlock, String> {
     })
 }
 
+/// Byte span of an unmarked workflow section that an older `init` wrote: from
+/// its heading to the next top- or second-level heading outside a code fence,
+/// or to the end of the file.
+fn legacy_section_span(text: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut start = None;
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+        } else if !fenced {
+            if start.is_none() && trimmed == WORKFLOW_HEADING {
+                start = Some(offset);
+            } else if start.is_some() && (trimmed.starts_with("# ") || trimmed.starts_with("## ")) {
+                return start.map(|start| (start, offset));
+            }
+        }
+        offset += line.len();
+    }
+    start.map(|start| (start, text.len()))
+}
+
 /// Text with the current managed block, or `None` when it is already current.
 /// Only the block changes: text outside it keeps its bytes, and the block uses
 /// CRLF when the file does. An unmarked workflow section from an older `init`
-/// is wrapped only when it is the current section verbatim, since anything
-/// else may hold user edits.
+/// is replaced whole, so the caller must keep a backup of the previous file.
 pub fn with_workflow_block(text: &str) -> Result<Option<String>, String> {
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let block = workflow_block().replace('\n', eol);
@@ -105,27 +127,19 @@ pub fn with_workflow_block(text: &str) -> Result<Option<String>, String> {
             let (begin, end) = block_span(text)?.expect("outdated block has markers");
             Ok(Some(format!("{}{block}{}", &text[..begin], &text[end..])))
         }
-        WorkflowBlock::Missing { legacy: false } => {
-            let text = text.trim_end();
-            Ok(Some(if text.is_empty() {
-                format!("{block}{eol}")
-            } else {
-                format!("{text}{eol}{eol}{block}{eol}")
-            }))
-        }
-        WorkflowBlock::Missing { legacy: true } => {
-            let section = workflow_section().replace('\n', eol);
-            let wrapped = text.find(&section).and_then(|at| {
-                let rest = &text[at + section.len()..];
-                (rest.is_empty() || rest.starts_with(['\r', '\n']))
-                    .then(|| format!("{}{block}{rest}", &text[..at]))
-            });
-            wrapped.map(Some).ok_or_else(|| {
-                format!(
-                    "it has an edited `{WORKFLOW_HEADING}` section without markers; delete that section and run init again to get the managed block"
-                )
-            })
-        }
+        WorkflowBlock::Missing { .. } => Ok(Some(match legacy_section_span(text) {
+            Some((begin, end)) => {
+                let rest = &text[end..];
+                let gap = if rest.is_empty() {
+                    eol.to_string()
+                } else {
+                    format!("{eol}{eol}")
+                };
+                format!("{}{block}{gap}{rest}", &text[..begin])
+            }
+            None if text.trim_end().is_empty() => format!("{block}{eol}"),
+            None => format!("{}{eol}{eol}{block}{eol}", text.trim_end()),
+        })),
     }
 }
 
@@ -179,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_workflow_section_is_wrapped_only_when_unedited() {
+    fn legacy_workflow_section_is_replaced_up_to_the_next_heading() {
         let legacy = strip_comment(WORKFLOW_TEMPLATE);
         let wrapped = with_workflow_block(&legacy).unwrap().unwrap();
         assert_eq!(
@@ -192,8 +206,30 @@ mod tests {
         let wrapped = with_workflow_block(&followed).unwrap().unwrap();
         assert!(wrapped.ends_with(&format!("{WORKFLOW_BLOCK_END}\n\n## My rules\nkept\n")));
 
-        let edited = legacy.replace("Use the lightest mode", "Use my mode");
-        assert!(with_workflow_block(&edited).is_err());
+        // A section from an older template, or one with local edits, is
+        // replaced up to the next heading of the same level.
+        let older = format!(
+            "# Project\n\n{}\n```sh\n# not a heading\n```\n\n## My rules\nkept\n",
+            legacy.replace("Use the lightest mode", "Use my mode")
+        );
+        let replaced = with_workflow_block(&older).unwrap().unwrap();
+        assert_eq!(
+            workflow_block_state(&replaced).unwrap(),
+            WorkflowBlock::Current
+        );
+        assert!(replaced.starts_with("# Project\n\n"));
+        assert!(replaced.ends_with(&format!("{WORKFLOW_BLOCK_END}\n\n## My rules\nkept\n")));
+        assert!(!replaced.contains("Use my mode"));
+
+        // A heading shown inside a code fence is not a section to replace.
+        let quoted = format!("Example:\n```md\n{WORKFLOW_HEADING}\n```\n");
+        let appended = with_workflow_block(&quoted).unwrap().unwrap();
+        assert!(appended.starts_with(&quoted));
+        assert_eq!(
+            workflow_block_state(&appended).unwrap(),
+            WorkflowBlock::Current
+        );
+        assert_eq!(with_workflow_block(&replaced).unwrap(), None);
     }
 
     #[test]

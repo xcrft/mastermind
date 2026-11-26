@@ -2,7 +2,7 @@
 name: mastermind-comment-audit
 description: Read-only review of a non-empty comment delta. Flags narration with evidence, names what it deliberately kept, and reports removed rationale. Use when the user asks to check comments or a finished diff's pre-gate found added, modified, or deleted comments; skip automatic routing when no comment changed.
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:
@@ -72,7 +72,7 @@ to it, is not a finding.
 
 Earns its place — **keep**, and say what it carries:
 
-- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load (INFRA-1421).`
+- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load.`
 - **Non-obvious workaround:** `// Round before compare — float drift makes == flaky here.`
 - **Invariant a caller must respect:** `// Caller must hold the mutex.`
 - **Surprising deliberate choice:** `// O(n²) is fine — n ≤ 8 by schema constraint.`

@@ -2,7 +2,7 @@
 name: mastermind-component-research
 description: Ground a UI change in the codegraph before writing it — find whether the component already exists, who renders it, and what its props contract is. Use before creating or changing any React or Vue component; triggers "add a component", "change these props", "build this screen", or a Figma frame handed over for implementation.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -24,8 +24,8 @@ Answer these before writing. Evidence is a query result, not a recollection.
 
 ```text
 mmcg_search "Button"                    # exact name
-mmcg_files --prefix src/components      # what the component directory holds
-mmcg_centrality --prefix src/components # the components everything already leans on
+mmcg_files prefix: src/components       # what the component directory holds
+mmcg_centrality prefix: src/components  # the components everything already leans on
 ```
 
 Search the name you were about to invent, then the words around it. A `Button`
@@ -42,7 +42,7 @@ most expensive mistake available here.
 
 ```text
 mmcg_callers "Button"          # components that render it
-mmcg_impact "Button" --depth 3 # transitive blast radius
+mmcg_impact "Button" max_depth: 3 # transitive blast radius
 mmcg_imported_by "Button"      # files importing it, including barrels
 ```
 

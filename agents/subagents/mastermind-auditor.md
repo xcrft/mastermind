@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.8.0
+  version: 0.8.1
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---
@@ -152,7 +152,7 @@ Return a short evidence report followed by the required structured tail:
 
 <!-- mastermind:audit-begin -->
 ```yaml
-spec: <absolute path to spec.md>
+spec: .mastermind/tasks/<NNN>-<name>/spec.md
 verdict: held | drift | broken
 files_in_scope: <N>
 files_in_diff: <M>

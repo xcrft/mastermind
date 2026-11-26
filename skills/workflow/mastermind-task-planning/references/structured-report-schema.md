@@ -94,10 +94,13 @@ facts.
 ```yaml
 spec: .mastermind/tasks/001-example/spec.md
 verdict: held | drift | broken
-scope_match: true
+files_in_scope: 3
+files_in_diff: 4
+scope_match: false
 discrepancies:
   - kind: scope_mismatch
     evidence: "<diff/index evidence>"
+snapshot_drift: []
 verifications_rerun:
   - cmd: "cargo test --locked --lib"
     result: pass

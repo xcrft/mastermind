@@ -2,7 +2,7 @@
 name: mastermind-structured-report-contract
 description: Produce or consume the canonical file-backed Mastermind executor report parsed by `run-task --post-only`. Use for executor evidence, schema-v1 report validation, controller audit inputs, or strict auditor advisory output.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   authors: [mastermind]
   tags: [workflow, reporting]
 ---
@@ -114,14 +114,18 @@ Strict mode may ask a read-only auditor for a sentinel-wrapped advisory tail:
 ```yaml
 spec: .mastermind/tasks/<NNN>-<name>/spec.md
 verdict: held | drift | broken
+files_in_scope: <N>
+files_in_diff: <M>
 scope_match: true
 discrepancies: []
+snapshot_drift: []
 verifications_rerun: []
 ```
 <!-- mastermind:audit-end -->
 ````
 
-This tail is currently a human/planner review contract, not a Rust-parsed
+`snapshot_drift` lists callers or signatures that moved since the pre-edit
+snapshot. This tail is currently a human/planner review contract, not a Rust-parsed
 lifecycle input. `audit.md` and `state.json` remain controller-owned. Do not
 claim that an auditor chat message was persisted unless a future controller
 command actually implements that transition.

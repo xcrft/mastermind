@@ -1241,7 +1241,8 @@ enum MinerCmd {
         #[arg(long)]
         force: bool,
         /// Compatibility path for a deep LLM analysis via `claude -p`. Sends bounded sampled
-        /// added lines + commit messages and replaces the preserved interpreted section.
+        /// added lines + commit messages and saves the reply as a separate candidate file
+        /// for human review; it does not change `style.md` or MCP output.
         /// Prefer the `mastermind-style-deep` skill when qualitative accuracy matters.
         #[arg(long)]
         deep: bool,

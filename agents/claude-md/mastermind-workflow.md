@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.2.1
+  version: 2.2.2
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -183,8 +183,8 @@ until those obligations are resolved.
   ask about cases missing from the PRD before approval.
 - Browser verification: record observations and viewport. Accessibility tree
   and console are evidence; screenshots are not. Mark unchecked items unchecked.
-- Feedback collector: after a session with a user correction or working rule,
-  record their own words verbatim in their profile.
+- Feedback collector: only on request, copy the person's own words from chosen
+  sessions into the private review inbox; never the profile.
 
 Skip roles that add no new evidence.
 

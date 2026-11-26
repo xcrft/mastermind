@@ -2,7 +2,7 @@
 name: no-ai-slop-comments
 description: Strip AI-slop comments from code — keep only comments that explain a *why* the code can't say itself, delete anything that just restates it. Use when writing or editing code (especially as an executor applying a spec) or reviewing a diff for comment noise. Triggers — "stop adding comments", "no slop comments", "too many comments", code that narrates itself.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
@@ -48,7 +48,7 @@ step labels, or a sentence above each branch merely because it is new.
 
 ## Keep these — they earn their place
 
-- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load (INFRA-1421).`
+- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load.`
 - **Non-obvious workaround:** `// Round before compare — float drift makes == flaky here.`
 - **Invariant a caller must respect:** `// Caller must hold the mutex before calling.`
 - **Deliberate, surprising choice:** `// O(n²) is fine — n ≤ 8 by schema constraint.`

@@ -2,7 +2,7 @@
 name: mastermind-runtime-research
 description: Gather who already depends on a service, handler, or state owner before changing it, and name the runtime gaps the codegraph cannot span. Use before designing a change to an API, queue consumer, background job, migration, or shared state; it feeds the architecture review rather than replacing it.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -43,7 +43,7 @@ unreferenced is the single most expensive thing to get wrong here.
 ```text
 mmcg_api_surface src/orders/      # symbols under a prefix used from OUTSIDE it
 mmcg_callers <symbol>             # static callers, with the caveat above
-mmcg_impact <symbol> --depth 3    # transitive blast radius
+mmcg_impact <symbol> max_depth: 3 # transitive blast radius
 mmcg_imported_by <symbol>         # importing files, including barrels
 ```
 
@@ -68,7 +68,7 @@ is what the architecture review's source-of-truth check needs as input.
 
 ```text
 mmcg_map <dir>                    # components, entry points, boundaries
-mmcg_change_impact --since <ref>  # api_crossings, affected_components
+mmcg_change_impact since: <ref>  # api_crossings, affected_components
 mmcg_dependency_cycles            # does this add a cycle
 ```
 

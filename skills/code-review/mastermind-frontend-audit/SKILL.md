@@ -2,7 +2,7 @@
 name: mastermind-frontend-audit
 description: Read-only review of a finished UI change against the codegraph — a component with no confirmed renderer, a props contract changed without its callers, a reinvented component, or a raw value where the design system has a token. Use after implementing React or Vue work; triggers "review this UI change", "check the component", or a finished frontend diff.
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:
@@ -48,10 +48,14 @@ after the static zero and those checks establish no renderer.
 
 ### 2. A props contract changed without its callers
 
-`mmcg_symbols_changed_since <baseline>` reports `signature_changed` for a
-component whose parameters moved. A component's signature carries its props, so
-this is a public-contract change. Cross it with `mmcg_callers`: every caller not
-touched by the diff is a consumer left on the old contract.
+`mmcg_change_impact` with `since: <baseline>` lists each changed symbol with
+its `change`; `signature_changed` marks a component whose parameters moved. It
+covers committed, staged, unstaged and untracked work, which matters because
+this review runs before the commit step. Do not use `mmcg_symbols_changed_since`
+here: it compares only `<baseline>..HEAD` and returns nothing for uncommitted
+work. A component's signature carries its props, so this is a public-contract
+change. Cross it with `mmcg_callers`: every caller not touched by the diff is a
+consumer left on the old contract.
 
 A removed or newly-required prop breaks them. An added optional prop does not.
 Say which, and name the callers — a count is not evidence.
@@ -60,7 +64,7 @@ Say which, and name the callers — a count is not evidence.
 
 For every component the change added, search the name and its neighbours
 (`Button` → `BaseButton`, `AppButton`, `UiButton`) and check
-`mmcg_centrality --prefix <component dir>` for what the codebase already leans
+`mmcg_centrality` with `prefix: <component dir>` for what the codebase already leans
 on. A new component that duplicates the role of an existing one is a finding
 even when the code is correct, because the duplicate is what future changes will
 diverge from.

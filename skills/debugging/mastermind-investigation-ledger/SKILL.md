@@ -2,7 +2,7 @@
 name: mastermind-investigation-ledger
 description: Find the cause of a bug, failing test or regression by reproducing it and testing competing hypotheses before a fix is specified. Use when something is broken with no supported why, a failure has several plausible causes, or behaviour changed between versions. Not for reading a failed CI job first (use mastermind-verify-change) or a cause already known.
 metadata:
-  version: 0.1.3
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -39,7 +39,33 @@ Do NOT use when:
 - It's a feature request, not a failure.
 - The fix is a self-evident one-liner.
 
-## The ledger
+## 1. Get a failing signal first
+
+Before any hypothesis, find one command or step that shows the exact symptom
+and run it. Record the command, the commit and the line of output that shows
+the failure. A loop that can go red is what lets every later probe mean
+something.
+
+- Running it runs the project's code. If the code comes from a fork, an
+  outside contributor or a branch you were not asked to trust, apply the
+  trust gate in [[mastermind-verify-change]] first and investigate statically
+  until the person approves a sandboxed run.
+- Make it smaller while it still fails: fewer inputs, one test, one request.
+- If it fails only sometimes, run it several times and record how many runs
+  failed. A probe that removes an intermittent failure once has not removed it.
+- If nothing you are allowed to run can show the symptom, say what access or
+  artifact is missing and stop. Do not reason your way to a cause instead.
+
+## 2. A regression with a known good version
+
+When one commit, tag or release works and a later one does not, find the
+first bad commit with `git bisect` in a separate detached worktree, using the
+failing command from step 1 as the test (`git bisect run <command>` when the
+command exits non-zero on failure). The first bad commit narrows the search; it
+is not the cause until the ledger supports it. Run the bisect only where step 1
+allows running the code.
+
+## 3. The ledger
 
 Track every hypothesis explicitly:
 
@@ -52,20 +78,26 @@ Current best explanation: <a concrete code location, config value, or dependency
 Next decision point: <the smallest probe or independent probe set that best splits the live hypotheses>
 ```
 
+- Write at least two hypotheses before the first probe, and for each one the
+  result that would rule it out.
 - A hypothesis is **`confirmed`** only when `evidence_for` is populated AND `evidence_against` has been checked. No `evidence_against` = premature closure; keep it `open`.
 - Ruling out every alternative does NOT confirm the survivor — it may mean all hypotheses are wrong.
 
-## The loop
+## 4. The loop
 
 1. Read the ledger. Don't pre-decide which hypothesis is right.
-2. Run the smallest probe that changes the decision. Independent read-only
-   probes may run together when neither depends on the other's result; record
-   each result separately.
+2. Run the smallest probe that changes the decision, and change one thing at a
+   time. Independent read-only probes may run together when neither depends on
+   the other's result; record each result separately.
 3. Fold results back in: update `evidence_for` / `evidence_against` and set the
    next decision point.
 4. Repeat until the causal explanation is supported. A failure may have more
    than one contributing confirmed cause; describe their relationship rather
    than forcing a single winner.
+5. Before you call a cause confirmed, show the step 1 command goes green when
+   that cause alone is removed or reverted in a scratch worktree, and red again
+   when it is put back. Where that cannot be run, say so and keep the status
+   `open`.
 
 ## When to stop and open a spec
 
@@ -73,16 +105,37 @@ Stop when the root cause or contributing causes are supported and the best
 explanation names concrete locations. Then:
 1. Put the user-visible corrected behavior in **Goals** and the supported cause
    in a concise **Problem / Root Cause** note.
-2. Link or summarize only ruled-out evidence that prevents repeated work; do
+2. Put the step 1 command in the spec as the check that must go from red to
+   green.
+3. Link or summarize only ruled-out evidence that prevents repeated work; do
    not paste the full investigation transcript into the implementation spec.
 
 After ~5 probes without a confirmed hypothesis (or sooner when no distinguishing test remains): stop and escalate to the user with the full ledger and ruled-out table. Bounded investigation beats an infinite probe loop. Don't guess a cause; don't open a spec on an `open` or `weakened` hypothesis.
+
+## Report
+
+```markdown
+## Investigation: <exact symptom>
+
+Failing signal: `<command>` at `<commit>` — red | intermittent <k>/<n> | unavailable: <what is missing>
+First bad commit: <sha and subject | not bisected: reason>
+
+<the ledger table>
+
+Current best explanation: <cause with file:line, or `Insufficient evidence`>
+Red/green proof: <cause removed → green, restored → red | not run: reason>
+Next decision point: <one probe and what it splits>
+```
 
 ## Anti-patterns
 
 - **Skipping investigation because you "know" the answer** — if you can't populate `evidence_against`, you're guessing.
 - **Running dependent probes in parallel** — parallelize only independent reads or tests whose interpretation does not depend on another result.
 - **Treating "no other hypothesis survived" as evidence_for** — it isn't.
+- **Calling it fixed because one run passed** — an intermittent failure needs
+  the failure rate before and after, not a single green run.
+- **Running a contributor's code to reproduce** before the trust gate allows
+  it — reproduction runs their tests, scripts and hooks.
 
 ## Related skills
 

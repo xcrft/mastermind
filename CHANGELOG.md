@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-investigation-ledger` starts from a failing command and only
+  then writes hypotheses. It applies the `mastermind-verify-change` trust gate
+  before reproducing code from a fork, bisects a regression that has a known
+  good version, measures an intermittent failure as a rate, and confirms a
+  cause only when removing it turns the failing command green. It ends with a
+  fixed report. The investigator subagent gets the same trust gate and
+  bisect step and stays within its 3,500-character prompt. Three workflow
+  eval cases cover the fork, bisect and one-green-run behaviour.
 - Every skill description now says when to use the skill early on and ends
   with a `Not for` clause that names the sibling to use instead, for example
   `mastermind-verify-change` for a red CI run and

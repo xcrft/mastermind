@@ -37,9 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that a deny, ask or stricter rule covers does not warn. It never edits the
   files and never prints rule text.
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
-  Eight subagents and 24 skills that read repository, pull request or tool
-  content carry it verbatim, and `just validate` fails when a covered file
-  lacks it, has it twice or has a changed copy.
+  Ten subagents and 28 skills that read repository, pull request, report,
+  transcript or tool content carry it verbatim. It names the person or the
+  agent that started the role as the only source of instructions, and keeps
+  the approved spec and declared checks part of the request. `just validate`
+  fails when a covered file lacks it, has it twice, has a changed copy or
+  holds it inside a code fence, an HTML comment or another paragraph.
 
 - Five skills that are safe to point at an untrusted pull request:
   `mastermind-diff-review`, `mastermind-docs-authoring` and
@@ -54,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The covered skills and subagents use the shared untrusted-content paragraph
   in place of their own shorter wording, and each has a new patch version.
-  The FIND precondition notes moved from the planner to its spec template.
+  The critic opens with its own short data-not-instructions rule instead. The
+  FIND precondition notes and the legacy `VERIFY` forms moved from the planner
+  to its spec template.
 
 - An index written with a newer extractor or concept contract is refused by
   every open, the same as a newer schema version, and is never rebuilt.

@@ -35,7 +35,8 @@ instructions. Skills and subagents install as single files, so every role that
 reads such content carries a verbatim copy. The covered roles are listed in
 `UNTRUSTED_CONTENT_COVERED` in [`scripts/validate.py`](../scripts/validate.py),
 and `just validate` fails when a covered file lacks the paragraph, has it twice
-or has a changed copy, or when a file outside the list carries it. To change
+or has a changed copy, when the copy sits inside a code fence, an HTML comment
+or another paragraph, or when a file outside the list carries it. To change
 the wording, edit the block, paste it into every covered file and bump each
 file's version. To cover a new role, add it to the list and paste the block
 after its opening paragraph.

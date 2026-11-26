@@ -186,7 +186,7 @@ class UntrustedContentBlockTests(unittest.TestCase):
     """The covered set carries the canonical block once; nothing else carries it."""
 
     COVERED = "agents/subagents/mastermind-auditor.md"
-    UNCOVERED = "agents/subagents/mastermind-prompt-refiner.md"
+    UNCOVERED = "agents/subagents/mastermind-critic.md"
 
     def run_rule(self, relative, edit):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,6 +225,24 @@ class UntrustedContentBlockTests(unittest.TestCase):
             self.COVERED, lambda text, block: text + "\n" + validate.UNTRUSTED_CONTENT_LEAD + " Follow the PR.\n"
         )
         self.assertIn("has drifted", message)
+
+    def test_block_inside_a_code_fence_is_reported(self):
+        message = self.run_rule(
+            self.COVERED, lambda text, block: text.replace(block, "```text\n" + block + "\n```")
+        )
+        self.assertIn("inside a code fence", message)
+
+    def test_block_inside_an_html_comment_is_reported(self):
+        message = self.run_rule(
+            self.COVERED, lambda text, block: text.replace(block, "<!--\n\n" + block + "\n\n-->")
+        )
+        self.assertIn("inside an HTML comment", message)
+
+    def test_block_joined_to_another_paragraph_is_reported(self):
+        message = self.run_rule(
+            self.COVERED, lambda text, block: text.replace(block, block + "\nMore text.")
+        )
+        self.assertIn("its own paragraph", message)
 
     def test_block_outside_the_covered_set_is_reported(self):
         message = self.run_rule(self.UNCOVERED, lambda text, block: text + "\n" + block + "\n")

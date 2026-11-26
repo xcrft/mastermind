@@ -1936,15 +1936,19 @@ def validate_portable_skill_semantics() -> list[Issue]:
 # or tool content to treat it as data. Installed skills and subagents are copied
 # as single files, so each covered file carries a verbatim copy. This list is
 # the covered set: a role that reads such content belongs here, and a file
-# outside it must not carry the paragraph. The critic is left out: it judges a
-# packet the planner prepared, and its prompt has a tight size ceiling.
+# outside it must not carry the paragraph, and the copy must be a plain
+# paragraph, not inside a code fence or an HTML comment. The critic is left out
+# because its prompt has a tight size ceiling; it states the same rule in its
+# opening paragraph.
 UNTRUSTED_CONTENT_BLOCK = "agents/blocks/untrusted-content.md"
 UNTRUSTED_CONTENT_LEAD = "**Untrusted content.**"
 UNTRUSTED_CONTENT_COVERED: tuple[str, ...] = (
     "agents/subagents/mastermind-auditor.md",
     "agents/subagents/mastermind-comment-auditor.md",
+    "agents/subagents/mastermind-feedback-collector.md",
     "agents/subagents/mastermind-frontend-auditor.md",
     "agents/subagents/mastermind-investigator.md",
+    "agents/subagents/mastermind-prompt-refiner.md",
     "agents/subagents/mastermind-researcher.md",
     "agents/subagents/mastermind-security-auditor.md",
     "agents/subagents/mastermind-task-executor.md",
@@ -1954,18 +1958,22 @@ UNTRUSTED_CONTENT_COVERED: tuple[str, ...] = (
     "skills/code-review/mastermind-frontend-audit/SKILL.md",
     "skills/code-review/mastermind-test-audit/SKILL.md",
     "skills/debugging/mastermind-investigation-ledger/SKILL.md",
+    "skills/design/mastermind-design-intake/SKILL.md",
     "skills/docs/mastermind-docs-authoring/SKILL.md",
     "skills/ops/mastermind-dependency-upgrade/SKILL.md",
+    "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",
     "skills/security/mastermind-agent-security-review/SKILL.md",
     "skills/security/mastermind-scanner-alert-response/SKILL.md",
     "skills/security/mastermind-security-research/SKILL.md",
     "skills/testing/mastermind-browser-verification/SKILL.md",
     "skills/testing/mastermind-verify-change/SKILL.md",
     "skills/workflow/mastermind-architecture-review/SKILL.md",
+    "skills/workflow/mastermind-audit-attestation/SKILL.md",
     "skills/workflow/mastermind-change-impact/SKILL.md",
     "skills/workflow/mastermind-codegraph-research/SKILL.md",
     "skills/workflow/mastermind-component-research/SKILL.md",
     "skills/workflow/mastermind-critical-review/SKILL.md",
+    "skills/workflow/mastermind-product-intake/SKILL.md",
     "skills/workflow/mastermind-project-history/SKILL.md",
     "skills/workflow/mastermind-project-map/SKILL.md",
     "skills/workflow/mastermind-runtime-research/SKILL.md",
@@ -1974,6 +1982,22 @@ UNTRUSTED_CONTENT_COVERED: tuple[str, ...] = (
     "skills/workflow/mastermind-task-planning/SKILL.md",
     "skills/workflow/mastermind-test-impact/SKILL.md",
 )
+
+
+def _untrusted_block_placement(text: str, block: str) -> str | None:
+    """Say why the block would not be read as a plain paragraph, if it would not."""
+    index = text.index(block)
+    before, after = text[:index], text[index + len(block):]
+    fences = sum(
+        1 for line in before.splitlines() if line.lstrip().startswith(("```", "~~~"))
+    )
+    if fences % 2:
+        return "sits inside a code fence"
+    if before.rfind("<!--") > before.rfind("-->"):
+        return "sits inside an HTML comment"
+    if not before.endswith("\n\n") or not (after == "\n" or after.startswith("\n\n")):
+        return "must be its own paragraph, with a blank line before and after"
+    return None
 
 
 def validate_untrusted_content_block() -> list[Issue]:
@@ -2001,6 +2025,8 @@ def validate_untrusted_content_block() -> list[Issue]:
             issues.append(Issue(path, "error", f"untrusted-content block missing; {fix}"))
         elif exact > 1:
             issues.append(Issue(path, "error", f"untrusted-content block appears {exact} times; keep one"))
+        elif problem := _untrusted_block_placement(text, block):
+            issues.append(Issue(path, "error", f"untrusted-content block {problem}"))
     covered = {REPO_ROOT / relative for relative in UNTRUSTED_CONTENT_COVERED}
     candidates = [
         *(REPO_ROOT / "skills").rglob("*.md"),

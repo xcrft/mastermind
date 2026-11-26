@@ -72,8 +72,9 @@ Retain the generated scope frontmatter. Use `touches` for existing files and
 `creates: [src/new.py, docs/new.md]` for additions. A new required document also
 belongs in `expected_docs`. Existing drafts allow another preflight, but an old
 baseline file cannot be relabeled as a creation. Mirror every required Final Verification
-command in `verify[].cmd`, including its arguments. Legacy `VERIFY:` command
-lines are also machine-checked; labels and ordinary shell fences are not.
+command in `verify[].cmd`, including its arguments. Legacy `VERIFY:`,
+`**VERIFY**:` and `**VERIFY:**` command lines are also machine-checked; labels
+and ordinary shell fences are not.
 
 Strict mode requires symbols for each existing file by default. For a deliberate
 file-level change, such as Markdown, YAML, a notebook, or adding tests to an

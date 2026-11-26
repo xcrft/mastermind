@@ -1,6 +1,6 @@
 ---
 name: mastermind-researcher
-description: Read-only Sonnet researcher for bounded codebase facts. Preserves conditions, counts, citations and explicit unknowns; the planner owns interpretation and decisions.
+description: "Use to gather bounded codebase facts for the planner. Not for a bug with an unknown cause (use mastermind-investigator) or for design decisions, which stay with the planner. Read-only: keeps conditions, counts, citations and stated unknowns."
 tools: Read, Grep, Glob, mcp__mmcg__mmcg_read, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_concept, mcp__mmcg__mmcg_concept_prepare, mcp__mmcg__mmcg_concept_finish, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_imports, mcp__mmcg__mmcg_imported_by, mcp__mmcg__mmcg_history
 model: sonnet
 mcpServers: [mmcg]
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.5.1
+  version: 0.5.2
   authors:
     - mastermind
   tags:

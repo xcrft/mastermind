@@ -1,6 +1,6 @@
 ---
 name: mastermind-frontend-auditor
-description: Independent read-only reviewer of a finished React or Vue change, grounded in the codegraph. Reports components with no confirmed renderer, props contracts changed without their callers, reinvented components, and raw values shadowing design tokens. Spawn after UI implementation is complete. Distinct from `mastermind-auditor`, which audits the spec contract.
+description: "Use after a React or Vue change is implemented. Not for checking the live page (use mastermind-browser-verification) or the spec contract (use mastermind-auditor). Read-only, from the codegraph: unrendered components, props changed without callers, reinvented components, raw values over tokens."
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_change_impact, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
 model: sonnet
 mcpServers: [mmcg]
@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.5
+  version: 0.1.6
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---

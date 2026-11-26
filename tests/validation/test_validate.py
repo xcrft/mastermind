@@ -304,6 +304,85 @@ class SkillDescriptionTests(unittest.TestCase):
             )
 
 
+class SubagentDescriptionTests(unittest.TestCase):
+    """A subagent description opens with its trigger and names the role to use instead."""
+
+    PATH = validate.REPO_ROOT / "agents/subagents/mastermind-critic.md"
+    GOOD = (
+        "Use before a spec is written, to challenge a design. "
+        "Not for a finished change (use mastermind-auditor). "
+        "Read-only design critique."
+    )
+
+    def codes(self, description, activation="conditional"):
+        return [
+            issue.msg.split("]")[0] + "]"
+            for issue in validate._subagent_description_issues(self.PATH, description, activation)
+        ]
+
+    def test_trigger_and_boundary_pass(self):
+        self.assertEqual(self.codes(self.GOOD), [])
+
+    def test_trigger_must_open_the_description(self):
+        self.assertEqual(self.codes("Design critic. " + self.GOOD), ["[subagent_trigger_missing]"])
+        self.assertEqual(self.codes("Independent critic. Not for code (use mastermind-auditor)."), ["[subagent_trigger_missing]"])
+
+    def test_missing_or_late_boundary_is_reported(self):
+        self.assertEqual(self.codes(self.GOOD.split(" Not for")[0]), ["[subagent_boundary_missing]"])
+        late = "Use before a spec. " + "x" * validate.SKILL_TRIGGER_WINDOW_CHARS + " Not for code (use mastermind-auditor)."
+        self.assertLessEqual(len(late), validate.SUBAGENT_DESCRIPTION_MAX_CHARS)
+        self.assertEqual(self.codes(late), ["[subagent_boundary_missing]"])
+
+    def test_long_description_is_reported(self):
+        self.assertIn("[subagent_description_too_long]", self.codes(self.GOOD + " " + "y" * 300))
+
+    def test_manual_role_must_say_only_when(self):
+        self.assertEqual(self.codes(self.GOOD, activation="manual"), ["[subagent_manual_trigger]"])
+        manual = "Use only when asked to rewrite a prompt. Not for handoffs (use mastermind-agent-handoff). Rewrites."
+        self.assertEqual(self.codes(manual, activation="manual"), [])
+
+    def test_proactive_wording_is_reported(self):
+        self.assertEqual(
+            self.codes("Use proactively after code changes. Not for designs (use mastermind-critic). Reviews."),
+            ["[subagent_trigger_missing]", "[subagent_proactive]"],
+        )
+
+    def test_every_shipped_subagent_passes(self):
+        for path in sorted(validate.REPO_ROOT.glob("agents/subagents/*.md")):
+            artifact = validate._load_artifact(path, slug=path.stem, domain=None)
+            activation = artifact.frontmatter["workflow"]["activation"]
+            self.assertEqual(
+                validate._subagent_description_issues(path, artifact.frontmatter["description"], activation), [], path
+            )
+
+
+class DescriptionReferralTests(unittest.TestCase):
+    """`(use X)` must name something the install actually ships."""
+
+    def artifact(self, path, name, description):
+        return validate.Artifact(path=path, slug=name, domain=None, frontmatter={"description": description}, name=name)
+
+    def test_referrals_are_read_from_use_clauses_only(self):
+        self.assertEqual(
+            validate.description_referrals(
+                "Use when x. Not for y (use mastermind-a, mastermind-b or no-ai-slop-comments). Mentions mastermind-c."
+            ),
+            ["mastermind-a", "mastermind-b", "no-ai-slop-comments"],
+        )
+
+    def test_unknown_and_self_referrals_are_errors(self):
+        root = validate.REPO_ROOT
+        skill = self.artifact(root / "skills/x/mastermind-a/SKILL.md", "mastermind-a", "Not for y (use mastermind-a).")
+        other = self.artifact(root / "skills/x/mastermind-b/SKILL.md", "mastermind-b", "Not for y (use mastermind-gone).")
+        agent = self.artifact(root / "agents/subagents/mastermind-r.md", "mastermind-r", "Not for y (use mastermind-a).")
+        to_agent = self.artifact(root / "skills/x/mastermind-c/SKILL.md", "mastermind-c", "Not for y (use mastermind-r).")
+        codes = [i.msg.split("]")[0] + "]" for i in validate.validate_description_referrals([skill, other, agent, to_agent])]
+        self.assertEqual(sorted(codes), ["[referral_self]", "[referral_unknown]", "[referral_unknown]"])
+
+    def test_shipped_referrals_resolve(self):
+        self.assertEqual(validate.validate_description_referrals(list(validate.find_artifacts())), [])
+
+
 class MainTests(unittest.TestCase):
     def test_exit_status_counts_errors_but_not_warnings(self):
         with redirect_stdout(io.StringIO()):

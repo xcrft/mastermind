@@ -1,6 +1,6 @@
 ---
 name: mastermind-critic
-description: Independent pre-spec design critic. Scores seven engineering dimensions against supplied codegraph evidence and returns a bounded verdict.
+description: "Use before a sensitive spec is written, to challenge a proposed design. Not for a finished change (use mastermind-auditor). Read-only: scores seven engineering dimensions against the supplied codegraph evidence and returns a bounded verdict."
 tools: Read, Grep, Glob, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact
 model: opus
 mcpServers: [mmcg]
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.6.1
+  version: 0.6.2
   authors:
     - mastermind
   tags:

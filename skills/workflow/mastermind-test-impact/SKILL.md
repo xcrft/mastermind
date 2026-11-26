@@ -1,8 +1,8 @@
 ---
 name: mastermind-test-impact
-description: "Use when deciding which tests to run first for a change. Not for judging whether tests prove it (use mastermind-test-audit). Ordered plan from `mastermind impact`: direct, transitive and heuristic candidates before the full gate."
+description: "Use when deciding which tests to run first for a change. Not for judging whether tests prove it (use mastermind-test-audit) or running checks to show it works (use mastermind-verify-change). Ordered plan from `mastermind impact`: direct, transitive and heuristic candidates first."
 metadata:
-  version: 0.1.4
+  version: 0.1.5
   authors: [mastermind]
   tags: [workflow, testing, mmcg]
 ---

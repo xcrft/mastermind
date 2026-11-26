@@ -1,8 +1,8 @@
 ---
 name: mastermind-design-intake
-description: "Use when a Figma frame, mockup or design spec is handed over for implementation. Not for whether a component exists (use mastermind-component-research). Writes a checkable task contract: named source, resolved components, tokens, unverifiable items."
+description: "Use when a Figma frame, mockup or design spec is handed over for implementation, even with a ticket. Not for whether a component exists (use mastermind-component-research). Writes a checkable task contract: named source, resolved components, tokens, unverifiable items."
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:

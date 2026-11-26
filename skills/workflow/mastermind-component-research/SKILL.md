@@ -1,8 +1,8 @@
 ---
 name: mastermind-component-research
-description: "Use before creating or changing a React or Vue component, or for \"build this screen\". Not for a design handoff (use mastermind-design-intake). Checks in the codegraph whether the component exists, who renders it and its props."
+description: "Use before creating or changing a React or Vue component, or for \"build this screen\". Not for a symbol outside the UI (use mastermind-codegraph-research). Checks in the codegraph whether the component exists, who renders it and its props."
 metadata:
-  version: 0.1.3
+  version: 0.1.4
   authors:
     - mastermind
   tags:

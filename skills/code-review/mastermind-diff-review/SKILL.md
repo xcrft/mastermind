@@ -1,8 +1,8 @@
 ---
 name: mastermind-diff-review
-description: "Use when asked to review code, a PR, a branch or a follow-up push, or whether it is safe to merge. Not for a design with no code yet (use mastermind-critical-review). Read-only, safe for forks: broken callers, unchecked input, lost errors, races, CI permissions, hidden text."
+description: "Use when asked to review code, a PR, a branch or a follow-up push, or whether it is safe to merge. Not for a design with no code yet (use mastermind-critical-review) or React or Vue code (use mastermind-frontend-audit). Read-only, safe for forks: broken callers, unchecked input, lost errors, races."
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors:
     - mastermind
   tags:

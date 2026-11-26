@@ -1,8 +1,8 @@
 ---
 name: mastermind-product-intake
-description: "Use when a PRD, ticket or feature request is handed over for implementation. Not for a design file or mockup (use mastermind-design-intake). Writes a task contract that can fail: behaviour over outcome, nouns mapped to symbols, gaps as questions."
+description: "Use when a PRD, ticket or feature request is handed over for implementation. Not for scoping work that already has a task contract (use mastermind-task-planning). Writes a task contract that can fail: behaviour over outcome, nouns mapped to symbols, gaps as questions."
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:

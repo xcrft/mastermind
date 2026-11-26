@@ -201,15 +201,84 @@ def _skill_description_issues(path: Path, desc: str) -> list[Issue]:
 SUBAGENT_DESCRIPTION_MAX_CHARS = 300
 SUBAGENT_TRIGGER_RE = re.compile(r"Use (?:only )?(?:when|before|after|for|to)\b")
 SUBAGENT_MANUAL_TRIGGER = "Use only when"
-DESCRIPTION_REFERRAL_RE = re.compile(r"\(use ([^)]*)\)")
-DESCRIPTION_REFERRAL_NAME_RE = re.compile(r"\b(?:mastermind-[a-z0-9-]*[a-z0-9]|no-ai-slop-comments)\b")
+# Claude's docs say wording like "use proactively" or "MUST BE USED" makes it
+# delegate on its own. The workflow spawns roles by name, so these phrases only
+# add delegation nobody asked for. The lookarounds keep "non-proactive" legal.
+SUBAGENT_PUSH_DELEGATION_RE = re.compile(
+    r"(?<![\w-])(?:must\s+be\s+used|proactive(?:ly)?|always\s+(?:use|delegate)|use\s+immediately)(?![\w-])",
+    re.IGNORECASE,
+)
+
+# The one canonical hand-off form is a lowercase `(use <name>)` with full
+# shipped names, joined by commas, "or" or "and". The parser reads every
+# `(use` case-insensitively so a near miss like `(Use mastermind-x)` or
+# `(use diff-review)` is reported instead of silently skipped.
+DESCRIPTION_REFERRAL_OPEN_RE = re.compile(r"\(\s*use\b", re.IGNORECASE)
+DESCRIPTION_REFERRAL_CANONICAL_OPEN = "(use "
+DESCRIPTION_REFERRAL_SPLIT_RE = re.compile(r"\s*,\s*(?:or\s+|and\s+)?|\s+or\s+|\s+and\s+")
+DESCRIPTION_REFERRAL_NAME_RE = re.compile(r"(?:mastermind-[a-z0-9]+(?:-[a-z0-9]+)*|no-ai-slop-comments)")
+DESCRIPTION_NAME_MENTION_RE = re.compile(r"(?<![\w./-])(?:mastermind-[a-z0-9-]*[a-z0-9]|no-ai-slop-comments)(?![\w-])", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class Referral:
+    """One `(use ...)` clause: where it sits, the text it hands off and its targets."""
+
+    start: int
+    end: int
+    clause: str
+    raw: str
+    targets: tuple[str, ...]
+
+    @property
+    def canonical_open(self) -> bool:
+        return self.raw.startswith(DESCRIPTION_REFERRAL_CANONICAL_OPEN)
+
+
+def _matching_paren(text: str, start: int) -> int:
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(text) - 1
+
+
+def description_referral_clauses(desc: str) -> list[Referral]:
+    """Every `(use ...)` clause with the boundary text it applies to.
+
+    The clause text runs from the end of the previous `(use ...)`, or from
+    `Not for`, up to this one, so "Not for a diff (use a) or a plan (use b)"
+    gives ("a diff", a) and ("or a plan", b).
+    """
+    referrals: list[Referral] = []
+    boundary = SKILL_BOUNDARY_RE.search(desc)
+    cursor = boundary.end() if boundary else 0
+    for match in DESCRIPTION_REFERRAL_OPEN_RE.finditer(desc):
+        if referrals and match.start() <= referrals[-1].end:
+            continue
+        end = _matching_paren(desc, match.start())
+        raw = desc[match.start(): end + 1]
+        body = raw[match.end() - match.start(): -1] if raw.endswith(")") else raw[match.end() - match.start():]
+        body = re.sub(r"\([^()]*\)", " ", body)
+        targets = tuple(part.strip(" .`'\"") for part in DESCRIPTION_REFERRAL_SPLIT_RE.split(body.strip()) if part.strip(" .`'\""))
+        clause_start = cursor if cursor <= match.start() else 0
+        clause = desc[clause_start: match.start()].strip(" ,.")
+        referrals.append(Referral(match.start(), end, clause, raw, targets))
+        cursor = end + 1
+    return referrals
 
 
 def description_referrals(desc: str) -> list[str]:
-    """Names a description sends the host to in its `(use ...)` clauses."""
+    """Names a description sends the host to in its canonical `(use ...)` clauses."""
     names: list[str] = []
-    for clause in DESCRIPTION_REFERRAL_RE.findall(desc):
-        names.extend(DESCRIPTION_REFERRAL_NAME_RE.findall(clause))
+    for referral in description_referral_clauses(desc):
+        if not referral.canonical_open:
+            continue
+        names.extend(target for target in referral.targets if DESCRIPTION_REFERRAL_NAME_RE.fullmatch(target))
     return names
 
 
@@ -227,20 +296,42 @@ def _subagent_description_issues(path: Path, desc: str, activation: object) -> l
         issues.append(
             Issue(path, "error", f"[subagent_manual_trigger] a manual subagent's description must start with '{SUBAGENT_MANUAL_TRIGGER}' so the host does not delegate to it unasked")
         )
-    if "proactive" in desc.lower():
+    push = SUBAGENT_PUSH_DELEGATION_RE.search(desc)
+    if push is not None:
         issues.append(
-            Issue(path, "error", "[subagent_proactive] the workflow spawns subagents by name; 'proactively' invites delegation nobody asked for")
+            Issue(path, "error", f"[subagent_push_delegation] {push.group(0)!r} pushes the host to delegate on its own; the workflow spawns subagents by name")
         )
     boundary = SKILL_BOUNDARY_RE.search(desc)
     if boundary is None or boundary.start() > SKILL_TRIGGER_WINDOW_CHARS:
         issues.append(
             Issue(path, "error", f"[subagent_boundary_missing] description must say 'Not for ...' within its first {SKILL_TRIGGER_WINDOW_CHARS} chars and name what to use instead")
         )
+    elif not any(r.start > boundary.start() for r in description_referral_clauses(desc)):
+        issues.append(
+            Issue(path, "error", "[subagent_boundary_missing] the 'Not for ...' boundary must name what to use instead with '(use <name>)'")
+        )
     return issues
 
 
+def _referral_target_issue(target: str, known: set[str], kind: str) -> str | None:
+    if target in known:
+        return None
+    folded = target.casefold()
+    if folded in known:
+        return f"[referral_noncanonical] '(use {target})' must spell the name in lowercase: {folded}"
+    prefixed = f"mastermind-{folded}"
+    if prefixed in known:
+        return f"[referral_noncanonical] '(use {target})' must use the full name {prefixed}"
+    return f"[referral_unknown] description says 'use {target}', which is not a shipped {kind}"
+
+
 def validate_description_referrals(artifacts: list[Artifact]) -> list[Issue]:
-    """Every `(use X)` in a skill or subagent description names a shipped artifact."""
+    """Every hand-off in a skill or subagent description is canonical and resolves.
+
+    Names may appear only inside a lowercase `(use ...)` clause, every target
+    in that clause must be a shipped name, and a subagent's `Not for` boundary
+    must hand off to at least one name that resolves.
+    """
     skills = {a.name for a in artifacts if a.path.name == "SKILL.md" and a.name}
     subagents = {a.name for a in artifacts if a.path.parent.name == "subagents" and a.name}
     issues: list[Issue] = []
@@ -256,11 +347,35 @@ def validate_description_referrals(artifacts: list[Artifact]) -> list[Issue]:
             known, kind = skills | subagents, "skill or subagent"
         else:
             continue
-        for name in description_referrals(desc):
-            if name == a.name:
-                issues.append(Issue(a.path, "error", f"[referral_self] description sends the host to itself ({name})"))
-            elif name not in known:
-                issues.append(Issue(a.path, "error", f"[referral_unknown] description says 'use {name}', which is not a shipped {kind}"))
+        referrals = description_referral_clauses(desc)
+        for referral in referrals:
+            if not referral.canonical_open:
+                issues.append(Issue(a.path, "error", f"[referral_noncanonical] write {referral.raw!r} as a lowercase '(use <name>)'"))
+            if not referral.targets:
+                issues.append(Issue(a.path, "error", f"[referral_unknown] {referral.raw!r} names nothing"))
+            for target in referral.targets:
+                if target == a.name:
+                    issues.append(Issue(a.path, "error", f"[referral_self] description sends the host to itself ({target})"))
+                    continue
+                message = _referral_target_issue(target, known, kind)
+                if message:
+                    issues.append(Issue(a.path, "error", message))
+        for mention in DESCRIPTION_NAME_MENTION_RE.finditer(desc):
+            if not any(r.start <= mention.start() <= r.end for r in referrals):
+                issues.append(
+                    Issue(a.path, "error", f"[referral_outside_clause] {mention.group(0)!r} is named outside a '(use ...)' clause; hand off only with '(use <name>)'")
+                )
+        if kind == "skill or subagent":
+            boundary = SKILL_BOUNDARY_RE.search(desc)
+            resolved = [
+                target
+                for r in referrals
+                if boundary is not None and r.start > boundary.start() and r.canonical_open
+                for target in r.targets
+                if target in known and target != a.name
+            ]
+            if boundary is not None and not resolved:
+                issues.append(Issue(a.path, "error", "[subagent_boundary_unresolved] the 'Not for ...' boundary must hand off to at least one shipped name"))
     return issues
 
 

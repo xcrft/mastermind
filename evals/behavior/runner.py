@@ -299,6 +299,8 @@ class Result:
     tool_calls: list[str] = field(default_factory=list)
     citation_checks: dict | None = None
     runtime_controls: dict[str, object] | None = None
+    # The answer a selection run picked, or None. Kept out of the JSON report.
+    selection_pick: str | None = None
 
     @property
     def context_tokens(self) -> int:
@@ -1472,6 +1474,10 @@ def validate_case_record(suite_name: str, record: object) -> None:
         optional_fields |= {"staged_paths", "allow_no_mmcg"}
     if suite_name == "workflow":
         required_fields.add("artifact")
+    if suite_name == "selection":
+        # Reviewed notes for the deterministic corpus check. The model never
+        # sees them: only input.prompt reaches the run.
+        optional_fields |= {"lexical_exception", "tie_break"}
     missing = required_fields - set(record)
     unexpected = set(record) - required_fields - optional_fields
     if missing or unexpected:
@@ -1481,6 +1487,9 @@ def validate_case_record(suite_name: str, record: object) -> None:
         )
     if not _nonblank_case_text(record["why"]):
         raise ValueError(f"case {case_id!r} has no rationale")
+    for field_name in ("lexical_exception", "tie_break"):
+        if field_name in record and not _nonblank_case_text(record[field_name]):
+            raise ValueError(f"case {case_id!r} has a blank {field_name}")
 
     if SUITES[suite_name].get("uses_fixture"):
         _fixture_relative_path(record["fixture"], "fixture")
@@ -4371,8 +4380,11 @@ def evaluation_cwd(
 ) -> Path | None:
     if suite_name in {"auditor", "researcher"}:
         return fixture_path
+    # Claude reports its working directory with symlinks resolved. On macOS
+    # the temp directory is under /var, a link to /private/var, so an
+    # unresolved sandbox path never matches the stream and every case fails.
     if prompt_sandbox is not None:
-        return Path(prompt_sandbox.name)
+        return Path(prompt_sandbox.name).resolve()
     return None
 
 
@@ -4673,6 +4685,50 @@ def extract_intake_action(output: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+SELECTION_ANSWER_RE = re.compile(r"^(Skill|Agent)\s*:\s*(.*)$")
+_SELECTION_WRAPPERS = " \t`'\"*"
+SELECTION_SPLIT_SALT = "mastermind-selection-split-v1"
+SELECTION_HELD_OUT_PER_FIVE = 2
+
+
+def selection_split(case_id: str) -> str:
+    """Put about 40% of selection cases in a fixed held-out split.
+
+    The split comes from a hash of the case id, so nobody chooses which cases
+    are held out and a new case never moves an old one.
+    """
+    digest = hashlib.sha256(f"{SELECTION_SPLIT_SALT}:{case_id}".encode("utf-8")).digest()
+    return "held-out" if digest[0] % 5 < SELECTION_HELD_OUT_PER_FIVE else "train"
+
+
+def selection_answers(output: str) -> list[str]:
+    """Every `Skill: <name>` or `Agent: <name>` line, without wrapping quotes or backticks."""
+    answers: list[str] = []
+    for line in output.splitlines():
+        match = SELECTION_ANSWER_RE.match(line.strip(_SELECTION_WRAPPERS))
+        if match:
+            name = match.group(2).strip(_SELECTION_WRAPPERS)
+            answers.append(f"{match.group(1)}: {name}")
+    return answers
+
+
+def selection_expected(expect: dict) -> list[str]:
+    groups = expect.get("contains_any") or [[]]
+    return [*expect.get("contains", []), *groups[0]]
+
+
+def selection_reasons(output: str, expect: dict) -> tuple[str | None, list[str]]:
+    """A selection run passes only on exactly one answer line naming an expected choice."""
+    answers = selection_answers(output)
+    if len(answers) != 1:
+        return None, [f"expected exactly one 'Skill:' or 'Agent:' line, found {len(answers)}"]
+    (pick,) = answers
+    expected = selection_expected(expect)
+    if pick not in expected:
+        return pick, [f"picked {pick!r}, expected one of {expected!r}"]
+    return pick, []
 
 
 def contains_any_phrase(output: str, phrases: list[str]) -> bool:
@@ -5223,12 +5279,22 @@ def evaluate_case(
                     f"structured audit did not record a passing rerun of {expected_rerun!r}"
                 )
 
-        for phrase in expect.get("contains", []):
+        selection_pick: str | None = None
+        if suite_name == "selection":
+            selection_pick, pick_reasons = selection_reasons(output, expect)
+            if pick_reasons:
+                passed = False
+                reasons.extend(pick_reasons)
+            phrase_expect: dict = {}
+        else:
+            phrase_expect = expect
+
+        for phrase in phrase_expect.get("contains", []):
             if phrase.lower() not in output.lower():
                 passed = False
                 reasons.append(f"missing phrase: {phrase!r}")
 
-        for alternatives in expect.get("contains_any", []):
+        for alternatives in phrase_expect.get("contains_any", []):
             if not isinstance(alternatives, list) or not all(
                 isinstance(phrase, str) for phrase in alternatives
             ):
@@ -5238,7 +5304,7 @@ def evaluate_case(
                 passed = False
                 reasons.append(f"none of alternative phrases found: {alternatives!r}")
 
-        for phrase in expect.get("not_contains", []):
+        for phrase in phrase_expect.get("not_contains", []):
             if phrase.lower() in output.lower():
                 passed = False
                 reasons.append(f"forbidden phrase present: {phrase!r}")
@@ -5265,6 +5331,7 @@ def evaluate_case(
             duration_ms=duration_ms,
             fixture_path=fixture_path,
             output_excerpt=output[:4000],
+            selection_pick=selection_pick,
             duration_api_ms=int(telemetry["duration_api_ms"]),
             num_turns=int(telemetry["num_turns"]),
             input_tokens=int(telemetry["input_tokens"]),
@@ -5288,6 +5355,90 @@ def evaluate_case(
             prompt_sandbox.cleanup()
         if fixture_path is not None and not keep_fixtures:
             teardown_fixture(fixture_path)
+
+
+def combine_selection_runs(runs: list[Result]) -> Result:
+    """One case result from repeated selection runs: it passes when most runs pass.
+
+    Usage from every run is added up. The JSON report keeps one record per
+    case, so the per-run picks go to the selection summary instead.
+    """
+    first, *rest = runs
+    combined = Result(
+        case_id=first.case_id,
+        suite=first.suite,
+        passed=False,
+        output_excerpt=first.output_excerpt,
+        selection_pick=first.selection_pick,
+        telemetry_complete=first.telemetry_complete,
+        runtime_controls=first.runtime_controls,
+    )
+    combined.add_attempt(first)
+    for run in rest:
+        combined.add_attempt(run)
+    passes = sum(run.passed for run in runs)
+    combined.passed = passes * 2 > len(runs)
+    if not combined.passed:
+        picks = ", ".join(run.selection_pick or "no answer" for run in runs)
+        combined.reasons = [f"passed {passes} of {len(runs)} runs; picks: {picks}"]
+        combined.reasons += list(dict.fromkeys(reason for run in runs for reason in run.reasons))
+    return combined
+
+
+def summarize_selection(
+    cases: list[dict],
+    runs_by_case: dict[str, list[Result]],
+    results: list[Result],
+    runs_per_case: int,
+) -> dict[str, object]:
+    """Per-split accuracy and per-skill misses for one selection run."""
+    final = {result.case_id: result for result in results if result.suite == "selection"}
+    splits: dict[str, dict[str, int]] = {}
+    misses: dict[str, list[dict[str, object]]] = {}
+    records = []
+    for case in cases:
+        runs = runs_by_case.get(case["id"], [])
+        if not runs:
+            continue
+        split = selection_split(case["id"])
+        expected = selection_expected(case["expect"])
+        result = final[case["id"]]
+        tally = splits.setdefault(split, {"cases": 0, "cases_passed": 0, "runs": 0, "runs_passed": 0})
+        tally["cases"] += 1
+        tally["cases_passed"] += int(result.passed)
+        tally["runs"] += len(runs)
+        tally["runs_passed"] += sum(run.passed for run in runs)
+        picks = [run.selection_pick for run in runs]
+        records.append(
+            {"id": case["id"], "split": split, "expected": expected, "picks": picks, "passed": result.passed}
+        )
+        for run in runs:
+            if not run.passed:
+                for name in expected:
+                    misses.setdefault(name, []).append(
+                        {"id": case["id"], "split": split, "picked": run.selection_pick, "reasons": run.reasons}
+                    )
+    return {
+        "schema_version": 1,
+        "runs_per_case": runs_per_case,
+        "splits": splits,
+        "misses": dict(sorted(misses.items())),
+        "cases": records,
+    }
+
+
+def print_selection_summary(report: dict[str, object]) -> None:
+    print("  selection accuracy:")
+    for split, tally in sorted(report["splits"].items()):
+        print(
+            f"    {split}: {tally['cases_passed']}/{tally['cases']} cases, "
+            f"{tally['runs_passed']}/{tally['runs']} runs"
+        )
+    if report["misses"]:
+        print("  selection misses by expected choice:")
+        for name, missed in report["misses"].items():
+            detail = ", ".join(f"{m['id']} -> {m['picked'] or 'no answer'}" for m in missed)
+            print(f"    {name}: {len(missed)} ({detail})")
 
 
 def main() -> int:
@@ -5314,6 +5465,26 @@ def main() -> int:
         help="atomically write a schema-versioned JSON telemetry report",
     )
     parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help=(
+            "selection suite only: run each prompt this many times; a case "
+            "passes when most runs pass (skill-creator suggests 3)"
+        ),
+    )
+    parser.add_argument(
+        "--split",
+        choices=("all", "train", "held-out"),
+        default="all",
+        help="selection suite only: run one split of the fixed train/held-out split",
+    )
+    parser.add_argument(
+        "--selection-summary",
+        type=Path,
+        help="selection suite only: write every run's pick, per-split accuracy and misses as JSON",
+    )
+    parser.add_argument(
         "--baseline-report",
         type=Path,
         help=(
@@ -5322,6 +5493,11 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    selection_only = args.runs != 1 or args.split != "all" or args.selection_summary is not None
+    if args.runs < 1:
+        parser.error("--runs must be at least 1")
+    if selection_only and args.suite != "selection":
+        parser.error("--runs, --split and --selection-summary need --suite selection")
 
     try:
         frozen_harness_definition = evaluation_harness_definition()
@@ -5352,6 +5528,8 @@ def main() -> int:
         return 2
     suites_to_run = [args.suite] if args.suite else list(SUITES.keys())
     results: list[Result] = []
+    selection_runs: dict[str, list[Result]] = {}
+    selection_cases: list[dict] = []
     case_definition_digests: dict[str, str] = {}
     case_definition_stability: dict[str, bool] = {}
     target_definition_digests: dict[str, str] = {}
@@ -5374,13 +5552,20 @@ def main() -> int:
                 for case in load_case_records(
                     suite_cfg["cases"], suite_name=suite_name
                 )
-                if not args.case or case["id"] == args.case
+                if (not args.case or case["id"] == args.case)
+                and (
+                    suite_name != "selection"
+                    or args.split == "all"
+                    or selection_split(case["id"]) == args.split
+                )
             ]
         except (OSError, ValueError) as error:
             print(f"error: loading suite {suite_name}: {error}", file=sys.stderr)
             return 2
         if not suite_cases:
             continue
+        if suite_name == "selection":
+            selection_cases = suite_cases
 
         if suite_cfg["uses_fixture"] and frozen_fixture_runtime is None:
             git_location = shutil.which("git")
@@ -5550,18 +5735,24 @@ def main() -> int:
         try:
             for case in suite_cases:
                 print(f"  [{case['id']}] running ...", end=" ", flush=True)
-                r = evaluate_case(
-                    args.model, suite_name, suite_cfg_for_run, case,
-                    keep_fixtures=args.keep_fixtures,
-                    fixtures_dir=fixtures_dir_for_run,
-                    workflow_root=workflow_root_for_run,
-                    claude_binary=claude_binary,
-                    claude_version=frozen_claude_version,
-                    git_binary=git_binary or "git",
-                    mmcg_binary=mmcg_binary,
-                    cargo_binary=cargo_binary,
-                    rustc_binary=rustc_binary,
-                )
+                runs = [
+                    evaluate_case(
+                        args.model, suite_name, suite_cfg_for_run, case,
+                        keep_fixtures=args.keep_fixtures,
+                        fixtures_dir=fixtures_dir_for_run,
+                        workflow_root=workflow_root_for_run,
+                        claude_binary=claude_binary,
+                        claude_version=frozen_claude_version,
+                        git_binary=git_binary or "git",
+                        mmcg_binary=mmcg_binary,
+                        cargo_binary=cargo_binary,
+                        rustc_binary=rustc_binary,
+                    )
+                    for _ in range(args.runs if suite_name == "selection" else 1)
+                ]
+                if suite_name == "selection":
+                    selection_runs[case["id"]] = runs
+                r = combine_selection_runs(runs) if len(runs) > 1 else runs[0]
                 _SENTINEL_MISSING = "no structured audit verdict block found"
                 if (
                     not r.passed
@@ -5794,6 +5985,16 @@ def main() -> int:
         f"{total_cache_creation} cache write, {total_cache_read} cache read"
     )
     print(f"  reported cost: ${total_cost:.4f}")
+    if selection_runs:
+        selection_report = summarize_selection(selection_cases, selection_runs, results, args.runs)
+        print_selection_summary(selection_report)
+        if args.selection_summary is not None:
+            try:
+                write_report(args.selection_summary, selection_report)
+            except OSError as error:
+                print(f"error: writing selection summary {args.selection_summary}: {error}", file=sys.stderr)
+                return 2
+            print(f"  selection summary: {args.selection_summary}")
 
     report = build_report(
         results,

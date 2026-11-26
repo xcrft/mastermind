@@ -132,7 +132,7 @@ npm-smoke-native:
 
     bash scripts/smoke-packed-npm-release.sh "$pack_dir" npm/mastermind/package.json "$variant"
 
-# Test audit publication, document snapshots, and eval harnesses without a model or build.
+# Test audit publication, document snapshots, eval harnesses and the selection case list, without a model or build.
 eval-harness:
     {{PY}} -m unittest discover -s tests -t .
     {{PY}} -m evals.benchmark.corpus --source-repo .

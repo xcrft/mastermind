@@ -344,8 +344,22 @@ class SubagentDescriptionTests(unittest.TestCase):
     def test_proactive_wording_is_reported(self):
         self.assertEqual(
             self.codes("Use proactively after code changes. Not for designs (use mastermind-critic). Reviews."),
-            ["[subagent_trigger_missing]", "[subagent_proactive]"],
+            ["[subagent_trigger_missing]", "[subagent_push_delegation]"],
         )
+
+    def test_push_delegation_phrases_are_reported(self):
+        for phrase in ("MUST BE USED for every change", "use PROACTIVELY on diffs", "always use it", "Use immediately after edits"):
+            with self.subTest(phrase=phrase):
+                description = f"Use when a change lands, {phrase}. Not for designs (use mastermind-critic). Reviews."
+                self.assertEqual(self.codes(description), ["[subagent_push_delegation]"])
+
+    def test_non_proactive_is_not_push_delegation(self):
+        self.assertEqual(self.codes("Use when a change is non-proactive. Not for designs (use mastermind-critic). Reviews."), [])
+
+    def test_boundary_must_name_what_to_use_instead(self):
+        self.assertEqual(self.codes("Use when a change lands. Not for designs. Reviews."), ["[subagent_boundary_missing]"])
+        before = "Use when a change lands (use mastermind-critic). Not for designs. Reviews."
+        self.assertEqual(self.codes(before), ["[subagent_boundary_missing]"])
 
     def test_every_shipped_subagent_passes(self):
         for path in sorted(validate.REPO_ROOT.glob("agents/subagents/*.md")):
@@ -378,6 +392,43 @@ class DescriptionReferralTests(unittest.TestCase):
         to_agent = self.artifact(root / "skills/x/mastermind-c/SKILL.md", "mastermind-c", "Not for y (use mastermind-r).")
         codes = [i.msg.split("]")[0] + "]" for i in validate.validate_description_referrals([skill, other, agent, to_agent])]
         self.assertEqual(sorted(codes), ["[referral_self]", "[referral_unknown]", "[referral_unknown]"])
+
+    def referral_codes(self, description, kind="skill"):
+        root = validate.REPO_ROOT
+        known = [
+            self.artifact(root / "skills/x/mastermind-a/SKILL.md", "mastermind-a", "Use when a. Not for b (use mastermind-diff-review)."),
+            self.artifact(root / "skills/x/mastermind-diff-review/SKILL.md", "mastermind-diff-review", "Use when d. Not for e (use mastermind-a)."),
+        ]
+        path = root / ("skills/x/mastermind-t/SKILL.md" if kind == "skill" else "agents/subagents/mastermind-t.md")
+        issues = validate.validate_description_referrals(known + [self.artifact(path, "mastermind-t", description)])
+        return sorted(i.msg.split("]")[0] + "]" for i in issues)
+
+    def test_non_canonical_and_unknown_targets_are_reported(self):
+        cases = {
+            "Use when x. Not for y (Use mastermind-zzz).": ["[referral_noncanonical]", "[referral_unknown]"],
+            "Use when x. Not for y (use Mastermind-Diff-Review).": ["[referral_noncanonical]"],
+            "Use when x. Not for y (use diff-review).": ["[referral_noncanonical]"],
+            "Use when x. Not for y, use mastermind-zzz instead.": ["[referral_outside_clause]"],
+            "Use when x. Not for y (use mastermind-a (core) or mastermind-zzz).": ["[referral_unknown]"],
+            "Use when x. Not for y (use mastermind-a or mastermind-diff-review).": [],
+        }
+        for description, expected in cases.items():
+            with self.subTest(description=description):
+                self.assertEqual(self.referral_codes(description), expected)
+
+    def test_every_target_in_a_clause_is_read(self):
+        self.assertEqual(
+            validate.description_referrals("Use when x. Not for y (use mastermind-a (core) or mastermind-zzz), z (use mastermind-b)."),
+            ["mastermind-a", "mastermind-zzz", "mastermind-b"],
+        )
+        clauses = validate.description_referral_clauses(
+            "Use when q. Not for the live page (use mastermind-b) or the spec contract (use mastermind-a). x"
+        )
+        self.assertEqual([(c.clause, c.targets) for c in clauses], [("the live page", ("mastermind-b",)), ("or the spec contract", ("mastermind-a",))])
+
+    def test_subagent_boundary_must_resolve(self):
+        self.assertEqual(self.referral_codes("Use when x. Not for y (use mastermind-zzz). z", kind="subagent"), ["[referral_unknown]", "[subagent_boundary_unresolved]"])
+        self.assertEqual(self.referral_codes("Use when x. Not for y (use mastermind-a). z", kind="subagent"), [])
 
     def test_shipped_referrals_resolve(self):
         self.assertEqual(validate.validate_description_referrals(list(validate.find_artifacts())), [])

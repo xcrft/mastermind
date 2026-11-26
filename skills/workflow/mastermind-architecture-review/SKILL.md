@@ -1,8 +1,8 @@
 ---
 name: mastermind-architecture-review
-description: Use for service boundaries, async workflows, persistence, migrations, public APIs, events and schemas. Not for a line-level diff review (use mastermind-diff-review). Checks the runtime path, ownership, retries, idempotency and compatibility.
+description: "Use for service boundaries, async workflows, persistence, migrations, public APIs, events and schemas. Not for a line-level diff review (use mastermind-diff-review) or stress-testing a plan before approval (use mastermind-critical-review). Checks runtime path, ownership, retries and compatibility."
 metadata:
-  version: 0.2.2
+  version: 0.2.3
   authors: [mastermind]
   tags: [workflow, architecture, review, reliability, contracts]
 ---

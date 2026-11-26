@@ -62,6 +62,15 @@ SUBAGENT_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 SUBAGENT_MAX_TURNS = 100
 WORKFLOW_ACTIVATIONS = {"always", "conditional", "manual"}
 WORKFLOW_MUTABILITIES = {"read-only", "writer"}
+# A subagent's capability class is its mutability plus the capabilities it
+# declares. Each declared capability needs a reason, and every tool that needs
+# a capability must have it declared.
+WORKFLOW_CAPABILITY_TOOLS = {
+    "shell": {"Bash", "PowerShell"},
+    "web": {"WebFetch", "WebSearch"},
+}
+WORKFLOW_MUTATION_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+WORKFLOW_CAPABILITY_REASON_MIN = 20
 WORKFLOW_RUNTIMES = {"claude", "codex", "portable", "controller"}
 WORKFLOW_MAX_RELATIONS = 512
 WORKFLOW_MAX_WRITES = 64
@@ -855,7 +864,7 @@ def _workflow_metadata_messages(
         return ["[workflow_metadata_invalid] workflow metadata must be a mapping"]
 
     messages: list[str] = []
-    allowed = {"schema_version", "activation", "mutability", "skills", "writes"}
+    allowed = {"schema_version", "activation", "mutability", "capabilities", "skills", "writes"}
     unknown = sorted(set(workflow) - allowed)
     if unknown:
         messages.append(
@@ -923,10 +932,55 @@ def _workflow_metadata_messages(
                 )
                 break
 
-    if mutability == "read-only" and {"Edit", "Write"}.intersection(runtime_tools):
-        messages.append(
-            "[readonly_mutation_capability] read-only workflow role grants Edit or Write"
-        )
+    messages.extend(_capability_messages(workflow, runtime_tools))
+    return messages
+
+
+def workflow_capability_class(workflow: dict) -> str:
+    """Name a role's capability class, such as `read-only-with-shell`."""
+    capabilities = workflow.get("capabilities")
+    declared = sorted(capabilities) if isinstance(capabilities, dict) else []
+    name = str(workflow.get("mutability"))
+    return name + "".join(f"-with-{capability}" for capability in declared)
+
+
+def _capability_messages(workflow: dict, runtime_tools: list[str]) -> list[str]:
+    capabilities = workflow.get("capabilities", {})
+    if not isinstance(capabilities, dict):
+        return ["[workflow_capability_invalid] workflow capabilities must be a mapping of capability to reason"]
+    messages: list[str] = []
+    for capability, reason in capabilities.items():
+        if capability not in WORKFLOW_CAPABILITY_TOOLS:
+            messages.append(
+                f"[workflow_capability_invalid] unknown capability {capability!r}, "
+                f"use {', '.join(sorted(WORKFLOW_CAPABILITY_TOOLS))}"
+            )
+        elif not isinstance(reason, str) or len(reason.strip()) < WORKFLOW_CAPABILITY_REASON_MIN:
+            messages.append(
+                f"[workflow_capability_invalid] capability {capability!r} needs a reason of at least "
+                f"{WORKFLOW_CAPABILITY_REASON_MIN} characters that says what the role runs"
+            )
+    tools = set(runtime_tools)
+    role = workflow_capability_class(workflow)
+    if workflow.get("mutability") == "read-only":
+        mutation = sorted(WORKFLOW_MUTATION_TOOLS & tools)
+        if mutation:
+            messages.append(
+                f"[readonly_mutation_capability] {role} role grants {', '.join(mutation)}"
+            )
+    for capability, needs in sorted(WORKFLOW_CAPABILITY_TOOLS.items()):
+        granted = sorted(needs & tools)
+        if granted and capability not in capabilities:
+            messages.append(
+                f"[undeclared_capability] {role} role grants {', '.join(granted)} without "
+                f"declaring workflow capability {capability!r} and its reason"
+            )
+        # A role that declares a capability it no longer uses keeps a stale
+        # class. Skills pass no runtime tools, so they cannot declare one.
+        if capability in capabilities and not granted:
+            messages.append(
+                f"[unused_capability] workflow capability {capability!r} is declared but no tool needs it"
+            )
     return messages
 
 
@@ -958,6 +1012,39 @@ def validate_workflow_metadata_fixture() -> list[Issue]:
             "readonly_mutation_capability" in message
             for message in _workflow_metadata_messages(
                 valid, required=True, runtime_tools=["Read", "Write"]
+            )
+        ),
+        any(
+            "readonly_mutation_capability" in message
+            for message in _workflow_metadata_messages(
+                valid, required=True, runtime_tools=["Read", "NotebookEdit"]
+            )
+        ),
+        any(
+            "undeclared_capability" in message and "'shell'" in message
+            for message in _workflow_metadata_messages(
+                valid, required=True, runtime_tools=["Read", "Bash"]
+            )
+        ),
+        not _workflow_metadata_messages(
+            {"workflow": {**valid["workflow"], "capabilities": {"shell": "runs git diff to scope the review"}}},
+            required=True,
+            runtime_tools=["Read", "Bash"],
+        ),
+        any(
+            "unused_capability" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "capabilities": {"web": "reads the release notes it cites"}}},
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+        any(
+            "workflow_capability_invalid" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "capabilities": {"shell": "git"}}},
+                required=True,
+                runtime_tools=["Read", "Bash"],
             )
         ),
         any(
@@ -2045,9 +2132,6 @@ def validate_workflow_role_contracts() -> list[Issue]:
         ):
             if token not in researcher:
                 issues.append(Issue(researcher_path, "error", f"researcher graph-first contract missing {token!r}"))
-        tools_line = re.search(r"^tools:\s*(.*)$", researcher, re.MULTILINE)
-        if tools_line is None or "Bash" in _runtime_tool_names(tools_line.group(1)):
-            issues.append(Issue(researcher_path, "error", "read-only researcher must not receive Bash"))
     workflow_path = REPO_ROOT / "agents/claude-md/mastermind-workflow.md"
     try:
         workflow = workflow_path.read_bytes()

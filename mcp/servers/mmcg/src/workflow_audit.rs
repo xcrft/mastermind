@@ -358,6 +358,11 @@ struct WorkflowMetadata {
     schema_version: u32,
     activation: WorkflowActivation,
     mutability: WorkflowMutability,
+    /// Declared capabilities and their reasons. `scripts/validate.py` checks
+    /// them against the role's tools at the source. The audit only accepts
+    /// the field.
+    #[serde(default, rename = "capabilities")]
+    _capabilities: Option<serde_norway::Value>,
     #[serde(default)]
     skills: Vec<WorkflowSkillRelation>,
     #[serde(default)]

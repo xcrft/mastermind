@@ -10,11 +10,13 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
+  capabilities:
+    shell: "Runs git diff and re-runs cheap deterministic test commands."
   skills:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.2.2
+  version: 0.2.3
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---

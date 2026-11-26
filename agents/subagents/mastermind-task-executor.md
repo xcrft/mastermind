@@ -10,6 +10,8 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: writer
+  capabilities:
+    shell: "Runs the build, test and verification commands the task declares."
   skills:
     - id: no-ai-slop-comments
       required: false
@@ -20,7 +22,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.6.2
+  version: 0.6.3
   authors: [mastermind]
   tags: [workflow, delegation]
 ---

@@ -9,8 +9,10 @@ workflow:
   schema_version: 1
   activation: manual
   mutability: writer
+  capabilities:
+    shell: "Runs the mastermind feedback commands that collect candidates."
 metadata:
-  version: 0.9.2
+  version: 0.9.3
   authors:
     - mastermind
   tags:

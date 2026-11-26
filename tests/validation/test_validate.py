@@ -304,6 +304,72 @@ class SkillDescriptionTests(unittest.TestCase):
             )
 
 
+class SubagentCapabilityTests(unittest.TestCase):
+    """A subagent's tools match the capability class its workflow metadata declares."""
+
+    SUBAGENTS = validate.REPO_ROOT / "agents/subagents"
+
+    def load(self, name):
+        path = self.SUBAGENTS / f"{name}.md"
+        return validate._load_artifact(path, slug=name, domain="subagents").frontmatter
+
+    def codes(self, frontmatter, tools=None):
+        tools = frontmatter.get("tools") if tools is None else tools
+        return [
+            message.split("]")[0] + "]"
+            for message in validate._workflow_metadata_messages(
+                frontmatter, required=True, runtime_tools=validate._runtime_tool_names(tools)
+            )
+        ]
+
+    def test_critic_with_shell_and_web_fails(self):
+        critic = self.load("mastermind-critic")
+        tools = critic["tools"] + ", Bash, WebFetch"
+        self.assertEqual(self.codes(critic, tools), ["[undeclared_capability]", "[undeclared_capability]"])
+
+    def test_read_only_roles_cannot_edit_even_with_capabilities(self):
+        auditor = self.load("mastermind-auditor")
+        for tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
+            self.assertIn("[readonly_mutation_capability]", self.codes(auditor, auditor["tools"] + f", {tool}"))
+
+    def test_shell_needs_a_declared_reason_for_writers_too(self):
+        executor = self.load("mastermind-task-executor")
+        without = {**executor, "workflow": {**executor["workflow"], "capabilities": {}}}
+        self.assertEqual(self.codes(without), ["[undeclared_capability]"])
+        vague = {**executor, "workflow": {**executor["workflow"], "capabilities": {"shell": "needed"}}}
+        self.assertEqual(self.codes(vague), ["[workflow_capability_invalid]"])
+
+    def test_stale_or_unknown_capabilities_are_reported(self):
+        critic = self.load("mastermind-critic")
+        stale = {**critic, "workflow": {**critic["workflow"], "capabilities": {"shell": "runs git diff to scope review"}}}
+        self.assertEqual(self.codes(stale), ["[unused_capability]"])
+        unknown = {**critic, "workflow": {**critic["workflow"], "capabilities": {"network": "fetches pages it cites"}}}
+        self.assertEqual(self.codes(unknown), ["[workflow_capability_invalid]"])
+
+    def test_every_shipped_subagent_matches_its_class(self):
+        classes = {}
+        for path in sorted(self.SUBAGENTS.glob("*.md")):
+            frontmatter = self.load(path.stem)
+            self.assertEqual(self.codes(frontmatter), [], path)
+            classes[path.stem] = validate.workflow_capability_class(frontmatter["workflow"])
+        self.assertEqual(
+            classes,
+            {
+                "mastermind-auditor": "read-only-with-shell",
+                "mastermind-comment-auditor": "read-only-with-shell",
+                "mastermind-critic": "read-only",
+                "mastermind-feedback-collector": "writer-with-shell",
+                "mastermind-frontend-auditor": "read-only-with-shell",
+                "mastermind-investigator": "read-only-with-shell",
+                "mastermind-prompt-refiner": "read-only",
+                "mastermind-researcher": "read-only",
+                "mastermind-security-auditor": "read-only-with-shell",
+                "mastermind-task-executor": "writer-with-shell",
+                "mastermind-test-auditor": "read-only-with-shell",
+            },
+        )
+
+
 class SubagentDescriptionTests(unittest.TestCase):
     """A subagent description opens with its trigger and names the role to use instead."""
 

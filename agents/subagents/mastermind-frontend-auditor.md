@@ -10,11 +10,13 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
+  capabilities:
+    shell: "Runs git diff to scope the changed components."
   skills:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.6
+  version: 0.1.7
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---

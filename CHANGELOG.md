@@ -68,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs code fails the check, and any other command hook or an `http` hook
   warns. The hook readiness checks now say how many other hooks exist instead
   of only "not configured".
+- Every shipped subagent declares its capability class in its workflow
+  metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
+  a reason. `just validate` fails when a role's `tools` do not match: `Edit`,
+  `Write`, `NotebookEdit` or `MultiEdit` in a read-only role, `Bash` or
+  `PowerShell` without `shell`, `WebFetch` or `WebSearch` without `web`, or a
+  declared capability no tool needs. Eight subagents that run commands now
+  declare `shell` with a reason.
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
   Ten subagents and 28 skills that read repository, pull request, report,
   transcript or tool content carry it verbatim. It names the person or the

@@ -10,8 +10,10 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
+  capabilities:
+    shell: "Runs the failing test, Git history and runtime probes behind the trust gate."
 metadata:
-  version: 0.4.2
+  version: 0.4.3
   authors:
     - mastermind
   tags:

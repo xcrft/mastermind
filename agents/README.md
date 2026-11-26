@@ -45,6 +45,34 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
 5. Hand off only with a lowercase `(use <full-name>)`. A name outside that
    form, a capitalised `(Use ...)` or a short name fails validation.
 
+## Declare capabilities
+
+Each subagent's `workflow` metadata names what it may do. `mutability` is
+`read-only` or `writer`, and `capabilities` adds `shell` or `web`, each with a
+reason that says what the role runs. Together they form the role's class, such
+as `read-only-with-shell`.
+
+```yaml
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
+  capabilities:
+    shell: "Runs git diff to scope the changed components."
+```
+
+`just validate` checks the class against `tools`:
+
+| Tool | Needs |
+|---|---|
+| `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | `mutability: writer` |
+| `Bash`, `PowerShell` | `capabilities.shell` with a reason of at least 20 characters |
+| `WebFetch`, `WebSearch` | `capabilities.web` with a reason of at least 20 characters |
+
+A declared capability that no tool needs fails too. A shell can still write
+files, so `read-only-with-shell` is a promise in the prompt, not a sandbox.
+Keep `shell` off a role that can work from `Read`, `Grep`, `Glob` and mmcg.
+
 ## Untrusted content
 
 [`blocks/untrusted-content.md`](blocks/untrusted-content.md) is the one source

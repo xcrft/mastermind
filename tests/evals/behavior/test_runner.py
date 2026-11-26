@@ -3549,7 +3549,7 @@ class PromptIsolationTests(unittest.TestCase):
         self.assertEqual(set(changed), {"src/staged.py", "src/unstaged.py", "src/added.py"})
 
     def test_synthetic_prompt_suites_cannot_inspect_the_maintainer_checkout(self):
-        for suite in ("critic", "intake", "workflow"):
+        for suite in ("critic", "intake", "workflow", "selection"):
             arguments = runner.isolated_cli_args(suite)
             self.assertEqual(arguments[:3], ["--safe-mode", "--tools", ""])
             for flag in (

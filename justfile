@@ -136,6 +136,7 @@ npm-smoke-native:
 eval-harness:
     {{PY}} -m unittest discover -s tests -t .
     {{PY}} -m evals.benchmark.corpus --source-repo .
+    {{PY}} -m evals.selection
 
 # Check completion invariants and sampled CLI behavior without model calls.
 eval-control output:

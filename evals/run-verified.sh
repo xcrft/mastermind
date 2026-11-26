@@ -12,5 +12,6 @@ cargo deny --manifest-path mcp/servers/mmcg/Cargo.toml check
 python scripts/validate.py
 python -m unittest discover -s tests -t .
 python -m evals.benchmark.corpus --source-repo .
+python -m evals.selection
 npm test --prefix npm/mastermind
 python -m evals.behavior.runner "$@"

@@ -40,7 +40,10 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
    name a shipped skill or subagent.
 3. End with a short line on what it does. Keep it within 300 characters and
    leave detail to the body, which loads only when the role runs.
-4. Do not write "use proactively". The workflow spawns roles by name.
+4. Do not write "use proactively", "MUST BE USED" or anything else that tells
+   Claude to delegate on its own. The workflow spawns roles by name.
+5. Hand off only with a lowercase `(use <full-name>)`. A name outside that
+   form, a capitalised `(Use ...)` or a short name fails validation.
 
 ## Untrusted content
 

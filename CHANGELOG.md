@@ -27,20 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A skill-selection corpus of 79 prompts in
-  `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill, a
-  declared tie or none, and rejects the near misses. Every core skill is
-  expected by at least two prompts and rejected by at least two. `just check`
-  runs `python -m evals.selection`, which needs no model. It fails when a prompt
-  names a skill that does not exist or the skill it expects, when a core skill
-  lacks prompts, when a `(use X)` names nothing, when three or more skills hand
-  a prompt on in a loop, when a conflict case has no written tie-break and is
-  not declared a tie, or when two skills share trigger wording and nothing
-  separates them. It does not show that a model picks the right skill. The new
-  `selection` behaviour suite runs the same prompts through Claude against a
-  generated list of every skill's name and description. The check found four
-  ties no description settles and three core skills that hand off to a skill
-  core does not install, listed in `evals/selection/README.md`.
+- A skill-selection corpus of 91 prompts in
+  `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill or
+  subagent, or none, and rejects the near misses. `just check` runs
+  `python -m evals.selection`, a check of the case list and the catalogue that
+  needs no model. It never decides which skill a prompt should get, so it does
+  not show that a model picks well. It fails on a label the prompt's words
+  contradict without a reviewed reason, a prompt that names its skill in any
+  spelling, gibberish, a conflict case whose cited clause does not pick its
+  winner in one direction, a known neighbour pair with no conflict case, a
+  core skill that hands off outside core, and a corpus where more than a third
+  of cases can be answered by rare-word matching. Cases fall into a fixed
+  train and held-out split of about 60/40. The new `selection` behaviour suite
+  sends the prompts to Claude against a catalogue of every skill and subagent,
+  can run each prompt three times, and reports accuracy per split. Details and
+  limits are in `evals/selection/README.md`.
 
 - `mastermind doctor` has a `permission rules` check. It reads the Claude Code
   permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
@@ -74,10 +75,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Not for ... (use X)` within its first 200 characters and stays within 300.
   Claude Code decides when to delegate from these descriptions, so the two
   roles that run only on request, the feedback collector and the prompt
-  refiner, start with `Use only when`. `just validate` fails a subagent description that breaks
-  this, says "proactively", or names a skill or subagent that does not exist.
-  Skill descriptions get the same check on what they name. Each subagent has
-  a new patch version.
+  refiner, start with `Use only when`. `just validate` fails a subagent
+  description that breaks this, says "proactively", "MUST BE USED" or another
+  phrase that pushes delegation, or has a `Not for` boundary with no
+  `(use X)` that resolves. In skill and subagent descriptions every hand-off
+  must be a lowercase `(use <full-name>)` naming something shipped, and names
+  may not appear outside one. Each subagent has a new patch version.
+
+- Skill descriptions now pick one winner for four prompts that two skills
+  both claimed. `mastermind-test-impact` hands running checks to
+  `mastermind-verify-change`, `mastermind-architecture-review` hands a plan
+  check before approval to `mastermind-critical-review`, and
+  `mastermind-diff-review` hands React and Vue code to
+  `mastermind-frontend-audit`. `mastermind-agent-security-review` already
+  claims changes touching auth and secrets, and `mastermind-diff-review` is a
+  core skill, so it does not name it. `mastermind-agent-handoff`,
+  `mastermind-component-research` and `mastermind-product-intake` no longer
+  hand off to skills that the core profile does not install.
+  `mastermind-design-intake` now claims a mockup that comes with a ticket.
 
 - `mastermind-dependency-upgrade` now does what its description promised for
   a new package. It checks the name against the registry and the project's

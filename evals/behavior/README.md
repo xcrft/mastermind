@@ -9,7 +9,7 @@ These suites run the shipped roles and workflow skills on planted cases through 
 | `auditor` | [auditor.jsonl](cases/auditor.jsonl) | Held, Drift or Broken in the YAML verdict |
 | `intake` | [intake.jsonl](cases/intake.jsonl) | Refine, pass through or ask |
 | `workflow` | [workflow.jsonl](cases/workflow.jsonl) | Required behavior of a workflow skill |
-| `selection` | [selection.jsonl](cases/selection.jsonl) | The skill a model picks from the [skill list](../selection/README.md) |
+| `selection` | [selection.jsonl](cases/selection.jsonl) | The one skill or subagent a model picks from the [catalogue](../selection/README.md) |
 
 You need the `claude` CLI logged in and `git` on PATH. The researcher and auditor suites also need a matching `mmcg` binary. Each fixture under [fixtures/](fixtures/) has a README that describes its planted change.
 

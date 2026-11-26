@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-dependency-upgrade` now does what its description promised for
+  a new package. It checks the name against the registry and the project's
+  documentation, looks for lookalike names, notes package and version age and
+  maintainer changes, respects a release-age cooldown and stops for a person
+  when a check fails. Two workflow eval cases cover a days-old lookalike and an
+  established package that should pass.
 - `mastermind-diff-review` looks for steering text where a person would not:
   HTML comments, collapsed blocks, alt text, encoded strings and invisible or
   direction-changing Unicode. It gives a portable command to find those

@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---
@@ -89,6 +89,7 @@ them; do not restate them as your own.
    `<=` or a dropped branch, and the assertion in a reaching test that would
    fail on it. If none would, report a `survivor`: at most one per symbol,
    called likely rather than proven. Skip logging, messages and formatting.
+   Survivors are advisory and go in `advisories`, never in `findings`.
 
 ## Evidence rule
 
@@ -116,7 +117,7 @@ verified.
 
 Return the [[mastermind-test-audit]] report shape — `Uncovered behaviour`,
 `Wrong path exercised`, `Assertion moved with the code`, `Non-asserting tests`,
-`Likely surviving bugs`, `Kept`, `Could not verify` — then the required structured tail.
+`Likely surviving bugs (advisory)`, `Kept`, `Could not verify` — then the required structured tail.
 
 ````markdown
 <!-- mastermind:test-audit-begin -->
@@ -129,13 +130,17 @@ flagged: <N>
 findings:
   - symbol: <name>
     test: <path or none>
-    kind: uncovered | wrong_path | assertion_moved | non_asserting | survivor | could_not_verify
+    kind: uncovered | wrong_path | assertion_moved | non_asserting | could_not_verify
+advisories:
+  - file: <path>
+    line: <N>
+    kind: survivor
 ```
 <!-- mastermind:test-audit-end -->
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero, `clean` otherwise. `incomplete` means the review stopped before
+is above zero, `clean` otherwise. `advisories` does not count. `incomplete` means the review stopped before
 it covered the diff, for example with no baseline; a stopped review is never
 `clean`. Keep empty headings and never omit the sentinel.
 

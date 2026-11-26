@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed line that decides something, they name the most likely small slip,
   such as `<` for `<=` or a dropped branch, and the assertion that would fail
   on it. When none would, they report a `survivor`, at most one per symbol and
-  called likely rather than proven. The structured tail accepts
-  `kind: survivor`. Two workflow eval cases cover a surviving boundary slip
+  called likely rather than proven. Survivors are advisory: they go in their
+  own section and an `advisories` list in the structured tail, and do not
+  count towards `flagged` or the verdict. Two workflow eval cases cover a surviving boundary slip
   and the clean case where both sides of the boundary are asserted.
 - `mastermind-investigation-ledger` starts from a failing command and only
   then writes hypotheses. Every run, the bisect and the red/green proof

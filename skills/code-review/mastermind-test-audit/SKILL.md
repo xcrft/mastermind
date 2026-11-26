@@ -2,7 +2,7 @@
 name: mastermind-test-audit
 description: Read-only review of whether a change's tests prove its behaviour — unreached changed code, a test on another path, an assertion edited to match new output, a test asserting nothing, a likely bug no assertion catches. Use after implementation or when a change claims to be covered. Not for choosing which tests to run (use mastermind-test-impact).
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
@@ -109,7 +109,9 @@ If none would, the slip would ship green.
 Skip lines where a slip would not change behaviour anyone checks: logging,
 messages, formatting, plumbing. Report at most one slip per changed symbol,
 name the line, the slip and the assertions you checked, and call it likely, not
-proven. Proving it means undoing the line in a scratch copy and running the
+proven. A survivor is advisory: it goes under `Likely surviving bugs` and in
+`advisories`, never in `findings`, so it does not change `flagged` or the
+verdict. Proving it means undoing the line in a scratch copy and running the
 test, which [[mastermind-verify-change]] does when running is allowed.
 
 ## Evidence rule
@@ -154,7 +156,7 @@ wants one more test is one nobody reads.
 ### Non-asserting tests
 - `<test>:<line>` — `<body>`
 
-### Likely surviving bugs
+### Likely surviving bugs (advisory)
 - `<file>:<line>` — slip `<mutation>`; checked `<test assertions>`; none would fail
 
 ### Kept
@@ -173,13 +175,18 @@ flagged: <N>
 findings:
   - symbol: <name>
     test: <path or none>
-    kind: uncovered | wrong_path | assertion_moved | non_asserting | survivor | could_not_verify
+    kind: uncovered | wrong_path | assertion_moved | non_asserting | could_not_verify
+advisories:
+  - file: <path>
+    line: <N>
+    kind: survivor
 ```
 <!-- mastermind:test-audit-end -->
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero and `clean` otherwise. `incomplete` means the review stopped
+is above zero and `clean` otherwise. `advisories` does not count, so a report
+with only survivors is `clean`. `incomplete` means the review stopped
 before it covered the diff, for example with no baseline; a stopped review is
 never `clean`. Keep every heading even when empty, and never omit the sentinel
 block.

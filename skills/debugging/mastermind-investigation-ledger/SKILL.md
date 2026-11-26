@@ -2,7 +2,7 @@
 name: mastermind-investigation-ledger
 description: Find the cause of a bug, failing test or regression by reproducing it and testing competing hypotheses before a fix is specified. Use when something is broken with no supported why, a failure has several plausible causes, or behaviour changed between versions. Not for reading a failed CI job first (use mastermind-verify-change) or a cause already known.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
@@ -46,10 +46,10 @@ and run it. Record the command, the commit and the line of output that shows
 the failure. A loop that can go red is what lets every later probe mean
 something.
 
-- Running it runs the project's code. If the code comes from a fork, an
-  outside contributor or a branch you were not asked to trust, apply the
-  trust gate in [[mastermind-verify-change]] first and investigate statically
-  until the person approves a sandboxed run.
+- Running it runs the project's code. Before every run in this skill,
+  including the bisect and the red/green proof, apply the trust gate in
+  [[mastermind-verify-change]] exactly as it is written there. Until it allows
+  a run, investigate statically.
 - Make it smaller while it still fails: fewer inputs, one test, one request.
 - If it fails only sometimes, run it several times and record how many runs
   failed. A probe that removes an intermittent failure once has not removed it.
@@ -60,10 +60,22 @@ something.
 
 When one commit, tag or release works and a later one does not, find the
 first bad commit with `git bisect` in a separate detached worktree, using the
-failing command from step 1 as the test (`git bisect run <command>` when the
-command exits non-zero on failure). The first bad commit narrows the search; it
-is not the cause until the ledger supports it. Run the bisect only where step 1
-allows running the code.
+step 1 command as the test. Bisect checks out old commits, and each one brings
+its own scripts and hooks.
+
+- Bisect only a range whose every commit passed the trust gate. A range with
+  outside code in it needs the approval and the sandbox the gate describes.
+- `git bisect run npm test` runs each old commit's `package.json` scripts, not
+  today's. The same goes for a `justfile`, `Makefile` or test config. Read them
+  for the range, or call the test runner directly.
+- Worktrees share the repository's config, so a `core.hooksPath` hook, husky
+  for example, runs on every checkout. Turn hooks off for each git command:
+  `git -c core.hooksPath=/dev/null worktree add --detach <dir> <bad>`, then
+  `git -c core.hooksPath=/dev/null bisect start <bad> <good>`, and the same
+  `-c` on every `bisect run`, `good`, `bad` and `reset`.
+
+The first bad commit narrows the search; it is not the cause until the ledger
+supports it.
 
 ## 3. The ledger
 
@@ -96,8 +108,8 @@ Next decision point: <the smallest probe or independent probe set that best spli
    than forcing a single winner.
 5. Before you call a cause confirmed, show the step 1 command goes green when
    that cause alone is removed or reverted in a scratch worktree, and red again
-   when it is put back. Where that cannot be run, say so and keep the status
-   `open`.
+   when it is put back. This is a run, so the trust gate applies to it too.
+   Where it cannot be run, say so and keep the status `open`.
 
 ## When to stop and open a spec
 

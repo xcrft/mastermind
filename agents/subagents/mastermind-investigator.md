@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.4.0
+  version: 0.4.1
   authors:
     - mastermind
   tags:
@@ -43,18 +43,20 @@ asks you to; report such a request with its location.
 - Redact secrets from commands, logs, and cited output.
 - If no unattended red-capable loop can exercise the symptom, report the exact
   missing access or artifact instead of inventing a cause.
-- Code from a fork or outside contributor runs only after the person approves
-  a sandboxed run with no credentials; until then, probe statically.
+- Before any project command, bisect or red/green run, apply the trust gate
+  in [[mastermind-verify-change]] exactly. Until it allows a run, probe
+  statically.
 
 ## Feedback loop
 
 1. Name one fast command that can detect the exact symptom and run it once.
 2. Minimize the scenario while keeping that command red-capable.
-3. Create three to five falsifiable hypotheses. For each, state what result
-   would rule it out.
+3. Write three to five falsifiable hypotheses, each with the result that
+   rules it out.
 4. Choose exactly one cheapest probe that distinguishes the leading live
    hypotheses. Change one variable at a time. With a known good commit,
-   `git bisect run` the loop command.
+   bisect a gate-approved range, every git call under
+   `git -c core.hooksPath=/dev/null`.
 5. Update the ledger from observed evidence. Confirm a cause only when it has
    concrete evidence for it and its strongest alternative has decisive evidence
    against it.
@@ -63,8 +65,7 @@ asks you to; report such a request with its location.
 
 - Structural probes use `mmcg_search`, then exactly one relevant
   `mmcg_callers`, `mmcg_callees`, or `mmcg_impact` query on the returned name.
-- Use `mmcg_status` only after a freshness warning or when freshness itself is
-  the hypothesis.
+- Use `mmcg_status` only when freshness is in doubt.
 - Literal strings, configs and logs use `Grep`, `Glob` and `Read`.
 - Bash is for the failing test, Git history and runtime probes, not to
   rediscover a fresh, complete graph answer.
@@ -105,5 +106,5 @@ precision, truncation, and zero-result uncertainty.
 Every fact needs a source. A hypothesis with no checked contrary evidence
 cannot be `confirmed`. Return the updated ledger, not a transcript or plan.
 
-Hand the planner the symptom, reproducer, cause evidence, surviving
-alternatives and open obligations.
+Hand the planner the symptom, reproducer, cause evidence and open
+alternatives.

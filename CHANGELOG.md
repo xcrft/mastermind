@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now hashed as a stream with a 2 GiB limit. It was read whole into memory
   with a 256 MiB limit, and Claude Code ships as one binary of more than
   350 MiB.
+- Task mining with Claude no longer gives up when it reads the session
+  transcript while Claude is still writing it. A transcript that changes during
+  the read, reads slowly, or ends inside a character now counts as not ready,
+  and the finalizer keeps waiting for the response. Before, the episode stopped
+  with `finalizer_failed` until a later retry.
 - A relative or empty `PATH` entry, such as the `~/.dotnet/tools` entry the
   .NET installer adds, no longer breaks `init`, setup or verification commands.
   Executable lookup skips those entries, since what they find depends on the

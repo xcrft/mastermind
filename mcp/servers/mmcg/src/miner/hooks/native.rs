@@ -188,7 +188,18 @@ pub(super) fn transcript_model(
         deadline: Some(Instant::now() + Duration::from_millis(250)),
         interrupted: None,
     };
-    let file = bounded_fs::read_regular_file_tail(&dir, &path, 256 * 1024 * 1024, TAIL, control)?;
+    // Claude appends to the transcript while the finalizer waits for it. A file
+    // that changes during the read, or a slow read, means the response has not
+    // settled yet, so the caller keeps waiting instead of failing.
+    let file =
+        match bounded_fs::read_regular_file_tail(&dir, &path, 256 * 1024 * 1024, TAIL, control) {
+            Ok(file) => file,
+            Err(
+                bounded_fs::BoundedReadError::SnapshotChanged
+                | bounded_fs::BoundedReadError::DeadlineExceeded,
+            ) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
     let bytes = if file.declared_len > TAIL {
         let Some(newline) = file.bytes.iter().position(|byte| *byte == b'\n') else {
             return Ok(None);
@@ -197,7 +208,10 @@ pub(super) fn transcript_model(
     } else {
         &file.bytes
     };
-    let text = std::str::from_utf8(bytes)?;
+    // A write can stop inside a multi-byte character.
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(None);
+    };
     let mut candidate: Option<(String, Value)> = None;
     for line in text.lines().rev() {
         control.check()?;

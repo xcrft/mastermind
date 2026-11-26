@@ -2,7 +2,7 @@
 name: mastermind-frontend-audit
 description: Read-only review of a finished UI change against the codegraph — a component with no confirmed renderer, a props contract changed without its callers, a reinvented component, or a raw value where the design system has a token. Use after implementing React or Vue work; triggers "review this UI change", "check the component", or a finished frontend diff.
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:
@@ -130,7 +130,7 @@ design.
 <!-- mastermind:frontend-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 components_added: <N>
 components_changed: <N>
 flagged: <N>
@@ -143,8 +143,10 @@ findings:
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero and `clean` otherwise. Keep every heading even when empty, and
-never omit the sentinel block.
+is above zero and `clean` otherwise. `incomplete` means the review stopped
+before it covered the diff, for example with no baseline; a stopped review is
+never `clean`. Keep every heading even when empty, and never omit the sentinel
+block.
 
 ## Boundaries
 

@@ -13,7 +13,7 @@ workflow:
     - id: mastermind-comment-audit
       required: false
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors: [mastermind]
   tags: [code-review, comments, audit, workflow]
 ---
@@ -39,8 +39,8 @@ authoritative source for what this change did to them.
 - optionally the canonical `spec.md`, when one exists, to know what the change
   was allowed to touch.
 
-If the baseline is missing, report `could_not_verify` and stop. Do not guess a
-ref, and do not fall back to reviewing the whole repository.
+If the baseline is missing, return `verdict: incomplete`, say why, and stop. Do
+not guess a ref, and do not fall back to reviewing the whole repository.
 
 ## Method
 
@@ -99,7 +99,7 @@ rationale`, `Kept`, `Could not verify`, then the required structured tail.
 <!-- mastermind:comment-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 comments_added: <N>
 comments_removed: <N>
 flagged: <N>
@@ -113,7 +113,9 @@ findings:
 ````
 
 `flagged` counts every `findings` entry — added slop and removed rationale
-together. `verdict` is `findings` when `flagged` is above zero, `clean` otherwise.
+together. `verdict` is `findings` when `flagged` is above zero, `clean`
+otherwise. `incomplete` means the review stopped before it covered the diff, for
+example with no baseline; a stopped review is never `clean`.
 
 Keep empty sections as headings and never omit the sentinel. `flagged: 0` with a
 populated `Kept` section is a complete, successful report.

@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.3
+  version: 0.1.4
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---
@@ -33,11 +33,11 @@ here are structural, and the diff alone cannot establish any of them.
 - baseline ref (task state for a verified/strict task, or the branch point);
 - the changed component files.
 
-If the baseline is missing, report `could_not_verify` and stop. A graph query
-refreshes a stale managed index once before it answers. If a query still
-returns `index_stale`, do not re-index yourself: report the graph-backed claims
-as `could_not_verify`, because a stale graph reports a wired-up component as
-unrendered.
+If the baseline is missing, return `verdict: incomplete`, say why, and stop. A
+graph query refreshes a stale managed index once before it answers. If a query
+still returns `index_stale`, do not re-index yourself: report the graph-backed
+claims as `could_not_verify`, because a stale graph reports a wired-up component
+as unrendered.
 
 ## Method
 
@@ -89,7 +89,7 @@ the required structured tail.
 <!-- mastermind:frontend-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 components_added: <N>
 components_changed: <N>
 flagged: <N>
@@ -102,8 +102,9 @@ findings:
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero, `clean` otherwise. Keep empty headings and never omit the
-sentinel.
+is above zero, `clean` otherwise. `incomplete` means the review stopped before
+it covered the diff, for example with no baseline; a stopped review is never
+`clean`. Keep empty headings and never omit the sentinel.
 
 ## Boundaries
 

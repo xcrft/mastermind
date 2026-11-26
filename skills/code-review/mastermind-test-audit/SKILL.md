@@ -2,7 +2,7 @@
 name: mastermind-test-audit
 description: Read-only review of whether the tests in a finished change actually prove its behaviour — changed code no test reaches, a test exercising a different path than the one that changed, an assertion edited to match the new output, and a suite that ran nothing. Use after implementation, and whenever a change claims to be covered.
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:
@@ -138,7 +138,7 @@ wants one more test is one nobody reads.
 <!-- mastermind:test-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 symbols_changed: <N>
 symbols_with_direct_tests: <N>
 flagged: <N>
@@ -151,8 +151,10 @@ findings:
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero and `clean` otherwise. Keep every heading even when empty, and
-never omit the sentinel block.
+is above zero and `clean` otherwise. `incomplete` means the review stopped
+before it covered the diff, for example with no baseline; a stopped review is
+never `clean`. Keep every heading even when empty, and never omit the sentinel
+block.
 
 ## Boundaries
 

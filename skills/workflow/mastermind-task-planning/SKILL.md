@@ -2,7 +2,7 @@
 name: mastermind-task-planning
 description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
 metadata:
-  version: 0.17.6
+  version: 0.17.7
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -55,8 +55,8 @@ Use [[mastermind-codegraph-research]] for structural claims:
 5. `mmcg_history` when prior decisions, failed approaches, audits, or lessons can
    affect the design. Use `mmcg_tasks` only when the task-spec-only view is useful.
 
-History retrieval is not current proof. Read sources and active/superseding
-records. User approval records scope and authority, not technical truth.
+History retrieval is not current proof; read sources and active/superseding
+records. User approval records authority, not technical truth.
 
 The graph is syntactic evidence. Preserve collision, precision, stale-index and
 truncation notes. Work inline for one or two lookups. Use
@@ -64,14 +64,13 @@ truncation notes. Work inline for one or two lookups. Use
 investigator for unknown-cause bugs.
 
 Reuse a hook profile only for matching planner paths and mode. Otherwise call
-`mmcg_profile` with those paths, `role: planner`, and the selected `workflow`
-(`direct`, `verified`, or `strict`). Use only returned reviewed preferences and observed
-habits that apply to this selection. The task's instructions, repository code,
-tooling, and approved contract take precedence. Preserve claim IDs, review
+`mmcg_profile` with those paths, `role: planner` and the selected `workflow`
+(`direct`, `verified` or `strict`). Use only returned reviewed preferences and
+observed habits that apply; the task, repository code, tooling and approved
+contract take precedence. Preserve claim IDs, review
 revisions, store/view revisions, source verification and omissions in the
-handoff. Missing or denied access means no personal context for this request;
-do not substitute a full `style.md` or unreviewed notes. `style.md` is a local
-inspection snapshot, whose source checks may be older than the current view.
+handoff. Missing or denied access means no personal context; do not substitute
+`style.md`, a local snapshot whose source checks may be older, or unreviewed notes.
 Git code-shape observations are diagnostic evidence, and Range records exposure.
 Neither establishes a personal habit. Commit voice is fallback-only when
 repository policy is silent.
@@ -79,11 +78,10 @@ repository policy is silent.
 Compose four separate components: the code brief, relevant
 `mmcg_project_profile` and `mmcg_docs` results (task query, `top: 2`), and
 `mmcg_profile` (the project's budget). Keep each component's freshness,
-revisions, citations and caveats. Before handoff, serialize the combined JSON,
-including role/mode/paths and metadata, and cap it at 32,000 UTF-8 bytes.
-This is a size estimate, not a model tokenizer guarantee. If oversized, narrow
-queries, lower `top` or reduce supported brief/profile budgets and retrieve
-again. Omit a whole optional component only with its tool, verification status
+revisions, citations and caveats. Before handoff, cap the serialized JSON,
+including role/mode/paths and metadata, at 32,000 UTF-8 bytes (a size
+estimate, not a tokenizer count). If oversized, narrow queries, lower `top` or
+reduce brief/profile budgets and retrieve again. Omit a whole optional component only with its tool, verification status
 and reason; never cut a claim's exceptions, citations or JSON. Resolve missing
 task-critical evidence explicitly. Each receiving role retrieves its own slice.
 
@@ -97,9 +95,9 @@ task-critical evidence explicitly. Each receiving role retrieves its own slice.
 - Spawn the security auditor when the contract touches auth, secrets,
   permissions, tools, untrusted prompts, delegation boundaries, or supply chain.
 
-Send reviewers a compact packet: problem, proposed design, concrete codegraph
-evidence, constraints, and only plausible alternatives. Do not paste the whole
-brainstorming transcript.
+Send reviewers a compact [design review packet](references/design-review-packet.md):
+problem, proposed design, codegraph evidence, constraints and only plausible
+alternatives, not the brainstorming transcript.
 
 Resolve the critic's `insufficient evidence` with a bounded research probe
 before accepting the design. Missing facts do not require redesign by
@@ -120,7 +118,8 @@ Start from the CLI template:
 mastermind new-spec "<description>" --mode verified
 ```
 
-Fill only these sections:
+Fill only these sections; [contract templates](references/spec-template.md)
+show the frontmatter, file scopes and strict additions:
 
 - **Goals** — observable definition of done.
 - **Product Context** — for product-derived work, retain the stable source and
@@ -198,9 +197,10 @@ Retries, including `--reset`, retain the original baseline, strict/index options
 and iteration budget so committed implementation remains visible to the audit.
 A failed retry revokes approval. Start a new task when a new baseline is needed.
 
-Route malformed or partial reports using their evidence and recommended defect
-kind. Stop after three failed execution cycles for the same blocking condition
-and return to design rather than looping.
+Route malformed or partial reports by their evidence and recommended
+[defect label](references/defect-taxonomy.md); the
+[report schema](references/structured-report-schema.md) lists the fields. Stop
+after three failed cycles on the same blocking condition and return to design.
 
 ## Post-flight
 
@@ -278,7 +278,6 @@ Record durable decisions with provenance, evidence, status (`active` or
 `superseded`), `supersedes` links, rejected alternatives and lessons after review.
 
 Typed decisions govern structured tasks; `history-review.md` is informational.
-After durable updates, rerun affected checks/audit and obtain fresh review.
 With native review authorized, `mastermind run-task <spec> --auto-review` reviews
 the held task and closes under its lock only after both gates and fresh checks.
 The native reviewer only reads.

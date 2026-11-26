@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Dependency Upgrade"
+  short_description: "Upgrade dependencies without running untrusted code"
+  default_prompt: "Use $mastermind-dependency-upgrade to plan and apply this dependency change with install scripts off."

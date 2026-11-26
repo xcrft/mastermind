@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.1.2
+  version: 0.1.4
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---
@@ -35,9 +35,11 @@ changed.
 - `audit.md` when it exists, for findings the controller already established;
 - the changed files.
 
-If the baseline is missing, report `could_not_verify` and stop. If `mmcg_status`
-reports stale files, re-index before trusting any answer — a stale graph will
-report covered code as uncovered.
+If the baseline is missing, return `verdict: incomplete`, say why, and stop. A
+graph query refreshes a stale managed index once before it answers. If a query
+still returns `index_stale`, do not re-index yourself: report the graph-backed
+claims as `could_not_verify`, because a stale graph reports covered code as
+uncovered.
 
 ## Build on what the controller established
 
@@ -55,7 +57,7 @@ them; do not restate them as your own.
 
 ## Method
 
-1. `mmcg_test_impact --since <baseline>` for candidates per changed symbol.
+1. `mmcg_test_impact` with `since: <baseline>` for candidates per changed symbol.
    `direct` is the strongest static candidate, `transitive` is weaker, and
    `heuristic` is a filename match without graph evidence. None proves a test
    ran or an assertion checked the changed behavior.
@@ -105,7 +107,7 @@ Return the [[mastermind-test-audit]] report shape — `Uncovered behaviour`,
 <!-- mastermind:test-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 symbols_changed: <N>
 symbols_with_direct_tests: <N>
 flagged: <N>
@@ -118,8 +120,9 @@ findings:
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero, `clean` otherwise. Keep empty headings and never omit the
-sentinel.
+is above zero, `clean` otherwise. `incomplete` means the review stopped before
+it covered the diff, for example with no baseline; a stopped review is never
+`clean`. Keep empty headings and never omit the sentinel.
 
 ## Boundaries
 

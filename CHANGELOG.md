@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Digests, receipt IDs, invocation IDs and review pins in those records must be
   lowercase hex.
 
+### Added
+
+- Five skills that are safe to point at an untrusted pull request:
+  `mastermind-diff-review`, `mastermind-docs-authoring` and
+  `mastermind-verify-change` in every profile, and
+  `mastermind-dependency-upgrade` and `mastermind-scanner-alert-response` in
+  the `security` and `full` profiles. They read repository instructions from
+  the base branch, treat everything in the change as data, never run the
+  change's scripts with credentials, and never fetch a secret's value. The
+  `core` profile now installs 23 skills.
+
 ### Changed
 
 - An index written with a newer extractor or concept contract is refused by
@@ -48,6 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The frontend audit checks props contracts with `mmcg_change_impact`, which
+  includes uncommitted work. `mmcg_symbols_changed_since` only compares
+  commits, so it missed a changed component before the commit step.
+- The runtime, component and security research skills pass `max_depth` to
+  `mmcg_impact`; it has no `depth` argument.
+- The comment auditor no longer counts `could_not_verify` as a finding, so an
+  unjudged comment cannot turn a clean result into `findings`.
+- The comment, test and frontend audits have an `incomplete` verdict. A review
+  that stopped early, for example with no baseline, no longer reads as
+  `clean`.
+- The test and frontend auditors no longer re-index the repository. A query
+  refreshes a stale managed index once; if it is still stale they report
+  `could_not_verify`.
+- The router says the feedback collector writes to the private review inbox
+  only when asked; it never edits the profile.
+- The auditor's report tail uses a repository-relative spec path, and the
+  report contract lists the auditor's full set of fields.
+- The planner links its spec template, defect labels, design review packet and
+  report schema references.
+- `miner profile --deep` help says it saves a separate candidate file for
+  review instead of replacing part of the profile.
 - A 4.0 task is no longer refused because an `executor-report.md` or
   `audit.md` sits beside its spec. Only a task started before 4.0 gets the
   old-name refusal, and a spec named `audit.md` never counts as its own old
@@ -112,6 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Development
 
+- `just bootstrap` and `just sync-templates` no longer run `just check` and
+  `just validate` by accident: their closing hint quoted the command in
+  backticks, which the shell executed.
 - Every workflow installs Rust from `rust-toolchain.toml`, and the validator
   checks that the Docker Action builds with the same channel.
 - `just release-tags` dispatches the npm and crates.io publish dry runs and

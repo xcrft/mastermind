@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Scanner Alert Response"
+  short_description: "Take one scanner alert to a fix, never reading the secret"
+  default_prompt: "Use $mastermind-scanner-alert-response to trace this alert from its metadata and propose a verified fix or disposition."

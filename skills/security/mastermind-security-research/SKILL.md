@@ -2,7 +2,7 @@
 name: mastermind-security-research
 description: Enumerate what a change can reach and what enforces it — privileged operations and their callers, guards and the sites that apply them, and every module that reads a secret — before designing an auth, permission, or secrets change. Feeds the security review; produces a population and a gap list, never a verdict.
 metadata:
-  version: 0.1.0
+  version: 0.1.1
   authors:
     - mastermind
   tags:
@@ -47,7 +47,7 @@ has done harm, not work.
 
 ```text
 mmcg_callers <privileged fn>        # direct callers
-mmcg_impact <privileged fn> --depth 3   # transitive reach
+mmcg_impact <privileged fn> max_depth: 3 # transitive reach
 mmcg_api_surface src/admin/         # what outside code actually reaches
 ```
 

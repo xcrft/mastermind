@@ -8,6 +8,7 @@ delegation runtime.
 |---|---|
 | [`subagents/`](subagents/) | Spawnable Claude Code subagents with bounded responsibilities |
 | [`claude-md/`](claude-md/) | Project-level `CLAUDE.md` and `CONTEXT.md` templates |
+| [`instructions/`](instructions/) | Source-routing instruction variants compared by the [context-routing benchmark](../evals/benchmark/README.md); not installed |
 
 ## Choose a role
 

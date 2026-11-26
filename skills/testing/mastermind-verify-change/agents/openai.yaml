@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Verify Change"
+  short_description: "Check a change is safe to run, then prove it works"
+  default_prompt: "Use $mastermind-verify-change to decide whether this change is safe to run and report the checks that prove it."

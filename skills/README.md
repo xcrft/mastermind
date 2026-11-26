@@ -41,6 +41,7 @@ that matches the work. Claude Code-specific roles are listed in
 
 | Skill | Description |
 |---|---|
+| [`mastermind-diff-review`](code-review/mastermind-diff-review/SKILL.md) | Reviews a diff, including untrusted PRs, for proven defects without running it. |
 | [`mastermind-comment-audit`](code-review/mastermind-comment-audit/SKILL.md) | Audits changed comments and deleted rationale with quotations. |
 | [`mastermind-test-audit`](code-review/mastermind-test-audit/SKILL.md) | Checks whether tests exercise and assert the changed behavior. |
 | [`mastermind-frontend-audit`](code-review/mastermind-frontend-audit/SKILL.md) | Reviews changed component usage, props, duplication and design tokens. |
@@ -50,6 +51,12 @@ that matches the work. Claude Code-specific roles are listed in
 | Skill | Description |
 |---|---|
 | [`mastermind-design-intake`](design/mastermind-design-intake/SKILL.md) | Turns a design handoff into components, tokens and acceptance criteria. |
+
+## Prove a change works
+
+| Skill | Description |
+|---|---|
+| [`mastermind-verify-change`](testing/mastermind-verify-change/SKILL.md) | Gates untrusted code, then runs the smallest checks that prove a change. |
 
 ## Verify in a browser
 
@@ -69,6 +76,19 @@ that matches the work. Claude Code-specific roles are listed in
 |---|---|
 | [`mastermind-security-research`](security/mastermind-security-research/SKILL.md) | Traces privileged operations, guards, secret readers and unresolved boundaries. |
 | [`mastermind-agent-security-review`](security/mastermind-agent-security-review/SKILL.md) | Reviews agent/tool trust boundaries with optional OWASP mapping. |
+| [`mastermind-scanner-alert-response`](security/mastermind-scanner-alert-response/SKILL.md) | Takes one scanner alert to a fix from metadata, never a secret's value. |
+
+## Keep dependencies current
+
+| Skill | Description |
+|---|---|
+| [`mastermind-dependency-upgrade`](ops/mastermind-dependency-upgrade/SKILL.md) | Applies the smallest compatible upgrade with install scripts off. |
+
+## Write documentation that matches the code
+
+| Skill | Description |
+|---|---|
+| [`mastermind-docs-authoring`](docs/mastermind-docs-authoring/SKILL.md) | Writes and reviews docs, decisions and diagrams against the current code. |
 
 ## Refine the request without replacing it
 

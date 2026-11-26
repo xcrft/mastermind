@@ -2,7 +2,7 @@
 name: mastermind-comment-audit
 description: Read-only review of a non-empty comment delta. Flags narration with evidence, names what it deliberately kept, and reports removed rationale. Use when the user asks to check comments or a finished diff's pre-gate found added, modified, or deleted comments; skip automatic routing when no comment changed.
 metadata:
-  version: 0.1.1
+  version: 0.1.3
   authors:
     - mastermind
   tags:
@@ -72,7 +72,7 @@ to it, is not a finding.
 
 Earns its place — **keep**, and say what it carries:
 
-- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load (INFRA-1421).`
+- **Why, not what:** `// Retry 3×: the upstream API 503s under burst load.`
 - **Non-obvious workaround:** `// Round before compare — float drift makes == flaky here.`
 - **Invariant a caller must respect:** `// Caller must hold the mutex.`
 - **Surprising deliberate choice:** `// O(n²) is fine — n ≤ 8 by schema constraint.`
@@ -124,7 +124,7 @@ and stop.
 <!-- mastermind:comment-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 comments_added: <N>
 comments_removed: <N>
 flagged: <N>
@@ -137,9 +137,10 @@ findings:
 <!-- mastermind:comment-audit-end -->
 ````
 
-`flagged` is the number of `findings` entries — added slop and removed
-rationale counted together. `verdict` is `findings` when `flagged` is above zero
-and `clean` otherwise.
+`flagged` is the number of `findings` entries — added slop and removed rationale
+counted together. `verdict` is `findings` when `flagged` is above zero and
+`clean` otherwise. `incomplete` means the review stopped before it covered the
+diff, for example with no baseline; a stopped review is never `clean`.
 
 Keep every section heading even when empty, and never omit the sentinel block.
 `flagged: 0` with a populated `Kept` section is a complete, successful report.

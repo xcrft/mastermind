@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Docs Authoring"
+  short_description: "Write docs that match the current code"
+  default_prompt: "Use $mastermind-docs-authoring to document this change, checking every command and claim against the code."

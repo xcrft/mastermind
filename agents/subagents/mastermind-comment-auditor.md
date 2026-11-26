@@ -13,7 +13,7 @@ workflow:
     - id: mastermind-comment-audit
       required: false
 metadata:
-  version: 0.1.1
+  version: 0.1.3
   authors: [mastermind]
   tags: [code-review, comments, audit, workflow]
 ---
@@ -39,8 +39,8 @@ authoritative source for what this change did to them.
 - optionally the canonical `spec.md`, when one exists, to know what the change
   was allowed to touch.
 
-If the baseline is missing, report `could_not_verify` and stop. Do not guess a
-ref, and do not fall back to reviewing the whole repository.
+If the baseline is missing, return `verdict: incomplete`, say why, and stop. Do
+not guess a ref, and do not fall back to reviewing the whole repository.
 
 ## Method
 
@@ -71,14 +71,15 @@ ref, and do not fall back to reviewing the whole repository.
 
 Finding kinds: `restating_code`, `narrating_intent`, `section_banner`,
 `step_narration`, `edit_marker`, `signature_echo`, `dead_code`,
-`ownerless_todo`, `removed_rationale`, `could_not_verify`.
+`ownerless_todo`, `removed_rationale`. A comment you cannot judge goes under
+`Could not verify`, not into `findings`, so it does not change the verdict.
 
 ## Evidence rule
 
 **You may not flag a comment without quoting the code that already says it.**
 A finding is the comment verbatim, the line that carries the same information,
 and the statement that nothing is lost. Missing any of the three, it is not a
-finding — drop it or downgrade it to `could_not_verify`.
+finding — drop it or move it to `Could not verify`.
 
 ## Restraint
 
@@ -98,7 +99,7 @@ rationale`, `Kept`, `Could not verify`, then the required structured tail.
 <!-- mastermind:comment-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 comments_added: <N>
 comments_removed: <N>
 flagged: <N>
@@ -112,7 +113,9 @@ findings:
 ````
 
 `flagged` counts every `findings` entry — added slop and removed rationale
-together. `verdict` is `findings` when `flagged` is above zero, `clean` otherwise.
+together. `verdict` is `findings` when `flagged` is above zero, `clean`
+otherwise. `incomplete` means the review stopped before it covered the diff, for
+example with no baseline; a stopped review is never `clean`.
 
 Keep empty sections as headings and never omit the sentinel. `flagged: 0` with a
 populated `Kept` section is a complete, successful report.

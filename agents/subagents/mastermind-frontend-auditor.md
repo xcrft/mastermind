@@ -1,7 +1,7 @@
 ---
 name: mastermind-frontend-auditor
 description: Independent read-only reviewer of a finished React or Vue change, grounded in the codegraph. Reports components with no confirmed renderer, props contracts changed without their callers, reinvented components, and raw values shadowing design tokens. Spawn after UI implementation is complete. Distinct from `mastermind-auditor`, which audits the spec contract.
-tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_symbols_changed_since, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
+tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_change_impact, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
 model: sonnet
 mcpServers: [mmcg]
 maxTurns: 15
@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.2
+  version: 0.1.4
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---
@@ -33,9 +33,11 @@ here are structural, and the diff alone cannot establish any of them.
 - baseline ref (task state for a verified/strict task, or the branch point);
 - the changed component files.
 
-If the baseline is missing, report `could_not_verify` and stop. If
-`mmcg_status` reports stale files, re-index before trusting any answer — a
-stale graph will report a wired-up component as unrendered.
+If the baseline is missing, return `verdict: incomplete`, say why, and stop. A
+graph query refreshes a stale managed index once before it answers. If a query
+still returns `index_stale`, do not re-index yourself: report the graph-backed
+claims as `could_not_verify`, because a stale graph reports a wired-up component
+as unrendered.
 
 ## Method
 
@@ -46,11 +48,13 @@ stale graph will report a wired-up component as unrendered.
    hypothesis, not proof. Check route tables, lazy `import()`, stories, tests,
    barrels, and Vue auto-import; report a defect only when those checks find no
    renderer, or `could_not_verify` when the registration cannot be inspected.
-3. For every changed component: `mmcg_symbols_changed_since <baseline>` for
-   `signature_changed`, then `mmcg_callers` for the consumers. Name the callers
-   the diff did not touch, and say whether the change is breaking.
+3. For every changed component: `mmcg_change_impact` with `since: <baseline>`
+   for symbols whose `change` is `signature_changed`, then `mmcg_callers` for
+   the consumers. It includes uncommitted work, which a
+   commit-range symbol query misses. Name the callers the diff did not
+   touch, and say whether the change is breaking.
 4. For every added component: `mmcg_search` the name and its neighbours, and
-   `mmcg_centrality --prefix <component dir>` for what already carries the load.
+   `mmcg_centrality` with `prefix: <component dir>` for what already carries the load.
    A duplicate finding must name the existing component.
 5. Scan added lines for raw colours, spacing, and `z-index`, then confirm a
    token exists before flagging.
@@ -85,7 +89,7 @@ the required structured tail.
 <!-- mastermind:frontend-audit-begin -->
 ```yaml
 baseline: <ref>
-verdict: clean | findings
+verdict: clean | findings | incomplete
 components_added: <N>
 components_changed: <N>
 flagged: <N>
@@ -98,8 +102,9 @@ findings:
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero, `clean` otherwise. Keep empty headings and never omit the
-sentinel.
+is above zero, `clean` otherwise. `incomplete` means the review stopped before
+it covered the diff, for example with no baseline; a stopped review is never
+`clean`. Keep empty headings and never omit the sentinel.
 
 ## Boundaries
 

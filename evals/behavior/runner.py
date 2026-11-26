@@ -155,15 +155,20 @@ EVALUATION_RUNTIME_ENV_KEYS = (
 
 WORKFLOW_ARTIFACTS = frozenset(
     {
+        "skills/code-review/mastermind-code-review/SKILL.md",
         "skills/code-review/mastermind-comment-audit/SKILL.md",
         "skills/code-review/mastermind-frontend-audit/SKILL.md",
         "skills/code-review/mastermind-test-audit/SKILL.md",
         "skills/coding/no-ai-slop-comments/SKILL.md",
         "skills/design/mastermind-design-intake/SKILL.md",
+        "skills/docs/mastermind-doc-writer/SKILL.md",
+        "skills/ops/mastermind-dependency-maintenance/SKILL.md",
+        "skills/testing/mastermind-change-verification/SKILL.md",
         "skills/testing/mastermind-browser-verification/SKILL.md",
         "skills/debugging/mastermind-investigation-ledger/SKILL.md",
         "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",
         "skills/security/mastermind-agent-security-review/SKILL.md",
+        "skills/security/mastermind-security-alert-triage/SKILL.md",
         "skills/security/mastermind-security-research/SKILL.md",
         "skills/workflow/mastermind-agent-handoff/SKILL.md",
         "skills/workflow/mastermind-audit-attestation/SKILL.md",

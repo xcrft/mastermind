@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Change Verification"
+  short_description: "Prove a change with checks that match its risk"
+  default_prompt: "Use $mastermind-change-verification to choose, run and report the checks that prove this change."

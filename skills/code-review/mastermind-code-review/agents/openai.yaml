@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Code Review"
+  short_description: "Review a diff for real, reachable defects"
+  default_prompt: "Use $mastermind-code-review to review this change against its merge base and report each root cause once."

@@ -28,10 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `mastermind doctor` has a `permission rules` check. It reads the Claude Code
-  `permissions.allow` lists, Codex `.rules` files and Codex `config.toml`, and
-  warns about rules that let an agent run code it chooses without asking:
-  any command, interpreters and shells, commands that run other commands,
-  package managers and task runners, and network fetches. It never edits the
+  permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
+  profile files, and warns about settings that let an agent run code it
+  chooses without asking: any command, interpreters and shells, commands that
+  run other commands, package managers, task runners and installs, `git` and
+  `gh` without a fixed subcommand, network fetches without a fixed host,
+  `bypassPermissions`, and Codex running unsandboxed without approval. A rule
+  that a deny, ask or stricter rule covers does not warn. It never edits the
   files and never prints rule text.
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
   Eight subagents and 24 skills that read repository, pull request or tool

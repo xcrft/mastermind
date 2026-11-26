@@ -1,4 +1,0 @@
-interface:
-  display_name: "Mastermind Security Alert Triage"
-  short_description: "Resolve one scanner alert with evidence"
-  default_prompt: "Use $mastermind-security-alert-triage to trace this security alert, decide its disposition and verify the fix."

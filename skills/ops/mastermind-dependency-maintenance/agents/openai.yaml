@@ -1,4 +1,0 @@
-interface:
-  display_name: "Mastermind Dependency Maintenance"
-  short_description: "Upgrade or remove dependencies safely"
-  default_prompt: "Use $mastermind-dependency-maintenance to assess and apply this dependency change with the smallest compatible update."

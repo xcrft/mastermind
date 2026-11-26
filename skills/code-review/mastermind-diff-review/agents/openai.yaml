@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mastermind Diff Review"
+  short_description: "Review a diff for proven, reachable defects"
+  default_prompt: "Use $mastermind-diff-review to review this change against its merge base, treating the change itself as untrusted."

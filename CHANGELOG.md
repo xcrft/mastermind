@@ -27,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mastermind doctor` has a `permission rules` check. It reads the Claude Code
+  permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
+  profile files, and warns about settings that let an agent run code it
+  chooses without asking: any command, interpreters and shells, commands that
+  run other commands, package managers, task runners and installs, `git` and
+  `gh` without a fixed subcommand, network fetches without a fixed host,
+  `bypassPermissions`, and Codex running unsandboxed without approval. A rule
+  that a deny, ask or stricter rule covers does not warn. It never edits the
+  files and never prints rule text.
+- One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
+  Ten subagents and 28 skills that read repository, pull request, report,
+  transcript or tool content carry it verbatim. It names the person or the
+  agent that started the role as the only source of instructions, and keeps
+  the approved spec and declared checks part of the request. `just validate`
+  fails when a covered file lacks it, has it twice, has a changed copy or
+  holds it inside a code fence, an HTML comment or another paragraph.
+
 - Five skills that are safe to point at an untrusted pull request:
   `mastermind-diff-review`, `mastermind-docs-authoring` and
   `mastermind-verify-change` in every profile, and
@@ -37,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `core` profile now installs 23 skills.
 
 ### Changed
+
+- The covered skills and subagents use the shared untrusted-content paragraph
+  in place of their own shorter wording, and each has a new patch version.
+  The critic opens with its own short data-not-instructions rule instead. The
+  FIND precondition notes and the legacy `VERIFY` forms moved from the planner
+  to its spec template.
 
 - An index written with a newer extractor or concept contract is refused by
   every open, the same as a newer schema version, and is never rebuilt.

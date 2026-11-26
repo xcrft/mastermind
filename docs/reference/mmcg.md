@@ -214,6 +214,63 @@ agent contracts and optional hooks, and it never runs a provider or a configured
 command. The settings `init` stores are in
 [project settings](task-runtime.md#project-settings).
 
+### Permission rules
+
+The `permission rules` check in `doctor` reads each client's permission
+settings and warns about the ones that let an agent run code it chooses
+without asking. It only reads: it never edits a settings file and never prints
+rule text, so a token or address inside a rule stays out of the report. Each
+finding names the file, the rule's position, a program or key name and why it
+is broad.
+
+| Client | Files read | What is read |
+|---|---|---|
+| Claude Code | `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), `.claude/settings.json`, `.claude/settings.local.json` | `Bash(...)` and `PowerShell(...)` entries in `permissions.allow`, `ask` and `deny`, `permissions.defaultMode` and `skipDangerousModePermissionPrompt`, see [Claude Code permissions](https://code.claude.com/docs/en/permissions) and the [settings reference](https://code.claude.com/docs/en/settings-reference) |
+| Codex | `$CODEX_HOME/rules/*.rules` (default `~/.codex/rules`), `.codex/rules/*.rules` | `prefix_rule` calls and their `decision`, see [Codex rules](https://developers.openai.com/codex/rules) |
+| Codex | `$CODEX_HOME/config.toml`, `.codex/config.toml`, profile files `$CODEX_HOME/<name>.config.toml` | `approval_policy`, `sandbox_mode` and `default_permissions`, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+
+A rule is broad when its open part can choose what runs. Quotes do not close
+it: `Bash(bash -c "*")` is as open as `Bash(bash -c *)`.
+
+| Reason | Examples that warn | Examples that do not |
+|---|---|---|
+| Any command | `Bash`, `Bash(*)`, `Bash(* --version)` | |
+| Interpreter or shell with no fixed script, or with a code option | `Bash(python:*)`, `Bash(node -e *)`, `Bash(sh -c '*')` | `Bash(python -m pytest *)`, `Bash(node scripts/check.js)` |
+| Command that runs another command, unless that command is fixed and known | `Bash(env *)`, `Bash(sudo -u root *)`, `Bash(ssh host *)`, `Bash(xargs -I {} *)`, `Bash(timeout 5 sh *)`, `PowerShell(Invoke-Command *)`, `PowerShell(& *)`, Codex `["find"]` | `Bash(timeout 5 npm test *)`, and `Bash(watch *)` or `Bash(find *)`, which Claude Code refuses to approve itself |
+| Package manager or task runner with no fixed subcommand, with one that runs a named command, or with one that installs packages | `Bash(npm *)`, `Bash(npx:*)`, `Bash(npm exec *)`, `Bash(uv run --with *)`, `Bash(docker compose *)`, `Bash(pip install *)`, `Bash(make *)` | `Bash(npm run *)`, `Bash(cargo test *)`, `Bash(make test)` |
+| `git` or `gh` with no fixed subcommand, or with one that sets commands | `Bash(git *)`, `Bash(git -c core.sshCommand=x *)`, `Bash(gh alias *)`, Codex `["git"]` | `Bash(git log *)`, `Bash(gh pr view *)` |
+| Network fetch with no fixed host, or a fetch piped into a shell | `Bash(curl *)`, `Bash(curl https://*)`, `Bash(curl -o /tmp/x *)`, `Bash(curl -fsSL https://example.com/x.sh \| sh)` | `Bash(curl https://api.example.com/*)` |
+| Claude Code skips permission prompts | `permissions.defaultMode` set to `bypassPermissions`, `skipDangerousModePermissionPrompt: true` | other modes |
+| Codex runs every command unsandboxed without asking | `approval_policy = "never"` with `sandbox_mode = "danger-full-access"` or `default_permissions = ":danger-full-access"`, in one file or combined | either setting alone |
+
+How the check combines files:
+
+- A broad Claude Code allow rule does not warn when a `deny` or `ask` rule in
+  any of the files has the same specifier or covers the whole tool, because
+  Claude Code evaluates deny and ask rules from every file first.
+- A broad Codex allow rule does not warn when a `prompt` or `forbidden` rule in
+  any loaded `.rules` file covers every command it matches, because Codex
+  applies the strictest matching decision. Every alternative in a pattern is
+  checked.
+- For Codex settings, the project file overrides the user file and a profile
+  file overrides both, so a user `approval_policy = "never"` and a project
+  `sandbox_mode = "danger-full-access"` warn together.
+- Claude Code strips wrappers such as `timeout` from a command before matching
+  it. Its documentation does not say whether a rule that starts with a
+  wrapper is stripped too, so the check reads past the wrapper and judges the
+  wrapped command.
+
+The check passes when no file exists or every rule is narrow. It warns for a
+broad rule and for a file it cannot read: invalid JSON or TOML, a `.rules` file
+outside the subset it reads (for example an alias of `prefix_rule`, lists
+nested deeper than eight levels or a pattern with more than 256 combinations),
+a symlink, a file over the configuration size limit, or a directory with more
+than 64 rules or profile files, where the rest are not read. Unparsed entries
+are counted. A rule with a fixed subcommand still runs whatever that
+subcommand runs, for example the repository's `package.json` scripts, so a
+passing check does not make a rule safe for untrusted code. Managed settings
+that an organisation deploys are not read.
+
 ## Local symbol concept search
 
 Concept search has its own page: [Concept search](concept-search.md).

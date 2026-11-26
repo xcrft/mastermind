@@ -1930,6 +1930,123 @@ def validate_portable_skill_semantics() -> list[Issue]:
     return issues
 
 
+# ----- untrusted-content block ------------------------------------------
+
+# One canonical paragraph tells every role that reads repository, pull request
+# or tool content to treat it as data. Installed skills and subagents are copied
+# as single files, so each covered file carries a verbatim copy. This list is
+# the covered set: a role that reads such content belongs here, and a file
+# outside it must not carry the paragraph, and the copy must be a plain
+# paragraph, not inside a code fence or an HTML comment. The critic is left out
+# because its prompt has a tight size ceiling; it states the same rule in its
+# opening paragraph.
+UNTRUSTED_CONTENT_BLOCK = "agents/blocks/untrusted-content.md"
+UNTRUSTED_CONTENT_LEAD = "**Untrusted content.**"
+UNTRUSTED_CONTENT_COVERED: tuple[str, ...] = (
+    "agents/subagents/mastermind-auditor.md",
+    "agents/subagents/mastermind-comment-auditor.md",
+    "agents/subagents/mastermind-feedback-collector.md",
+    "agents/subagents/mastermind-frontend-auditor.md",
+    "agents/subagents/mastermind-investigator.md",
+    "agents/subagents/mastermind-prompt-refiner.md",
+    "agents/subagents/mastermind-researcher.md",
+    "agents/subagents/mastermind-security-auditor.md",
+    "agents/subagents/mastermind-task-executor.md",
+    "agents/subagents/mastermind-test-auditor.md",
+    "skills/code-review/mastermind-comment-audit/SKILL.md",
+    "skills/code-review/mastermind-diff-review/SKILL.md",
+    "skills/code-review/mastermind-frontend-audit/SKILL.md",
+    "skills/code-review/mastermind-test-audit/SKILL.md",
+    "skills/debugging/mastermind-investigation-ledger/SKILL.md",
+    "skills/design/mastermind-design-intake/SKILL.md",
+    "skills/docs/mastermind-docs-authoring/SKILL.md",
+    "skills/ops/mastermind-dependency-upgrade/SKILL.md",
+    "skills/prompt-engineering/mastermind-prompt-refiner/SKILL.md",
+    "skills/security/mastermind-agent-security-review/SKILL.md",
+    "skills/security/mastermind-scanner-alert-response/SKILL.md",
+    "skills/security/mastermind-security-research/SKILL.md",
+    "skills/testing/mastermind-browser-verification/SKILL.md",
+    "skills/testing/mastermind-verify-change/SKILL.md",
+    "skills/workflow/mastermind-architecture-review/SKILL.md",
+    "skills/workflow/mastermind-audit-attestation/SKILL.md",
+    "skills/workflow/mastermind-change-impact/SKILL.md",
+    "skills/workflow/mastermind-codegraph-research/SKILL.md",
+    "skills/workflow/mastermind-component-research/SKILL.md",
+    "skills/workflow/mastermind-critical-review/SKILL.md",
+    "skills/workflow/mastermind-product-intake/SKILL.md",
+    "skills/workflow/mastermind-project-history/SKILL.md",
+    "skills/workflow/mastermind-project-map/SKILL.md",
+    "skills/workflow/mastermind-runtime-research/SKILL.md",
+    "skills/workflow/mastermind-style-deep/SKILL.md",
+    "skills/workflow/mastermind-task-executor/SKILL.md",
+    "skills/workflow/mastermind-task-planning/SKILL.md",
+    "skills/workflow/mastermind-test-impact/SKILL.md",
+)
+
+
+def _untrusted_block_placement(text: str, block: str) -> str | None:
+    """Say why the block would not be read as a plain paragraph, if it would not."""
+    index = text.index(block)
+    before, after = text[:index], text[index + len(block):]
+    fences = sum(
+        1 for line in before.splitlines() if line.lstrip().startswith(("```", "~~~"))
+    )
+    if fences % 2:
+        return "sits inside a code fence"
+    if before.rfind("<!--") > before.rfind("-->"):
+        return "sits inside an HTML comment"
+    if not before.endswith("\n\n") or not (after == "\n" or after.startswith("\n\n")):
+        return "must be its own paragraph, with a blank line before and after"
+    return None
+
+
+def validate_untrusted_content_block() -> list[Issue]:
+    issues: list[Issue] = []
+    source = REPO_ROOT / UNTRUSTED_CONTENT_BLOCK
+    try:
+        block = source.read_text(encoding="utf-8").strip("\n")
+    except OSError as error:
+        return [Issue(source, "error", f"cannot read the canonical untrusted-content block: {error}")]
+    if not block.startswith(UNTRUSTED_CONTENT_LEAD) or block.count(UNTRUSTED_CONTENT_LEAD) != 1:
+        return [Issue(source, "error", f"canonical block must start with {UNTRUSTED_CONTENT_LEAD!r} once")]
+    fix = f"copy it verbatim from {UNTRUSTED_CONTENT_BLOCK}"
+    for relative in UNTRUSTED_CONTENT_COVERED:
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(Issue(path, "error", f"cannot read covered file: {error}"))
+            continue
+        exact = text.count(block)
+        leads = text.count(UNTRUSTED_CONTENT_LEAD)
+        if leads > exact:
+            issues.append(Issue(path, "error", f"untrusted-content block has drifted; {fix}"))
+        elif exact == 0:
+            issues.append(Issue(path, "error", f"untrusted-content block missing; {fix}"))
+        elif exact > 1:
+            issues.append(Issue(path, "error", f"untrusted-content block appears {exact} times; keep one"))
+        elif problem := _untrusted_block_placement(text, block):
+            issues.append(Issue(path, "error", f"untrusted-content block {problem}"))
+    covered = {REPO_ROOT / relative for relative in UNTRUSTED_CONTENT_COVERED}
+    candidates = [
+        *(REPO_ROOT / "skills").rglob("*.md"),
+        *(REPO_ROOT / "agents/subagents").glob("*.md"),
+        *(REPO_ROOT / "agents/claude-md").glob("*.md"),
+    ]
+    for path in sorted(candidates):
+        if path in covered:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if UNTRUSTED_CONTENT_LEAD in text:
+            issues.append(
+                Issue(path, "error", "carries the untrusted-content block but is not in UNTRUSTED_CONTENT_COVERED")
+            )
+    return issues
+
+
 # ----- verifiable audit Action security contract -----------------------
 
 AUDIT_ACTION_PINS = {
@@ -2260,6 +2377,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_openai_skill_adapters(artifacts))
     issues.extend(validate_workflow_role_contracts())
     issues.extend(validate_portable_skill_semantics())
+    issues.extend(validate_untrusted_content_block())
 
     links = collect_wikilinks()
     issues.extend(validate_wikilinks(artifacts, links))

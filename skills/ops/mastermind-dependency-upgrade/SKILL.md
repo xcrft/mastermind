@@ -1,8 +1,8 @@
 ---
 name: mastermind-dependency-upgrade
-description: Upgrade, add or remove a dependency with the smallest compatible change, without running untrusted install scripts or commands taken from release notes, and check an update bot's configuration. Use for version bumps, update-bot pull requests (Dependabot, Renovate), lockfile changes, compatibility questions and removing packages that look unused.
+description: Add, upgrade or remove a dependency with the smallest compatible change, confirm a new package is the real and established one, and keep install scripts and release-note commands from running. Use for version bumps, Dependabot or Renovate PRs, lockfile changes, new packages and unused ones. Not for a specific vulnerability alert (use mastermind-scanner-alert-response).
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:

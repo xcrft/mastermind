@@ -1,8 +1,8 @@
 ---
 name: no-ai-slop-comments
-description: Strip AI-slop comments from code — keep only comments that explain a *why* the code can't say itself, delete anything that just restates it. Use when writing or editing code (especially as an executor applying a spec) or reviewing a diff for comment noise. Triggers — "stop adding comments", "no slop comments", "too many comments", code that narrates itself.
+description: "Keep only comments that explain a why the code cannot say and delete the ones that restate it. Use when writing or editing code, applying a spec, or when told \"stop adding comments\" or \"too many comments\". Not for auditing the comments of a finished diff (use mastermind-comment-audit)."
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors:
     - mastermind
   tags:

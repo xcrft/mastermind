@@ -1,8 +1,8 @@
 ---
 name: mastermind-browser-verification
-description: Turn "I opened it and it looks fine" into recorded evidence — accessibility tree over screenshot, console and network errors as mechanical failures, viewport and colour-scheme checks as a checklist, and anything unchecked marked unchecked. Use after implementing a UI change in a client that can drive a browser.
+description: "Turn \"I opened it and it looks fine\" into recorded evidence — accessibility tree over screenshot, console and network errors as failures, viewport and colour-scheme checks, unchecked items marked so. Use after implementing a UI change in a client that can drive a browser. Not for a code review of components (use mastermind-frontend-audit)."
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:

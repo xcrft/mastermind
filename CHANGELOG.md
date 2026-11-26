@@ -55,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every skill description now says when to use the skill early on and ends
+  with a `Not for` clause that names the sibling to use instead, for example
+  `mastermind-verify-change` for a red CI run and
+  `mastermind-investigation-ledger` for a cause that is still unknown. Hosts
+  pick skills from these descriptions alone, and Codex shortens them when the
+  skill list is long. `just validate` now fails a skill description that is
+  longer than 400 characters, has no `Use when`, `before`, `after` or `for`
+  in its first 250 characters, or has no `Not for` clause. The skills README
+  has a short guide to writing a skill.
 - The covered skills and subagents use the shared untrusted-content paragraph
   in place of their own shorter wording, and each has a new patch version.
   The critic opens with its own short data-not-instructions rule instead. The

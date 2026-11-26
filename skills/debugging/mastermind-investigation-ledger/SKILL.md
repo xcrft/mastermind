@@ -1,8 +1,8 @@
 ---
 name: mastermind-investigation-ledger
-description: Investigate unknown bugs with an explicit hypothesis ledger and evidence-driven probes before drafting a task spec. Triggers on unexplained failures, ambiguous test failures, regressions, or bug reports without a supported root cause.
+description: Find the cause of a bug, failing test or regression by reproducing it and testing competing hypotheses before a fix is specified. Use when something is broken with no supported why, a failure has several plausible causes, or behaviour changed between versions. Not for reading a failed CI job first (use mastermind-verify-change) or a cause already known.
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:

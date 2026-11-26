@@ -1,8 +1,8 @@
 ---
 name: mastermind-architecture-review
-description: Review a proposed or existing architecture against the real runtime path, source-of-truth ownership, retry and idempotency behavior, and backward-compatibility constraints. Use for service boundaries, async workflows, persistence changes, external integrations, migrations, public APIs, events, schemas, or designs whose component diagram looks plausible but runtime safety is not yet proven.
+description: Review a proposed or existing architecture against the real runtime path, source-of-truth ownership, retries, idempotency and backward compatibility. Use for service boundaries, async workflows, persistence, migrations, public APIs, events and schemas. Not for a line-level diff review (use mastermind-diff-review).
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors: [mastermind]
   tags: [workflow, architecture, review, reliability, contracts]
 ---

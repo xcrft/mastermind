@@ -1,8 +1,8 @@
 ---
 name: mastermind-test-impact
-description: Build a focused, evidence-backed test plan from `mastermind impact` or `mmcg_test_impact`. Use when deciding which tests to run for a change, explaining direct/transitive/heuristic candidates, or sequencing fast feedback before the repository's required full test gate.
+description: Build a focused test plan from `mastermind impact` or `mmcg_test_impact` — direct, transitive and heuristic candidates in order, ahead of the required full gate. Use when deciding which tests to run first for a change. Not for judging whether tests prove the change (use mastermind-test-audit).
 metadata:
-  version: 0.1.3
+  version: 0.1.4
   authors: [mastermind]
   tags: [workflow, testing, mmcg]
 ---

@@ -1,8 +1,8 @@
 ---
 name: mastermind-docs-authoring
-description: Write, update or review documentation so every command, flag, path and claim is true of the current code — READMEs, guides, reference pages, runbooks, decision records and Mermaid diagrams. Use when asked to document something, fix stale docs, record a decision, add a diagram, or check changed docs in a review. Checks commands without running anything destructive or credentialed.
+description: Write, update or review docs so every command, flag, path and claim is true of the current code — READMEs, guides, reference pages, runbooks, decision records and diagrams. Use when asked to document something, fix stale docs, record a decision or check changed docs. Not for code comments (use no-ai-slop-comments).
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:

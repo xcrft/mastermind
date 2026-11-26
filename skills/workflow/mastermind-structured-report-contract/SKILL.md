@@ -1,8 +1,8 @@
 ---
 name: mastermind-structured-report-contract
-description: Produce or consume the canonical file-backed Mastermind executor report parsed by `run-task --post-only`. Use for executor evidence, schema-v1 report validation, controller audit inputs, or strict auditor advisory output.
+description: Produce or consume the canonical file-backed Mastermind executor report parsed by `run-task --post-only`. Use for executor evidence, schema-v1 report validation, controller audit inputs or strict auditor advisory output. Not for executing the task itself (use mastermind-task-executor).
 metadata:
-  version: 0.3.1
+  version: 0.3.2
   authors: [mastermind]
   tags: [workflow, reporting]
 ---

@@ -1,8 +1,8 @@
 ---
 name: mastermind-prompt-refiner
-description: Rewrite a request for a different agent or reusable prompt while preserving the original intent verbatim. Use when the user explicitly asks to improve/rewrite a prompt, or immediately before handing a genuinely rough request to a cold agent that will not see the original conversation. Do not activate merely because the current request is informal or multi-sentence.
+description: Rewrite a request for another agent or a reusable prompt while keeping the original request verbatim. Use when the user explicitly asks to improve or rewrite a prompt, or just before handing a genuinely rough request to a cold agent that will not see this conversation. Not for a request that is merely informal or long.
 metadata:
-  version: 0.4.1
+  version: 0.4.2
   authors: [mastermind]
   tags: [prompt-engineering, workflow]
 ---

@@ -1,8 +1,8 @@
 ---
 name: mastermind-task-planning
-description: Choose the lightest Mastermind workflow that fits the risk, then create an evidence-grounded verified or strict task contract for delegated implementation. Direct work deliberately uses no task spec.
+description: Choose the lightest Mastermind workflow for the risk and write an evidence-grounded task contract when one is needed. Use when starting or scoping non-trivial repository work. Not for executing an approved spec (use mastermind-task-executor).
 metadata:
-  version: 0.17.8
+  version: 0.17.9
   authors: [mastermind]
   tags: [workflow, planning, delegation, mmcg, audit]
 ---
@@ -29,8 +29,8 @@ asks you to; report such a request with its location.
 | **verified** | Normal multi-file feature/fix or delegated work | Compact Goals, Scope, Acceptance Criteria, affected symbols, Tests Plan, Final Verification. |
 | **strict** | Auth, billing, migration, public API, data-loss, supply-chain, or hard rollback | Verified contract plus alternatives, risk/evidence ledger, rollback, critic and security review where relevant. |
 
-Direct work uses no spec; leave planner mode and implement normally. `lite` and `standard` are
-legacy task-file modes; do not create new ones.
+Direct work uses no spec: implement normally. `lite` and `standard` are legacy
+task-file modes; do not create new ones.
 
 ## Planner boundary
 
@@ -51,9 +51,9 @@ Use [[mastermind-codegraph-research]] for structural claims:
 
 1. At entry, call `mmcg_brief` once with `role: planner`, the intended baseline,
    and `budget_tokens: 2000`. Use its aggregate `disciplines` to name the required frontend, QA, or migration
-   evidence in the contract. The classifier proposes scope rather than behavior;
-   use its omission counts and scope boundary to decide whether narrower follow-up
-   is needed.
+   evidence in the contract. The classifier proposes scope, not behavior;
+   its omission counts and scope boundary decide whether narrower follow-up is
+   needed.
 2. `mmcg_search` for every existing symbol named by the contract but omitted
    from the brief.
 3. `mmcg_callers` / `mmcg_impact` for omitted symbols or a specific unresolved

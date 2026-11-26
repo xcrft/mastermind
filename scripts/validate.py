@@ -165,6 +165,33 @@ def _load_artifact(path: Path, *, slug: str, domain: str | None) -> Artifact | N
 # ----- per-artifact validation ------------------------------------------
 
 
+# Hosts list every installed skill by its description, and Codex shortens
+# descriptions when the list outgrows its budget, so the trigger has to come
+# early and the boundary has to name the sibling that should win instead.
+SKILL_DESCRIPTION_MAX_CHARS = 400
+SKILL_TRIGGER_WINDOW_CHARS = 250
+SKILL_TRIGGER_RE = re.compile(r"\bUse (?:when|before|after|for|whenever)\b")
+SKILL_BOUNDARY_RE = re.compile(r"\bNot for\b")
+
+
+def _skill_description_issues(path: Path, desc: str) -> list[Issue]:
+    issues: list[Issue] = []
+    if len(desc) > SKILL_DESCRIPTION_MAX_CHARS:
+        issues.append(
+            Issue(path, "error", f"[skill_description_too_long] description is {len(desc)} chars; keep it within {SKILL_DESCRIPTION_MAX_CHARS}")
+        )
+    trigger = SKILL_TRIGGER_RE.search(desc)
+    if trigger is None or trigger.start() > SKILL_TRIGGER_WINDOW_CHARS:
+        issues.append(
+            Issue(path, "error", f"[skill_trigger_missing] description must say 'Use when/before/after/for' within its first {SKILL_TRIGGER_WINDOW_CHARS} chars")
+        )
+    if SKILL_BOUNDARY_RE.search(desc) is None:
+        issues.append(
+            Issue(path, "error", "[skill_boundary_missing] description must say 'Not for ...' and name what to use instead")
+        )
+    return issues
+
+
 def validate_artifact(a: Artifact) -> list[Issue]:
     issues: list[Issue] = []
 
@@ -189,6 +216,8 @@ def validate_artifact(a: Artifact) -> list[Issue]:
         issues.append(
             Issue(a.path, "warning", f"'description' is very short ({len(desc)} chars); state the action and its trigger.")
         )
+    elif a.path.name == "SKILL.md":
+        issues.extend(_skill_description_issues(a.path, desc))
 
     metadata = a.frontmatter.get("metadata", {})
     if not isinstance(metadata, dict):

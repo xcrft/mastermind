@@ -1,8 +1,8 @@
 ---
 name: mastermind-component-research
-description: Ground a UI change in the codegraph before writing it — find whether the component already exists, who renders it, and what its props contract is. Use before creating or changing any React or Vue component; triggers "add a component", "change these props", "build this screen", or a Figma frame handed over for implementation.
+description: "Ground a UI change in the codegraph — whether the component exists, who renders it and its props contract. Use before creating or changing a React or Vue component, or for \"add a component\" or \"build this screen\". Not for turning a design handoff into a task contract (use mastermind-design-intake)."
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:

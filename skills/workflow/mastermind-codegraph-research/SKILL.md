@@ -1,8 +1,8 @@
 ---
 name: mastermind-codegraph-research
-description: Use mmcg before Bash or literal search for repository orientation, natural-language symbol discovery, symbol existence, callers, callees, imports, blast radius, file existence, or stale-index handling.
+description: Answer structural questions with mmcg before Bash or text search — orientation, symbols from plain-language terms, existence, callers, callees, imports, blast radius and stale indexes. Use whenever a task needs one of these facts. Not for a ready-made architecture briefing (use mastermind-project-map) or a change brief since a ref (use mastermind-change-impact).
 metadata:
-  version: 0.3.7
+  version: 0.3.8
   authors:
     - mastermind
   tags:

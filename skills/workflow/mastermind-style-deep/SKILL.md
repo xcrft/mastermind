@@ -1,8 +1,8 @@
 ---
 name: mastermind-style-deep
-description: Draft a grounded, reviewable portrait of how the author develops from attributed code and commit evidence. Keep it as a persona candidate until the author verifies the source examples. Use for "deep style", "design patterns", or "qualitative profile" requests.
+description: "Draft a grounded, reviewable portrait of how the author develops from attributed code and commit evidence, kept as a persona candidate until the author verifies the source examples. Use for \"deep style\", \"design patterns\" or \"qualitative profile\" requests. Not for repository conventions, which always win over a profile."
 metadata:
-  version: 0.4.1
+  version: 0.4.2
   authors:
     - mastermind
   tags:

@@ -1,8 +1,8 @@
 ---
 name: mastermind-security-research
-description: Enumerate what a change can reach and what enforces it — privileged operations and their callers, guards and the sites that apply them, and every module that reads a secret — before designing an auth, permission, or secrets change. Feeds the security review; produces a population and a gap list, never a verdict.
+description: List what a planned auth, permission or secrets change can reach and what enforces it — privileged operations and their callers, guards and the sites that apply them, and every module that reads a secret. Use before designing such a change. It produces a population and a gap list. Not for a security verdict (use mastermind-agent-security-review).
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors:
     - mastermind
   tags:

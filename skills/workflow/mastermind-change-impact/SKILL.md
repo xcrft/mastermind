@@ -1,8 +1,8 @@
 ---
 name: mastermind-change-impact
-description: Produce an evidence-backed change-impact brief with `mastermind impact` or `mmcg_change_impact`. Use before editing, during implementation planning, or in PR review to trace changed symbols, callers, component/API crossings, collision risk, and likely affected consumers since a git ref.
+description: Produce a change-impact brief with `mastermind impact` or `mmcg_change_impact` — changed symbols, callers, API crossings, collision risk and likely consumers since a git ref. Use before editing, while planning or in PR review. Not for choosing tests (use mastermind-test-impact) or a first look at a repository (use mastermind-project-map).
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors: [mastermind]
   tags: [workflow, mmcg, impact]
 ---

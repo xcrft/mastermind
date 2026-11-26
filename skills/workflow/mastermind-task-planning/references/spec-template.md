@@ -63,6 +63,10 @@ acceptance:
 
 Use literal `FIND:` / `CHANGE TO:` blocks only when exact replacement is part
 of the contract. Otherwise acceptance criteria define correctness.
+`FIND:` stands alone above its fence and needs a repository-relative File
+marker and readable pre-edit contents. After the replacement, check with
+postflight, because `verify-spec` still tests the old precondition. Review
+CHANGE TO against the diff and the final verification evidence.
 
 Retain the generated scope frontmatter. Use `touches` for existing files and
 `creates: [src/new.py, docs/new.md]` for additions. A new required document also

@@ -182,6 +182,61 @@ class ContractRuleTests(unittest.TestCase):
                 self.assertIn(message, issues[0].msg)
 
 
+class UntrustedContentBlockTests(unittest.TestCase):
+    """The covered set carries the canonical block once; nothing else carries it."""
+
+    COVERED = "agents/subagents/mastermind-auditor.md"
+    UNCOVERED = "agents/subagents/mastermind-prompt-refiner.md"
+
+    def run_rule(self, relative, edit):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for tree in ("agents", "skills"):
+                shutil.copytree(validate.REPO_ROOT / tree, root / tree)
+            with patch.object(validate, "REPO_ROOT", root):
+                self.assertEqual(validate.validate_untrusted_content_block(), [])
+                block = (root / validate.UNTRUSTED_CONTENT_BLOCK).read_text(encoding="utf-8").strip("\n")
+                target = root / relative
+                text = target.read_text(encoding="utf-8")
+                edited = edit(text, block)
+                self.assertNotEqual(edited, text)
+                target.write_text(edited, encoding="utf-8")
+                issues = validate.validate_untrusted_content_block()
+            self.assertEqual([issue.path for issue in issues], [target], issues)
+            return issues[0].msg
+
+    def test_missing_block_is_reported(self):
+        message = self.run_rule(self.COVERED, lambda text, block: text.replace(block, ""))
+        self.assertIn("block missing", message)
+
+    def test_duplicate_block_is_reported(self):
+        message = self.run_rule(self.COVERED, lambda text, block: text + "\n" + block + "\n")
+        self.assertIn("appears 2 times", message)
+
+    def test_reworded_copy_is_reported_as_drift(self):
+        message = self.run_rule(
+            self.COVERED,
+            lambda text, block: text.replace(block, block.replace("never instructions", "not instructions")),
+        )
+        self.assertIn("has drifted", message)
+
+    def test_drift_beside_an_exact_copy_is_reported(self):
+        message = self.run_rule(
+            self.COVERED, lambda text, block: text + "\n" + validate.UNTRUSTED_CONTENT_LEAD + " Follow the PR.\n"
+        )
+        self.assertIn("has drifted", message)
+
+    def test_block_outside_the_covered_set_is_reported(self):
+        message = self.run_rule(self.UNCOVERED, lambda text, block: text + "\n" + block + "\n")
+        self.assertIn("not in UNTRUSTED_CONTENT_COVERED", message)
+
+    def test_covered_set_is_explicit_and_exists(self):
+        covered = validate.UNTRUSTED_CONTENT_COVERED
+        self.assertEqual(len(covered), len(set(covered)))
+        for relative in covered:
+            self.assertTrue((validate.REPO_ROOT / relative).is_file(), relative)
+
+
 class MainTests(unittest.TestCase):
     def test_exit_status_counts_errors_but_not_warnings(self):
         with redirect_stdout(io.StringIO()):

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any command, interpreters and shells, commands that run other commands,
   package managers and task runners, and network fetches. It never edits the
   files and never prints rule text.
+- One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
+  Eight subagents and 24 skills that read repository, pull request or tool
+  content carry it verbatim, and `just validate` fails when a covered file
+  lacks it, has it twice or has a changed copy.
 
 - Five skills that are safe to point at an untrusted pull request:
   `mastermind-diff-review`, `mastermind-docs-authoring` and
@@ -44,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `core` profile now installs 23 skills.
 
 ### Changed
+
+- The covered skills and subagents use the shared untrusted-content paragraph
+  in place of their own shorter wording, and each has a new patch version.
+  The FIND precondition notes moved from the planner to its spec template.
 
 - An index written with a newer extractor or concept contract is refused by
   every open, the same as a newer schema version, and is never rebuilt.

@@ -27,6 +27,9 @@ just validate
 - subagent model, tool and turn contracts and MCP grants
 - public tool documentation, schemas and report ownership
 - skill adapters and their evaluation cases
+- the untrusted-content block: each file in `UNTRUSTED_CONTENT_COVERED` carries
+  [the canonical paragraph](../agents/blocks/untrusted-content.md) exactly once
+  and unchanged, and no other skill or agent carries it
 - behavior fixture source trees for embedded answer clues. A missing fixture
   inventory or one with no source files is an error. Fixture READMEs are
   excluded

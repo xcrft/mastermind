@@ -17,14 +17,15 @@
 //! | 7 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 8 | `CLAUDE.md`, `AGENTS.md` | managed workflow block matches the template in each saved client's file |
 //! | 9 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
-//! | 10 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
-//! | 11 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
-//! | 12 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
-//! | 13 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
-//! | 14 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
-//! | 15 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
-//! | 16 | `Codex hook readiness` | the same independent boundaries for Codex |
-//! | 17 | `capture fence markers` | capture markers in every project, and prefixes with no known grant |
+//! | 10 | `permission rules`    | client allow rules that let an agent run code it chooses without asking |
+//! | 11 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
+//! | 12 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
+//! | 13 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
+//! | 14 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
+//! | 15 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
+//! | 16 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
+//! | 17 | `Codex hook readiness` | the same independent boundaries for Codex |
+//! | 18 | `capture fence markers` | capture markers in every project, and prefixes with no known grant |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -225,6 +226,7 @@ impl Report {
             out.push_str("  No MCP config  run `mastermind init`\n");
             out.push_str("  Stale index    run `mastermind index .` or start `mastermind watch`\n");
             out.push_str("  Not ignored    run `mastermind init`\n");
+            out.push_str("  Broad rule     narrow it in the client settings file doctor names\n");
         }
         out
     }
@@ -246,6 +248,7 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
     checks.extend(instruction_checks(root));
     checks.extend([
         check_mcp_config(root),
+        crate::permission_lint::check(&crate::permission_lint::Locations::from_environment(root)),
         check_mcp_handshake(index_path, mmcg_binary, &index),
         check_workflow_mcp_contract(workflow_audit.as_ref()),
         check_workflow_runtime_contract(workflow_audit.as_ref()),

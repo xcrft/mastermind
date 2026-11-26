@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mastermind doctor` has a `permission rules` check. It reads the Claude Code
+  `permissions.allow` lists, Codex `.rules` files and Codex `config.toml`, and
+  warns about rules that let an agent run code it chooses without asking:
+  any command, interpreters and shells, commands that run other commands,
+  package managers and task runners, and network fetches. It never edits the
+  files and never prints rule text.
+
 - Five skills that are safe to point at an untrusted pull request:
   `mastermind-diff-review`, `mastermind-docs-authoring` and
   `mastermind-verify-change` in every profile, and

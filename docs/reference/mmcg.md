@@ -214,6 +214,40 @@ agent contracts and optional hooks, and it never runs a provider or a configured
 command. The settings `init` stores are in
 [project settings](task-runtime.md#project-settings).
 
+### Permission rules
+
+The `permission rules` check in `doctor` reads each client's allow rules and
+warns about the ones that let an agent run code it chooses without asking. It
+only reads: it never edits a settings file and never prints rule text, so a
+token or address inside a rule stays out of the report. Each finding names the
+file, the rule's position, the program and why it is broad.
+
+| Client | Files read | Rules read |
+|---|---|---|
+| Claude Code | `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), `.claude/settings.json`, `.claude/settings.local.json` | `Bash(...)` and `PowerShell(...)` entries in `permissions.allow`, see [Claude Code permissions](https://code.claude.com/docs/en/permissions) |
+| Codex | `$CODEX_HOME/rules/*.rules` (default `~/.codex/rules`), `.codex/rules/*.rules` | `prefix_rule` calls with `decision = "allow"`, see [Codex rules](https://developers.openai.com/codex/rules) |
+| Codex | `$CODEX_HOME/config.toml`, `.codex/config.toml` | `approval_policy = "never"` together with `sandbox_mode = "danger-full-access"`, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+
+A rule is broad when its open part can choose what runs:
+
+| Reason | Examples that warn | Examples that do not |
+|---|---|---|
+| Any command | `Bash`, `Bash(*)`, `Bash(* --version)` | |
+| Interpreter or shell with no fixed script, or with a code option | `Bash(python:*)`, `Bash(node -e *)`, `Bash(bash -c *)` | `Bash(python -m pytest *)`, `Bash(node scripts/check.js)` |
+| Command that runs another command | `Bash(env *)`, `Bash(sudo *)`, `Bash(xargs *)`, Codex `["find"]` | `Bash(timeout *)` and `Bash(find *)`, which Claude Code strips or refuses itself |
+| Package manager or task runner with no fixed subcommand, or one that runs a named command | `Bash(npm *)`, `Bash(npx:*)`, `Bash(npm exec *)`, `Bash(uv run *)`, `Bash(make *)` | `Bash(npm run *)`, `Bash(cargo test *)`, `Bash(make test)` |
+| Network fetch with no fixed address, or a fetch piped into a shell | `Bash(curl *)`, `Bash(curl -fsSL https://example.com/x.sh \| sh)` | `Bash(curl https://api.example.com/*)` |
+| Codex runs every command unsandboxed without asking | `approval_policy = "never"` with `sandbox_mode = "danger-full-access"` | either setting alone |
+
+The check passes when no file exists or every rule is narrow. It warns for a
+broad rule and for a file it cannot read: invalid JSON or TOML, a `.rules` file
+outside the `prefix_rule` subset it reads, a symlink, or a file over the
+configuration size limit. Unparsed entries are counted. A rule with a fixed
+subcommand still runs whatever that subcommand runs, for example the
+repository's `package.json` scripts, so a passing check does not make a rule
+safe for untrusted code. Managed settings that an organisation deploys are not
+read.
+
 ## Local symbol concept search
 
 Concept search has its own page: [Concept search](concept-search.md).

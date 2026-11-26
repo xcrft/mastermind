@@ -42,6 +42,7 @@ pub mod lessons;
 pub mod mcp;
 pub mod miner;
 pub mod onboarding;
+pub mod permission_lint;
 pub mod policy;
 mod project_claims;
 pub mod queries;

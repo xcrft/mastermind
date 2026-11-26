@@ -104,6 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   To replace a claim, reject it and review a new one.
 - The generation column in `habit list`, and the relation and generation lines
   in `habit show` and `feedback show`.
+- `docs/README.md`, `docs/architecture.md`, the Claude Code and Codex
+  integration pages and `docs/reference/persona-context.md`. Their content now
+  lives in the README, getting started, effort routing and the persona
+  reference. Eval narratives that only retold a retained JSON record are gone,
+  and the scorecard links the JSON directly.
 
 ### Development
 

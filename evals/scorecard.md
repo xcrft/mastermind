@@ -1,8 +1,6 @@
 # Evaluation scorecard
 
-Use this page to find the retained report behind a claim, the version and date it measured, and what it leaves unmeasured. A result holds only for the version it names, so a later release needs a new matched run before it reuses a claim. Each report keeps its own counts, failures and limits.
-
-Run instructions and comparison rules are in [evals/README.md](README.md). The full write-up of the 2026-10-07 and 2026-10-08 runs, with review findings, per-task tables and superseded records, is in [the 2026-10-09 record](baselines/scorecard-20261009.md).
+This is the index of retained results behind Mastermind's claims. Each row names the report, the version and date it measured, and what it leaves unmeasured. A result holds only for the version it names, so a later release needs a new matched run before it reuses a claim. How to run the checks is in the [evaluation README](README.md).
 
 ## Deterministic checks
 
@@ -23,44 +21,44 @@ Run instructions and comparison rules are in [evals/README.md](README.md). The f
 | Claim | Report | Version and date | Not measured |
 |---|---|---|---|
 | With 180 s, 16,384 output tokens and 8 turns per attempt, 32 of 36 research attempts timed out and the graph arm satisfied 0 of 12 | [Bounded research](baselines/research-20261007.json) | 3.2.1 binary, Codex 0.160.1, 2026-10-07 | Benefit on unseen tasks, token or cost saving |
-| Without time, token or turn budgets, research instructions with graph tools used 25.78% fewer tokens and 14.60% more time than source tools alone. The yield gain per token is only bounded, between −43.86% and +196.42% | [Unbounded research](baselines/research-unbounded-20261008.json) | 3.2.1 binary, Codex 0.160.1, 2026-10-08 | A positive overall efficiency gain, independent review, held-out tasks |
+| Without time, token or turn budgets, research instructions with graph tools used 25.78% fewer tokens and 14.60% more time than source tools alone. The yield gain per token is only bounded, between -43.86% and +196.42% | [Unbounded research](baselines/research-unbounded-20261008.json) | 3.2.1 binary, Codex 0.160.1, 2026-10-08 | A positive overall efficiency gain, independent review, held-out tasks |
 | The shorter research instruction is rejected. It used 7.15% fewer tokens per accepted task, but p95 latency was 15.51% higher and the ambiguous-symbol task used 91.8% more tokens | [Instruction calibration](baselines/instruction-optimization-20261008.json) | 3.2.2, Codex 0.162.0-alpha.2, 2026-10-08 | Independent review, prompt refinement, personalization |
-| The `bounded_readonly_v1` effort router stays experimental. Each arm has 7 of 8 tasks accepted after the complete-answer recheck | [Effort routing](baselines/effort-routing-20261008.md), [recheck](baselines/effort-quality-recheck-20261008.md) | `0db5dfe`, 2026-10-08 | Preserved quality on the full corpus, tokens per accepted task |
-| Neither routed nor batched retrieval instructions are promoted. Routing kept 8 of 8 accepted with 6.1% more tokens, batching dropped to 7 of 8 | [Context routing](baselines/context-routing-20261010.md) | 3.2.4 at `6da6a73`, 2026-10-10 | Accepted-task efficiency, causal effect of batching |
-| `mmcg repo-map` cut total producer tokens by 6.9% and uncached input by 12.0% across 8 development questions in one run | [Repo-map](baselines/repo-map-20261012.md) | 3.2.4 at `f9c336c`, 2026-10-12 | General benefit, production default |
-| No repo-map arm beat the baseline on Astra acceptance: bundle 14 of 16, map-only 12 of 16, baseline 14 of 16. The bundle v2 navigation instruction scored 10 of 16 and was not promoted | [Factorial](baselines/repo-map-factorial-20261013.md), [boundaries v2](baselines/repo-map-boundaries-v2-20261013.md) | 2026-10-13, 8 development tasks | Human reference labels, production improvement |
-| Mandatory source quotes did not improve acceptance, 14 of 16 against 15 of 16, and raised output tokens by 56.59% | [Source quotes](baselines/source-quotes-20261014.md) | 3.2.4 at `f9c336c`, 2026-10-14 | Claim correctness of quoted answers |
-| A stricter offline parser finds 227 valid source bindings in the quoted answers, against 84 before. Under parser v4, 9 snippets fall outside their declared ranges and 100 match only the raw fenced body, so they stay unverifiable | [Parser reaudit](baselines/producer-binding-reaudit-20261014.md), [framing](baselines/producer-binding-framing-20261014.md) | 2026-10-14, the same 32 answers | Claim correctness, any new model result |
+| The `bounded_readonly_v1` effort router stays experimental. Each arm has 7 of 8 tasks accepted after the complete-answer recheck | [Effort routing](baselines/effort-routing-20261008.md), [recheck](baselines/effort-quality-recheck-20261008.json) | `0db5dfe`, 2026-10-08 | Preserved quality on the full corpus, tokens per accepted task |
+| Neither routed nor batched retrieval instructions are promoted. Routing kept 8 of 8 accepted with 6.1% more tokens, batching dropped to 7 of 8 | [Context routing](baselines/context-routing-20261010-public.json) | 3.2.4 at `6da6a73`, 2026-10-10 | Accepted-task efficiency, effect of batching |
+| `mmcg repo-map` cut total producer tokens by 6.9% across 8 development questions in one run | [Repo-map](baselines/repo-map-20261012.json) | 3.2.4 at `f9c336c`, 2026-10-12 | General benefit, production default |
+| No repo-map arm beat the baseline on Astra acceptance: bundle 14 of 16, map-only 12 of 16, baseline 14 of 16. The bundle v2 navigation instruction scored 10 of 16 and was not promoted | [Factorial](baselines/repo-map-factorial-20261013.json), [boundaries v2](baselines/repo-map-boundaries-v2-20261013.json) | 2026-10-13, 8 development tasks | Human reference labels, production improvement |
+| Mandatory source quotes did not improve acceptance, 14 of 16 against 15 of 16, and raised output tokens by 56.59% | [Source quotes](baselines/source-quotes-20261014.json) | 3.2.4 at `f9c336c`, 2026-10-14 | Claim correctness of quoted answers |
+| A stricter offline parser finds 227 valid source bindings in the quoted answers, against 84 before. Under parser v4, 9 snippets fall outside their declared ranges and 100 match only the raw fenced body, so they stay unverifiable | [Parser reaudit](baselines/producer-binding-reaudit-20261014.json), [framing](baselines/producer-binding-framing-20261014.json) | 2026-10-14, the same 32 answers | Claim correctness, any new model result |
 | No contrast in the six development campaigns shows a detectable acceptance difference. Low effort used 34.2% fewer total tokens and 44.5% less producer run time than high effort, exact p = 0.008 | [Statistical reanalysis](baselines/statistical-reanalysis-20261015.md) | 2026-10-15, no new model calls | Effects outside these 8 tasks, acceptance non-inferiority |
-| Eight tasks with eight repetitions per arm give 68.6% power, not 80%, for a 0.90 token ratio | [Resource power](baselines/resource-power-20261015.md) | 2026-10-15, simulation only | Any model result |
+| Eight tasks with eight repetitions per arm give 68.6% power, not 80%, for a 0.90 token ratio | [Resource power](baselines/resource-power-20261015-v2.json) | 2026-10-15, simulation only | Any model result |
 | Source-witness concept review keeps all 574 useful identities, but strict qualification fails on 3 disagreements and 1 missing declaration | [Concept witness](baselines/concept-witness-20261016.md) | 2026-10-16 | Qualified production use |
-
-## Not measured yet
-
-| Feature or outcome | Matched comparison | Retained evidence | Measurement still needed |
-|---|---|---|---|
-| Prompt refinement | Raw task vs frozen refined task under the original outcome key | Production protocol checks and static condition controls | Raw and refined accepted tasks under one original key, generation cost and native delivery |
-| Personal profile | Same task with and without a frozen applicable profile, plus a shuffled-profile control | Attribution, store and replay regressions, synthetic extraction labels | Independent real-history labels, contradictions, applicability, no-profile and shuffled-profile controls |
-| Project and document context | Relevant context vs none, with stale and irrelevant controls | Freshness, audience, scope and coverage checks | Relevant, irrelevant and stale context contrasts on unseen tasks |
-| Research and graph quality | `source` vs `portable` for instructions, `portable` vs `portable_mmcg` for graph tools, `source` vs `portable_mmcg` for both | Four-task public calibration runs and eight-task development campaigns | Held-out tasks, realistic repository discovery and independently reviewed complete answers |
-| Whole workflow | Same task and source, baseline vs enabled features. For guards, all obligations vs each omitted guard | Finite guards and selected CLI paths | Accepted coding outcomes, false completion, corrections and bounded failure and recovery comparisons |
-| Cost and throughput | Every comparison above, with all attempts counted | All-attempt telemetry and useful-outcome formulas | Complete usage, accepted outcomes and matched budgets. Subscription billing stays unknown |
-| Representative indexing | Cached vs forced-full index of identical source | Synthetic Rust call-chain fixture | Mixed-language repositories, imports, generated files and production storage and load |
-| Behavioral role suites | Complete suite report vs an earlier complete report | Loader and fixture tests | A complete model-backed run on a released version |
-
-Resource per success and yield are defined in [Compare paired outcomes](benchmark/REVIEW.md#compare-paired-outcomes). Repetitions of the same tasks are not independent samples, and no qualified population or causal product-quality result exists yet.
 
 ## Harness and rejected candidates
 
-These records back the harness and calibration work behind the claims above. None of them measures a product benefit.
+None of these measures a product benefit.
 
-| Claim | Report | Version and date | Not measured |
+| Claim | Report | Date | Not measured |
 |---|---|---|---|
 | Codex stage accounting passed 386 deterministic tests and detected 4 of 4 guard mutations | [Stage accounting](baselines/codex-stage-accounting-20261008-public.json) | 2026-10-08 | Semantic quality, model savings |
-| The effort-routing harness passed 389 tests and detected 4 of 4 mutations: ignored effort selection, unchecked runtime effort, discarded authentication identity and ignored risk markers | [Effort harness](baselines/effort-routing-harness-20261008.json) | 2026-10-08 | Output correctness |
-| The returned-range replay accounts for all 16 planned instruction attempts | [Range replay](baselines/retrieval-replay-20261008.json) | 2026-10-08 | Semantic redundancy, safe removal of repeated reads |
-| Native batch lookup returns the same query metadata as 3 single lookups, and the Codex transport smoke passed | [Batched lookup](baselines/retrieval-implementation-20261008.json) | 2026-10-08 | Task quality, model latency or token gain |
-| The evidence-policy candidate is rejected. Neither tokens per accepted task nor median latency improved by 10%, and p95 latency got worse | [Evidence policy](baselines/evidence-frontier-20261008-public.json) | 2026-10-08 | Population generalization |
-| The retrieval-route candidate is rejected. Token savings stayed under 10% and p50 latency got worse | [Retrieval route](baselines/route-selection-20261008-public.json) | 2026-10-08 | Population generalization |
-| Source reuse stays off. In the first reuse run it accepted 7 of 8 against 8 of 8 with full reads and used 20.6% more tokens per accepted task. The run had 47 of 48 planned attempts complete, with manual, unblinded review | [Source delivery](baselines/source-delivery-20261010-public.json) | 3.2.4 development build, Codex 0.162.0-alpha.2, 2026-10-10 | Token savings from reuse, held-out tasks, independent review |
-| The 3.2.1 product baseline compares `source` with `portable_mmcg` over 36 attempts on 4 tasks, scored against the full source key | [Product baseline](baselines/product-20261008-03.json) | 3.2.1 at `86b46d4`, 2026-10-08 | User acceptance. Full-key coverage can't be relabeled as acceptance |
+| The effort-routing harness passed 389 tests and detected 4 of 4 mutations | [Effort harness](baselines/effort-routing-harness-20261008.json) | 2026-10-08 | Output correctness |
+| The returned-range replay accounts for all 16 planned instruction attempts | [Range replay](baselines/retrieval-replay-20261008.json) | 2026-10-08 | Safe removal of repeated reads |
+| Native batch lookup returns the same query metadata as 3 single lookups | [Batched lookup](baselines/retrieval-implementation-20261008.json) | 2026-10-08 | Task quality, latency or token gain |
+| The evidence-policy candidate is rejected. Neither tokens per accepted task nor median latency improved by 10% | [Evidence policy](baselines/evidence-frontier-20261008-public.json) | 2026-10-08 | Other tasks |
+| The retrieval-route candidate is rejected. Token savings stayed under 10% and p50 latency got worse | [Retrieval route](baselines/route-selection-20261008-public.json) | 2026-10-08 | Other tasks |
+| Source reuse stays off. It accepted 7 of 8 against 8 of 8 with full reads and used 20.6% more tokens per accepted task | [Source delivery](baselines/source-delivery-20261010-public.json) | 2026-10-10 | Token savings from reuse, independent review |
+| The 3.2.1 product baseline compares `source` with `portable_mmcg` over 36 attempts on 4 tasks, scored against the full source key | [Product baseline](baselines/product-20261008-03.json) | 2026-10-08 | User acceptance |
+
+## Not measured yet
+
+| Feature | Measurement still needed |
+|---|---|
+| Prompt refinement | Raw and refined accepted tasks under one original key, with generation cost |
+| Personal profile | Real-history labels, plus no-profile and shuffled-profile controls on the same tasks |
+| Project and document context | Relevant, irrelevant and stale context on unseen tasks |
+| Research and graph quality | Held-out tasks with independently reviewed complete answers |
+| Whole workflow | Accepted coding outcomes, false completion and user corrections |
+| Cost and throughput | Complete usage and accepted outcomes under matched budgets. Subscription billing stays unknown |
+| Indexing | Mixed-language repositories and production storage |
+| Behavioral role suites | A complete model-backed run on a released version |
+
+Repetitions of the same tasks are not independent samples, and no qualified population or product-quality result exists yet.

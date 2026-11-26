@@ -1,160 +1,74 @@
-# Completion contract and executable evaluation
+# Completion control checks
 
-This evaluation checks one rule: the controller publishes a completed task iteration only when all six obligations hold. It proves the rule on a finite model, removes each guard to show the proof would catch it, and runs exact named regressions through the production CLI, the library and the Lens UI. The retained results are in the [scorecard](../scorecard.md).
+Use this check before you change how the controller decides that a task iteration is complete. The controller may publish a completed iteration only when all six obligations below hold. The check proves that rule on a finite model, removes each guard to show the proof catches it, and runs exact named regressions through the production CLI, the library and the Lens UI. It makes no model calls. Retained results are in the [scorecard](../scorecard.md).
 
-## Run
+## Prerequisites
 
-From a stable source tree, with Python 3.10+ (3.13+ on macOS), Rust, Git and Node
-on a POSIX host supporting `waitid(WNOWAIT)`:
+- Python 3.10+ (3.13+ on macOS), Rust, Git and Node on a POSIX host with `waitid(WNOWAIT)`.
+- A source tree nobody edits during the run, because the report fails when source hashes change.
+- Sources from 3.2.2 or newer for the profile-delivery regressions.
+
+## Run the checks
+
+From the repository root:
 
 ```sh
-python3 -m evals.control --output .mastermind/research/control-loop/run-01
-# Use another current source checkout while retaining this harness.
-python3 -m evals.control --source-repo /path/to/current-mastermind \
-  --output .mastermind/research/control-loop/run-02
+python3 -m evals.control --output .mastermind/research/control-loop/new-run
 ```
 
-| Run requirement | Behavior |
-|---|---|
-| Output directory | Must be new |
-| Native clients | Fixtures in disposable repositories, no model calls |
-| Selected tests | Every exact test must run and pass, missing/ignored/renamed/failed tests fail the eval |
-| Lens UI | One aggregate DOM/static suite via `node --test --test-reporter=tap`, not a browser run |
-| Source binding | Hashes before and after execution must match |
-| Profile delivery | Needs 3.2.2 or newer sources. Four profile-budget CLI tests and twelve exact library regressions, and absent or ignored tests fail |
-| Output | `report.json`, raw Cargo stdout/stderr per target and `lens.stdout`/`lens.stderr` |
-| Report provenance | Starting revision, dirty-tree flag, source manifest, platform and wall time |
-| Trust boundary | Owner-writable local records, no runner signature or model-quality assessment |
-
-For the finite model alone:
+`just eval-control <new-output-directory>` runs the same command. To test another checkout with this harness, add `--source-repo /path/to/mastermind`. For the finite model alone, without Cargo or Node:
 
 ```sh
-python3 -m evals.control --model-only --output /tmp/mastermind-model-01
+python3 -m evals.control --model-only --output /tmp/mastermind-model-new
 python3 -m unittest tests.evals.control.test_harness
 ```
 
-The first command leaves CLI and UI conformance `not_run` and the overall report
-`incomplete`. The second checks the model and harness accounting without running
-Cargo, Node or a model. The combined source-bound report is also available as
-`just eval-control <new-output-directory>`.
+`--model-only` reports CLI and UI conformance as `not_run`, so the overall result is `incomplete`.
 
-## State and assumptions
-
-For one structured task iteration, let its obligations at publication time be:
-
-| Symbol | Obligation | Boundary |
-|---|---|---|
-| A | Current task contract and invocation admission | Does not imply every OS effect was authorized |
-| X | Required executor invocation completed with valid binding | Manual workflows have no native-invocation requirement |
-| V | Every required observed check passed for current bound inputs | External environments are not fully captured |
-| H | Mechanical audit is Held for the recorded work | Does not supply semantic acceptance |
-| R | Current revision-pinned criterion review is satisfied | Judgment truth is an assumption |
-| K | Current canonical Context/Lesson decisions are resolved | Reviewed bytes and decisions are explicit |
-
-The state has six validation bits and one completion flag. A true obligation
-means its associated records passed validation. Scope, identity, index
-availability and freshness are abstracted inside each bit.
-
-| Proof assumption | Implementation obligation outside this model |
+| Output | Contents |
 |---|---|
-| Contract is true and sufficient | Define criteria that capture the user's outcome |
-| Records and validators are intact | Validate identity, schema, scope and current source bytes |
-| No unseen mutation before publication | Keep validation and publication consistent under concurrency |
-| Bounded I/O terminates | Enforce process and storage bounds |
-| Evidence owner is trusted | Hashes alone cannot detect an owner rewriting the entire chain |
+| `report.json` | Results, starting revision, dirty-tree flag, source manifest, platform and wall time |
+| Cargo stdout and stderr | Raw output per test target |
+| `lens.stdout`, `lens.stderr` | The aggregate Lens DOM suite, run with `node --test --test-reporter=tap` |
 
-## Safety
+The output directory must be new. Every selected test must run and pass, so a missing, ignored, renamed or failed test fails the check.
 
-Let `Publish(t)` mean that the controller newly records iteration `t` as
-completed. The required property is:
+## The six obligations
 
-```text
-Publish(t) => A(t) and X(t) and V(t) and H(t) and R(t) and K(t)
-```
-
-Proof in the finite model:
-
-1. The initial state is open.
-2. Execution, checks, audit and review actions do not publish completion.
-3. Invalidation actions can remove an obligation while leaving other old
-   records present. A new preflight resets the previous evidence.
-4. The only publishing transition requires all six obligations.
-5. Therefore every publishing edge from a reachable state satisfies the rule.
-
-`explore()` enumerates reachable states and checks every publishing edge against
-a separate invariant predicate. It removes each guard in turn and requires a
-reachable violating publication. Missing counterexamples fail the mutation check.
-
-The invariant concerns the moment of publication. Completed iterations retain
-their historical meaning when later work changes a file. An explicit re-audit
-starts fresh evidence validation.
-
-## Progress and stopping
-
-| Property | Argument | Limit |
-|---|---|---|
-| Conditional reachability | Every open model state can start a new preflight and complete in ≤7 successful actions | Assumes stable inputs and successful producers, says nothing about repairing the current iteration |
-| Bounded automatic repair | `remaining = max_iterations - iteration` is nonnegative and decreases per permitted retry | Requires terminating I/O and bounded child processes |
-| Budget exhaustion | Controller stops the automatic sequence | The task remains unresolved |
-| Manual retry or new contract | Starts a new sequence | No global convergence guarantee |
-
-The seven actions are preflight, execution, verification, audit, criterion review,
-history review and publication.
-
-## Connection to the implementation
-
-The source-bound CLI selection in `harness.py` covers:
-
-| Direction | Observable scenarios |
+| Symbol | Obligation |
 |---|---|
-| Project onboarding | Saved choices, no-write preview, retryable setup/removal, preserved worker budgets, read-only registration inspection and index write failures |
-| Required proof | Missing or failed checks, foreign-repository receipt, late executable change |
-| Acceptance | Positive completion, unknown/negative judgments, review compare-and-swap |
-| Project history | Required updates block completion, changed lessons remain reviewable |
-| Recovery | Bound follow-up instructions, review without execution, one opted-in semantic retry with fresh evidence |
-| Admission and budget | Native denial, controller lock, stale input, shared finite retry budget |
-| Guarded executor | Supported fixture calls, denied paths/actions, missing or conflicting mediation, receipt replay and declared check commands |
-| Context | Current document evidence, exact bytes offered to the process, audience scope and private review metadata |
-| Person profile | Collection creates no active habit, authorship review and current sources remain required |
-| Observation influence | Original observations remain available, later profile/refiner exposure limits habit promotion |
-| Hook intake | Invalid results, replay, revocation, unfinished deliveries, session binding and compare-and-swap recovery |
-| Managed worker | Single owner, persistent budgets/checkpoints, client isolation, restart, stop, timeout and source drift |
-| Readiness | Registration, capture, observed sessions, refiner configuration and worker state remain separate |
-| Lens UI | Private metadata clears on leave/error, stays out of standalone export and distinguishes offered context from unknown model use |
+| A | Current task contract and invocation admission |
+| X | Required executor invocation completed with a valid binding |
+| V | Every required observed check passed for the current inputs |
+| H | Mechanical audit is Held for the recorded work |
+| R | Current revision-pinned criterion review is satisfied |
+| K | Current Context and Lesson decisions are resolved |
 
-CLI selectors exercise production paths with synthetic native clients and
-processors. Lens uses a mocked DOM. The harness counts that file as one aggregate
-suite, not one independent test for each helper function. These are sampled
-conformance checks, not exhaustive coverage of code, interleavings or environments.
+The required property is `Publish(t) => A(t) and X(t) and V(t) and H(t) and R(t) and K(t)`. `explore()` walks every reachable state of the model and checks each publishing edge against it. It then removes each guard in turn and expects a reachable violation. The model assumes intact validators, no unseen change before publication and bounded I/O, so the CLI regressions check those parts of the implementation.
 
-Onboarding, persona, context, intake, worker, readiness, guarded execution and UI
-checks are adjacent boundaries.
-They do not add obligations to the six-bit theorem or show model benefit,
-native before-effect enforcement or verified native loading.
-
-## Reading results
+## Read the report
 
 | Field | Meaning |
 |---|---|
 | `bounded_model_safety` | Reachable states, publications, violations and detected guard mutants |
-| `sampled_cli_conformance` | Exact selected production tests passed, failed or did not run |
-| `sampled_ui_conformance` | Aggregate Lens suite passed, failed or did not run |
-| `cli_cases`, `ui_suites` | Named selections, raw process outcome, elapsed time and accounting |
-| `source_unchanged` | Recorded source inventory and hashes stayed the same during the run |
-| `elapsed_seconds` | Evaluation duration on this machine, including build and fixture overhead |
-| `semantic_goal_success` | Unmeasured by this evaluation |
-| `token_savings`, `cost_savings` | Unmeasured, there are no inference calls |
+| `sampled_cli_conformance` | Selected production tests passed, failed or not run |
+| `sampled_ui_conformance` | The Lens suite passed, failed or not run |
+| `cli_cases`, `ui_suites` | Named selections, raw process outcome and elapsed time |
+| `source_unchanged` | Source hashes stayed the same during the run |
+| `semantic_goal_success`, `token_savings`, `cost_savings` | Always null, because nothing calls a model |
 
-Real-task false completion, user corrections, unsupported conclusions, tokens
-and time require a fixed, independently reviewed task corpus. See
-[measurement definitions](../README.md#what-we-measure).
+Overall `passed` needs model, CLI and UI success with unchanged sources. A nonzero exit, a timeout or a missing runtime fails the check even when a child printed a passing test summary.
 
-Overall `passed` requires model, CLI and UI success with unchanged sources. A
-nonzero exit, output/timeout stop or missing runtime cannot become a passing
-result because a child printed a successful test summary.
+The CLI selection in `harness.py` covers onboarding, required proof, acceptance, project history, recovery, admission and budget, the guarded executor, context, person profiles, hook intake, the managed worker, readiness and Lens metadata. These are sampled checks with synthetic native clients, not full coverage of code or interleavings.
 
-## Refiner protocol and model evaluation
+## Fix a failed run
 
-Use the [intake package](../intake/README.md) for the 40-case multilingual
-refiner protocol evaluation. It measures processor/parser behavior separately
-from these completion guards and from downstream task benefit.
+| Symptom | What to do |
+|---|---|
+| Output directory exists | Choose a new path |
+| `source_unchanged: false` | Something edited the tree during the run. Stop the editor or use a clean checkout, then run again |
+| A selected test is missing or ignored | The test was renamed or removed. Update the selection in `harness.py` together with the test |
+| A selected test fails | Fix the production code. Keep the failed report |
+| Profile-delivery tests missing | The source is older than 3.2.2 |
+
+The refiner protocol has its own evaluation in the [intake package](../intake/README.md).

@@ -9,7 +9,7 @@
 | Users | Maintainers and teams planning, implementing, and reviewing repository changes |
 | Evidence boundary | Mechanical checks, execution records, and semantic judgments remain distinct |
 
-See [Architecture](docs/architecture.md) for components and trust boundaries.
+See [how it works](README.md#how-it-works) for components and trust boundaries.
 
 ## Active goals
 
@@ -48,8 +48,3 @@ See [Architecture](docs/architecture.md) for components and trust boundaries.
 |---|---|
 | Lesson candidate | Audit signal awaiting review before use as guidance |
 | History review | Decision about further CONTEXT or lesson updates, bound to the reviewed file revisions |
-
-## Updates
-
-Record durable project knowledge here. A completed task may need no update.
-Keep tutorials and component details in the linked documentation.

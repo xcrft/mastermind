@@ -1,7 +1,7 @@
 # Security policy
 
-Found a way to cross a documented trust boundary? Tell us privately so we can
-verify it without exposing users or working exploit details.
+If you found a way to cross a documented trust boundary, tell us privately so
+we can check it without exposing users or working exploit details.
 
 ## Supported versions
 
@@ -13,74 +13,64 @@ verify it without exposing users or working exploit details.
 
 ## Report privately
 
-Do not open a public issue or discussion. Use
-[GitHub private vulnerability reporting](https://github.com/xcrft/mastermind/security/advisories/new).
+Use [GitHub private vulnerability reporting](https://github.com/xcrft/mastermind/security/advisories/new),
+not a public issue or discussion. If it is unavailable, ask the maintainer for a
+private channel through the GitHub profile. Include:
 
-Include:
+- the Mastermind version and installation method
+- the operating system and the relevant client and runtime versions
+- a minimal reproduction or proof of concept
+- the expected and the actual security boundary
+- the impact, the attacker access it needs and whether untrusted repository
+  content is involved
+- logs with credentials, tokens, private source and personal data removed
 
-- Affected Mastermind version and installation method.
-- Operating system and relevant client/runtime versions.
-- Minimal reproduction or proof of concept.
-- Expected and actual security boundary.
-- Impact, required attacker access, and whether untrusted repository content is
-  involved.
-- Logs with credentials, tokens, private source, and personal data removed.
+## What is in scope
 
-If private reporting is unavailable, contact the maintainer through the GitHub
-profile and request a private channel. Do not send exploit details in a public
-comment.
-
-## In scope
-
-- Path traversal, unsafe overwrite, or command execution in indexing, setup,
-  install, export, or workflow commands.
+- Path traversal, unsafe overwrite or command execution in indexing, setup,
+  install, export or workflow commands
 - SQL injection or database corruption through crafted repository paths or
-  imported evidence.
-- MCP protocol or tool-permission defects that cross the documented read-only
-  and additive-write boundary.
-- Lens binding, same-origin, script-injection, CSP, or source-index mutation
-  defects.
-- Fact, SARIF, coverage, JUnit, OTLP, SCIP, signature, revision, provenance,
-  size, or path validation bypasses.
-- Workflow artifacts that instruct an agent to expose secrets, bypass explicit
-  approval, or perform destructive actions during normal documented use.
-- npm, Cargo, Docker Action, GitHub Actions, or release-provenance defects that
-  can replace or publish unverified artifacts.
-- Setup/uninstall ownership bugs that modify unrelated client configuration or
-  user files.
+  imported evidence
+- MCP protocol or tool-permission defects that cross the read-only and
+  additive-write boundary in the [MCP reference](docs/reference/mcp.md)
+- Lens binding, same-origin, script injection, CSP or source-index mutation
+  defects
+- Bypasses of fact, SARIF, coverage, JUnit, OTLP, SCIP, signature, revision,
+  provenance, size or path validation
+- Workflow artifacts that tell an agent to expose secrets, skip explicit
+  approval or run destructive actions during normal documented use
+- npm, Cargo, Docker Action, GitHub Actions or release provenance defects that
+  can replace or publish unverified artifacts
+- Setup or uninstall bugs that change unrelated client configuration or user
+  files
 
-## Usually out of scope
+Usually out of scope, though a private report is still welcome when you are
+unsure:
 
-- An upstream dependency advisory without a demonstrated Mastermind impact.
-- Generic model jailbreaks that do not bypass a Mastermind-enforced boundary.
-- Denial of service that requires the local user to index an intentionally
-  hostile repository, unless it bypasses a documented size/work limit or causes
-  persistent data loss.
-- Scanner output without a reproducible path and impact.
-- Social engineering, account compromise, or GitHub/npm/crates.io platform
-  issues outside this repository's control.
+- an upstream dependency advisory without a shown Mastermind impact
+- a generic model jailbreak that bypasses no Mastermind-enforced boundary
+- denial of service that needs the local user to index a hostile repository,
+  unless it bypasses a documented size or work limit or loses data
+- scanner output without a reproducible path and impact
+- social engineering, account compromise, or GitHub, npm or crates.io platform
+  issues
 
-We still welcome a private report when scope is uncertain.
-
-## Local index and repository boundary
+## How Mastermind treats repository content
 
 Mastermind treats repository source and its history as untrusted input. It
 opens files relative to the selected repository without following symlinks or
 Windows reparse points, rejects special files and path escapes, enforces
 per-file and total limits, and checks the file identity before and after each
-read. The index is local derived data, so protect it like the repository
-itself. The documentation-token filter that drops secret-like text reduces
-accidental credential storage, but it is not a secret scanner and doesn't
-protect against a hostile local machine.
-
-The exact limits are in the reference: request deadlines, refresh caps and
-read-only custom indexes in [MCP server](docs/reference/mcp.md#managed-index-refresh),
-and the documentation token rules in
+read. The index is local derived data, so protect it like the repository. The
+filter that drops secret-like documentation tokens reduces accidental
+credential storage, but it is not a secret scanner and doesn't protect against
+a hostile local machine. The exact limits are in
+[managed index refresh](docs/reference/mcp.md#managed-index-refresh) and
 [concept search](docs/reference/concept-search.md).
 
 ## Response and disclosure
 
-This is a small-maintainer open-source project. Targets are best effort:
+This is a small-maintainer project, so these targets are best effort:
 
 | Stage | Target |
 |---|---|
@@ -88,7 +78,6 @@ This is a small-maintainer open-source project. Targets are best effort:
 | Initial triage | 14 days |
 | Remediation | Based on severity and release safety |
 
-We use coordinated disclosure. Please allow up to 90 days by default and avoid
-publishing details while a fix or registry release is in progress. Material
-issues may receive a GitHub Security Advisory and CVE. Reporter credit is
-included when requested.
+We use coordinated disclosure. Please allow up to 90 days and don't publish
+details while a fix or registry release is in progress. Material issues may get
+a GitHub Security Advisory and a CVE, with reporter credit when you ask for it.

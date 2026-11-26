@@ -1,142 +1,124 @@
-# Task and agent effort routing
+# Route reasoning effort for a new agent
 
-Select effort before starting an agent, then apply the decision through the
-host's native control. CLI and MCP share one deterministic Rust policy, and
-selection needs neither an index nor a model call.
+With this guide you pick the reasoning effort for an agent before it starts and
+apply it through the client's own control. The CLI and MCP share one fixed Rust
+policy, and a decision needs neither an index nor a model call.
 
-## Prerequisites
+The core workflow does this for you. The
+[`mastermind-agent-handoff`](../../skills/workflow/mastermind-agent-handoff/SKILL.md)
+skill runs before each new agent in planning, research and delegated execution.
+Use this guide to route by hand or to check what the skill did.
 
-- Install the Mastermind workflow and register MCP, or have `mastermind` on PATH.
-- Inspect the receiving agent's duty, source scope and risk.
-- Use a host that supports per-invocation effort and an authenticated client for execution.
-- Resolve any competing effort dispatcher before spawning an agent.
-
-Routing uses declarations from the controller. It does not inspect the task or
-verify those declarations. Keep the selected model, permissions and budgets.
-
-## Choose effort
+## How the policy decides
 
 | Condition | Result |
 |---|---|
-| Explicit human `user_effort` for this invocation | Requested override, ahead of automatic routing |
-| Researcher on an allowed family, with every low condition below | `low`, as a pilot (see below) |
-| Other or unknown duty/family, incomplete scope, high or unknown risk | `high` |
+| Explicit human `user_effort` for this invocation | That level, ahead of automatic routing |
+| Researcher with every declaration in the next table | `low`, as a pilot |
+| Anything else, including unknown duty, incomplete scope or high or unknown risk | `high` |
 
-| Required for automatic low | Controller declaration |
+| Required for automatic low | Declaration |
 |---|---|
 | Source-only research | `agent: researcher` or `mastermind-researcher`, `read_only: true` |
 | Allowed task | `task_family: callees_trace`, `source_read_reuse` or `task_phase_trace` |
 | Bounded source scope and stable inputs | `bounded_scope: true`, `stable_inputs: true` |
-| Lexical map at a 1600-byte budget, with its fixed advice text unchanged | `lexical_repo_map: true` |
+| The `mastermind repo-map` shortlist at a 1600-byte budget, with its fixed advice text | `lexical_repo_map: true` |
 | Inspected low risk | `risk: low` |
 
-The lexical map is the `mastermind repo-map` shortlist given to the researcher.
-Its header carries fixed advice to read the cited source directly and to check
-the ranges the map does not cover. The low route was measured with exactly that
-text, so changing it, or the 1600-byte budget, makes the condition false.
+The policy trusts these declarations and checks none of them. The low route was
+measured with the exact `repo-map` advice text and budget, so a changed text or
+budget makes that condition false. Execution, review, security, removal proofs
+and normalization boundaries always get high. Route again when the duty, risk
+or source scope changes, not on every lookup.
 
-Execution, review, security, removal proofs and normalization boundaries select
-high. A phase trace explains an input contract, while changing or approving
-workflow state is a different duty. When duty, risk or source scope changes,
-route a new handoff with the existing facts and gaps. Do not route per lookup.
+The low pilot rests on development runs with GPT-6.1 Sol on 8 tasks, where low
+and high effort showed no detectable acceptance difference, see the
+[statistical reanalysis](../../evals/baselines/statistical-reanalysis-20261015.md).
+Other models and task families are not qualified.
 
-## Select a decision
+## Get a decision
 
-Create `route.json` for an eligible source-reuse request:
+1. Write `route.json` for the receiving agent:
 
-```json
-{
-  "agent": "researcher",
-  "task_family": "source_read_reuse",
-  "read_only": true,
-  "bounded_scope": true,
-  "stable_inputs": true,
-  "lexical_repo_map": true,
-  "risk": "low"
-}
-```
+   ```json
+   {
+     "agent": "researcher",
+     "task_family": "source_read_reuse",
+     "read_only": true,
+     "bounded_scope": true,
+     "stable_inputs": true,
+     "lexical_repo_map": true,
+     "risk": "low"
+   }
+   ```
 
-```bash
-mastermind effort-route --request route.json
-```
+2. Ask for the decision:
 
-Alternatively, pass that object to `mmcg_effort_route`. Omitted booleans default
-to false and risk to unknown. `user_effort` accepts `low`, `medium`, `high`,
-`xhigh` or `max`. Use it only for an explicit human choice. Unknown fields,
-invalid types and unrecognized values fail validation. CLI input is limited to
-16 KiB, and agent and family names to 80 UTF-8 bytes.
+   ```bash
+   mastermind effort-route --request route.json
+   ```
 
-## Apply to an ordinary agent
+   You get `requested_effort`, a reason, and argument arrays for each client:
+   `codex_spawn_args`, `codex_args` and `claude_args`. The MCP tool
+   `mmcg_effort_route` takes the same object.
 
-Mastermind planning, research and executor workflows use
-[`mastermind-agent-handoff`](../../skills/workflow/mastermind-agent-handoff/SKILL.md)
-before each new agent. The controller must:
+Omitted booleans default to false and risk to unknown. `user_effort` takes
+`low`, `medium`, `high`, `xhigh` or `max`, only for an explicit human choice.
+Unknown fields and invalid values fail. The request is limited to 16 KiB, and
+agent and family names to 80 UTF-8 bytes.
 
-1. Select the decision for the receiving agent's actual task.
-2. Apply the returned setting through the native control below.
-3. Carry role instructions, objective, authorized scope, facts, citations, remaining obligations, source/map bindings, permissions and budgets into the child.
-4. Retain the request, decision, child ID and runtime evidence together.
+## Apply it
 
-| Host | Native control | Constraint |
+A decision changes nothing on its own. A prompt or MCP response can't
+reconfigure its caller or a running child, so apply it to the new agent:
+
+| Client | Control | Note |
 |---|---|---|
-| Codex `spawn_agent` | Merge returned `codex_spawn_args`: `fork_turns: "none"`, `reasoning_effort: requested_effort` | Fresh child with a self-contained packet. Full-history forks inherit the parent's effort |
-| Codex CLI | Returned `codex_args`, such as `-c 'model_reasoning_effort="low"'` | Applies to the new native session |
-| Claude Code CLI | Returned `claude_args`, such as `--effort low` | Agent definitions and environment settings can override session effort |
-| Claude non-fork `Agent`, 2.1.292 or later | `effort: requested_effort` | `CLAUDE_CODE_EFFORT_LEVEL` takes precedence |
-| Another host | Supported per-agent field | Record `not_applied` if the control is unavailable |
+| Codex `spawn_agent` | Merge `codex_spawn_args`: `fork_turns: "none"`, `reasoning_effort` | The child starts fresh, so pass it a self-contained task packet. A full-history fork keeps the parent's effort and counts as `not_applied` |
+| Codex CLI | `codex_args`, such as `-c 'model_reasoning_effort="low"'` | Applies to the new session |
+| Claude Code CLI | `claude_args`, such as `--effort low` | Agent definitions and environment settings can override session effort |
+| Claude Code non-fork `Agent`, 2.1.292 or later | `effort: requested_effort` | `CLAUDE_CODE_EFFORT_LEVEL` takes precedence |
+| Older client or another host | Its own per-agent field, if it has one | Otherwise keep the defaults and record `not_applied` |
 
-Keep any existing model choice. Custom Codex agent files can override spawn
-settings, so don't set a conflicting fixed effort there. See
-[Codex subagent configuration](https://developers.openai.com/codex/multi-agent)
-and [Claude subagent effort](https://code.claude.com/docs/en/sub-agents#choose-an-effort-level).
-A prompt or MCP response cannot reconfigure its caller or a running child.
+Keep the model, permissions and budgets as they are, and keep the request, the
+decision and the child ID together. Custom Codex agent files can override spawn
+settings, so don't set a conflicting fixed effort there.
 
-## Launch a native client
-
-`--exec` selects and submits the override together. It requires a request file,
-leaving stdin for the client's prompt. Arguments after `--` pass directly to the
-client, without shell expansion:
+To launch a native client with the override in one step, pass `--exec`. The
+request must come from a file, because stdin goes to the client. Arguments
+after `--` go to the client without shell expansion:
 
 ```bash
 mastermind effort-route --request route.json --exec codex -- exec --sandbox read-only - < task.txt
 mastermind effort-route --request route.json --exec claude -- --print --tools Read,Grep,Glob < task.txt
 ```
 
-The launcher resolves the client from PATH and inherits its working directory,
-configuration and authentication. stdout contains client output. stderr includes
-a JSON route record after spawn: `override_submitted: true`, `served_effort: null`.
-Capture it with the result. Exit codes 0-255 are preserved. Signal exits and wider
-codes return 1. A nonzero exit fails the command without retrying at another effort.
+The client comes from PATH and inherits your working directory, configuration
+and authentication. stdout is the client output. stderr gets a JSON route
+record with `override_submitted: true` and `served_effort: null`. Exit codes
+0-255 pass through, and signal exits or wider codes return 1. A failed run is
+not retried at another effort.
 
-## Verify application
+## Check that it applied
 
-| Evidence | Meaning |
-|---|---|
-| `requested_effort` and reason | Policy decision |
-| `applied: false`, `declarations_verified: false`, `quality_qualified: false` | Selection verifies neither the declarations, application nor answer quality |
-| Native setting submitted | Requested configuration reached the host |
-| Codex child's own `turn_context.effort` | Observed native child setting. The parent's record is not enough |
-| Provider record or matched answer evaluation | Separate evidence for provider behavior or semantic quality |
+The decision always says `applied: false`, `declarations_verified: false` and
+`quality_qualified: false`, because it checks none of those. For Codex, the
+child's own `turn_context.effort` shows the setting it actually got, and the
+parent's record is not enough. Provider behavior and answer quality need a
+provider record or a matched answer evaluation.
 
-Automatic low is a pilot. It is on only for the narrow researcher case above,
-and its only evidence is development runs with GPT-6.1 Sol on 8 tasks, where
-low and high effort showed no detectable acceptance difference (see the
-[statistical reanalysis](../../evals/baselines/statistical-reanalysis-20261015.md)). To qualify other models or
-more task families, use matched inputs, instructions and tools, independent
-answer review, and keep failed and unknown outcomes. Routing and transport
-checks say nothing about quality or savings.
+## When it fails
 
-## Recover or disable
-
-| Condition | Action |
+| Condition | What to do |
 |---|---|
 | Invalid input or missing client | Fix the request or PATH. No child has started |
-| Conflicting native effort flag or `CLAUDE_CODE_EFFORT_LEVEL` | Put the human choice in `user_effort` and remove the conflict for this invocation |
-| Codex full-history fork required, older Claude, or unsupported host | Keep the host's setting and record `not_applied` |
-| Dispatcher forbids effort overrides | Stop before spawn and select one authority. See [Codex integration](../integrations/codex.md#route-reasoning-effort) |
-| Authentication or transport failure | Retain the failed attempt, fix the cause, then explicitly retry |
-| Disable automatic low | Use an explicit `user_effort: high` for new invocations or remove the routing step |
+| A native effort flag or `CLAUDE_CODE_EFFORT_LEVEL` conflicts | Put the human choice in `user_effort` and remove the conflict for this invocation |
+| Another Codex dispatcher, such as TokenX, rejects explicit `reasoning_effort` | Pick one effort authority. The handoff skill stops before spawn until you do. To keep Mastermind, disable that dispatcher's non-managed hooks in `/hooks` and start a new session, see [Codex hook controls](https://developers.openai.com/codex/hooks#review-and-trust-hooks) |
+| Full-history fork, older Claude Code or unsupported host | Keep the client's setting and record `not_applied` |
+| Authentication or transport failure | Keep the failed attempt, fix the cause, then retry by hand |
+| You want to turn off automatic low | Send `user_effort: high`, or drop the routing step |
 
-See [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level)
-for client controls. Preserve existing results when changing routing. Historical
-grades remain bound to their original invocation.
+Client controls are documented in
+[Codex subagent configuration](https://developers.openai.com/codex/multi-agent),
+[Claude subagent effort](https://code.claude.com/docs/en/sub-agents#choose-an-effort-level)
+and [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level).

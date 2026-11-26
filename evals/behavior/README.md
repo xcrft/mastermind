@@ -1,88 +1,52 @@
 # Behavioral evaluations
 
-| Suite | Cases | Target | Main observation |
-|---|---|---|---|
-| `critic` | [critic.jsonl](cases/critic.jsonl) | Design review | Final `## Verdict` and explicit uncertainty |
-| `researcher` | [researcher.jsonl](cases/researcher.jsonl) | Code and document research | Source citations, graph use and limits |
-| `auditor` | [auditor.jsonl](cases/auditor.jsonl) | Postflight review | Held, Drift or Broken in the structured YAML verdict |
-| `intake` | [intake.jsonl](cases/intake.jsonl) | Goal refinement | Refine, pass through or ask |
-| `workflow` | [workflow.jsonl](cases/workflow.jsonl) | Portable workflow skills | Required behavior in a focused scenario |
+These suites run the shipped roles and workflow skills on planted cases through the Claude CLI and grade the answers with deterministic checks, without an LLM judge. Runs spend inference usage on your Claude login, so they stay outside ordinary CI.
 
-[Fixture READMEs](fixtures/) describe the planted changes. Model-backed researcher
-and auditor runs need a matching `mmcg` binary. The runner uses deterministic
-grading, without an LLM judge.
+| Suite | Cases | Checks |
+|---|---|---|
+| `critic` | [critic.jsonl](cases/critic.jsonl) | Final `## Verdict` and explicit uncertainty |
+| `researcher` | [researcher.jsonl](cases/researcher.jsonl) | Source citations, graph use and limits |
+| `auditor` | [auditor.jsonl](cases/auditor.jsonl) | Held, Drift or Broken in the YAML verdict |
+| `intake` | [intake.jsonl](cases/intake.jsonl) | Refine, pass through or ask |
+| `workflow` | [workflow.jsonl](cases/workflow.jsonl) | Required behavior of a workflow skill |
 
-Model-backed runs require an authenticated Claude CLI. They consume inference
-usage and are run explicitly, outside ordinary CI:
+You need the `claude` CLI logged in and `git` on PATH. The researcher and auditor suites also need a matching `mmcg` binary. Each fixture under [fixtures/](fixtures/) has a README that describes its planted change.
+
+## Run the suites
+
+From the repository root, `just evals --model sonnet` runs the repository gates and then every suite. To run one suite and compare it with an earlier complete report:
 
 ```sh
-# Run repository gates, then all behavioral suites.
-bash evals/run-verified.sh --model sonnet
-
-# Run one suite and retain the complete report.
 python3 -m evals.behavior.runner --suite critic --model opus \
   --report /tmp/mastermind-critic.json
-
-# Compare with a complete report retained from an earlier run.
 python3 -m evals.behavior.runner --suite critic --model opus \
   --report /tmp/mastermind-critic-current.json \
   --baseline-report /tmp/mastermind-critic.json
 ```
 
-Use `--case ID` for diagnosis, `--keep-fixtures` to inspect a temporary corpus,
-and `--verbose-failures` for detailed assertion failures. A targeted rerun does
-not replace the result of a complete suite.
-
-| Runner contract | Enforcement |
-|---|---|
-| Prompt-only suites | Empty tool set and a fresh temporary directory |
-| Researcher/auditor suites | Shipped agent, disposable Git fixture, index and live MCP server |
-| Identity | Frozen model, CLI, harness, role, case, source and tool identities |
-| Claimed verification | Exact command plus observed successful result |
-| Failure accounting | Missing evidence, denials, transport errors and incomplete telemetry fail the case |
-| Execution bounds | Per-case wall time and output caps, process-group cleanup |
-| Host boundary | Managed client policies still apply, no OS sandbox or reviewer independence claim |
+ For diagnosis, add `--case ID`, `--keep-fixtures` to keep the temporary corpus, or `--verbose-failures`. A rerun of one case doesn't replace a complete suite result. A case fails on missing evidence, permission denials, transport errors or incomplete telemetry. A claimed check counts only with its exact command and an observed successful result.
 
 ## Add or change a case
 
 1. Put one falsifiable behavior in a JSONL case and explain it in `why`.
-2. Use a source fixture for tool behavior and an explicit positive oracle.
-3. Keep expected answers out of source files shown to the model.
-4. Prefer structured outputs, observed results and exact citation anchors.
-5. Validate the harness, then run the affected case and the complete suite.
+2. For tool behavior, use a source fixture with an explicit positive oracle. Keep expected answers out of the files the model sees.
+3. For the auditor, put the complete after-tree under `fixtures/<name>/changes/`. Missing baseline files are deleted, and `staged_paths` leaves only the listed paths staged.
+4. Run `python3 -m unittest discover -s tests/evals/behavior -t .`, then the affected case and the complete suite.
 
 | Case field | Use |
 |---|---|
 | `expect.verdict` | Final critic or auditor decision |
-| `expect.contains` / `contains_any` | Required signals or equivalent wording |
-| `expect.not_contains` | Forbidden affirmative claim, accounting for denials |
-| `expect.citations` | Source anchor matching one fixture line |
+| `expect.contains`, `contains_any` | Required wording or equivalent wording |
+| `expect.not_contains` | A forbidden affirmative claim |
+| `expect.citations` | A source anchor that matches one fixture line |
 | `expect.code_comments` | Comment limits for generated code |
 
-Auditor variants provide a complete after-tree under `fixtures/<name>/changes/`.
-Missing baseline files are deleted. `staged_paths` leaves selected changes staged
-and others unstaged or untracked for a pre-commit audit.
+The loader rejects unknown fields, contradictory expectations, invalid budgets and ambiguous anchors. Phrase checks can fail on a correct paraphrase, and a forbidden phrase can appear inside a denial. Diagnose such a failure against the case's intent, and don't widen the case just to pass the answer that failed.
 
-The loader rejects unknown fields, contradictory expectations, invalid budgets,
-unavailable tools and ambiguous citation anchors. Auditor verdicts come from
-the canonical YAML block. Source citations must name valid bounded locations.
-Citation validity does not prove that a conclusion follows from the source.
-
-Phrase assertions can fail on a correct paraphrase or pass on shallow wording.
-A forbidden phrase can also occur inside a denial. Diagnose those failures
-against the intended contract. Do not widen a case merely to admit the answer
-that just failed. Long-task adherence and semantic accuracy need separate
-outcome evaluations.
-
-## Auditor ablation
+## Compare with a plain reviewer
 
 ```sh
 python3 -m evals.behavior.ablation --with-mastermind
 ```
 
-This compares a neutral Git reviewer with the shipped auditor on the same
-fixtures. The columns use different grading rules, so the output is diagnostic
-and can't show a quality uplift. Do not subtract those scores. The
-[paired research comparison](../benchmark/REVIEW.md#compare-paired-outcomes) uses
-one outcome rubric for all arms. Auditor defect/no-defect quality needs its own
-shared semantic key and adapter, and the legacy ablation is not that experiment.
+This runs a plain `claude -p` reviewer and the shipped auditor on the planted-defect auditor fixtures. The two columns use different grading rules, so don't subtract them. For a fair quality comparison, use the [paired research comparison](../benchmark/REVIEW.md#compare-paired-outcomes), which grades all arms with one rubric.

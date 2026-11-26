@@ -17,6 +17,7 @@ mod semantic;
 mod task_mining;
 mod worker;
 
+pub(crate) use install::registration_marker;
 pub use refiner::Config as RefinerConfig;
 
 use super::{collection, curation, profile, store};

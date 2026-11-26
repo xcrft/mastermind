@@ -17,15 +17,16 @@
 //! | 7 | `gitignore`            | `.mastermind/` is excluded from VCS                    |
 //! | 8 | `CLAUDE.md`, `AGENTS.md` | managed workflow block matches the template in each saved client's file |
 //! | 9 | `MCP config`           | mmcg registered in `~/.claude.json` (user) or `./.mcp.json` (project) |
-//! | 10 | `permission rules`    | client allow rules that let an agent run code it chooses without asking |
-//! | 11 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
-//! | 12 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
-//! | 13 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
-//! | 14 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
-//! | 15 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
-//! | 16 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
-//! | 17 | `Codex hook readiness` | the same independent boundaries for Codex |
-//! | 18 | `capture fence markers` | capture markers in every project, and prefixes with no known grant |
+//! | 10 | `permission rules`    | client settings, repository skills, subagents and MCP servers that let code run or secrets leave without asking |
+//! | 11 | `client hooks`        | hooks Mastermind did not install, and hooks that download and run code |
+//! | 12 | `MCP serve handshake` | spawning `mastermind serve` responds to `initialize` + `tools/list` |
+//! | 13 | `subagent MCP scoping` | every subagent `mcpServers:` entry names a registered server |
+//! | 14 | `subagent runtime contract` | Mastermind agents pin model, tools, turns, effort, and exact mmcg access |
+//! | 15 | `style profile`       | author's `~/.mastermind/style.md` has fallen behind their commits |
+//! | 16 | `profile budget`      | the configured `mmcg_profile` budget cannot deliver every eligible rule |
+//! | 17 | `Claude hook readiness` | optional native registration, capture, session, refiner and miner state |
+//! | 18 | `Codex hook readiness` | the same independent boundaries for Codex |
+//! | 19 | `capture fence markers` | capture markers in every project, and prefixes with no known grant |
 //!
 //! Human-readable by default; `--json` switches to a machine-parseable format.
 
@@ -236,6 +237,8 @@ impl Report {
 pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
     let workflow_audit = crate::workflow_audit::audit_workflow_for_doctor(root);
     let index = DoctorIndex::inspect(index_path);
+    let locations = crate::permission_lint::Locations::from_environment(root);
+    let hooks = crate::permission_lint::hooks::read_all(&locations);
     let mut checks = vec![
         check_binary(),
         check_path_entries(),
@@ -248,7 +251,8 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
     checks.extend(instruction_checks(root));
     checks.extend([
         check_mcp_config(root),
-        crate::permission_lint::check(&crate::permission_lint::Locations::from_environment(root)),
+        crate::permission_lint::check(&locations),
+        crate::permission_lint::hooks::check(&hooks),
         check_mcp_handshake(index_path, mmcg_binary, &index),
         check_workflow_mcp_contract(workflow_audit.as_ref()),
         check_workflow_runtime_contract(workflow_audit.as_ref()),
@@ -257,10 +261,12 @@ pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Rep
         hook_readiness_check(
             "claude",
             crate::miner::hooks::readiness::report("claude", root),
+            &crate::permission_lint::hooks::counts(&hooks, "claude"),
         ),
         hook_readiness_check(
             "codex",
             crate::miner::hooks::readiness::report("codex", root),
+            &crate::permission_lint::hooks::counts(&hooks, "codex"),
         ),
         capture_fence_check(crate::miner::hooks::readiness::capture_fence_directory()),
     ]);
@@ -325,6 +331,7 @@ fn capture_fence_check(report: Result<serde_json::Value, Box<dyn std::error::Err
 fn hook_readiness_check(
     client: &str,
     report: Result<serde_json::Value, Box<dyn std::error::Error>>,
+    hooks: &crate::permission_lint::hooks::HookCounts,
 ) -> Check {
     let name = if client == "claude" {
         "Claude hook readiness"
@@ -350,14 +357,27 @@ fn hook_readiness_check(
         }
     };
     if report["configured"] == false {
+        let mut message = if report["platform"] == "unsupported" {
+            "optional, Mastermind hooks not configured, native hooks and managed mining require Unix".to_string()
+        } else {
+            "optional, Mastermind hooks not configured, capture and mining are not enabled by this check".to_string()
+        };
+        // Other hooks are reviewed by the `client hooks` check.
+        if hooks.other() > 0 {
+            message.push_str(&format!(
+                "; {} other {} configured, see client hooks",
+                hooks.other(),
+                if hooks.other() == 1 {
+                    "hook is"
+                } else {
+                    "hooks are"
+                }
+            ));
+        }
         return Check {
             name,
             status: Status::Ok,
-            message: if report["platform"] == "unsupported" {
-                "optional, not configured, native hooks and managed mining require Unix".into()
-            } else {
-                "optional, not configured, capture and mining are not enabled by this check".into()
-            },
+            message,
             hint: None,
         };
     }
@@ -2310,15 +2330,36 @@ mod tests {
 
     #[test]
     fn hook_checks_keep_optional_absence_distinct_from_unavailable_state() {
+        let none = crate::permission_lint::hooks::HookCounts::default();
         let absent = hook_readiness_check(
             "codex",
             Ok(serde_json::json!({"configured":false,"platform":"unix"})),
+            &none,
         );
         assert_eq!(absent.status, Status::Ok);
         assert!(absent.hint.is_none());
+        assert!(!absent.message.contains("other"), "{}", absent.message);
+        // Hooks Mastermind did not install are named, not hidden behind
+        // "not configured".
+        let foreign = hook_readiness_check(
+            "claude",
+            Ok(serde_json::json!({"configured":false,"platform":"unix"})),
+            &crate::permission_lint::hooks::HookCounts {
+                total: 1,
+                mastermind: 0,
+            },
+        );
+        assert!(
+            foreign
+                .message
+                .contains("1 other hook is configured, see client hooks"),
+            "{}",
+            foreign.message
+        );
         let unknown = hook_readiness_check(
             "codex",
             Err("hook journal format version 2 is newer; upgrade mmcg".into()),
+            &none,
         );
         assert_eq!(unknown.status, Status::Warn);
         assert!(
@@ -2335,6 +2376,7 @@ mod tests {
                 "activation":{"status":"session_start_observed"},
                 "refiner":{"status":"not_configured"},"mining":{"status":"not_configured"}}),
             ),
+            &none,
         );
         assert_eq!(incomplete.status, Status::Warn);
         assert!(incomplete.message.contains("current (disabled)"));

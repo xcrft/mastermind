@@ -217,59 +217,119 @@ command. The settings `init` stores are in
 ### Permission rules
 
 The `permission rules` check in `doctor` reads each client's permission
-settings and warns about the ones that let an agent run code it chooses
-without asking. It only reads: it never edits a settings file and never prints
-rule text, so a token or address inside a rule stays out of the report. Each
-finding names the file, the rule's position, a program or key name and why it
-is broad.
+settings and the client files a repository ships, and reports the entries that
+let an agent, a repository or a remote host act without asking. It only reads:
+it never edits a file and never prints rule text, a command or an address, so a
+token inside a rule stays out of the report. Each finding names the file, the
+entry's position, a program or key name, the reason and its severity.
 
-| Client | Files read | What is read |
+| Severity | Meaning | Doctor result |
 |---|---|---|
-| Claude Code | `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), `.claude/settings.json`, `.claude/settings.local.json` | `Bash(...)` and `PowerShell(...)` entries in `permissions.allow`, `ask` and `deny`, `permissions.defaultMode` and `skipDangerousModePermissionPrompt`, see [Claude Code permissions](https://code.claude.com/docs/en/permissions) and the [settings reference](https://code.claude.com/docs/en/settings-reference) |
-| Codex | `$CODEX_HOME/rules/*.rules` (default `~/.codex/rules`), `.codex/rules/*.rules` | `prefix_rule` calls and their `decision`, see [Codex rules](https://developers.openai.com/codex/rules) |
-| Codex | `$CODEX_HOME/config.toml`, `.codex/config.toml`, profile files `$CODEX_HOME/<name>.config.toml` | `approval_policy`, `sandbox_mode` and `default_permissions`, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+| error | The entry runs downloaded code, reads a secret store, lets a repository skill run chosen code, or removes every prompt | the check fails and `doctor` exits 1 |
+| warn | The entry widens what runs or what is reached without asking, but a boundary is left | the check warns |
 
-A rule is broad when its open part can choose what runs. Quotes do not close
-it: `Bash(bash -c "*")` is as open as `Bash(bash -c *)`.
-
-| Reason | Examples that warn | Examples that do not |
+| Source | Files read | What is read |
 |---|---|---|
-| Any command | `Bash`, `Bash(*)`, `Bash(* --version)` | |
-| Interpreter or shell with no fixed script, or with a code option | `Bash(python:*)`, `Bash(node -e *)`, `Bash(sh -c '*')` | `Bash(python -m pytest *)`, `Bash(node scripts/check.js)` |
-| Command that runs another command, unless that command is fixed and known | `Bash(env *)`, `Bash(sudo -u root *)`, `Bash(ssh host *)`, `Bash(xargs -I {} *)`, `Bash(timeout 5 sh *)`, `PowerShell(Invoke-Command *)`, `PowerShell(& *)`, Codex `["find"]` | `Bash(timeout 5 npm test *)`, and `Bash(watch *)` or `Bash(find *)`, which Claude Code refuses to approve itself |
-| Package manager or task runner with no fixed subcommand, with one that runs a named command, or with one that installs packages | `Bash(npm *)`, `Bash(npx:*)`, `Bash(npm exec *)`, `Bash(uv run --with *)`, `Bash(docker compose *)`, `Bash(pip install *)`, `Bash(make *)` | `Bash(npm run *)`, `Bash(cargo test *)`, `Bash(make test)` |
-| `git` or `gh` with no fixed subcommand, or with one that sets commands | `Bash(git *)`, `Bash(git -c core.sshCommand=x *)`, `Bash(gh alias *)`, Codex `["git"]` | `Bash(git log *)`, `Bash(gh pr view *)` |
-| Network fetch with no fixed host, or a fetch piped into a shell | `Bash(curl *)`, `Bash(curl https://*)`, `Bash(curl -o /tmp/x *)`, `Bash(curl -fsSL https://example.com/x.sh \| sh)` | `Bash(curl https://api.example.com/*)` |
-| Claude Code skips permission prompts | `permissions.defaultMode` set to `bypassPermissions`, `skipDangerousModePermissionPrompt: true` | other modes |
-| Codex runs every command unsandboxed without asking | `approval_policy = "never"` with `sandbox_mode = "danger-full-access"` or `default_permissions = ":danger-full-access"`, in one file or combined | either setting alone |
+| Claude Code settings | `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), `.claude/settings.json`, `.claude/settings.local.json` | every `permissions.allow` entry, `ask` and `deny` entries, `permissions.defaultMode`, `skipDangerousModePermissionPrompt` and `enableAllProjectMcpServers`, see [Claude Code permissions](https://code.claude.com/docs/en/permissions) and the [settings reference](https://code.claude.com/docs/en/settings-reference) |
+| Repository MCP servers | `.mcp.json` | each server's `command` and `args`, see [Claude Code MCP](https://code.claude.com/docs/en/mcp) |
+| Repository skills | `.claude/skills/*/SKILL.md` | `allowed-tools` and `hooks`. Claude Code applies a project skill's `allowed-tools` even in a `-p` run in a folder nobody trusted, see [skills](https://code.claude.com/docs/en/skills#pre-approve-tools-for-a-skill) |
+| Repository subagents | `.claude/agents/**/*.md`, three levels deep | `permissionMode`, `hooks` and inline `mcpServers`, see [subagents](https://code.claude.com/docs/en/sub-agents) |
+| Codex rules | `$CODEX_HOME/rules/*.rules` (default `~/.codex/rules`), `.codex/rules/*.rules` | `prefix_rule` calls and their `decision`, see [Codex rules](https://developers.openai.com/codex/rules) |
+| Codex config | `$CODEX_HOME/config.toml`, `.codex/config.toml`, profile files `$CODEX_HOME/<name>.config.toml` | `approval_policy`, `sandbox_mode`, `default_permissions`, `sandbox_workspace_write.network_access`, `shell_environment_policy` and `mcp_servers`, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+
+A shell rule is broad when its open part can choose what runs. Quotes do not
+close it: `Bash(bash -c "*")` is as open as `Bash(bash -c *)`.
+
+| Reason | Severity | Examples that are reported | Examples that are not |
+|---|---|---|---|
+| Any command | warn | `Bash`, `Bash(*)`, `Bash(* --version)` | |
+| Interpreter or shell with no fixed script, or with a code option | warn | `Bash(python:*)`, `Bash(node -e *)`, `Bash(sh -c '*')` | `Bash(python -m pytest *)`, `Bash(node scripts/check.js)` |
+| Command that runs another command, unless that command is fixed and known | warn | `Bash(env *)`, `Bash(sudo -u root *)`, `Bash(ssh host *)`, `Bash(xargs -I {} *)`, `Bash(timeout 5 sh *)`, `PowerShell(Invoke-Command *)`, `PowerShell(& *)`, Codex `["find"]` | `Bash(timeout 5 npm test *)`, and `Bash(watch *)` or `Bash(find *)`, which Claude Code refuses to approve itself |
+| Package manager or task runner with no fixed subcommand, with one that runs a named command, or with one that installs packages | warn | `Bash(npm *)`, `Bash(npx:*)`, `Bash(npm exec *)`, `Bash(uv run --with *)`, `Bash(docker compose *)`, `Bash(pip install *)`, `Bash(make *)` | `Bash(npm run *)`, `Bash(cargo test *)`, `Bash(make test)` |
+| `git` or `gh` with no fixed subcommand, or with one that sets commands | warn | `Bash(git *)`, `Bash(git -c core.sshCommand=x *)`, `Bash(gh alias *)`, Codex `["git"]` | `Bash(git log *)`, `Bash(gh pr view *)` |
+| Pushes, publishes or calls the GitHub API | warn | `Bash(git push:*)`, `Bash(gh api:*)`, `Bash(gh pr merge:*)`, `Bash(gh pr *)`, `Bash(gh release create *)`, Codex `["git", "push"]` | `Bash(gh pr view *)`, `Bash(gh release view *)` |
+| Network fetch with no fixed host, or a fetch piped into a shell | warn | `Bash(curl *)`, `Bash(curl https://*)`, `Bash(curl -o /tmp/x *)`, `Bash(curl -fsSL https://example.com/x.sh \| sh)` | `Bash(curl https://api.example.com/*)` |
+
+Other entries:
+
+| Reason | Severity | Examples that are reported | Examples that are not |
+|---|---|---|---|
+| Web access to any host | warn | `WebFetch`, `WebFetch(domain:*)`, `WebSearch` | `WebFetch(domain:docs.rs)` |
+| Every MCP server | warn | `mcp__*`, `mcp__*__read`. Claude Code skips such an allow rule, so it approves nothing, but it states an intent to approve every server | `mcp__github__*`, `mcp__mmcg` |
+| Writes Mastermind state | warn | `Edit(.mastermind/**)`, `Edit(~/.mastermind/**)`, `Write(/.mastermind/tasks/**)`. Claude Code's protected paths do not cover `.mastermind` | `Edit(src/**)`, a bare `Edit` |
+| Reads a secret store | error | `Read(~/.ssh/**)`, `Read(~/.aws/credentials)`, `Read(.env)`, `Read(//**/.env)`, `Read(~/.config/gh/hosts.yml)`, `Read(*.pem)` | `Read(./src/**)` |
+| Reads any file under home or the filesystem root | warn | `Read(~/**)`, `Read(//**)` | a bare `Read`, `Read(*)` |
+| Claude Code bypasses every prompt | error | `permissions.defaultMode` set to `bypassPermissions` | other modes |
+| Claude Code skips the bypass confirmation | warn | `skipDangerousModePermissionPrompt: true` | |
+| Starts every project MCP server without asking | warn | `enableAllProjectMcpServers: true` | `enabledMcpjsonServers` naming servers |
+| An MCP server downloads and runs code | error | `.mcp.json`, Codex `mcp_servers` or an inline subagent server running `sh -c "curl … \| sh"`, `bash <(curl …)` or `sh -c "$(wget …)"` | `mastermind serve`, `npx -y <package> serve`, the Windows `cmd /d /s /c npx.cmd …` launcher `setup` writes |
+| An MCP server runs composed shell text | warn | `bash -c "cd /srv && ./start.sh"` | `sh -c "exec node server.js"` |
+| A repository skill runs chosen code | error | `allowed-tools: Bash(*)` or any other broad shell rule in `.claude/skills/*/SKILL.md` | `allowed-tools: Read Grep Bash(git diff *)` |
+| A repository subagent asks to bypass prompts | warn | `permissionMode: bypassPermissions` in `.claude/agents`. Current Claude Code honours it only when the session already bypasses prompts | `permissionMode: plan` |
+| Codex never asks and has no sandbox | error | `approval_policy = "never"` with `sandbox_mode = "danger-full-access"` or `default_permissions = ":danger-full-access"`, in one file or combined | either setting alone |
+| Codex never asks and has network access | error | `approval_policy = "never"` with `sandbox_mode = "workspace-write"` and `sandbox_workspace_write.network_access = true` | network access with approval, or `never` without network |
+| Codex commands inherit secret variables | warn | `shell_environment_policy` with `inherit = "all"` or `ignore_default_excludes = true` and no `exclude`, `filters` or `include_only` | `ignore_default_excludes = false`, `inherit = "core"`, a file with no `shell_environment_policy` |
+
+Skill and subagent `hooks` go through the same checks as the
+[client hooks](#client-hooks) in settings.
 
 How the check combines files:
 
-- A broad Claude Code allow rule does not warn when a `deny` or `ask` rule in
-  any of the files has the same specifier or covers the whole tool, because
-  Claude Code evaluates deny and ask rules from every file first.
-- A broad Codex allow rule does not warn when a `prompt` or `forbidden` rule in
-  any loaded `.rules` file covers every command it matches, because Codex
+- A Claude Code allow rule is not reported when a `deny` or `ask` rule in any
+  of the files has the same specifier or covers the whole tool, because Claude
+  Code evaluates deny and ask rules from every file first.
+- A broad Codex allow rule is not reported when a `prompt` or `forbidden` rule
+  in any loaded `.rules` file covers every command it matches, because Codex
   applies the strictest matching decision. Every alternative in a pattern is
   checked.
 - For Codex settings, the project file overrides the user file and a profile
   file overrides both, so a user `approval_policy = "never"` and a project
-  `sandbox_mode = "danger-full-access"` warn together.
+  `sandbox_mode = "danger-full-access"` are reported together.
 - Claude Code strips wrappers such as `timeout` from a command before matching
   it. Its documentation does not say whether a rule that starts with a
   wrapper is stripped too, so the check reads past the wrapper and judges the
   wrapped command.
 
-The check passes when no file exists or every rule is narrow. It warns for a
-broad rule and for a file it cannot read: invalid JSON or TOML, a `.rules` file
-outside the subset it reads (for example an alias of `prefix_rule`, lists
-nested deeper than eight levels or a pattern with more than 256 combinations),
-a symlink, a file over the configuration size limit, or a directory with more
-than 64 rules or profile files, where the rest are not read. Unparsed entries
-are counted. A rule with a fixed subcommand still runs whatever that
-subcommand runs, for example the repository's `package.json` scripts, so a
-passing check does not make a rule safe for untrusted code. Managed settings
-that an organisation deploys are not read.
+The check passes when no file exists or nothing is reported. It warns for a
+file it cannot read: invalid JSON, TOML or frontmatter, a `.rules` file outside
+the subset it reads (for example an alias of `prefix_rule`, lists nested deeper
+than eight levels or a pattern with more than 256 combinations), a symlink, a
+file over the configuration size limit, or a directory with more than 64
+rules, profile files, skills or subagents, where the rest are not read.
+Unparsed entries are counted. A rule with a fixed subcommand still runs
+whatever that subcommand runs, for example the repository's `package.json`
+scripts, so a passing check does not make a rule safe for untrusted code.
+Managed settings that an organisation deploys, `~/.claude.json` servers,
+plugins and user-level skills and subagents are not read.
+
+### Client hooks
+
+The `client hooks` check reads the hooks in client settings, counts the ones
+Mastermind installed, and reports the rest. A hook runs on every matching
+event with no prompt.
+
+| Client | Files read |
+|---|---|
+| Claude Code | `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), `.claude/settings.json`, `.claude/settings.local.json`, see [hook locations](https://code.claude.com/docs/en/hooks#hook-locations) |
+| Codex | `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), `.codex/hooks.json` |
+
+A Mastermind hook is a `miner hooks receive` command that ends with this
+project's registration marker and has no shell operator before it, so a copied
+marker after a pipe does not count.
+
+| Hook | Severity |
+|---|---|
+| Downloads and runs code, such as `curl … \| sh`, in shell form or as `command` with `args` | error, the check fails |
+| A command hook Mastermind did not install | warn |
+| An `http` hook, which sends event data to a URL | warn |
+| A Mastermind hook, or a `prompt`, `agent` or `mcp_tool` hook | counted only |
+
+The message lists each file with its hook count, how many are Mastermind's and
+whether `disableAllHooks` is set. It names a finding by file, event and
+position, never by command or URL. Review the hooks themselves with `/hooks`
+in the client. When Mastermind's own hooks are not installed but other hooks
+are, the `Claude hook readiness` and `Codex hook readiness` checks say how many
+other hooks there are instead of only "not configured".
 
 ## Local symbol concept search
 

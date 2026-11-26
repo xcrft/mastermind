@@ -44,14 +44,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limits are in `evals/selection/README.md`.
 
 - `mastermind doctor` has a `permission rules` check. It reads the Claude Code
-  permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
-  profile files, and warns about settings that let an agent run code it
-  chooses without asking: any command, interpreters and shells, commands that
-  run other commands, package managers, task runners and installs, `git` and
-  `gh` without a fixed subcommand, network fetches without a fixed host,
-  `bypassPermissions`, and Codex running unsandboxed without approval. A rule
-  that a deny, ask or stricter rule covers does not warn. It never edits the
-  files and never prints rule text.
+  permission lists and modes, Codex `.rules` files, Codex `config.toml` and
+  profile files, and what a repository ships for its clients: `.mcp.json`
+  servers, `.claude/skills/*/SKILL.md` and `.claude/agents/**/*.md`. Each
+  finding has a severity. An error fails the check and makes `doctor` exit 1:
+  a `Read` rule for a secret store such as `~/.ssh` or `.env`, an MCP server
+  or hook that downloads and runs code, a repository skill whose
+  `allowed-tools` grants a broad shell rule, `defaultMode: bypassPermissions`,
+  and Codex never asking while it has no sandbox or has network access. A
+  warning covers any command, interpreters and shells, commands that run other
+  commands, package managers, task runners and installs, `git` and `gh`
+  without a fixed subcommand, `git push`, `gh api` and other publishing
+  subcommands, network fetches without a fixed host, `WebFetch` and
+  `WebSearch` for any host, `mcp__*`, writes to `.mastermind`, reads of the
+  whole home directory, `enableAllProjectMcpServers`, a repository subagent
+  with `permissionMode: bypassPermissions`, and Codex commands that inherit
+  KEY, SECRET and TOKEN variables. A rule that a deny, ask or stricter rule
+  covers is not reported. It never edits the files and never prints rule
+  text, commands or addresses.
+- `mastermind doctor` has a `client hooks` check. It reads the hooks in Claude
+  Code user, project and local settings and in Codex `hooks.json`, counts the
+  ones Mastermind installed and reports the rest: a hook that downloads and
+  runs code fails the check, and any other command hook or an `http` hook
+  warns. The hook readiness checks now say how many other hooks exist instead
+  of only "not configured".
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
   Ten subagents and 28 skills that read repository, pull request, report,
   transcript or tool content carry it verbatim. It names the person or the

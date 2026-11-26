@@ -27,6 +27,21 @@ delegation runtime.
 | [`mastermind-feedback-collector`](subagents/mastermind-feedback-collector.md) | Collects stated preferences as quoted candidates for profile review. |
 | [`mastermind-security-auditor`](subagents/mastermind-security-auditor.md) | Reviews security-sensitive boundaries with optional OWASP ASI mapping. |
 
+## Write a description
+
+Claude Code reads every subagent's description and delegates when a task
+matches one, so a loose description spawns a costly or writing role nobody
+asked for. Codex does not install these roles. `just validate` checks the shape:
+
+1. Start with the trigger: `Use when`, `before`, `after`, `for` or `to`. A role
+   with `activation: manual` starts with `Use only when`.
+2. Within the first 200 characters, say `Not for ... (use <name>)` for the
+   nearest role or skill that could be picked by mistake. Every `(use X)` must
+   name a shipped skill or subagent.
+3. End with a short line on what it does. Keep it within 300 characters and
+   leave detail to the body, which loads only when the role runs.
+4. Do not write "use proactively". The workflow spawns roles by name.
+
 ## Untrusted content
 
 [`blocks/untrusted-content.md`](blocks/untrusted-content.md) is the one source

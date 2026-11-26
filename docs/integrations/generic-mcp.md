@@ -1,19 +1,48 @@
-# Generic MCP integration
+# Other MCP clients
 
-Install Mastermind and index the repository. The client must launch a stdio
-MCP server.
+This guide connects Cursor, Continue or any client that can launch a stdio MCP
+server to the `mmcg` server. Claude Code and Codex have their own guides,
+[Claude Code](claude-code.md) and [Codex](codex.md), because `mastermind init`
+sets them up for you.
 
-## Configure the server
-
-For JSON `mcpServers` configuration, use the client's actual configuration path:
+Install Mastermind and index the repository first:
 
 ```bash
-mastermind setup generic --scope project --config ./mcp.json
-mastermind setup generic --scope project --config ./mcp.json --write
+npm install -g @xcraftmind/mastermind
+cd your-project
+mastermind index .
 ```
 
-The first command previews a merge that preserves unrelated settings.
-Equivalent manual configuration:
+## Register the server
+
+Each `setup` command previews the change first. Add `--write` to apply it.
+Setup merges into the file and keeps unrelated entries.
+
+| Client | Commands | Configuration file |
+|---|---|---|
+| Cursor | `mastermind setup cursor --scope project --root .` | `.cursor/mcp.json`, or `~/.cursor/mcp.json` with `--scope user` |
+| Continue | `mastermind setup continue --scope project --root .` | `.continue/mcpServers/mastermind.yaml`, or `~/.continue/mcpServers/mastermind.yaml` with `--scope user` |
+| Any client with JSON `mcpServers` | `mastermind setup generic --scope project --config ./mcp.json` | The file you pass to `--config` |
+
+For example, for Cursor:
+
+```bash
+mastermind setup cursor --scope project --root .
+mastermind setup cursor --scope project --root . --write
+```
+
+Without `--scope`, setup uses user scope. For Continue, Mastermind owns a
+separate `mastermind.yaml` and doesn't touch Continue's general configuration.
+Setup picks the launcher command for your installation, Windows npm included.
+
+Restart or reload the client, then check the registration and the project:
+
+```bash
+mastermind doctor
+```
+
+To write the entry by hand, use this JSON and start the client from the
+repository root:
 
 ```json
 {
@@ -26,79 +55,71 @@ Equivalent manual configuration:
 }
 ```
 
-| Setting | Value |
-|---|---|
-| Working directory | Repository root |
-| npm command | `mastermind` or `mmcg` |
-| Cargo command | `mmcg` |
-| Apply registration | Restart the client |
+The npm package provides both `mastermind` and `mmcg` as the command. A cargo
+install provides only `mmcg`. To point the server at a specific index, put
+`--index /absolute/path/project/.mastermind/mmcg.db` before `serve` in `args`.
+Don't use that form in a Claude Code `.mcp.json`, because the
+[workflow audit](../reference/mmcg.md#workflow-audit) expects exactly
+`["serve"]` there.
 
-To select a specific index, place `--index` before `serve`:
-
-```json
-{
-  "mcpServers": {
-    "mmcg": {
-      "command": "mastermind",
-      "args": ["--index", "/absolute/path/project/.mastermind/mmcg.db", "serve"]
-    }
-  }
-}
-```
-
-## Choose a tool
+## Pick a tool
 
 | Need | Start with |
 |---|---|
-| Role briefing | `mmcg_brief` |
-| Task/agent effort decision | `mmcg_effort_route` |
-| Name or concept | `mmcg_search`, `mmcg_concept` |
-| Operation relevance | `mmcg_concept_prepare`, source reads, `mmcg_concept_finish` |
+| Briefing for a role | `mmcg_brief` |
+| Reasoning effort for a task or agent | `mmcg_effort_route` |
+| A name or a concept | `mmcg_search`, `mmcg_concept` |
+| Whether a symbol does an operation | `mmcg_concept_prepare`, source reads, `mmcg_concept_finish` |
 | Structure or change impact | `mmcg_map`, `mmcg_change_impact` |
 | Project documentation | `mmcg_docs`, `mmcg_project_profile` |
 | Combined context | `mmcg_context` |
 | Task records | `mmcg_tasks`, `mmcg_history` |
 | Granted personal preferences | `mmcg_profile` |
 
-`tools/list` defines names and schemas.
-For concept review, call `mmcg_concept_prepare`, inspect the returned source,
-then submit judgments with `mmcg_concept_finish`. The response carries the role
-rubric. The request contract, witness and role rules are in
-[Local symbol concept search](../reference/mmcg.md#local-symbol-concept-search).
-The [MCP reference](../reference/mmcg.md#mcp-tools) defines arguments and limits.
-Graph queries may refresh the derived index. Scratchpad append is an additive
-local write.
+`tools/list` returns the names and schemas, and the
+[MCP tool reference](../reference/mcp.md#mcp-tools) has the arguments and
+limits. Concept review is described in
+[concept search](../reference/concept-search.md#review-operation-relevance).
+Graph queries may refresh the derived index, and `mmcg_mining_submit` is the
+only other local write.
 
-The effort tool returns a requested level and client argument arrays. Apply it
-through a supported per-agent control before the next invocation; without that
-control, keep the existing setting. It does not change this chat or launch a
-model. See [effort routing](../guides/effort-routing.md).
+`mmcg_effort_route` returns a requested level and client argument arrays. It
+doesn't change the current chat or launch a model, so apply it through a
+per-agent control before the next invocation, see
+[effort routing](../guides/effort-routing.md).
 
-## Enable personal context separately
+## Give the client your profile
+
+Personal context needs a read grant for this repository and a client ID that
+the server sends with each request:
 
 ```bash
 mastermind miner access grant . --client my-client
+mastermind setup cursor --scope project --root . --profile-client my-client --write
 ```
 
-| Requirement | Value |
-|---|---|
-| Read grant | This repository and client ID |
-| Server environment | `MMCG_PROFILE_CLIENT=my-client` |
-| Profile behavior | Advisory, live source checks |
-| Access denied | Withhold personal context, no static `style.md` fallback |
+`--profile-client` writes `MMCG_PROFILE_CLIENT=my-client` into the server entry.
+For a hand-written entry, set that variable in its `env`. Without a grant the
+server withholds personal context, and there is no fallback to a static
+`style.md`. [Persona hooks](../guides/persona-hooks.md) covers capture and
+review.
 
-See [Persona hooks](../guides/persona-hooks.md) for capture and review.
+## Protocol
 
-## Protocol and removal
+The server speaks JSON-RPC over stdin and stdout and lists tools only, with no
+resources or prompts. Supported MCP versions and message limits are in the
+[protocol contract](../reference/mcp.md#protocol-contract).
 
-| Protocol property | Value |
-|---|---|
-| Transport | JSON-RPC over stdin/stdout |
-| MCP versions | See the [protocol contract](../reference/mmcg.md#protocol-contract) |
-| Catalog | Tools, no resources or prompts |
+## Remove the entry
 
-Source and message bounds: [protocol contract](../reference/mmcg.md#protocol-contract).
+Run the same `setup` command with `--remove`, check the preview, then add
+`--write`. Use the scope you registered with.
 
-Remove the entry with the same setup path and `--remove`. Inspect the preview,
-then add `--write`. Customized entries require `--force`. Forced file changes
-save backups under `~/.mastermind/setup-backups/`.
+```bash
+mastermind setup cursor --scope project --root . --remove
+mastermind setup cursor --scope project --root . --remove --write
+```
+
+An entry that matches what setup would write needs no change. A customized
+entry also needs `--force`, and a forced change saves a backup under
+`~/.mastermind/setup-backups/`.

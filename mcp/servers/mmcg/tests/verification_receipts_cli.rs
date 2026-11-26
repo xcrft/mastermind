@@ -784,6 +784,27 @@ exec /usr/bin/git "$@"
     }
 
     #[test]
+    fn a_closed_terminal_interrupts_the_check_instead_of_orphaning_it() {
+        let fixture = Fixture::new("sleep", 30);
+        fixture.prepare();
+        let mut runner = fixture.spawn_verification();
+        fixture.await_started();
+        // SAFETY: this is the owned CLI child created by the fixture.
+        unsafe {
+            libc::kill(runner.id() as i32, libc::SIGHUP);
+        }
+        assert!(!runner.wait().unwrap().success());
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(fixture.path(RECEIPT)).unwrap()).unwrap();
+        assert_eq!(receipt["status"], "interrupted");
+        let child: i32 = fs::read_to_string(fixture.path(".mastermind/child"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        no_running_process(child);
+    }
+
+    #[test]
     fn killed_runner_leaves_pending_and_cannot_reuse_old_success() {
         let fixture = Fixture::new("switch", 30);
         fixture.prepare();

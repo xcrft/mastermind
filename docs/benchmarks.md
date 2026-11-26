@@ -19,7 +19,7 @@ MMCG_BENCH_CHANGED_FILES=1000 \
 ```
 
 Retain stdout, stderr and exit status for every run, including failures. Compile
-once before repeated measurements; compilation is outside the timed phases.
+once before repeated measurements. Compilation is outside the timed phases.
 
 | Input | Default |
 |---|---:|
@@ -52,7 +52,7 @@ Volatile SQLite row IDs are excluded. A mismatch fails the process.
 | SQLite writes through the normal writer | Temporary store creation |
 | Indexing all files when forced | Correctness queries and hashing |
 
-RSS is sampled every 2 ms; shorter peaks can be missed. Reported RSS includes
+RSS is sampled every 2 ms, so shorter peaks can be missed. Reported RSS includes
 memory retained from earlier phases, so it is not isolated per-phase allocation.
 
 ## Current retained measurement
@@ -75,8 +75,8 @@ over the three runs:
 
 | Same-source comparison | Median latency saving | Observed range |
 |---|---:|---:|
-| Warm cached vs forced full | 93.22% | 93.01–93.70% |
-| Incremental cached vs forced full | 83.52% | 82.88–84.98% |
+| Warm cached vs forced full | 93.22% | 93.01-93.70% |
+| Incremental cached vs forced full | 83.52% | 82.88-84.98% |
 
 These figures measure avoided reprocessing on this fixture. Cached processing
 runs before forced processing in a fixed order, with uncontrolled desktop load.
@@ -86,5 +86,5 @@ SCIP imports or Lens rendering.
 
 Schema 1 used constant-only functions and three phases. Its
 [retained report](../evals/baselines/index-20260927.json) describes that older
-corpus; do not interpret the schema 2 timings as a version regression against it.
+corpus, so don't read the schema 2 timings as a version regression against it.
 Other feature measurements and gaps are in the [scorecard](../evals/scorecard.md).

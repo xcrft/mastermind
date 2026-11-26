@@ -7,6 +7,7 @@ verify it without exposing users or working exploit details.
 
 | Version | Security fixes |
 |---|---|
+| 4.x | Supported |
 | 3.x | Supported |
 | 2.x and earlier | Upgrade required |
 
@@ -17,13 +18,13 @@ Do not open a public issue or discussion. Use
 
 Include:
 
-- affected Mastermind version and installation method.
-- operating system and relevant client/runtime versions.
-- minimal reproduction or proof of concept.
-- expected and actual security boundary.
-- impact, required attacker access, and whether untrusted repository content is
+- Affected Mastermind version and installation method.
+- Operating system and relevant client/runtime versions.
+- Minimal reproduction or proof of concept.
+- Expected and actual security boundary.
+- Impact, required attacker access, and whether untrusted repository content is
   involved.
-- logs with credentials, tokens, private source, and personal data removed.
+- Logs with credentials, tokens, private source, and personal data removed.
 
 If private reporting is unavailable, contact the maintainer through the GitHub
 profile and request a private channel. Do not send exploit details in a public
@@ -31,7 +32,7 @@ comment.
 
 ## In scope
 
-- path traversal, unsafe overwrite, or command execution in indexing, setup,
+- Path traversal, unsafe overwrite, or command execution in indexing, setup,
   install, export, or workflow commands.
 - SQL injection or database corruption through crafted repository paths or
   imported evidence.
@@ -39,64 +40,43 @@ comment.
   and additive-write boundary.
 - Lens binding, same-origin, script-injection, CSP, or source-index mutation
   defects.
-- fact, SARIF, coverage, JUnit, OTLP, SCIP, signature, revision, provenance,
+- Fact, SARIF, coverage, JUnit, OTLP, SCIP, signature, revision, provenance,
   size, or path validation bypasses.
-- workflow artifacts that instruct an agent to expose secrets, bypass explicit
+- Workflow artifacts that instruct an agent to expose secrets, bypass explicit
   approval, or perform destructive actions during normal documented use.
 - npm, Cargo, Docker Action, GitHub Actions, or release-provenance defects that
   can replace or publish unverified artifacts.
-- setup/uninstall ownership bugs that modify unrelated client configuration or
+- Setup/uninstall ownership bugs that modify unrelated client configuration or
   user files.
 
 ## Usually out of scope
 
-- an upstream dependency advisory without a demonstrated Mastermind impact.
-- generic model jailbreaks that do not bypass a Mastermind-enforced boundary.
-- denial of service that requires the local user to index an intentionally
+- An upstream dependency advisory without a demonstrated Mastermind impact.
+- Generic model jailbreaks that do not bypass a Mastermind-enforced boundary.
+- Denial of service that requires the local user to index an intentionally
   hostile repository, unless it bypasses a documented size/work limit or causes
   persistent data loss.
-- scanner output without a reproducible path and impact.
-- social engineering, account compromise, or GitHub/npm/crates.io platform
+- Scanner output without a reproducible path and impact.
+- Social engineering, account compromise, or GitHub/npm/crates.io platform
   issues outside this repository's control.
 
 We still welcome a private report when scope is uncertain.
 
 ## Local index and repository boundary
 
-Repository source and durable history are untrusted local inputs. Mastermind
-opens admitted files relative to the selected repository capability without
-following symlinks or Windows reparse points, rejects special files and path
-escapes, enforces per-file and aggregate limits, and compares descriptor
-identity before and after reads. History is derived retrieval evidence.
-Markdown remains authoritative, and its structural freshness is tracked
-separately from the source graph.
+Mastermind treats repository source and its history as untrusted input. It
+opens files relative to the selected repository without following symlinks or
+Windows reparse points, rejects special files and path escapes, enforces
+per-file and total limits, and checks the file identity before and after each
+read. The index is local derived data, so protect it like the repository
+itself. The documentation-token filter that drops secret-like text reduces
+accidental credential storage, but it is not a secret scanner and doesn't
+protect against a hostile local machine.
 
-| Boundary | Enforcement |
-|---|---|
-| One MCP request | Absolute deadline and cancellation across SQLite, Git, file reads, refresh, single retry, snapshots and serialization |
-| Cancellation | `cancelled` |
-| Deadline expiry | `work_limit_exceeded` |
-| Automatic refresh | At most 100,000 source candidates and 512 MiB declared source bytes |
-| Writable refresh | Only canonical `ROOT/.mastermind/mmcg.db` opened by `serve` |
-| Custom `--index` | Read-only snapshot, no creation, migration, truncation or source-side SQLite sidecars |
-| Incompatible schema | `schema_incompatible` |
-
-Concept documentation is derived from untrusted repository text. Rust outer
-docs, Python owned docstrings, and JavaScript/TypeScript JSDoc are inspected
-while their declaration AST is available, but raw text is never written to the
-index or returned by a tool. Only bounded normalized search tokens are stored.
-
-| Documentation stage | Limit or rejection |
-|---|---|
-| Raw inspection | 2 KiB per candidate |
-| Normalized tokens | 512 UTF-8 bytes per symbol, 64 KiB per file |
-| Whole-candidate omission | Private-key header, AWS access-key shape, bearer value or non-placeholder api-key/secret/token/password assignment |
-
-These checks reduce accidental credential persistence. They are not a general
-secret scanner or a confidentiality boundary for a hostile local machine. The
-SQLite index remains local derived data and should receive the same filesystem
-protection as the repository. Count-only omission metadata and query precision
-notes never include documentation excerpts.
+The exact limits are in the reference: request deadlines, refresh caps and
+read-only custom indexes in [MCP server](docs/reference/mcp.md#managed-index-refresh),
+and the documentation token rules in
+[concept search](docs/reference/concept-search.md).
 
 ## Response and disclosure
 

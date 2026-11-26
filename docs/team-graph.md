@@ -41,9 +41,10 @@ mastermind team map team.lock.json > team-map.json
 
 | Operation or result | Contract |
 |---|---|
-| `team lock` | Pins canonical paths, repository identities, Git revisions and database/WAL digests |
+| `team lock` | Pins canonical paths, credential-free repository identities, Git revisions and the exact database and active-WAL digests. Its JSON summary prints the `manifest_sha256` that MCP authorization needs |
+| Repository IDs | ASCII letters, digits, dots, underscores and hyphens only, so namespaced node IDs cannot collide |
 | `team map` | Rechecks every pin and source freshness |
-| Changed repository or index | Requires a new lock. This includes a no-op `mmcg index` and a checkpoint of a non-empty WAL, because the pin covers exact bytes. An empty WAL beside a running server does not count |
+| Changed repository or index | Requires a new lock. This includes a no-op `mastermind index` and a checkpoint of a non-empty WAL, because the pin covers exact bytes. An empty WAL beside a running server does not count |
 | Nodes | Namespaced by repository |
 | Internal edges | Retain static codegraph provenance |
 | Cross-repository edges | Retain `provenance=team-manifest`. A declaration is not an observed network call |
@@ -55,7 +56,7 @@ Configure both values in the server environment:
 
 ```text
 MMCG_TEAM_MANIFEST=team.lock.json
-MMCG_TEAM_MANIFEST_SHA256=sha256:<digest printed by team lock>
+MMCG_TEAM_MANIFEST_SHA256=sha256:<manifest_sha256 from team lock>
 ```
 
 | Input | Rule |
@@ -66,12 +67,23 @@ MMCG_TEAM_MANIFEST_SHA256=sha256:<digest printed by team lock>
 
 ## Boundaries
 
+| Limit | Value |
+|---|---|
+| Manifest | 1 MiB |
+| Repositories | 16 |
+| Explicit relationships | 500 |
+| Component endpoints declared per repository | 20. More is a contract error |
+| Components returned per repository | 20 |
+| Internal import edges | 200 returned per repository, from a probe of at most 20,000 |
+| Index file (database or WAL) | 2 GiB each, 4 GiB across all members |
+| Deadline | 30 s for each `team lock` or `team map` |
+
 | Boundary | Behavior |
 |---|---|
-| Version 1 input | At most 16 repositories and 500 explicit relationships |
-| Bounded output | Inspect `partial` and diagnostics for omitted components or edges |
-| Unsafe paths, duplicate roots/indexes, stale sources or changed pins | Query rejected |
+| Bounded output | A cut component or edge list sets `partial` and adds a diagnostic |
+| Unsafe paths, duplicate roots or indexes, stale sources, changed pins or a timeout | Query rejected |
+| Database and WAL hashing | One parent-directory capability per repository. Path substitution, symlinks and special files are rejected, and identity is checked before and after each bounded read |
 | Manifest authority | Declares data only. Queries cannot fetch repositories, run plugins or write member indexes |
 
-See the [public schema](../schemas/mastermind-team-v1.schema.json) and
-[reference](reference/mmcg.md#local-team-graph) for exact limits and endpoint rules.
+The [public schema](../schemas/mastermind-team-v1.schema.json) defines every
+manifest field and endpoint rule.

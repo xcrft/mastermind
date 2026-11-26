@@ -18,7 +18,6 @@ use crate::queries::{ImpactBaseline, ImpactEngine};
 use crate::store::Store;
 
 pub const DEFAULT_CONFIG_PATH: &str = "mastermind-policy.yml";
-pub const DEFAULT_WORKFLOW_EVIDENCE_PATH: &str = ".mastermind/tasks";
 const CONFIG_BYTE_LIMIT: u64 = 1024 * 1024;
 const RULE_LIMIT: usize = 100;
 const RULE_ID_LIMIT: usize = 128;
@@ -45,10 +44,6 @@ impl PolicyError {
             code,
             detail: detail.into(),
         }
-    }
-
-    pub fn code(&self) -> &'static str {
-        self.code
     }
 
     pub fn new_for_cli(code: &'static str) -> Self {
@@ -1404,7 +1399,7 @@ rules:
             br#"rules: [{id: bad, scope: "**", require_tests: false}]"#.as_slice(),
         ] {
             let error = parse_config(source).unwrap_err();
-            assert_eq!(error.code(), "invalid_policy_config");
+            assert_eq!(error.code, "invalid_policy_config");
         }
         let too_many = format!(
             "rules:\n{}",
@@ -1415,7 +1410,7 @@ rules:
                 .collect::<String>()
         );
         assert_eq!(
-            parse_config(too_many.as_bytes()).unwrap_err().code(),
+            parse_config(too_many.as_bytes()).unwrap_err().code,
             "invalid_policy_config"
         );
     }
@@ -1451,7 +1446,7 @@ rules:
 
         for path in [root.join("policy\\alias.yml"), non_utf8] {
             let error = policy_config_identity_path(root, &path).unwrap_err();
-            assert_eq!(error.code(), "invalid_policy_config");
+            assert_eq!(error.code, "invalid_policy_config");
         }
     }
 
@@ -1474,7 +1469,7 @@ rules:
             Err(error) => error,
         };
 
-        assert_eq!(error.code(), "invalid_policy_config");
+        assert_eq!(error.code, "invalid_policy_config");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Deterministic, rebuildable candidates from explicit CONTEXT.md decision entries.
 //! Source-declared status is never treated as a review event.
 
-use crate::context_doctor::ProseLine;
 use crate::document_sections::DocumentSection;
+use crate::document_sections::ProseLine;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -95,7 +95,7 @@ fn decision_record_headings(
 pub fn extract(sections: &[DocumentSection], source_body: &str) -> ExtractedProjectClaims {
     let mut extracted = ExtractedProjectClaims::default();
     let mut seen_ids = HashSet::new();
-    let visible = crate::context_doctor::prose_lines(source_body);
+    let visible = crate::document_sections::prose_lines(source_body);
     let file_digest = crate::hex::sha256(source_body);
     for section in sections {
         let Some((root_heading, record_heading)) = decision_record_headings(section, &visible)

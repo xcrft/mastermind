@@ -103,7 +103,7 @@ fn source_bytes(
         4 * 1024 * 1024,
         (*remaining).min(4 * 1024 * 1024),
         crate::bounded_fs::ReadControl {
-            deadline: Some(Instant::now() + crate::diff::git_timeout()),
+            deadline: Some(Instant::now() + crate::git::git_timeout()),
             interrupted: None,
         },
     )
@@ -326,11 +326,11 @@ impl Feedback {
         }
         // follow_up has validated the native receipt's content and binding.
         // Retain its exact pin before run_pre clears the active review pin.
-        let value = crate::setup::parse_json_unique(&review)
+        let value = crate::strict_json::parse(&review, crate::strict_json::Floats::Reject)
             .map_err(|_| "auto_follow_up_review_unavailable")?;
         let native_pin = value["native_invocation"]["receipt_sha256"]
             .as_str()
-            .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .filter(|value| crate::hex::is_lower(value, 64))
             .ok_or("auto_follow_up_native_review_required")?;
         for (path, pin) in [
             (review_path, packet.review_revision.as_str()),
@@ -427,7 +427,7 @@ impl Feedback {
             &parsed,
             root.canonical_root(),
             &self.source_binding.baseline_oid,
-            Instant::now() + crate::diff::git_timeout(),
+            Instant::now() + crate::git::git_timeout(),
         )
         .map_err(|_| "auto_follow_up_check_executable_unavailable")?;
         if current != semantic.check_executables {

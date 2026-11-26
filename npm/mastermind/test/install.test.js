@@ -631,7 +631,7 @@ test("install keeps an edited owned skill and an unowned one with the same name"
 
       assert.throws(
         () => copyAll({ home: f.home, share: f.share, client: "claude", version: "2.0.0" }),
-        kind === "edited" ? /edited owned workflow artifact/ : /unowned workflow artifact conflicts/,
+        (error) => error.conflicts.length === 1 && error.conflicts[0].kind === kind && error.conflicts[0].path === skill,
       );
       assert.equal(fs.readFileSync(path.join(skill, "SKILL.md"), "utf8"), "my change\n");
       assert.equal(fs.readFileSync(path.join(skill, "mine.txt"), "utf8"), "mine\n");
@@ -639,6 +639,39 @@ test("install keeps an edited owned skill and an unowned one with the same name"
     } finally {
       f.cleanup();
     }
+  }
+});
+
+test("Finder and Python debris inside an installed skill is neither drift nor an edit", () => {
+  const f = completeFixture();
+  try {
+    copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+    const skill = path.join(f.home, ".claude", "skills", "mastermind-task-planning");
+    fs.writeFileSync(path.join(skill, ".DS_Store"), "finder\n");
+    fs.mkdirSync(path.join(skill, "__pycache__"));
+    fs.writeFileSync(path.join(skill, "__pycache__", "helper.cpython-312.pyc"), "bytecode\n");
+    const [status] = workflowStatus({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+    assert.equal(status.parity, true, JSON.stringify(status));
+    copyAll({ home: f.home, share: f.share, client: "claude", version: "2.0.0" });
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("doctor reports a linked skills directory as a row with a next step", () => {
+  const f = fixture();
+  try {
+    copyAll({ home: f.home, share: f.share, client: "claude", version: "1.0.0", profile: "full" });
+    const skills = path.join(f.home, ".claude", "skills");
+    const dotfiles = path.join(f.root, "dotfiles-skills");
+    fs.renameSync(skills, dotfiles);
+    fs.symlinkSync(dotfiles, skills, "dir");
+    const [status] = workflowStatus({ home: f.home, share: f.share, client: "claude", version: "1.0.0" });
+    assert.equal(status.parity, false);
+    assert.match(status.layout_error, /skills directory cannot be a symbolic link/);
+    assert.match(status.recovery[0], /Replace the symbolic link .* with a regular directory/);
+  } finally {
+    f.cleanup();
   }
 });
 

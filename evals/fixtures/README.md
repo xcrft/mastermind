@@ -2,7 +2,7 @@
 
 Compare lexical symbol retrieval on identical source bytes. Queries and sparse
 source anchors must be frozen before inspecting candidate output. Every observed
-suite becomes a regression set; choose fresh queries for further qualification.
+suite becomes a regression set, so choose fresh queries for further qualification.
 
 | Suite | Use after the retained runs |
 |---|---|
@@ -11,7 +11,7 @@ suite becomes a regression set; choose fresh queries for further qualification.
 | `concept-relevance-20261016.json` | First 20261016 selection set, with targeted checks separate |
 | `concept-relevance-20261016-holdout2.json` | Rejected query-filtering variant's observed qualification set |
 | `concept-relevance-20261016-holdout3.json` | Final ranking variant's observed qualification set |
-| Independent V6–V11 fixtures | Retained observed sets; use as regression data |
+| Independent V6-V11 fixtures | Retained observed sets. Use them as regression data |
 | Independent V12 fixture, source evidence and freeze | Query/anchor freeze for the [source-witness study](../baselines/concept-witness-20261016.md) |
 | V12 `.hints.json` and `.request-contracts.json` | Query-only recall and constraint inputs fixed before retrieval |
 
@@ -49,14 +49,14 @@ the [source-witness report](../baselines/concept-witness-20261016.md).
 
 | Measurement | Interpretation |
 |---|---|
-| Hit@k | Fraction of positive queries with a listed relevant anchor; empty queries stay in the denominator |
-| Anchor recall | Fraction of listed anchors returned; alternatives need not all be returned for a query to be useful |
-| Judged precision | Relevant rows divided by relevant plus explicit distractor rows; always report unjudged rows |
-| Complete source review | Judge the union of both result pages with variant and rank hidden; retain unknowns and disclose model review separately from frozen anchors |
-| Negative results | Returned lexical candidates for unsupported domain requests; inspect these separately |
-| Failed queries | Unknown measurements retained in planned denominators; point hit@k is withheld |
+| Hit@k | Fraction of positive queries with a listed relevant anchor. Empty queries stay in the denominator |
+| Anchor recall | Fraction of listed anchors returned. Alternatives need not all be returned for a query to be useful |
+| Judged precision | Relevant rows divided by relevant plus explicit distractor rows. Always report unjudged rows |
+| Complete source review | Judge the union of both result pages with variant and rank hidden. Keep unknowns and disclose model review separately from frozen anchors |
+| Negative results | Returned lexical candidates for unsupported domain requests. Inspect these separately |
+| Failed queries | Unknown measurements kept in planned denominators. Point hit@k is withheld |
 
-These measurements establish behavior on the frozen queries. They do not measure
+These measurements describe behavior on the frozen queries. They do not measure
 general semantic quality, token savings or the frequency of real user queries.
 
 For source-reviewed behavior, follow the [operation-review commands](../benchmark/README.md#evaluate-operation-relevance-with-source-review).
@@ -64,4 +64,4 @@ Pass the matching `.hints.json` with `--hints` and `.request-contracts.json`
 with `--request-contracts`. Keep the fixture and its anchors away from source
 reviewers. A second reviewer assesses every emitted declaration without seeing
 the first labels, roles or ranks. Rerunning these now-observed queries provides
-regression evidence; further qualification needs a newly authored frozen set.
+regression evidence, and further qualification needs a newly authored frozen set.

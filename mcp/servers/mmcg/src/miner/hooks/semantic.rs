@@ -456,11 +456,11 @@ fn excluded_ranges(text: &str) -> Vec<Range<usize>> {
     let mut excluded = Vec::new();
     let mut prose = vec![false; text.len()];
     let mut literals = vec![false; text.len()];
-    let prose_lines: HashSet<usize> = crate::context_doctor::prose_lines(text)
+    let prose_lines: HashSet<usize> = crate::document_sections::prose_lines(text)
         .into_iter()
         .map(|line| line.index)
         .collect();
-    for line in crate::context_doctor::source_lines(text) {
+    for line in crate::document_sections::source_lines(text) {
         if !prose_lines.contains(&line.index) {
             excluded.push(line.offset..line.offset + line.raw.len());
         }

@@ -110,22 +110,29 @@ mastermind audit verify .mastermind/audit.bundle.json \
   --require-signature --trusted-key-id "sha256:<public-key-digest>"
 ```
 
-Protect private seed files. Keep trusted and revoked key IDs in independently
-reviewed policy. When snapshot and signature policies are supplied, both must
-pass.
+| Key and signature rule | Contract |
+|---|---|
+| Private key | One line of base64 holding a 32-byte Ed25519 seed, with Unix mode `0600` |
+| Signature | A detached, domain-separated schema-v1 statement that binds the envelope schema, hash algorithm, canonicalization, key ID and manifest digest |
+| Trust | Keep trusted and revoked key IDs in independently reviewed policy. Key owners handle rotation, revocation and the policy needed to verify old envelopes |
+| Snapshot and signature policies both supplied | Both must pass |
+| Signing time | Not recorded. Ed25519 alone cannot tell a signature made before a key compromise from one made after |
 
 ## Interpret the result
+
+`audit-spec --bundle` seals the mechanical report as canonical JSON with a
+manifest SHA-256 digest. Spec and executor-report paths need exact UTF-8
+identities before they enter the bundle. `audit verify` succeeds only with a
+complete repository, baseline, head, root and clean-worktree policy, a required
+signature from an allowlisted key ID that is not revoked, or both.
 
 | Evidence | Establishes | Does not establish |
 |---|---|---|
 | Matching canonical digest | Envelope content is internally consistent | Authenticity or finding accuracy |
-| Signature under a trusted key | The signing key approved those bytes | Independent source inspection or human identity |
+| Signature under a trusted key | The signing key approved those bytes | Independent source inspection, human identity or signing time |
 | Repository policy checks | Required repository and revisions match | Semantic correctness |
-| GitHub artifact attestation | Archive and statement passed through the attestation workflow | Finding accuracy |
-| `--integrity-only` | Digest consistency only | Authenticity or policy admission. Unsuitable for publication |
-
-See the [audit-envelope reference](reference/mmcg.md#schema-v3-audit-envelopes)
-for canonicalization, signatures, trust anchors, and validation limits.
+| GitHub artifact attestation | The publication workflow verified the archive and statement | That PR analysis ran in a trusted environment, or finding accuracy |
+| `--integrity-only` | Digest consistency only. The result is labeled untrusted and reports authenticity and policy as `not_evaluated` | Authenticity or policy admission. Unsuitable for publication |
 
 ## Maintain the integration
 

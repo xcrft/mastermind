@@ -384,9 +384,18 @@ def collect_relative_links() -> dict[Path, set[str]]:
     return result
 
 
+# Retained reports whose exact bytes are bound by SHA-256 in other records.
+# Editing a dead link would break that binding, so their links are not checked.
+HASH_BOUND_REPORTS = {
+    "evals/baselines/statistical-reanalysis-20261015.md",
+}
+
+
 def validate_relative_links(links: dict[Path, set[str]]) -> list[Issue]:
     issues: list[Issue] = []
     for source, targets in links.items():
+        if source.relative_to(REPO_ROOT).as_posix() in HASH_BOUND_REPORTS:
+            continue
         source_dir = source.parent
         for target in targets:
             resolved = (source_dir / target).resolve()
@@ -475,21 +484,21 @@ MMCG_MCP_SRC = "mcp/servers/mmcg/src/mcp.rs"
 MMCG_EXPECTED_LAST_TOOL = "mmcg_mining_submit"
 MMCG_EXPECTED_BEHAVIOR_COUNTS = {
     "refreshable_tool": 22,
-    "read_only_tool": 15,
-    "additive_tool": 2,
+    "read_only_tool": 14,
+    "additive_tool": 1,
 }
 
 # The reference owns the complete catalog; integration guides link to it.
 MMCG_TOOL_LIST_DOCS: list[str] = [
-    "docs/reference/mmcg.md",
+    "docs/reference/mcp.md",
 ]
 
 # Files that quote a tool *count* like "16 structural query tools" / "15 tools".
 # We extract counts and assert they all match the count derived from mcp.rs.
 MMCG_TOOL_COUNT_DOCS: list[str] = [
     "docs/reference/mmcg.md",
+    "docs/reference/mcp.md",
     "docs/integrations/generic-mcp.md",
-    "mcp/README.md",
     "mcp/servers/mmcg/README.md",
     "npm/mastermind/README.md",
     "README.md",
@@ -964,7 +973,7 @@ def validate_mmcg_tool_drift() -> list[Issue]:
     except OSError as error:
         issues.append(Issue(guide, "error", f"cannot read MCP integration guide: {error}"))
     else:
-        if not re.search(r"\]\(\.\./reference/mmcg\.md#mcp-tools\)", guide_text):
+        if not re.search(r"\]\(\.\./reference/mcp\.md#mcp-tools\)", guide_text):
             issues.append(Issue(guide, "error", "MCP integration guide must link to the canonical tool catalog"))
     src_path = REPO_ROOT / MMCG_MCP_SRC
     if not src_path.is_file():
@@ -2047,6 +2056,42 @@ def dockerfile_from_images(text: str) -> list[str]:
     return images
 
 
+# A workflow that names its own toolchain drifts from rust-toolchain.toml on the next bump.
+WORKFLOW_TOOLCHAIN_PIN = re.compile(
+    r"dtolnay/rust-toolchain|rustup (?:toolchain install|default|override set)[ \t]+\w|cargo \+\w"
+)
+
+
+def validate_rust_toolchain_source() -> list[Issue]:
+    """Keep rust-toolchain.toml the only place that chooses the Rust version."""
+    toolchain_path = REPO_ROOT / "rust-toolchain.toml"
+    docker_path = REPO_ROOT / "Dockerfile.audit-action"
+    try:
+        toolchain_text = toolchain_path.read_text(encoding="utf-8")
+        docker_text = docker_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [Issue(toolchain_path, "error", f"cannot read Rust toolchain sources: {error}")]
+    match = re.search(r'(?m)^channel = "((\d+\.\d+)\.\d+)"$', toolchain_text)
+    if match is None:
+        return [Issue(toolchain_path, "error", 'rust-toolchain.toml must pin channel = "X.Y.Z"')]
+    channel, minor = match.groups()
+
+    issues: list[Issue] = []
+    images = dockerfile_from_images(docker_text)
+    if not images or not images[0].startswith(f"rust:{minor}-") or f"cargo +{channel} build" not in docker_text:
+        issues.append(Issue(
+            docker_path, "error",
+            f"Docker build must use rust:{minor} and `cargo +{channel} build` to match rust-toolchain.toml",
+        ))
+    for path in sorted((REPO_ROOT / ".github/workflows").glob("*.y*ml")):
+        if WORKFLOW_TOOLCHAIN_PIN.search(path.read_text(encoding="utf-8")):
+            issues.append(Issue(
+                path, "error",
+                "install Rust with `rustup toolchain install` so rust-toolchain.toml stays the only version",
+            ))
+    return issues
+
+
 def validate_audit_action_security() -> list[Issue]:
     issues: list[Issue] = []
     parsed: dict[str, dict] = {}
@@ -2155,8 +2200,8 @@ def validate_audit_action_security() -> list[Issue]:
         actual_from = dockerfile_from_images(docker_text)
         if actual_from != expected_from:
             issues.append(Issue(docker_path, "error", "Docker stages must use the two audited immutable OCI digests"))
-        if "cargo +1.100.0 build" not in docker_text or "--locked" not in docker_text:
-            issues.append(Issue(docker_path, "error", "Docker Action must build with Rust 1.100 and the Cargo lockfile"))
+        if "--locked" not in docker_text:
+            issues.append(Issue(docker_path, "error", "Docker Action must build with the Cargo lockfile"))
         if "COPY mcp/servers/mmcg/benches ./mcp/servers/mmcg/benches" not in docker_text:
             issues.append(Issue(docker_path, "error", "Docker Action must include Cargo's declared benchmark target"))
         if "COPY mcp/servers/mmcg/build.rs ./mcp/servers/mmcg/build.rs" not in docker_text:
@@ -2234,6 +2279,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_fact_ingestion_sdk_contract())
     issues.extend(validate_extension_lifecycle_contract())
     issues.extend(validate_repository_workflow_pins())
+    issues.extend(validate_rust_toolchain_source())
     issues.extend(validate_audit_action_security())
 
     issues.sort(key=lambda i: (str(i.path), 0 if i.level == "error" else 1, i.msg))

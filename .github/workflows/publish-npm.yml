@@ -81,11 +81,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: 1.100.0
-          components: clippy, rustfmt
-          targets: ${{ matrix.target }}
+      # rustup reads the channel, profile and components from rust-toolchain.toml.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add ${{ matrix.target }}
 
       - name: Install musl-tools
         if: matrix.install_musl

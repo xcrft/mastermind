@@ -246,7 +246,7 @@ pub(super) fn finish(episode: &str) -> Result<(), Error> {
             if !enabled(root, &captured.client)? {
                 return Ok(None);
             }
-            let reader = super::configured_profile_client(root, &captured.client)?;
+            let reader = super::configured_profile_client(root, &captured.client, true)?;
             Ok(super::refresh_task_profile(root, reader.as_deref()))
         })();
         match result {

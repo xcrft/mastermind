@@ -1,4 +1,4 @@
-use mmcg::{indexer::Indexer, store::Store};
+use mmcg::{indexer::Indexer, queries, store::Store};
 
 fn index(source: &str) -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -27,11 +27,11 @@ fn receiver_calls_do_not_reference_a_free_function_with_the_same_name() {
         .unwrap()
         .iter()
         .any(|s| s.name == "map"));
-    assert!(!store
-        .centrality(None, None, None, 100)
+    assert!(!queries::centrality(&store, None, None, None, 100)
         .unwrap()
+        .results
         .iter()
-        .any(|(s, _, _)| s.name == "map"));
+        .any(|hit| hit.name == "map"));
     for (scope, kind) in [(".", "root"), ("src", "directory"), ("src/lib.rs", "file")] {
         assert!(!store
             .map_centrality_filtered(scope, kind, 100, false)
@@ -50,10 +50,12 @@ fn receiver_and_free_calls_keep_separate_degrees_even_with_the_same_name() {
     let (_dir, store) = index(
         "fn run() {}\nstruct Worker;\nimpl Worker { fn run(&self) {} }\nfn free_entry() { run(); }\nfn method_entry(w: Worker) { w.run(); }",
     );
-    let degrees = store.centrality(None, None, None, 100).unwrap();
-    let runs: Vec<_> = degrees.iter().filter(|(s, _, _)| s.name == "run").collect();
+    let degrees = queries::centrality(&store, None, None, None, 100)
+        .unwrap()
+        .results;
+    let runs: Vec<_> = degrees.iter().filter(|hit| hit.name == "run").collect();
     assert_eq!(runs.len(), 2);
-    assert!(runs.iter().all(|(_, degree, _)| *degree == 1));
+    assert!(runs.iter().all(|hit| hit.in_degree == 1));
     for (scope, kind) in [(".", "root"), ("src", "directory")] {
         let rows = store
             .map_centrality_filtered(scope, kind, 100, false)

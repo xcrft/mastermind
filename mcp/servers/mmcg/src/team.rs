@@ -349,7 +349,7 @@ fn validate_manifest(manifest: &TeamManifest) -> Result<(), TeamError> {
         if repository
             .revision
             .as_deref()
-            .is_some_and(|value| !crate::diff::is_full_git_oid(value))
+            .is_some_and(|value| !crate::git::is_full_git_oid(value))
         {
             return Err(TeamError::Contract(format!(
                 "repository {} has an invalid revision",

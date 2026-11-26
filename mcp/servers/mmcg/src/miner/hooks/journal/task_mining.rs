@@ -60,6 +60,49 @@ fn offer_at(conn: &Connection, episode: &str) -> Result<Option<Offer>, Error> {
     raw.map(|raw| Ok(serde_json::from_str(&raw)?)).transpose()
 }
 
+pub(super) fn task_mining_receipt(conn: &Connection, episode: &str) -> Result<Value, Error> {
+    if !conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_task_mining'")?
+        .exists([])?
+    {
+        return Ok(json!({"status":"not_offered"}));
+    }
+    let Some(offer) = offer_at(conn, episode)? else {
+        return Ok(archive::retired(conn, episode, "task_mining")?
+            .unwrap_or_else(|| json!({"status":"not_offered"})));
+    };
+    Ok(
+        json!({"status":offer.status,"ticket_id":offer.id,"source_event_id":offer.event_id,
+        "client":offer.client,"capture_generation":offer.generation,"publication":"none",
+        "continuation_requested":offer.continuation.is_some(),"reason":offer.reason,
+        "candidate_count":offer.candidate_count,"finalization":task_finalization(conn, episode)?,
+        "result":if offer.status == "completed" { offer.candidate_count.map(|count| if count == 0 {"no_signal"} else {"candidates"}) } else {None}}),
+    )
+}
+
+fn task_finalization(conn: &Connection, episode: &str) -> Result<Option<Value>, Error> {
+    let exists:bool=conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_task_finalization')",
+        [], |row|row.get(0))?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT attempts,reason,completed,owner IS NOT NULL AND lease_until>unixepoch()
+        FROM hook_task_finalization WHERE episode=?1",
+            [episode],
+            |row| {
+                let completed: bool = row.get(2)?;
+                let running: bool = row.get(3)?;
+                Ok(json!({"schema_version":1,"attempts":row.get::<_,i64>(0)?,
+                "reason":row.get::<_,Option<String>>(1)?,
+                "status":if completed {"completed"} else if running {"running"} else {"pending"}}))
+            },
+        )
+        .optional()?)
+}
+
 fn save_offer(conn: &Connection, offer: &Offer) -> Result<(), Error> {
     conn.execute(
         "UPDATE hook_task_mining SET data=?2 WHERE id=?1",
@@ -317,23 +360,7 @@ impl Journal {
     }
 
     pub fn task_mining_receipt(&self, episode: &str) -> Result<Value, Error> {
-        if !self
-            .conn
-            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_task_mining'")?
-            .exists([])?
-        {
-            return Ok(json!({"status":"not_offered"}));
-        }
-        let Some(offer) = offer_at(&self.conn, episode)? else {
-            return Ok(json!({"status":"not_offered"}));
-        };
-        Ok(
-            json!({"status":offer.status,"ticket_id":offer.id,"source_event_id":offer.event_id,
-            "client":offer.client,"capture_generation":offer.generation,"publication":"none",
-            "continuation_requested":offer.continuation.is_some(),"reason":offer.reason,
-            "candidate_count":offer.candidate_count,"finalization":self.task_finalization(episode)?,
-            "result":if offer.status == "completed" { offer.candidate_count.map(|count| if count == 0 {"no_signal"} else {"candidates"}) } else {None}}),
-        )
+        task_mining_receipt(&self.conn, episode)
     }
 
     pub fn queue_task_finalizer(&self, episode: &str) -> Result<(), Error> {
@@ -439,24 +466,6 @@ impl Journal {
             |row| row.get(0),
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    fn task_finalization(&self, episode: &str) -> Result<Option<Value>, Error> {
-        let exists:bool=self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_task_finalization')",
-            [], |row|row.get(0))?;
-        if !exists {
-            return Ok(None);
-        }
-        Ok(self.conn.query_row(
-            "SELECT attempts,reason,completed,owner IS NOT NULL AND lease_until>unixepoch()
-            FROM hook_task_finalization WHERE episode=?1", [episode], |row| {
-                let completed:bool=row.get(2)?;
-                let running:bool=row.get(3)?;
-                Ok(json!({"schema_version":1,"attempts":row.get::<_,i64>(0)?,
-                    "reason":row.get::<_,Option<String>>(1)?,
-                    "status":if completed {"completed"} else if running {"running"} else {"pending"}}))
-            }).optional()?)
     }
 
     pub fn offer_task_mining(

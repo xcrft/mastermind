@@ -1547,6 +1547,9 @@ fn build_batch(store: &Store, scip_path: &Path) -> Result<SemanticImportBatch, S
 }
 
 pub fn import(store: &Store, scip_path: &Path) -> Result<ImportSummary, ScipOverlayError> {
+    let _writer = store
+        .lock_writer()
+        .map_err(|error| ScipOverlayError::Store(error.to_string()))?;
     let batch = build_batch(store, scip_path)?;
     let previous = store
         .semantic_source()

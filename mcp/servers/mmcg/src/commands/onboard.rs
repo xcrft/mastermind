@@ -340,6 +340,12 @@ fn workflow(root: &Path, client: &str, write: bool) -> Result<Value, Error> {
         let parity = clients[0]["parity"]
             .as_bool()
             .ok_or("workflow doctor did not report bundle parity")?;
+        // The workflow doctor owns the recovery text, including edited,
+        // linked and unowned entries that a plain update would refuse.
+        let mut actions = clients[0]["recovery"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         if detail["schema_version"] != 1 || result.success != parity {
             return Err("workflow doctor returned an inconsistent report".into());
         }
@@ -349,14 +355,18 @@ fn workflow(root: &Path, client: &str, write: bool) -> Result<Value, Error> {
             "missing_or_stale"
         });
         if !parity {
-            detail["next_action"] = json!(format!(
-                "mastermind update --workflow-only --client {client}"
-            ));
+            if actions.is_empty() {
+                actions.push(json!(format!(
+                    "mastermind update --workflow-only --client {client}"
+                )));
+            }
+            detail["next_action"] = actions[0].clone();
+            detail["next_actions"] = json!(actions);
         }
         return Ok(detail);
     }
-    if !result.success {
-        return Err(format!("workflow reconciliation failed: {detail}").into());
+    if result.success != (detail["status"] == "complete") {
+        return Err("workflow update returned an inconsistent report".into());
     }
     Ok(detail)
 }
@@ -414,11 +424,15 @@ pub fn init(options: Options, index_override: Option<&Path>) -> Result<bool, Err
     }
     for client in &settings.clients {
         if settings.workflow {
-            stage(
-                &mut steps,
-                &format!("{client}.workflow"),
-                workflow(&root, client, true),
-            );
+            let component = format!("{client}.workflow");
+            match workflow(&root, client, true) {
+                Ok(detail) if detail["status"] != "complete" => steps.push(json!({
+                    "component":component,"status":"failed","reason":detail["reason"],"detail":detail
+                })),
+                result => {
+                    stage(&mut steps, &component, result);
+                }
+            }
         }
         stage(
             &mut steps,
@@ -515,7 +529,7 @@ fn stop_worker(root: &Path, client: &str) -> Result<Value, Error> {
     }
     let report = background::stop(client, root)?;
     if report["owner"] == "held" {
-        return Err("worker is still stopping. Repeat init after the current attempt exits".into());
+        return Err("worker is still stopping. Wait until the current attempt exits".into());
     }
     Ok(report)
 }
@@ -547,7 +561,7 @@ pub fn status_report(root: &Path, index_override: Option<&Path>) -> Result<Value
         Ok(settings) => (settings, None),
         Err(error) => (None, Some(error.to_string())),
     };
-    let workflow_status = mmcg::workflow_status::WorkflowStatus::scan_with_index(
+    let workflow_status = mmcg::task_status::WorkflowStatus::scan_with_index(
         root,
         &index_override
             .map(Path::to_path_buf)
@@ -584,7 +598,7 @@ pub fn status_report(root: &Path, index_override: Option<&Path>) -> Result<Value
         } else {
             json!({"status":"not_requested"})
         };
-        let access = onboarding::profile_access(root, client)
+        let access = onboarding::profile_access(root, client, false)
             .map(|allowed| json!({"allowed":allowed}))
             .unwrap_or_else(|error| json!({"allowed":null,"reason":error.to_string()}));
         clients.push(json!({"client":client,"pending_removal":settings.as_ref().is_some_and(|settings| settings.pending_removals.contains(client)),"mcp":mcp,"workflow":workflow,"hooks":hooks,"profile_access":access}));
@@ -626,6 +640,13 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
             for warning in step["detail"]["warnings"].as_array().into_iter().flatten() {
                 if let Some(warning) = warning.as_str() {
                     println!("    Warning: {}", warning.escape_debug());
+                }
+            }
+            if step["status"] == "failed" {
+                for action in step["detail"]["recovery"].as_array().into_iter().flatten() {
+                    if let Some(action) = action.as_str() {
+                        println!("    Next: {}", action.escape_debug());
+                    }
                 }
             }
             if let Some(attempts) = step["detail"]["run"]["attempts"].as_u64() {
@@ -684,8 +705,27 @@ fn emit(report: &Value, as_json: bool) -> Result<(), Error> {
                     .as_str()
                     .unwrap_or("unknown")
             );
-            if let Some(action) = client["workflow"]["next_action"].as_str() {
-                println!("    Next: {action}");
+            for conflict in client["workflow"]["clients"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row["conflicts"].as_array())
+                .flatten()
+            {
+                println!(
+                    "    {} {}",
+                    conflict["kind"].as_str().unwrap_or("conflict"),
+                    conflict["path"].as_str().unwrap_or("").escape_debug()
+                );
+            }
+            for action in client["workflow"]["next_actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(action) = action.as_str() {
+                    println!("    Next: {}", action.escape_debug());
+                }
             }
             if client["hooks"]["activation"]["status"] == "not_observed" {
                 if let Some(activation) =

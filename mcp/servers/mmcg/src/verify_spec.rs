@@ -379,7 +379,7 @@ pub(crate) fn run_reapproval(
     spec: &ParsedSpec,
     store: Option<&Store>,
     repo_root: &Path,
-    files: &[crate::diff::WorkingTreeChangedFile],
+    files: &[crate::git::WorkingTreeChangedFile],
     baseline: crate::declared_files::DeletionBaseline<'_>,
 ) -> Report {
     run_internal(
@@ -405,7 +405,7 @@ pub(crate) fn run_postflight(
 enum Phase<'a> {
     Preflight,
     Reapproval(
-        &'a [crate::diff::WorkingTreeChangedFile],
+        &'a [crate::git::WorkingTreeChangedFile],
         crate::declared_files::DeletionBaseline<'a>,
     ),
     Postflight,
@@ -418,7 +418,7 @@ fn run_internal(
     phase: Phase<'_>,
     removals: Option<&spec_removals::Plan>,
 ) -> Report {
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let mut errors: Vec<Finding> = Vec::new();
     let mut warnings: Vec<Finding> = Vec::new();
 
@@ -770,7 +770,7 @@ fn body_is_effectively_empty(section: &str, body: &str) -> bool {
     if section == "Final Verification" && has_concrete_fenced_command(body) {
         return false;
     }
-    let prose = crate::context_doctor::prose_lines(body);
+    let prose = crate::document_sections::prose_lines(body);
     let stripped: String = prose
         .iter()
         .map(|line| line.text.trim())

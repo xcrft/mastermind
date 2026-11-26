@@ -96,8 +96,8 @@ pub(super) fn directory_summary() -> Result<BTreeMap<String, Summary>> {
 
 /// Lists and validates the directory. Nothing is removed before `remove`, so
 /// the caller can decide inside its own transaction.
-pub(super) fn recovery(client: &str, root: &Path) -> Result<Option<Recovery>> {
-    recovery_at(&directory()?, &prefix(client, root)?)
+pub(super) fn recovery(client: &str, project_root: &str) -> Result<Option<Recovery>> {
+    recovery_at(&directory()?, &grant_prefix(client, project_root)?)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

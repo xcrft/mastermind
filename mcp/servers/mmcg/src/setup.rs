@@ -50,10 +50,6 @@ pub struct Request {
     pub force: bool,
 }
 
-pub fn run(request: &Request, mmcg_binary: &Path) -> Outcome {
-    run_with_profile_client(request, mmcg_binary, None)
-}
-
 /// Register the selected MCP audience without granting it profile access.
 /// `None` preserves the ordinary setup contract. A previously canonical entry
 /// with no environment can acquire this one explicit value without `force`;
@@ -2678,7 +2674,10 @@ mod tests {
             remove: false,
             force: false,
         };
-        assert_eq!(run(&request, &binary), Outcome::Error);
+        assert_eq!(
+            run_with_profile_client(&request, &binary, None),
+            Outcome::Error
+        );
         assert!(!root.join(".mcp.json").exists());
         fs::remove_dir_all(root).ok();
     }
@@ -2827,9 +2826,7 @@ mod tests {
                 entry,
                 json!({"command": node_text, "args": [launcher_text, "serve"]})
             );
-            assert!(crate::workflow_status::valid_mmcg_registration_entry(
-                &entry
-            ));
+            assert!(crate::workflow_audit::valid_mmcg_registration_entry(&entry));
         }
         let other_script = Path::new(root).join("bin/other.js");
         let _guard = EnvGuard::set(&[
@@ -2841,10 +2838,10 @@ mod tests {
             mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other),
             Err("npm_launcher_path_invalid")
         );
-        assert!(!crate::workflow_status::valid_mmcg_registration_entry(
+        assert!(!crate::workflow_audit::valid_mmcg_registration_entry(
             &json!({"command": node_text, "args": [other_script, "serve"]})
         ));
-        assert!(!crate::workflow_status::valid_mmcg_registration_entry(
+        assert!(!crate::workflow_audit::valid_mmcg_registration_entry(
             &json!({"command": "node", "args": [launcher_text, "serve"]})
         ));
     }
@@ -2996,7 +2993,10 @@ mod tests {
             },
         ];
         for request in invalid {
-            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+                Outcome::Error
+            );
         }
         assert!(!root.exists());
     }
@@ -3019,7 +3019,10 @@ mod tests {
             remove: false,
             force: false,
         };
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Wrote);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Wrote
+        );
         let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
         assert_eq!(value.pointer("/other/kept"), Some(&json!(true)));
         assert!(value.pointer("/mcpServers/other").is_some());
@@ -3027,12 +3030,18 @@ mod tests {
 
         // Client configs carry fractional values such as cost totals.
         fs::write(&config, br#"{"mcpServers":{},"cost":0.25}"#).unwrap();
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Wrote);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Wrote
+        );
         let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
         assert_eq!(value.pointer("/cost"), Some(&json!(0.25)));
 
         fs::write(&config, br#"{"mcpServers":{},"nested":{"x":1,"x":2}}"#).unwrap();
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Error
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -3485,13 +3494,16 @@ mod tests {
             force: false,
         };
         assert_eq!(
-            run(&request, Path::new("/bin/mmcg")),
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
             Outcome::RefusedOverwrite
         );
         assert!(target.exists());
         request.force = true;
         request.remove = false;
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Wrote);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Wrote
+        );
         let backups = fs::read_dir(home.join(".mastermind/setup-backups"))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
@@ -3502,7 +3514,10 @@ mod tests {
             .contains("hidden"));
         request.force = false;
         request.remove = true;
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Wrote);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Wrote
+        );
         assert!(!target.exists());
         fs::remove_dir_all(root).ok();
     }
@@ -3926,7 +3941,10 @@ esac
                 Outcome::RefusedOverwrite
             );
             assert_eq!(fs::read_to_string(mutations).unwrap(), "remove\nadd\n");
-            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::NoChange);
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+                Outcome::NoChange
+            );
         }
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(request_root).ok();
@@ -4068,7 +4086,10 @@ esac
                 failed_add_class(client, &program, &identity, &entry, &prior)
             };
 
-            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+                Outcome::Error
+            );
             assert_eq!(fs::read_to_string(&state).unwrap(), "old\n", "{name}");
             let argv = fs::read_to_string(bin.join(format!("{name}.argv"))).unwrap();
             assert!(
@@ -4079,7 +4100,10 @@ esac
 
             fs::write(bin.join(format!("{name}.restore-fails")), b"").unwrap();
             fs::remove_file(&state).unwrap();
-            assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+            assert_eq!(
+                run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+                Outcome::Error
+            );
             assert_eq!(fs::read_to_string(&state).unwrap(), "removed\n", "{name}");
             assert_eq!(failed_add(), "native_add_failed_not_restored", "{name}");
         }
@@ -4109,11 +4133,17 @@ esac
             force: false,
         };
 
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Error
+        );
 
         fs::write(executable.with_extension("state"), b"canonical").unwrap();
         request.remove = true;
-        assert_eq!(run(&request, Path::new("/bin/mmcg")), Outcome::Error);
+        assert_eq!(
+            run_with_profile_client(&request, Path::new("/bin/mmcg"), None),
+            Outcome::Error
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -4338,8 +4368,14 @@ esac
             },
         ];
         for request in requests {
-            assert_eq!(run(&request, mmcg), Outcome::Wrote);
-            assert_eq!(run(&request, mmcg), Outcome::NoChange);
+            assert_eq!(
+                run_with_profile_client(&request, mmcg, None),
+                Outcome::Wrote
+            );
+            assert_eq!(
+                run_with_profile_client(&request, mmcg, None),
+                Outcome::NoChange
+            );
         }
 
         #[cfg(unix)]
@@ -4369,8 +4405,14 @@ esac
                     remove: false,
                     force: false,
                 };
-                assert_eq!(run(&request, mmcg), Outcome::Wrote);
-                assert_eq!(run(&request, mmcg), Outcome::NoChange);
+                assert_eq!(
+                    run_with_profile_client(&request, mmcg, None),
+                    Outcome::Wrote
+                );
+                assert_eq!(
+                    run_with_profile_client(&request, mmcg, None),
+                    Outcome::NoChange
+                );
                 assert!(state.is_file());
             }
             fs::remove_dir_all(native_root).ok();

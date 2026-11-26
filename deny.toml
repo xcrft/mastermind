@@ -3,6 +3,8 @@ all-features = true
 
 [advisories]
 ignore = []
+# Fail on unmaintained crates anywhere in the tree, not only direct dependencies.
+unmaintained = "all"
 
 [licenses]
 allow = [
@@ -19,7 +21,8 @@ allow = [
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
 exceptions = [
-    { allow = ["CC0-1.0"], crate = "notify@8.2.2" },
+    { allow = ["CC0-1.0"], crate = "notify@9.0.0" },
+    { allow = ["BSL-1.0"], crate = "xxhash-rust@0.8.21" },
 ]
 
 [bans]

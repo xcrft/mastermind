@@ -6,7 +6,7 @@
 //! existing project-map engine over both stores. No checkout, worktree, or
 //! repository-index write is required.
 
-use crate::diff::{self, WorkingTreeChangedFile, WorkingTreeDiffError};
+use crate::git::{WorkingTreeChangedFile, WorkingTreeDiffError};
 use crate::indexer::{extractor_for_path, is_binary_content, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::queries::{
     self, ChangeImpactError, ChangeImpactResponse, MapComponent, MapHotspot, ProjectMapResponse,
@@ -493,7 +493,7 @@ pub(crate) fn analyze_with_impact(
         .deadline
         .map(|remaining| Instant::now() + remaining);
     let interrupted = || store.work_interrupted();
-    let baseline_blobs = diff::baseline_blobs_for_paths_controlled(
+    let baseline_blobs = crate::git::baseline_blobs_for_paths_controlled(
         &root,
         &impact.baseline.baseline_oid,
         &changed_paths,
@@ -596,7 +596,7 @@ pub(crate) fn analyze_with_impact(
         .deadline
         .map(|remaining| Instant::now() + remaining);
     let interrupted = || store.work_interrupted();
-    diff::validate_working_tree_snapshot_controlled(
+    crate::git::validate_working_tree_snapshot_controlled(
         &root,
         &impact.baseline.baseline_oid,
         &impact.baseline.head_oid,
@@ -704,7 +704,7 @@ pub(crate) fn analyze_with_impact(
             history: "exact_path_mentions_review_candidates_only",
         },
         limits: TemporalLimits {
-            changed_files: diff::CHANGE_FILE_LIMIT as u32,
+            changed_files: crate::git::CHANGE_FILE_LIMIT as u32,
             components_per_direction: COMPONENT_DELTA_LIMIT as u32,
             boundaries_per_direction: BOUNDARY_DELTA_LIMIT as u32,
             cycles_per_direction: CYCLE_DELTA_LIMIT as u32,
@@ -1310,7 +1310,7 @@ fn ownership_delta(
         .deadline
         .map(|remaining| Instant::now() + remaining);
     let interrupted = || store.work_interrupted();
-    let baseline_owner_blobs = diff::baseline_blobs_for_paths_controlled(
+    let baseline_owner_blobs = crate::git::baseline_blobs_for_paths_controlled(
         root,
         baseline_oid,
         &baseline_candidates,

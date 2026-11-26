@@ -232,12 +232,11 @@ fn seal_checked_with_hook<F>(
 where
     F: FnOnce(),
 {
+    let changed = |reason| BundleError::Invalid(format!("snapshot_changed: {reason}"));
     let preview = seal(manifest.clone())?;
-    recompute_inputs(&preview, root)
-        .map_err(|_| BundleError::Invalid("snapshot_changed".into()))?;
+    recompute_inputs(&preview, root).map_err(changed)?;
     between_rechecks();
-    recompute_inputs(&preview, root)
-        .map_err(|_| BundleError::Invalid("snapshot_changed".into()))?;
+    recompute_inputs(&preview, root).map_err(changed)?;
     seal(manifest)
 }
 
@@ -391,13 +390,13 @@ pub fn verify_envelope(envelope: &Envelope, policy: &VerifyPolicy) -> Verificati
             report.reasons.push("repository_mismatch".into());
             policy_ok = false;
         }
-        if !crate::diff::is_full_git_oid(baseline)
+        if !crate::git::is_full_git_oid(baseline)
             || envelope.manifest.repository.baseline_oid != baseline
         {
             report.reasons.push("baseline_mismatch".into());
             policy_ok = false;
         }
-        if !crate::diff::is_full_git_oid(head) || envelope.manifest.repository.head_oid != head {
+        if !crate::git::is_full_git_oid(head) || envelope.manifest.repository.head_oid != head {
             report.reasons.push("head_mismatch".into());
             policy_ok = false;
         }
@@ -614,7 +613,9 @@ fn open_file_at(parent: &File, component: &std::ffi::OsStr) -> Result<File, Bund
         libc::openat(
             parent.as_raw_fd(),
             component.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            // A FIFO would block the open until a writer appears. The type
+            // check after opening refuses it instead.
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
     if fd < 0 {
@@ -1274,7 +1275,7 @@ thread_local! {
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Vec<u8>, BundleError> {
     let output =
-        crate::diff::run_bounded_git_controlled(root, args, None, BUNDLE_INPUT_MAX, None, None)
+        crate::git::run_bounded_git_controlled(root, args, None, BUNDLE_INPUT_MAX, None, None)
             .map_err(|error| BundleError::Invalid(format!("audit_git_{}", error.code())))?;
     if !output.success {
         return Err(BundleError::Invalid("audit_git_failed".into()));
@@ -1680,7 +1681,7 @@ mod tests {
         assert_eq!(observations, 2);
         assert!(matches!(
             result,
-            Err(BundleError::Invalid(reason)) if reason == "snapshot_changed"
+            Err(BundleError::Invalid(reason)) if reason == "snapshot_changed: diff_digest_mismatch"
         ));
 
         let (_directory, root, value) = snapshot_fixture();
@@ -1693,7 +1694,7 @@ mod tests {
         assert_eq!(observations, 2);
         assert!(matches!(
             result,
-            Err(BundleError::Invalid(reason)) if reason == "snapshot_changed"
+            Err(BundleError::Invalid(reason)) if reason == "snapshot_changed: name_status_mismatch"
         ));
     }
 
@@ -1714,10 +1715,12 @@ mod tests {
         .is_err());
 
         let (_directory, root, value) = snapshot_fixture();
-        assert!(seal_checked_with_hook(value, &root, || {
-            std::fs::write(root.join("dirty.txt"), "dirty").unwrap();
-        })
-        .is_err());
+        assert!(matches!(
+            seal_checked_with_hook(value, &root, || {
+                std::fs::write(root.join("dirty.txt"), "dirty").unwrap();
+            }),
+            Err(BundleError::Invalid(reason)) if reason == "snapshot_changed: worktree_not_clean"
+        ));
 
         let (_directory, root, value) = snapshot_fixture();
         run_git(&root, &["update-index", "--assume-unchanged", "spec.md"]);
@@ -2114,6 +2117,11 @@ mod tests {
             .file_type()
             .is_fifo());
         assert!(write_atomic(&fifo, b"blocked", false).is_err());
+        // Without a writer, a blocking open of the FIFO would never return.
+        assert!(matches!(
+            read_bounded_regular(&fifo, false, false),
+            Err(BundleError::Invalid(reason)) if reason == "input must be a regular file"
+        ));
 
         let private = directory.path().join("private.json");
         write_atomic(&private, b"secret", true).unwrap();

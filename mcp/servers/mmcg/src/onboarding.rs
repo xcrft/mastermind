@@ -7,7 +7,7 @@ use crate::bounded_fs::{
 };
 use crate::invocation::{DEFAULT_MAX_TURNS as DEFAULT_EXEC_MAX_TURNS, DEFAULT_WALL_TIMEOUT_SECS};
 use crate::review_invocation::{DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS};
-use crate::run_task::DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES;
+use crate::task_record::DEFAULT_SNAPSHOT_MAX_TOTAL_BYTES;
 use crate::task_worktree::DEFAULT_WORKTREE_MAX_TOTAL_BYTES;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -388,9 +388,17 @@ pub fn snapshot_max_total_bytes(root: &Path) -> u64 {
     })
 }
 
-pub fn profile_access(root: &Path, client: &str) -> Result<bool, Error> {
-    let path = crate::miner::store::ProfileStore::db_path().ok_or("home directory unavailable")?;
-    let Some(store) = crate::miner::store::ProfileStore::open_optional_read_only(&path)? else {
+/// `convert` opens an existing store writable, which converts an older format.
+/// Read-only inspection passes `false` and gets the refusal instead.
+pub fn profile_access(root: &Path, client: &str, convert: bool) -> Result<bool, Error> {
+    use crate::miner::store::ProfileStore;
+    let path = ProfileStore::db_path().ok_or("home directory unavailable")?;
+    let store = if convert {
+        ProfileStore::open_existing(&path)?
+    } else {
+        ProfileStore::open_optional_read_only(&path)?
+    };
+    let Some(store) = store else {
         return Ok(false);
     };
     Ok(store.reader_allowed(root.to_str().ok_or("project root is not UTF-8")?, client)?)

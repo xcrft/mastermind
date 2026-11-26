@@ -27,7 +27,7 @@ use super::store::{self, Counts};
 use super::tooling::{self, Governed, ToolScope};
 use super::workflow::{self, CommitShape};
 use crate::bounded_fs::{AtomicWriteExpectation, BoundedReadError, ReadControl, RootCapability};
-use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
+use crate::git::{run_bounded_git_controlled, WorkingTreeDiffError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -125,7 +125,7 @@ pub fn refresh_for_task(
     repo_root: &Path,
     reader: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    if !crate::onboarding::profile_access(repo_root, reader)? {
+    if !crate::onboarding::profile_access(repo_root, reader, true)? {
         return Ok(serde_json::json!({"status":"access_denied","model":false}));
     }
     let path = store::ProfileStore::db_path().ok_or("could not resolve style store")?;
@@ -2807,7 +2807,7 @@ fn delivery_summary_at(
 
 /// See [`delivery_summary`].
 pub struct DeliverySummary {
-    /// Active, not-superseded rows before the 64-cap or source verification.
+    /// Active rows before the 64-cap or source verification.
     pub eligible: usize,
     /// Rows ranking, the cap and source verification would ever deliver —
     /// `doctor`'s "M".
@@ -2968,10 +2968,6 @@ fn mark_unavailable_claims(
     let mut checked = 0;
     let mut complete = true;
     for habit in &mut agg.habits {
-        if let Some(status) = habit.retired_status() {
-            habit.status = status.into();
-            continue;
-        }
         if habit.status != "observed" {
             continue;
         }
@@ -2993,10 +2989,6 @@ fn mark_unavailable_claims(
     }
     checked = 0;
     for entry in &mut agg.feedback {
-        if entry.superseded_by.is_some() {
-            entry.status = "superseded".into();
-            continue;
-        }
         if entry.status != "active" {
             continue;
         }
@@ -3105,7 +3097,6 @@ fn view_at_with_verifier(
                 role,
                 workflow,
             ) && entry.status == "active"
-                && entry.superseded_by.is_none()
         });
         // Most important first: cap slots and verification quota go to rows
         // that could actually be delivered, never to ineligible ones.
@@ -4624,7 +4615,6 @@ diff --git a/app/bar.ts b/app/bar.ts
             commits_total: 42,
             commits_sampled: 42,
             added_lines_sampled: 320,
-            identities: vec!["me@example.com".to_string()],
             counts: Counts::new(),
             commits: Vec::new(),
             legacy_repos: 0,
@@ -4662,7 +4652,6 @@ diff --git a/app/bar.ts b/app/bar.ts
             commits_total: 3,
             commits_sampled: 3,
             added_lines_sampled: 0,
-            identities: vec![],
             counts: Counts::new(),
             commits: Vec::new(),
             legacy_repos: 2,
@@ -4898,7 +4887,6 @@ diff --git a/app/bar.ts b/app/bar.ts
             commits_total: 1,
             commits_sampled: 1,
             added_lines_sampled: 1,
-            identities: vec!["private@example.com".into()],
             counts: Counts::new(),
             commits: Vec::new(),
             legacy_repos: 0,
@@ -6177,8 +6165,6 @@ diff --git a/src/a.rs b/src/a.rs
                 status: "active".into(),
                 evidence_revision: String::new(),
                 accepted_revision: None,
-                relations_revision: String::new(),
-                superseded_by: None,
             }
         }
         let mut rows = [
@@ -6301,8 +6287,8 @@ diff --git a/src/a.rs b/src/a.rs
         }
         // Unaccepted: proposed but never reviewed, must not take a slot.
         store::fixture_preference(&mut db, "Never reviewed rule", "global");
-        // Superseded: one of the 70 is replaced; the retired row drops out and
-        // its replacement takes its place, so the eligible count stays 70.
+        // Rejected: one of the 70 drops out and an accepted row takes its
+        // place, so the eligible count stays 70.
         let old_key = db
             .feedback()
             .unwrap()
@@ -6310,26 +6296,8 @@ diff --git a/src/a.rs b/src/a.rs
             .find(|entry| entry.statement == "Eligible rule 0")
             .unwrap()
             .key;
-        store::fixture_preference(&mut db, "Replacement rule", "global");
-        let new_entry = db
-            .feedback()
-            .unwrap()
-            .into_iter()
-            .find(|entry| entry.statement == "Replacement rule")
-            .unwrap();
-        let old_entry = db
-            .feedback()
-            .unwrap()
-            .into_iter()
-            .find(|entry| entry.key == old_key)
-            .unwrap();
-        db.supersede_feedback(
-            &old_entry.key,
-            &new_entry.key,
-            &old_entry.review_revision(),
-            &new_entry.review_revision(),
-        )
-        .unwrap();
+        db.review_feedback(&old_key, "rejected", None).unwrap();
+        accept_feedback(&mut db, "Replacement rule", "global");
         drop(db);
         let packet = view_at_with_verifier(
             &path,
@@ -6344,7 +6312,7 @@ diff --git a/src/a.rs b/src/a.rs
         .unwrap();
         assert_eq!(
             packet["feedback_total"], 70,
-            "unaccepted and superseded rows are not eligible"
+            "unaccepted and rejected rows are not eligible"
         );
         assert_eq!(packet["feedback"].as_array().unwrap().len(), 64);
     }
@@ -7195,7 +7163,6 @@ diff --git a/src/a.rs b/src/a.rs
             commits_total: 100,
             commits_sampled: 100,
             added_lines_sampled: 120,
-            identities: vec!["fixture@example.com".to_string()],
             counts: c,
             commits: evidence,
         };

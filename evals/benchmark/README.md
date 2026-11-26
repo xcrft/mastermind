@@ -1,12 +1,6 @@
 # Research benchmark
 
-Prepare matched sources, run a pinned model adapter, retain complete answers
-and export them for [offline review](REVIEW.md).
-
-[Product success measures](../PRODUCT.md) defines the original-request outcome,
-initial targets and quality gate. `python3 -m evals.benchmark.value` compares a
-sealed review set without model calls. Codex adapter v4 also records native
-first-message and final-answer latency; older runs keep those fields unknown.
+Use this runbook to compare research instructions, tools or reasoning settings on the same tasks. You freeze matched sources, run a pinned model adapter for every planned attempt, keep the complete answers and export them for [offline review](REVIEW.md). The targets and the quality gate are in [product success measures](../PRODUCT.md), and `python3 -m evals.benchmark.value` reads a sealed review set against them without a model call.
 
 ```mermaid
 flowchart LR
@@ -18,57 +12,47 @@ flowchart LR
     I --> C[Compare paired task outcomes and recorded costs]
 ```
 
-| Validation layer | Current status |
-|---|---|
-| Built-in Claude and Codex adapters | Covered by deterministic fixture tests |
-| Live-model compatibility | Requires a fresh run |
-| Representative quality baseline | Unmeasured |
-| Comparison acceptance | `comparability.eligible: false`, `comparison_accepted: false` |
-| Causal quality change | `quality_uplift: null`, importing reviews does not change it |
+The built-in Claude and Codex adapters are covered by deterministic fixture tests. Live compatibility with a model service needs a fresh run, and no representative quality baseline exists yet. Comparisons keep `comparability.eligible: false`, `comparison_accepted: false` and `quality_uplift: null`, and importing reviews doesn't change that.
 
 ## Package layout
 
 | Module | Responsibility |
 |---|---|
-| `trials` | Prepare/run CLI and trial orchestration |
-| `conditions` | Instruction/tool specifications, calibration-axis validation and pinned instruction inventories |
+| `trials` | Prepare and run CLI, trial orchestration |
+| `conditions` | Instruction and tool specifications, calibration-axis validation, pinned instruction inventories |
 | `protocol` | Task, manifest, request and stream contracts |
 | `batch` | Plan binding, execution order and snapshot checks |
-| `campaign` | Prepare/run/export every corpus case with one configuration |
+| `campaign` | Prepare, run and export every corpus case with one configuration |
 | `source` | Git projections and SQLite index validation |
 | `repo_map` | Offline byte sweep, payload aliases and development component schedules |
 | `runtime` | Executable pins and private environments |
 | `artifacts` | Bounded reads, hashes and immutable publication |
 | `adapters.bundle`, `adapters.claude`, `adapters.codex`, `tools`, `mcp` | Frozen client runtimes and read-only tool transport |
-| `corpus` | Calibration and qualification task/key source bindings |
+| `corpus` | Calibration and qualification task and key source bindings |
 | `review`, `review_io`, `review_contracts` | Blinded packets and offline artifact validation |
-| `judge` | Pinned Claude CLI assessment of a review export, with every attempt retained |
-| `qualify` | Pre-registered promote/experimental/reject rule over sealed qualification review sets |
-| `qualify_calibration` | Simulated size and power of that rule; calibrates `t_star`, `t_upper` and the material-error veto |
+| `judge` | Pinned Claude CLI assessment of a review export, every attempt kept |
+| `qualify` | Pre-registered promote, experimental or reject rule over sealed qualification review sets |
+| `qualify_calibration` | Simulated size and power of that rule. Calibrates `t_star`, `t_upper` and the material-error veto |
 | `assessment` | Reviewer evidence and receipt validation |
 | `evidence_binding` | Literal source-quote and pinned file checks, separate from semantic assessments |
 | `analysis` | Paired outcomes, uncertainty and all-attempt resource totals |
 | `efficiency` | Useful outcomes per measured resource, by task and corpus |
 | `retrieval`, `retrieval_analysis` | Per-trial returned-range ledger and all-attempt campaign accounting |
-| `lookup` | Exact-name lookup counts reconstructed from hash-bound Codex streams |
+| `lookup` | Exact-name lookup counts rebuilt from hash-bound Codex streams |
 
-The shared process supervisor lives in `evals.shared.process`. Deterministic
-tests and fixtures live in `tests/evals/benchmark` and `tests/evals/support`.
+The shared process supervisor lives in `evals.shared.process`. Deterministic tests and fixtures live in `tests/evals/benchmark` and `tests/evals/support`.
 
 ## Conditions and corpus
 
 | Condition | Instructions | Tools |
 |---|---|---|
 | `source` | Common research instruction | Read, search and Git inspection |
-| `portable` | Common instruction plus pinned research skill | Same source tools |
+| `portable` | Common instruction plus the pinned research skill | Same source tools |
 | `portable_mmcg` | Same instructions as `portable` | Same source tools plus mmcg |
 
-Every condition uses the same public task, source bytes, hidden rubric, model
-and budgets. Preparation creates independent repositories from an explicit Git
-file allowlist. Original history, configuration, omitted files and answer keys
-are excluded. Each trial records common, condition and request hashes.
+Every condition uses the same public task, source bytes, hidden rubric, model and budgets. Preparation creates independent repositories from an explicit Git file allowlist and leaves out the original history, configuration, omitted files and answer keys. Each trial records the common, condition and request hashes.
 
-Add `conditions` to the configuration to replace the default three arms:
+To replace the default three arms, add `conditions` to the configuration:
 
 ```json
 {"conditions": [
@@ -79,28 +63,21 @@ Add `conditions` to the configuration to replace the default three arms:
 ]}
 ```
 
-For A/B, keep `raw` and `refined`. The four-arm example holds tools fixed while
-varying the two instruction components. To test retrieval separately, use
-`tools: "mmcg"` for a declared arm. Names do not select tools.
+For an A/B test, keep `raw` and `refined`. The four-arm example holds tools fixed and varies the two instruction parts. To test retrieval separately, set `tools: "mmcg"` on a declared arm, because condition names don't select tools.
 
-Declare 2–8 unique IDs and at most 60 attempts per batch. Instruction paths are
-regular UTF-8 files from the pinned **tool revision**. Their declared order,
-byte counts and hashes are frozen; multiple files join with two newlines.
-Combined instruction bytes are capped at 1 MiB. The condition specifications
-are also bound into the batch plan and checked before invocation.
-Use a repetition count divisible by the arm count to give each arm every position
-equally often in the rotating order.
+| Matrix rule | Limit |
+|---|---|
+| Condition IDs | 2-8 unique IDs |
+| Attempts per batch | At most 60 |
+| Instruction paths | Regular UTF-8 files from the pinned tool revision. Order, byte counts and hashes are frozen, and files join with two newlines |
+| Combined instruction bytes | At most 1 MiB |
+| Repetitions | Divisible by the arm count, so each arm gets every position equally often in the rotating order |
 
-These are static instruction controls for read-only research tasks. Preparation
-does not run the native refiner, mine a profile or execute a coding workflow.
-The original public task and review key stay common to all arms. Freeze that key
-before inspecting answers. Live refinement overhead, client delivery and profile
-applicability need separate experiments.
+The condition specifications are also bound into the batch plan and checked before invocation. These are static instruction controls for read-only research tasks. Preparation doesn't run the native refiner, mine a profile or run a coding workflow, so live refinement overhead, client delivery and profile fit need separate experiments. The original public task and review key stay common to all arms. Freeze the key before you look at answers.
 
 ### Compare symbol lookup
 
-Keep instructions, model, effort, task and native binary identical. Set
-`symbol_lookup` on each `tools: "mmcg"` condition:
+Keep instructions, model, effort, task and native binary identical, and set `symbol_lookup` on each `tools: "mmcg"` condition:
 
 ```json
 {"conditions": [
@@ -112,57 +89,33 @@ Keep instructions, model, effort, task and native binary identical. Set
 | Setting | Broker contract |
 |---|---|
 | `single` | Advertise single-name lookup and reject `names`, even when the native binary supports batches |
-| `batch` | Advertise batches after native capability verification; an unsupported binary fails instead of falling back |
-| Omitted | Preserve automatic capability discovery for existing experiments |
+| `batch` | Advertise batches after the native capability check. An unsupported binary fails instead of falling back |
+| Omitted | Keep automatic capability discovery for existing experiments |
 
-The setting is bound through the plan, manifest and adapter request. Role and
-effort calibration requires identical lookup settings. Use balanced repetitions
-and assess complete answers against the common original-request key. Fewer calls
-alone do not establish lower model token use or preserved quality.
+The setting is bound through the plan, manifest and adapter request, and role or effort calibration needs identical lookup settings. Single and batch defaults return different amounts, so put `agents/instructions/source-lookup.md` in both arms. It asks for the same explicit `top=10` and combines only independent names when the schema allows it. Check the recorded limits, because the model can leave them out. Fewer calls alone don't show lower token use or preserved quality, so assess complete answers against the common original-request key.
 
-Use `agents/instructions/source-lookup.md` in both arms to request the same
-explicit `top=10` and combine only independent names when the schema permits
-it. Inspect recorded limits; the model can omit them. Single and batch defaults
-differ, so a comparison using their defaults may also change delivered context.
-
-`retrieval_analysis` reconstructs lookup use from the pinned Codex event stream.
-It retains requested names, explicit/effective limits, single/batch counts,
-returned matches, truncation, failures and incomplete calls. Missing captures
-remain unknown. Counts do not establish avoided inference rounds or source truth.
+`retrieval_analysis` rebuilds lookup use from the pinned Codex event stream. It keeps requested names, explicit and effective limits, single and batch counts, returned matches, truncation, failures and incomplete calls. Missing captures stay unknown.
 
 ### Compare retrieval instructions
 
-Freeze `agents/instructions/source-boundaries.md` in both arms, then add
-`agents/instructions/source-routing.md` to the candidate only. Use identical
-tools, lookup setting, source delivery, model and effort. Declare `role_prompt`
-as the calibration axis. This tests a routing instruction; it does not install
-an automatic router or change the shipped agent defaults.
+Freeze `agents/instructions/source-boundaries.md` in both arms and add `agents/instructions/source-routing.md` to the candidate only. Keep tools, lookup setting, source delivery, model and effort identical, and declare `role_prompt` as the calibration axis. This tests a routing instruction. It doesn't install a router or change the shipped agent defaults.
 
-Run batching as a separate comparison with the same routing instruction in
-both arms. Keep the complete original-request key outside the model inputs.
-Public cases are development calibration; qualify an improvement on unseen
-tasks and retain every failed or unresolved attempt.
+Run batching as a separate comparison, with the same routing instruction in both arms. Public cases are development calibration, so qualify any improvement on unseen tasks and keep every failed or unresolved attempt.
 
 ### Source tools
 
 | Tool | Read contract |
 |---|---|
-| `source_read` | Inclusive line range, 80 lines by default, at most 200 per reply; an end beyond EOF returns the remaining lines |
-| `source_search` | Literal search, 30 results by default, at most 100; inspect returned truncation |
+| `source_read` | Inclusive line range, 80 lines by default, at most 200 per reply. An end past EOF returns the remaining lines |
+| `source_search` | Literal search, 30 results by default, at most 100. Check the returned truncation |
 | `source_git show` | Same line contract as `source_read` |
-| `source_git files/log` | Allowlisted files and one synthetic commit; no original history |
+| `source_git files/log` | Allowlisted files and one synthetic commit, no original history |
 
-Long requests return `range_truncated: true` and `next_line`. Continue there with
-the original requested end until the range is complete; `total_lines` identifies
-EOF. A partial reply does not cover the omitted lines. An explicit start beyond
-EOF or a reversed range is rejected. An empty file is readable without a range.
-Retrieved source and skill documents are evidence, not instructions to change
-the current task.
+A long request returns `range_truncated: true` and `next_line`. Continue from there with the original end until the range is complete, and use `total_lines` to find EOF. A partial reply doesn't cover the lines it left out. An explicit start past EOF or a reversed range is rejected, and an empty file is readable without a range. Retrieved source and skill documents are evidence, not instructions that change the current task.
 
 ### Calibration corpus
 
-[corpus.json](corpus.json) binds each public task to its private review key and
-indexed source files.
+[corpus.json](corpus.json) binds each public task to its private review key and indexed source files.
 
 | Case | Focus |
 |---|---|
@@ -171,61 +124,39 @@ indexed source files.
 | `callees-definition-boundaries-01` | Ambiguous definitions and outgoing calls |
 | `reference-removal-evidence-01` | References needed before code removal |
 
-These are published maintenance-reviewed calibration examples. The current
-keys describe contract-drift rejection, document corpus freshness, bounded
-ambiguous definition results and reference coverage. They require a new
-independent review after this source refresh. Held-out quality and
-representativeness remain unmeasured.
+These are published calibration examples that a maintainer reviewed. The keys describe contract-drift rejection, document corpus freshness, bounded ambiguous definition results and reference coverage. They need a new independent review after this source refresh, and held-out quality is unmeasured.
 
 ```sh
 python3 -m evals.benchmark.corpus --source-repo /absolute/path/to/mastermind
 python3 -m evals.benchmark.corpus --source-repo /absolute/path/to/mastermind --require-current
 ```
 
-This checks task/key identity, pinned Git objects, source hashes, scope and
-anchor ranges without model calls. It does not verify the meaning of a claim.
-The pinned history must be available locally. The checker never fetches it.
-`--require-current` compares the reviewed files with current HEAD and working
-tree bytes. Unrelated commits are allowed; changed research source requires
-reviewing the task and key again. A corpus-wide campaign always requires this
-check before preparation.
+The check covers task and key identity, pinned Git objects, source hashes, scope and anchor ranges, with no model call. It doesn't check what a claim means. The pinned history must be available locally, because the checker never fetches it. `--require-current` compares the reviewed files with current HEAD and working-tree bytes. Unrelated commits are fine, but changed research source means reviewing the task and key again. A corpus-wide campaign always runs this check before preparation.
 
 ### Qualification corpus
 
-A qualification corpus decides on a frozen candidate with tasks it was not tuned
-on. It uses the same registry, task and key schemas with `role: qualification`.
+A qualification corpus decides on a frozen candidate with tasks it was not tuned on. It uses the same registry, task and key schemas with `role: qualification`.
 
 | Contract | Rule |
 |---|---|
-| Roles | One role per registry: every case is `calibration` or every case is `qualification` |
+| Roles | One role per registry. Every case is `calibration` or every case is `qualification` |
 | Key | `status: qualification_key_source_reviewed` and request-bound `acceptance_criteria` |
-| Location | Registry, tasks, keys and output stay outside `--source-repo` and `--tool-repo`; otherwise preparation fails with `corpus_private_location` before any trial |
-| Selection | A qualification key is prepared only with `--case` from its corpus; `--task`/`--rubric` fails with `invalid_selection` |
-| Comparison | `scope: sealed_current_source_qualification`; a key whose status differs from the corpus role fails with `campaign_changed`. `comparison_accepted` stays false and `quality_uplift` null |
+| Location | Registry, tasks, keys and output stay outside `--source-repo` and `--tool-repo`. Otherwise preparation fails with `corpus_private_location` before any trial |
+| Selection | A qualification key is prepared only with `--case` from its corpus. `--task` or `--rubric` fails with `invalid_selection` |
+| Comparison | `scope: sealed_current_source_qualification`. A key whose status differs from the corpus role fails with `campaign_changed`. `comparison_accepted` stays false and `quality_uplift` null |
 
 ```sh
 python3 -m evals.benchmark.corpus --corpus /absolute/private/path/corpus.json \
   --source-repo /absolute/private/path/snapshot-repo --require-current
 ```
 
-The location check covers preparation and the two repositories given to the
-command. Review exports and copies still contain the keys, so write them to the
-same private storage. Keep qualification files out of every directory a tuning
-agent can read, including `.mastermind/`, and publish the decision rather than
-per-case reports.
+The location check covers preparation and the two repositories passed to the command. Review exports and their copies still contain the keys, so write them to the same private storage. Keep qualification files out of every directory a tuning agent can read, `.mastermind/` included, and publish the decision instead of per-case reports.
 
 ## Prepare an experiment
 
-Requires Python 3.10+, Git and POSIX with `waitid(WNOWAIT)`; on macOS use Python
-3.13+. Use an output directory outside the source
-repository and trusted, already installed adapter and mmcg executables. The
-harness does not build, download or select an alternative binary.
+You need Python 3.10+ (3.13+ on macOS), Git and a POSIX host with `waitid(WNOWAIT)`. Use an output directory outside the source repository and trusted adapter and mmcg executables that are already installed. The harness doesn't build, download or pick another binary.
 
-Process supervision keeps the leader's PID reserved until group cleanup. On
-macOS, `/bin/ps` checks whether an `EPERM` group contains only zombies; a live
-or unobservable group remains a cleanup failure.
-
-Create a local configuration with actual identities:
+Create a local configuration with the real identities:
 
 ```json
 {
@@ -261,12 +192,9 @@ Create a local configuration with actual identities:
 }
 ```
 
-Match index-contract fields to the pinned runtime. The task's source revision
-and the evaluated tool/instruction revision serve different purposes and are
-recorded separately.
+Match the index-contract fields to the pinned runtime. The task's source revision and the evaluated tool revision are recorded separately because they answer different questions.
 
-To measure completion without an experiment time, turn or token budget, set
-all three optional limits explicitly:
+To measure completion without a time, turn or token budget, set all three optional limits explicitly:
 
 ```json
 "limits": {
@@ -279,27 +207,32 @@ all three optional limits explicitly:
 }
 ```
 
-Omitting a field keeps its default; `null` disables that budget. Byte caps,
-tool startup/call timeouts, source integrity and process cleanup remain enforced.
-All conditions must use the same budget settings. The harness waits for completion and
-still records elapsed time and reported usage. Provider context, response and
-subscription limits remain outside the harness. Keep bounded and unbounded
-campaigns separate; their results answer different questions.
+An omitted field keeps its default and `null` turns that budget off. Byte caps, tool startup and call timeouts, source integrity and process cleanup still apply. All conditions must use the same budget settings. The harness waits for completion and still records elapsed time and reported usage, while provider context, response and subscription limits stay outside it. Keep bounded and unbounded campaigns apart, since they answer different questions.
 
-To compare Claude or Codex reasoning settings, add `reasoning_effort` to every explicit
-condition. Allowed values are `low`, `medium`, `high`, `xhigh` and `max`.
-The model, adapter bytes, source, limits and other common runtime settings remain
-bound. Codex keeps its selected `auth_home` in common identity; the authenticated
-principal and served effort are not attested. For an effort-only comparison, also use identical tools
-and instruction paths in both conditions. A runtime
-effort different from its condition fails identity validation. Existing
-conditions without this field keep effort in their common identity.
+### Compare reasoning effort or role prompts
 
-For role-prompt or effort calibration, also declare `calibration.axis` and a
-`role` on every condition. The harness rejects changes outside that axis and
-binds it through offline export. See [role calibration](../ROLE_CALIBRATION.md)
-for the configuration, role defaults and capability boundaries. A role label
-does not activate a native agent.
+To compare Claude or Codex reasoning settings, add `reasoning_effort` to every explicit condition. Allowed values are `low`, `medium`, `high`, `xhigh` and `max`. For an effort-only comparison, keep tools and instruction paths identical too. A runtime effort that differs from its condition fails identity validation. The recorded value is the requested effort, and the served effort is not attested. Codex keeps its selected `auth_home` in the common identity.
+
+For a role-prompt or effort calibration, declare the axis and give every condition a `role` and an effort:
+
+```json
+{
+  "calibration": {"axis": "role_prompt"},
+  "conditions": [
+    {"id": "direct", "role": "direct", "tools": "source", "reasoning_effort": "high", "instruction_paths": []},
+    {"id": "researcher", "role": "researcher", "tools": "source", "reasoning_effort": "high", "instruction_paths": ["agents/subagents/mastermind-researcher.md"]}
+  ]
+}
+```
+
+| Axis | Held fixed | May vary |
+|---|---|---|
+| `role_prompt` | Model, effort, tools, task, sources, limits and common runtime settings | Role label and instruction files |
+| `effort` | Everything above except effort, including role and ordered instruction paths | Requested effort |
+
+Preparation rejects any other changed variable with `confounded_calibration`. The axis is bound into trial, batch and campaign records and survives offline export, so removing or relabeling it fails validation. `role` only labels the portable instructions. It doesn't start a native agent or grant its tools. Instruction files are frozen verbatim from `tool_revision`, and referenced skills are not resolved, so list their files explicitly. The order of experiments and the task families are in [role calibration](../ROLE_CALIBRATION.md).
+
+### Route effort per case
 
 For an experimental campaign router, set:
 
@@ -307,15 +240,9 @@ For an experimental campaign router, set:
 "effort_policy": {"condition": "adaptive", "policy": "bounded_readonly_v1"}
 ```
 
-Declare the `adaptive` condition and an effort for every condition. The router
-chooses `high` only for an explicitly read-only research request with one to
-three source files and no recognized risk marker; otherwise it retains `max`.
-The campaign retains the public-task digest, observed features and chosen effort.
-Use `evals.benchmark.campaign prepare` for this policy; single-task preparation
-uses the declared condition efforts without routing.
-This English request heuristic is not a validated difficulty estimate or a
-production default. Keep full-answer review, failed attempts and unknown outcomes
-when comparing its resource use. It performs no model call and sees no review key.
+Declare the `adaptive` condition and an effort for every condition. The router picks `high` only for an explicitly read-only research request that names one to three source files and has no recognized risk marker. Otherwise it keeps `max`. The campaign records the public-task digest, observed features and chosen effort. Only `evals.benchmark.campaign prepare` applies the policy, and single-task preparation uses the declared efforts. The router makes no model call and never sees the review key. It is an English-only heuristic and can miss task risk, so it is not a production default. When the router picks the control's effort for a case, keep that case but don't present it as an effort contrast.
+
+### Prepare one task
 
 ```sh
 python3 -m evals.benchmark prepare \
@@ -328,23 +255,17 @@ python3 -m evals.benchmark prepare \
 
 | Preparation setting | Contract |
 |---|---|
-| Default plan | 3 conditions × 3 repetitions = 9 attempts, rotating condition order |
-| `conditions` | Explicit 2–8 arms; omitted configs retain the default plan |
-| `--repetitions` | 1–20 repetitions, subject to the 60-attempt cap |
+| Default plan | 3 conditions x 3 repetitions = 9 attempts, rotating condition order |
+| `conditions` | Explicit 2-8 arms. Without it the default plan applies |
+| `--repetitions` | 1-20 repetitions, within the 60-attempt cap |
 | `--corpus` | Select another registry |
-| `--task PATH --rubric PATH` | Custom task instead of `--case` |
-| Rubric binding | Must match task ID and source revision |
-| Custom task status | Does not inherit calibration-corpus source review |
+| `--task PATH --rubric PATH` | A custom task instead of `--case` |
+| Rubric binding | Must match the task ID and source revision |
+| Custom task status | Doesn't inherit the calibration corpus source review |
 
-Corpus cases supply the exact indexed subset. A conflicting `mmcg.indexed_files`
-setting fails. For custom tasks, provide that subset when some source files are
-not indexed. Only arms with mmcg tools run the indexer. A wrong, partial or stale
-SQLite index remains a setup failure, including wrong root/contracts/file
-hashes or nonempty WAL/journal state.
+Corpus cases supply the exact indexed subset, and a conflicting `mmcg.indexed_files` setting fails. For a custom task, give that subset when some source files are not indexed. Only arms with mmcg tools run the indexer. A wrong, partial or stale SQLite index is a setup failure, and so are a wrong root, contracts or file hashes, and a nonempty WAL or journal.
 
-Preparation does not call a model. It rejects source/instruction path overlap
-for corpus cases and explicit matrices, unsupported file types, unsafe paths and leaked answer keys.
-Path checks do not detect copied instructions or all corpus contamination.
+Preparation doesn't call a model. It rejects overlapping source and instruction paths, unsupported file types, unsafe paths and leaked answer keys. Path checks can't catch copied instructions or every kind of corpus contamination.
 
 ## Run every planned attempt
 
@@ -352,30 +273,17 @@ Path checks do not detect copied instructions or all corpus contamination.
 python3 -m evals.benchmark run /absolute/path/to/batch-id/trial-id
 ```
 
-Follow `batch.json` order. A batch lock serializes attempts and requires the
-previous result before the next begins. Each attempt has a one-shot lock. A
-crash leaves it unfinished. Prepare a new balanced batch when changing runtime
-or experiment settings. Do not selectively retry failed conditions.
+Follow the order in `batch.json`. A batch lock runs one attempt at a time and needs the previous result before the next one starts. Each attempt has a one-shot lock, so a crash leaves it unfinished. When you change the runtime or experiment settings, prepare a new balanced batch. Never retry only the failed conditions.
 
-A trial gets a private HOME, XDG and temporary directory. Generic and Claude
-adapters receive credentials only by explicit `--credential-env NAME`.
-Supported names are `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`. They are not written into the
-request. All other inherited environment variables are cleared. The Codex
-adapter uses the explicitly selected existing subscription login described below.
+A trial gets a private HOME, XDG and temporary directory. The generic and Claude adapters get credentials only through an explicit `--credential-env NAME`. The supported names are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`. They are not written into the request, and every other inherited variable is cleared. The Codex adapter uses the existing subscription login described below.
 
-Files and runtime identities are rechecked. Results link to the batch plan and
-previous result. One-shot publication rejects replaced files and directories.
-A missing or corrupt chain prevents verified execution-order claims.
+Files and runtime identities are checked again before the run. Results link to the batch plan and the previous result, and one-shot publication rejects replaced files and directories. A missing or corrupt chain means nobody can claim a verified execution order.
 
 ## Generic adapter contract
 
-The pinned executable receives no arguments. Its cwd is the source projection.
-Stdin is one `mastermind-research-adapter-v1` JSON request followed by a newline.
-The request contains the public task, frozen source identities, instructions,
-model, limits and available tools. It omits the rubric and other trial results.
+The pinned executable gets no arguments, and its cwd is the source projection. Stdin is one `mastermind-research-adapter-v1` JSON request followed by a newline. The request holds the public task, frozen source identities, instructions, model, limits and available tools. It leaves out the rubric and other trial results.
 
-stdout must contain one `init`, optional `trace` events and one terminal `result`:
+stdout must contain one `init`, optional `trace` events and one final `result`:
 
 ```jsonl
 {"type":"init","model":"exact-model-id","adapter_version":"exact-version"}
@@ -383,16 +291,9 @@ stdout must contain one `init`, optional `trace` events and one terminal `result
 {"type":"result","answer":"Observed behavior at src/service.py:2.","model_error":false,"turns":1,"usage":{"input_tokens":25,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":0},"cost_usd":0}
 ```
 
-A successful answer is nonempty and fits the configured cap. Token counts must
-be nonnegative integers and turn count positive. Missing cost is unknown.
-Observed model and adapter identity must match the manifest. Non-JSON stdout,
-incomplete telemetry or malformed event order fails the protocol.
+A successful answer is nonempty and fits the configured cap. Token counts must be nonnegative integers and the turn count positive. A missing cost is unknown. The observed model and adapter identity must match the manifest. Non-JSON stdout, incomplete telemetry or events in the wrong order fail the protocol.
 
-The adapter must preserve the supplied instructions, expose only declared tools,
-disable unrelated hooks/settings/history and enforce any configured budgets.
-Embedded skill references are not automatically resolved. The supervisor bounds
-wall time and output bytes and cleans up its process group. These are controls
-over a trusted executable, not an OS sandbox.
+The adapter must keep the supplied instructions, expose only the declared tools, turn off unrelated hooks, settings and history, and enforce any configured budgets. It doesn't resolve skill references embedded in instructions. The supervisor bounds wall time and output bytes and cleans up the process group. These are controls over a trusted executable, not an OS sandbox.
 
 ## Built-in Claude adapter
 
@@ -411,51 +312,24 @@ Use this `adapter` configuration with an explicitly pinned CLI:
 }
 ```
 
-The fixture-tested contract targets the displayed version. Compatibility with
-another CLI or live service requires a fresh run. Preparation pins a copied
-Python adapter bundle, interpreter and CLI. It does not attest shared libraries.
-Claude adapter v3 passes optional `reasoning_effort` as `--effort`. When absent,
-it preserves the CLI default. A condition effort overrides this common setting.
-Only the varied effort leaves common identity; other settings remain bound.
-The recorded value is requested; served effort remains unknown. Retained v2
-runtimes without this field keep their existing identity and frozen transport.
+The fixture tests target the version shown. Another CLI version or the live service needs a fresh run. Preparation pins a copied Python adapter bundle, the interpreter and the CLI, but not shared libraries. The adapter passes the optional `reasoning_effort` as `--effort` and keeps the CLI default when it is absent. A condition effort overrides this common setting. Retained runs from earlier adapter versions keep their original identity and transport.
 
 ```sh
 python3 -m evals.benchmark run /absolute/path/to/batch-id/trial-id \
   --credential-env ANTHROPIC_API_KEY
 ```
 
-This adapter requires an API key and does not use OAuth/keychain fallback.
-The CLI runs in an empty client directory with explicit instructions, no general
-built-in tools, no persisted session and one strict MCP configuration. Observed
-inventory, permission mode, working directory, model and tool-result identities
-must match. Managed host policies can still affect a run.
+This adapter needs an API key and never falls back to OAuth or the keychain. The CLI runs in an empty client directory with explicit instructions, no general built-in tools, no saved session and one strict MCP configuration. The observed tool inventory, permission mode, working directory, model and tool-result identities must match. Managed host policies can still affect a run.
 
-The broker exposes allowlisted UTF-8 source ranges, literal search and frozen
-Git inspection. Arms with mmcg tools add `mmcg_concept`, `mmcg_search`,
-`mmcg_outline`, `mmcg_files`, `mmcg_callers` and `mmcg_callees`. Root, index and
-command configuration cannot be changed through tool arguments. Native ambiguity,
-freshness errors and truncation are preserved. Credential variables are removed
-from broker/server environments.
+The broker exposes allowlisted UTF-8 source ranges, literal search and frozen Git inspection. Arms with mmcg tools add `mmcg_concept`, `mmcg_search`, `mmcg_outline`, `mmcg_files`, `mmcg_callers` and `mmcg_callees`. Tool arguments can't change the root, index or command configuration. Native ambiguity, freshness errors and truncation pass through unchanged, and credential variables are removed from the broker and server environments.
 
-The broker checks the pinned native catalog before exposing graph tools. Search
-advertises `names` only when the runtime supports the batch contract. Batch
-filters apply to every name; `top` defaults to 10 and accepts at most 25 per name.
-Older runtimes retain single-name search. Catalog failures retain their failure
-class and close the native session; no batch is emulated with hidden calls.
+The broker checks the pinned native catalog before it exposes graph tools. Search advertises `names` only when the runtime supports batches. Batch filters apply to every name, and `top` defaults to 10 with at most 25 per name. Older runtimes keep single-name search. A catalog failure keeps its failure class and closes the native session, and no batch is emulated with hidden calls.
 
-With finite limits, the CLI receives a turn limit and per-response output cap. A live usage cutoff
-can overshoot the aggregate token budget. The final result records the violation.
-Permission denials, model switches and cutoffs cannot become completed trials.
-With `null` limits the adapter omits those CLI controls and live aggregate cutoff.
-Raw bounded `claude-stream.jsonl` may include tool inputs/results and should be
-handled as private experiment data.
+With finite limits, the CLI gets a turn limit and a per-response output cap. A live usage cutoff can overshoot the total token budget, and the final result records the violation. Permission denials, model switches and cutoffs never become completed trials. With `null` limits the adapter leaves out those CLI controls and the live cutoff. The raw bounded `claude-stream.jsonl` can include tool inputs and results, so treat it as private experiment data.
 
 ## Codex with a subscription
 
-Authenticate the installed CLI with ChatGPT first. Use its exact executable,
-digest and version, the model ID configured for the experiment and the existing
-Codex authentication directory. Replace the `adapter` object with:
+Log the installed CLI in with ChatGPT first. Use its exact executable, digest and version, the model ID configured for the experiment and the existing Codex authentication directory. Replace the `adapter` object with:
 
 ```json
 {
@@ -471,85 +345,41 @@ Codex authentication directory. Replace the `adapter` object with:
 }
 ```
 
-Run without `--credential-env`. The adapter forces ChatGPT login, clears API
-keys and launches ephemeral read-only sessions with the frozen research MCP
-server. User config, rules, global project documents, host skill discovery,
-hooks, memory, plugins, shell and browser tools are disabled. Authentication
-state still comes from the selected directory; managed host policies and
-service behavior remain outside the experiment's verified isolation.
-Adapters v2 and later launch in the frozen source projection so absolute file links
-resolve to the inspected files. Earlier v1 archives used an empty client
-directory; check their answer links separately from factual claim support.
-Adapter v3 also accepts explicitly disabled experiment budgets.
+Run without `--credential-env`. The adapter forces ChatGPT login, clears API keys and starts short-lived read-only sessions in the frozen source projection, with the frozen research MCP server as the only server. User config, rules, global project documents, host skill discovery, hooks, memory, plugins, shell and browser tools are off. Authentication state still comes from the selected directory, and managed host policies and service behavior are outside the experiment's checked isolation. The adapter accepts explicitly disabled budgets.
 
-Adapter v7 configures one research server and permits the CLI's built-in resource
-and template discovery only when the completed reply is exactly the declared
-empty catalog. Discovery is protocol overhead, not source evidence. Resource
-reads, other servers, pagination, extra content and incomplete discovery fail
-the trial. The broker exposes no resource URI or template. Earlier frozen
-adapters retain their original tool contract; do not retry their failed attempts
-with the new adapter or compare them as a matched runtime.
-
-Adapter v8 retains v7's discovery contract and allows standalone CLI error
-notices, including reconnect progress, to precede a completed turn. It records
-their count and keeps the raw messages. `turn.failed` or stream exit without a
-completed turn remains a failure with unknown usage; a reconnect notice cannot
-turn a partial answer into a completed result. Earlier bundles keep their original
-failure handling and immutable records.
+The CLI may run its built-in resource and template discovery only when the completed reply is exactly the declared empty catalog. Discovery is protocol overhead, not source evidence. Resource reads, other servers, pagination, extra content or incomplete discovery fail the trial. Standalone CLI error notices, reconnect progress included, may come before a completed turn. The adapter records their count and keeps the raw messages. `turn.failed`, or a stream that ends without a completed turn, stays a failure with unknown usage.
 
 | Codex measurement | Contract |
 |---|---|
-| Model | Requested ID is pinned; the JSON stream does not report the actual served model |
-| Context | Reported input includes cache reads/writes; subtract those from uncached input to avoid counting them twice |
-| Billing | `cost_usd: null`; subscription usage is consumed, API billing is not measured |
+| Model | The requested ID is pinned. The JSON stream doesn't report the served model |
+| Context | Reported input includes cache reads and writes, so subtract them from uncached input to avoid counting them twice |
+| Billing | `cost_usd: null`. Subscription usage is spent, API billing is not measured |
 | Turns | CLI conversation turns, not inference rounds or tool calls |
-| Tool calls | Separately reported as `diagnostics.adapter.mcp_calls` |
-| Resource discovery | Adapters v7 and v8 record empty catalog calls separately in `diagnostics.adapter.resource_discovery`; they remain included in tool intervals and total usage |
-| Returned source ranges | Adapter v5 records `diagnostics.adapter.read_ledger`: returned, unique and repeated lines, failed/unverifiable reads and pending calls, with request-pinned source digests |
-| Reasoning output | Adapter v6 records the optional reported reasoning subset and remaining output in `diagnostics.adapter.output_breakdown`; total output already includes reasoning |
-| Tool intervals | Adapter v6 records start/completion receipt times and their interval union in `diagnostics.adapter.tool_timeline`; missing starts or completions keep whole-span totals unknown |
-| Output budget | A finite budget is checked against final reported usage, without a verified live per-response cutoff; `null` keeps usage without rejecting it |
-| Failure | Timeout, missing usage, unknown tool or terminal client failure remains a failed attempt |
-| Raw evidence | Private bounded `codex-stream.jsonl`, answers and result envelopes; v6, v7 and v8 bind the stream digest and review verifies it |
+| Tool calls | Reported separately as `diagnostics.adapter.mcp_calls` |
+| Resource discovery | Empty catalog calls in `diagnostics.adapter.resource_discovery`. They stay in tool intervals and total usage |
+| Returned source ranges | `diagnostics.adapter.read_ledger`: returned, unique and repeated lines, failed or unverifiable reads and pending calls, with request-pinned source digests |
+| Reasoning output | The optional reported reasoning subset and the rest of the output in `diagnostics.adapter.output_breakdown`. Total output already includes reasoning |
+| Tool intervals | Start and completion receipt times and their interval union in `diagnostics.adapter.tool_timeline`. Missing starts or completions keep whole-span totals unknown |
+| Output budget | A finite budget is checked against the final reported usage, without a live per-response cutoff. `null` keeps usage without rejecting it |
+| Failure | A timeout, missing usage, unknown tool or terminal client failure stays a failed attempt |
+| Raw evidence | Private bounded `codex-stream.jsonl`, answers and result envelopes. The result binds the stream digest and review checks it |
 
-Use the reasoning subset to distinguish a smaller visible response from less
-reported reasoning. Never add it to total output tokens again. Tool durations
-measure receipt of `item.started` and `item.completed`, including buffering and
-client/transport overhead. Their interval union avoids counting concurrent calls
-twice. Time outside them also contains startup, network and queuing; it is not
-pure inference time. The timeline horizon runs from native launch to diagnostic
-capture after process completion; it is separate from final-answer latency.
-Pending calls, missing starts and invalid spans preserve unknown whole-attempt
-timing. These diagnostics do not evaluate answer quality.
+The reasoning subset tells a smaller visible answer apart from less reported reasoning. Never add it to total output tokens a second time. Tool durations measure when `item.started` and `item.completed` arrive, buffering and client overhead included, and the interval union keeps concurrent calls from being counted twice. Time outside the intervals also holds startup, network and queuing, so it is not pure inference time. The timeline runs from native launch to diagnostic capture after the process ends, which is separate from final-answer latency. These diagnostics don't judge answer quality.
 
-The read ledger merges inclusive ranges within one frozen trial across
-`source_read` and `source_git show`. It records completed replies once, counts
-only returned lines from partial replies, and credits no coverage to failed or
-unverifiable results. Pending reads remain unknown. It measures reported delivery,
-not semantic relevance or the benefit of removing a repeat. Source integrity and
-acceptance remain separate gates. Frozen v3/v4 bundles remain verifiable; their
-original results have no v5 ledger.
+The read ledger merges inclusive ranges within one frozen trial across `source_read` and `source_git show`. It counts a completed reply once, counts only the returned lines of a partial reply, and credits nothing for failed or unverifiable results. Pending reads stay unknown. It measures reported delivery, not whether a repeated read was useful.
 
-Summarize every planned attempt without model calls:
+Retained runs from earlier adapter versions keep their original contract, failure handling and records. Don't retry their failed attempts with the current adapter, and don't compare them as a matched runtime.
+
+Summarize every planned attempt without a model call:
 
 ```sh
 python3 -m evals.benchmark.retrieval_analysis /absolute/path/to/campaign \
   --output /absolute/path/to/new-retrieval-report.json
 ```
 
-The report binds ledgers to retained manifest/result hashes and source ranges.
-It keeps failed and unrun attempts in the denominator. Missing ledgers remain
-unknown; incomplete captures retain partial observed counts and no complete
-total. Source-range failures affect range totals even when call counts are
-known. Existing output files are never replaced; choose a new path when inputs
-or reporting code change. Acceptance and token accounting remain separate.
+The report binds ledgers to the retained manifest and result hashes and source ranges. Failed and unrun attempts stay in the denominator. Missing ledgers stay unknown, and incomplete captures keep partial counts with no complete total. Source-range failures affect range totals even when call counts are known. The command never replaces an existing file, so choose a new path when inputs or reporting code change.
 
-Deterministic client fixtures cover CLI 0.160.1's stream shape. Retained live
-calibrations pin CLI 0.162.0-alpha.2. Pin and check another version before
-comparing runs; an installed version alone does not establish compatibility.
-The [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
-describes login and document-loading settings. Runtime identity remains
-partially unobserved, so this adapter does not qualify a causal quality claim.
+The fixture tests cover the stream shape of CLI 0.160.1, and the retained live calibrations pin CLI 0.162.0-alpha.2. Pin and check any other version before you compare runs. The [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) describes the login and document-loading settings. Part of the runtime identity is not observed, so this adapter can't qualify a causal quality claim.
 
 ## Run the whole corpus
 
@@ -568,29 +398,24 @@ python3 -m evals.benchmark.campaign compare /absolute/path/to/new-review-set \
 
 | Campaign control | Contract |
 |---|---|
-| Default inventory | 4 tasks × 3 conditions × 3 repetitions = 36 attempts |
+| Default inventory | 4 tasks x 3 conditions x 3 repetitions = 36 attempts |
 | Limits | 240 attempts per campaign, 60 per case |
-| Runtime | Native mmcg is copied and pinned before trial preparation; later Cargo builds cannot replace it |
-| Order | Rotates within each case; 3 repetitions balance positions across the 3 default arms |
-| Resume | Completed and failed attempts are retained; unfinished attempts cannot be retried selectively |
-| Pause | `run --stop-file PATH` stops before the next unstarted case while `PATH` exists; remove it and run again. A started case always finishes |
-| Invalid runtime/input | Abort; remaining slots stay `not_run` |
-| Unavailable tool requested by the model | Failed attempt; continue only after rechecking unchanged prepared inputs and runtime |
-| Changed settings or failed preparation | Retain the old campaign and prepare a new complete one |
-| Export | Every planned case and attempt, including failed or absent answers |
-| Matrix integrity | Conditions, repetitions, attempt denominator and position balance must match every bound batch at run and comparison |
-| Comparison | Case, task, key and batch bindings checked before all-attempt aggregation |
+| Runtime | Native mmcg is copied and pinned before trial preparation, so later Cargo builds can't replace it |
+| Order | Rotates within each case. 3 repetitions balance positions across the 3 default arms |
+| Resume | Completed and failed attempts are kept. Unfinished attempts can't be retried one by one |
+| Pause | `run --stop-file PATH` stops before the next unstarted case while `PATH` exists. Remove it and run again. A started case always finishes |
+| Invalid runtime or input | Abort. The remaining slots stay `not_run` |
+| Unavailable tool requested by the model | A failed attempt. Continue only after checking that prepared inputs and runtime are unchanged |
+| Changed settings or failed preparation | Keep the old campaign and prepare a new complete one |
+| Export | Every planned case and attempt, failed or absent answers included |
+| Matrix integrity | Conditions, repetitions, attempt denominator and position balance must match every bound batch at run and comparison time |
+| Comparison | Case, task, key and batch bindings are checked before all-attempt aggregation |
 
-Import assessments into each case directory using [the review instructions](REVIEW.md).
-Corpus totals keep each reviewer separate. Missing case reviews leave outcome
-bounds unresolved. Repetitions do not turn four public tasks into 36 independent
-task samples.
+The Claude adapter needs `campaign run ... --credential-env ANTHROPIC_API_KEY`. The Codex adapter runs with no selected credential. Import assessments into each case directory with [the review instructions](REVIEW.md). Corpus totals keep each reviewer separate, and missing case reviews leave the outcome bounds open. Repetitions don't turn four public tasks into 36 independent samples.
 
 ## Qualify a candidate
 
-Apply a frozen decision rule to one or more sealed qualification review sets after
-every case has its reviewer assessment. Write the pre-registration before running
-the campaign and record its SHA-256.
+Apply a frozen decision rule to one or more sealed qualification review sets after every case has its reviewer assessment. Write the pre-registration before you run the campaign and record its SHA-256.
 
 ```json
 {"kind": "mastermind-qualification-prereg", "schema_version": 1, "claim": "R",
@@ -609,73 +434,59 @@ python3 -m evals.benchmark.qualify --prereg /private/prereg.json \
 
 | Input check | Rule |
 |---|---|
-| Campaigns | Exactly the registered two conditions and an even number of repetitions, balanced positions, sealed qualification scope, one configuration hash, model and tool revision across all review sets |
-| Stage validity | Any `not_run`, `unfinished`, `missing_artifacts`, `setup_error` or `input_changed` attempt, or more `invocation_error`/`model_error` attempts than `max_infrastructure_failures` in a review set, fails with `qualify_stage_invalid` |
-| Cases | Disjoint cases covering `clusters` exactly (a subset only with `--interim`); the registered reviewer must have assessed at least one case per review set. Cases it did not assess stay unresolved and are counted as `unreviewed_cases` |
+| Campaigns | Exactly the two registered conditions, an even number of repetitions, balanced positions, sealed qualification scope, and one configuration hash, model and tool revision across all review sets |
+| Stage validity | Any `not_run`, `unfinished`, `missing_artifacts`, `setup_error` or `input_changed` attempt, or more `invocation_error` and `model_error` attempts than `max_infrastructure_failures` in a review set, fails with `qualify_stage_invalid` |
+| Cases | Disjoint cases that cover `clusters` exactly, or a subset with `--interim`. The registered reviewer must have assessed at least one case per review set. Cases it didn't assess stay unresolved and count as `unreviewed_cases` |
 
 | Step | Rule |
 |---|---|
-| Unit | Tasks are sampled; each repository in `clusters` is one test unit. Per-task differences are averaged within a repository, then across repositories |
-| Acceptance | `R`: lower bound `mean − t_star·SE > −margin`. `Q`: lower bound above zero. Candidate answers the reviewer flags as material errors, including failed attempts, may exceed the baseline's by at most `veto_material_errors` |
-| Tokens | Per-task log ratio of geometric means over positive measurements, including failed attempts; bounds use `t_upper`. `R`: upper bound below 1, ratio and tokens per accepted answer at most 0.90. `Q`: upper bound below 1.10 |
-| Latency | Only when `latency` is true and the token step holds: per-task log ratio of median trial seconds, upper bound below 1 and ratio at most 0.90 |
-| Unresolved outcomes | Evaluated at both bounds; a decision that differs between them is `inconclusive` |
-| Unknown usage | Missing or non-positive measurements count as unknown; more than `max_unknown_usage` in an arm, or a task arm without any measurement, makes that resource step `inconclusive` |
-| Audit | With an audit reviewer: inconclusive when no case has its labels, when the exact one-sided 95% lower bound of judge false accepts among human-unmet answers exceeds the limit, or when judge–human discordance differs between arms by Fisher's exact test |
-| Decision | Acceptance fails → `reject`; acceptance and every resource step hold → `promote`; otherwise `experimental` |
-| `--interim` | Non-binding futility after stage 1: best-case acceptance below `−margin` → `reject`; `R` token ratio at least 1 → `experimental`; otherwise `continue`. Bounds are null when the cases cover one repository |
+| Unit | Tasks are sampled, and each repository in `clusters` is one test unit. Per-task differences are averaged within a repository, then across repositories |
+| Acceptance | `R`: lower bound `mean - t_star * SE > -margin`. `Q`: lower bound above zero. Candidate answers the reviewer flags as material errors, failed attempts included, may exceed the baseline's by at most `veto_material_errors` |
+| Tokens | Per-task log ratio of geometric means over positive measurements, failed attempts included, with bounds from `t_upper`. `R`: upper bound below 1, ratio and tokens per accepted answer at most 0.90. `Q`: upper bound below 1.10 |
+| Latency | Only when `latency` is true and the token step holds. Per-task log ratio of median trial seconds, upper bound below 1, ratio at most 0.90 |
+| Unresolved outcomes | Evaluated at both bounds. A decision that differs between them is `inconclusive` |
+| Unknown usage | Missing or non-positive measurements are unknown. More than `max_unknown_usage` in an arm, or a task arm without any measurement, makes that resource step `inconclusive` |
+| Audit | With an audit reviewer, the result is inconclusive when no case has its labels, when the exact one-sided 95% lower bound of judge false accepts among human-unmet answers exceeds the limit, or when judge and human discordance differs between arms by Fisher's exact test |
+| Decision | Acceptance fails: `reject`. Acceptance and every resource step hold: `promote`. Anything else: `experimental` |
+| `--interim` | A non-binding futility check after stage 1. Best-case acceptance below `-margin` gives `reject`, an `R` token ratio of at least 1 gives `experimental`, otherwise `continue`. Bounds are null when the cases cover one repository |
 
-The report keeps per-case records; share only the decision file. Both outputs must
-be new, distinct files; on any error neither is left behind.
+The report keeps per-case records, so share only the decision file. Both outputs must be new, distinct files, and on any error neither is left behind.
 
 ### Calibrate before registration
 
-`t_star`, `t_upper` and `veto_material_errors` are declared in the pre-registration
-because they are calibrated by simulation for the registered design:
+`t_star`, `t_upper` and `veto_material_errors` go into the pre-registration because a simulation calibrates them for the registered design:
 
 ```sh
 python3 -m evals.benchmark.qualify_calibration --input /private/calibration-input.json \
   --output /private/new-calibration.json
 ```
 
-The input declares the claim, design (repositories, tasks per repository, even
-repetitions), baseline acceptance, nuisance standard deviations, `margin`, `alpha`,
-`concentrated_fraction`, `material_error_rate`, `veto_false_rate`, an optional
-`interim_repositories` and scenarios; see `qualify_calibration.FIELDS`. `simulations`
-must be at least `20/alpha`.
+The input declares the claim, the design (repositories, tasks per repository, even repetitions), baseline acceptance, nuisance standard deviations, `margin`, `alpha`, `concentrated_fraction`, `material_error_rate`, `veto_false_rate`, an optional `interim_repositories` and the scenarios. The full field list is `qualify_calibration.FIELDS`. `simulations` must be at least `20/alpha`.
 
 | Output | Meaning |
 |---|---|
-| `nulls` | `R`: a logit shift whose average change is `−margin`, and a concentrated null whose `concentrated_fraction` of tasks lose the `loss` that makes the average change exactly `−margin`. `Q`: the logit shift at zero. Each null reports its conformal `critical` value and `fresh_size`, the false-pass rate on an independent batch with its standard error and a `check` |
-| `t_star` | The largest null critical value. Passes are counted with `qualify`'s own arithmetic, and ties move the value upwards. A design whose null campaigns pass at any registrable value fails with `calibration_design` |
-| `t_upper` | One-sided 95% Student t quantile with `repositories − 1` degrees of freedom |
-| `veto_material_errors` | Smallest limit whose exact false-veto probability, reported as `false_veto_probability`, stays at or below `veto_false_rate` when both arms share `material_error_rate` |
-| `power` | Decision fractions per scenario through `qualify.decide`, with Monte Carlo standard errors and `interim_stops` when `interim_repositories` is set |
-| `limitations` | Simulated outcomes are resolved; reviewer error, unknown usage, infrastructure failures, latency and the audit detector are not modelled |
+| `nulls` | `R`: a logit shift whose average change is `-margin`, and a concentrated null where `concentrated_fraction` of tasks lose the `loss` that makes the average change exactly `-margin`. `Q`: the logit shift at zero. Each null reports its conformal `critical` value and `fresh_size`, the false-pass rate on an independent batch with its standard error and a `check` |
+| `t_star` | The largest null critical value. Passes are counted with the same arithmetic as `qualify`, and ties move the value up. A design whose null campaigns pass at any registrable value fails with `calibration_design` |
+| `t_upper` | One-sided 95% Student t quantile with `repositories - 1` degrees of freedom |
+| `veto_material_errors` | The smallest limit whose exact false-veto probability, reported as `false_veto_probability`, stays at or below `veto_false_rate` when both arms share `material_error_rate` |
+| `power` | Decision fractions per scenario through `qualify.decide`, with Monte Carlo standard errors, and `interim_stops` when `interim_repositories` is set |
+| `limitations` | Simulated outcomes are resolved. Reviewer error, unknown usage, infrastructure failures, latency and the audit detector are not modelled |
 
-Replace the nuisance assumptions with pilot measurements before registration. The
-output must be a new file in a canonical directory and is checked before simulation.
+Replace the nuisance assumptions with pilot measurements before registration. The output must be a new file in a canonical directory, and it is checked before the simulation starts.
 
 ## Interpret results
 
 | Result | Meaning |
 |---|---|
-| `completed` | Transport, identity and required telemetry passed. An answer was retained |
-| `setup_error`, `identity_mismatch`, `protocol_error`, `invocation_error` | Infrastructure or contract failed |
+| `completed` | Transport, identity and required telemetry passed, and an answer was kept |
+| `setup_error`, `identity_mismatch`, `protocol_error`, `invocation_error` | Infrastructure or a contract failed |
 | `timeout`, `output_limit`, `budget_exceeded` | An execution bound was exceeded |
 | `model_error` | The model invocation failed |
-| `quality: review_pending` | A retained answer awaits a separate semantic assessment |
+| `quality: review_pending` | A kept answer waits for a separate semantic assessment |
 
-Keep setup time separate from investigation time and include every planned
-attempt. A failed run may retain a partial answer. It remains failed. Missing
-telemetry must not become zero cost. Full answer bytes, their hashes and logs
-support [offline assessment](REVIEW.md). An intact transport record does not
-establish a correct answer.
+Keep setup time apart from investigation time and include every planned attempt. A failed run can keep a partial answer, and it is still a failure. Missing telemetry never becomes zero cost. Full answer bytes, their hashes and logs support [offline assessment](REVIEW.md), but an intact transport record doesn't make an answer correct.
 
-Missing token/turn telemetry and unavailable reported tools produce
-`protocol_error`; an exceeded model budget produces `budget_exceeded`.
-Their answers and recorded expenses remain available for review. Missing cost
-alone stays unknown and does not change task correctness.
+Missing token or turn telemetry and unavailable reported tools give `protocol_error`, and an exceeded model budget gives `budget_exceeded`. Their answers and recorded costs stay available for review. A missing cost alone stays unknown and doesn't change task correctness.
 
 | Resource | Hard limit |
 |---|---:|
@@ -684,69 +495,39 @@ alone stays unknown and does not change task correctness.
 | Turns | 64 |
 | Declared output tokens | 65,536 |
 
-Lower limits are part of experiment identity. Existing records retain their
-schema guarantees; legacy data cannot claim newer checks.
+Lower limits are part of the experiment identity. Older records keep their own schema guarantees and can't claim checks that came later.
 
-The supervisor leaves the process-group leader unreaped until cleanup, using
-[Python's `waitid` contract](https://docs.python.org/3/library/os.html#os.waitid).
-It handles macOS refusal to signal a zombie-only group after checking group
-state. Live or unobservable members produce `cleanup_error`, reported as an
-invocation failure; retained stdout is preserved.
+The supervisor leaves the process-group leader unreaped until cleanup, following [Python's `waitid` contract](https://docs.python.org/3/library/os.html#os.waitid), so its PID stays reserved. macOS refuses to signal a group that holds only zombies, so the supervisor checks the group with `/bin/ps` first. Live or unobservable members give `cleanup_error`, reported as an invocation failure, and the kept stdout is preserved.
 
 | Artifact | Version | Contract |
 |---|---:|---|
 | Batch | 1 | Legacy unbound three-arm plan |
 | Batch | 2 | Bound default three-arm plan |
 | Batch | 3 | Bound explicit condition matrix |
-| Trial manifest | 1–2 | Legacy standalone trial |
+| Trial manifest | 1-2 | Legacy standalone trial |
 | Trial manifest | 3 | Bound default trial |
-| Trial manifest | 4 | Explicit instruction/tool specification and file inventory |
+| Trial manifest | 4 | Explicit instruction and tool specification and file inventory |
 
 The generic adapter protocol stays `mastermind-research-adapter-v1`.
 
 ## Compare native source delivery
 
-Declare `source_delivery` on an explicit `tools: mmcg` condition. Keep model,
-effort, instructions, source scope and native binary identical across the arms.
-The broker delegates `source_read` to native `mmcg_read` and checks the reply's
-path/SHA against the frozen source. Older conditions retain their original reader.
+Declare `source_delivery` on an explicit `tools: mmcg` condition. Keep model, effort, instructions, source scope and native binary identical across the arms. The broker hands `source_read` to native `mmcg_read` and checks the reply's path and SHA against the frozen source. Conditions without the field keep their original reader.
 
 | Mode | Exposed contract |
 |---|---|
-| `native_full` | Every read delivers text; receipts cannot be submitted |
-| `native_reuse` | Optional `previous_receipt` allows missing-range delivery |
+| `native_full` | Every read delivers text, and receipts can't be submitted |
+| `native_reuse` | An optional `previous_receipt` allows delivery of only the missing ranges |
 
-Both modes require the native tool and explicit root binding. A runtime without
-it fails preparation of the tool catalog; there is no silent reader fallback.
-Do not combine a delivery comparison with changed role prompts or effort. A
-`role_prompt`/`effort` calibration rejects such mixed tool contracts.
+Both modes need the native tool and an explicit root binding. A runtime without it fails while preparing the tool catalog, with no silent fallback to the old reader. Don't combine a delivery comparison with changed role prompts or effort, because a `role_prompt` or `effort` calibration rejects mixed tool contracts.
 
-The range ledger counts only returned segments as delivered source. Reused lines
-must bind to a receipt observed in that same trial; they are reported separately
-under `native_delivery`. Missing telemetry remains unknown. Inspect actual receipt
-use, complete answers and original-request acceptance before claiming savings.
+The range ledger counts only returned segments as delivered source. Reused lines must bind to a receipt observed in the same trial, and they are reported separately under `native_delivery`. Missing telemetry stays unknown. Check actual receipt use, complete answers and original-request acceptance before you claim a saving.
 
-For an explicit activation comparison, include
-`agents/instructions/source-reuse.md` in both arms' `instruction_paths`. It asks
-for receipts only when the tool supports them and all referenced text remains
-in context. Keep a trial that ignores this instruction in the denominator.
-Receipt submission without reused lines establishes adoption, not avoided
-delivery. A replay assuming retained text does not measure model tokens or quality.
-
-For the separate scope-instruction experiment, freeze
-`agents/instructions/source-boundaries.md` as a candidate instruction path. Keep
-source delivery and effort common. It is a generic development candidate; gold
-keys and case-specific counterexamples stay outside the model input.
+To test whether the model uses receipts at all, put `agents/instructions/source-reuse.md` in both arms' `instruction_paths`. It asks for receipts only when the tool supports them and the referenced text is still in context. A trial that ignores the instruction stays in the denominator, and a submitted receipt with no reused lines shows adoption, not avoided delivery.
 
 ## Offline repo-map component planning
 
-Before spending model calls on header size, sweep the native payload against a
-retained integrated-map campaign. Use the frozen map generator that produced its
-header, or build that implementation with `cargo build --locked --manifest-path
-mcp/servers/mmcg/Cargo.toml`. The campaign must contain its original
-input seal, requests, runtime records, source projections, indexes and map JSON.
-The sweep reads these inputs, checks their bindings before and after generation,
-and invokes only the local native CLI. It does not run a model.
+Before you spend model calls on header size, sweep the native payload against a retained integrated-map campaign. Use the frozen map generator that produced its header, or build that version with `cargo build --locked --manifest-path mcp/servers/mmcg/Cargo.toml`. The campaign must contain its original input seal, requests, runtime records, source projections, indexes and map JSON. The sweep checks their bindings before and after generation, runs only the local native CLI and makes no model call.
 
 ```sh
 python3 -m evals.benchmark.repo_map /absolute/path/to/retained-campaign \
@@ -754,89 +535,28 @@ python3 -m evals.benchmark.repo_map /absolute/path/to/retained-campaign \
   --output /absolute/path/to/new-sweep.json
 ```
 
-The output parent must exist. Publication is immutable: use a new output path to
-repeat a sweep, and preserve failed model attempts separately when executing a
-later plan. A source, request, index or default-payload mismatch stops the sweep;
-recover the pinned inputs instead of rewriting their seals.
-Changing the navigation instruction creates a new experiment. Keep the previous
-payload seal immutable and compare the new header against fresh matched controls;
-do not use a changed generator to reproduce an older header sweep.
-
-| Arm | Added content after the retained common instruction |
+| Arm | Content added after the common instruction |
 | --- | --- |
 | baseline | Nothing |
 | map-only | Source binding, shortlist disclaimer and the bundle's selected locations |
 | instructions-only | Direct-read and uncovered-range advice |
-| bundle | Both factors, with the original header layout |
+| bundle | Both, in the original header layout |
 
-Budgets are 512, 1600, 4096 and 16384 bytes. Map-only reserves the bundle's advice
-space, so removing advice does not add definitions. The report retains every
-payload and command, verifies two identical generations, and checks the 1600-byte
-bundle against the original producer input. Equal request digests are aliases.
-Only distinct curve points need later budget experiments; byte counts are not
-token counts and do not establish quality or cost savings.
+The sweep tests budgets of 512, 1600, 4096 and 16384 bytes. Map-only reserves the bundle's advice space, so removing advice doesn't add definitions. The report keeps every payload and command, checks that two generations are identical and checks the 1600-byte bundle against the original producer input. Equal request digests are aliases. The report recommends the smallest tested budget whose payloads equal those at the largest budget and proposes two development plans. Neither plan starts model calls. Byte counts are not token counts.
 
-The report recommends the smallest tested budget whose payloads equal those at
-the largest budget. It also provides two **alternative development plans**:
-an append-only second repetition in reversed order of the retained baseline/map
-pair, and a fresh four-arm factorial with two repetitions. Each factorial arm's
-mean position is balanced within a case; uniform position coverage within each
-case requires four repetitions. Neither plan starts model calls automatically.
-
-Keep exact-profile seeded judge calibration and real human reference separate
-from model proxy labels. Existing tuned questions from one repository remain
-development data. Formal `qualify` additionally needs an independent preregistered
-held-out corpus from at least two repositories and its design-specific simulated
-thresholds. Do not relabel repeated development questions as qualification data.
-
-## Test the harness
-
-```sh
-python3 -m unittest tests.evals.benchmark.test_trials tests.evals.benchmark.test_claude \
-  tests.evals.benchmark.test_corpus tests.evals.benchmark.test_review tests.evals.benchmark.test_judge
-```
-
-These checks exercise real disposable files/processes and fixture adapters.
-They make no model calls and do not measure model quality.
+The output parent must exist, and publication is immutable, so use a new output path to repeat a sweep. A source, request, index or default-payload mismatch stops the sweep. Recover the pinned inputs instead of rewriting their seals. A changed navigation instruction is a new experiment that needs fresh matched controls.
 
 ## Compare local concept retrieval
 
-Use a frozen relevance fixture, source snapshot and native binary with
-`python3 -m evals.benchmark.concept_relevance --help` to select the required
-inputs and a new immutable output path. Retain the source, fixture, binary,
-runner, database and active WAL bindings with the output. Rebuild an index when
-its extractor or concept normalization contract is stale.
+Use a frozen relevance fixture, source snapshot and native binary. Run `python3 -m evals.benchmark.concept_relevance --help` to see the required inputs, and give it a new output path. The [fixture runbook](../fixtures/README.md) has the full commands. Keep the source, fixture, binary, runner, database and active WAL bindings with the output, and rebuild an index whose extractor or concept normalization contract is stale.
 
-The current schema-v5 CLI and MCP exclude recognized Rust test scopes before
-counting and limiting: parsed `test`, `rstest`, or namespaced `::test` attributes,
-plus descendants of canonical `#[cfg(test)]` modules. CLI `--include-tests` and
-MCP `include_tests: true` restore all otherwise qualifying rows. The module
-check requires kind `mod`, exactly the decorator list `,cfg,`, and a raw
-signature of at most 65,536 bytes starting with `#[cfg(test)]` after removing
-spaces, tabs, CR and LF. The cfg-module check does not recognize compound
-expressions, comments within that prefix or additional attributes. Unmarked
-scopes and other languages remain unclassified.
-Queries with at least three distinct terms retain full AND matches
-first and allow qualifying partial candidates to supplement the page, even
-when full matches exist. `all_and_partial_terms` reports both groups in the
-qualified corpus; exact `indexed_total` includes both before the page limit.
-Partial admission requires the existing overall half-terms floor and
-`min(3, overall floor, ranking_terms count)` informative matches. Retain both
-thresholds and `include_tests` when comparing outputs from different policies.
+The native test-scope filter, `include_tests` and the rules for admitting partial-term matches are in the [concept search reference](../../docs/reference/concept-search.md). Record both term thresholds and `include_tests` when you compare outputs from different policies.
 
-Check each previously useful row and frozen anchor per query, alongside the
-planned-query failure denominator and explicit negative queries. Aggregate
-hit@5 can hide losses offset by gains elsewhere. Keep sparse frozen labels and
-post-output source judgments separate; unjudged rows remain unknown. Lexical
-coverage does not prove that a candidate implements the requested operation.
-After inspecting a qualification set, treat it as development data and use a
-new independently authored set for the next qualification.
+Check each previously useful row and frozen anchor per query, together with the planned-query failure denominator and the explicit negative queries. Aggregate hit@5 can hide a loss that a gain elsewhere offsets. Keep sparse frozen labels apart from source judgments made after seeing the output, and keep unjudged rows unknown. Lexical coverage doesn't show that a candidate implements the requested operation. Once you have looked at a qualification set it becomes development data, so author a new independent set for the next qualification.
 
 ## Evaluate operation relevance with source review
 
-Freeze the queries and exact source anchors before retrieving a qualification
-set. Build one native binary and index over that source snapshot, then prepare
-packets in a new directory outside the snapshot:
+Freeze the queries and exact source anchors before you retrieve a qualification set. Build one native binary and one index over that source snapshot, then prepare packets in a new directory outside the snapshot:
 
 ```sh
 python3 -m evals.benchmark.concept_operation prepare \
@@ -845,60 +565,16 @@ python3 -m evals.benchmark.concept_operation prepare \
   --output-dir /absolute/path/to/new-preparation
 ```
 
-For agent-expanded recall, add `--hints /absolute/path/to/frozen-hints.json`.
-This file maps every case ID to at most eight short plain hints. Generate hints
-from query-only packets before viewing retrieval outputs, without anchors,
-labels or code access, and retain their generator and hash. The runner binds
-this input and passes repeated native `--hint` flags. Hints do not change the
-query used for source assessment or scoring. Report plain and expanded recall
-separately if comparing those mechanisms.
+| Optional input | Contract |
+|---|---|
+| `--hints PATH` | JSON mapping every case ID to at most eight short plain hints. Generate them from query-only packets before you see retrieval output, with no anchors, labels or code access, and keep the generator and hash. The runner passes them as repeated native `--hint` flags. Hints broaden recall but don't change the query used for assessment or scoring, so report plain and expanded recall separately |
+| `--request-contracts PATH` | JSON object mapping every frozen case ID to `{operation, constraints}`. Each constraint has a unique `id`, an exact query quote `text`, and a `kind` of `input`, `state`, `scope` or `result`. Write it from the query alone before retrieval. The runner binds its hash, passes one native `--request-contract` per case and rejects drift before finish. Without it, the whole query is the operation with no parsed constraints |
 
-Generate a query-only operation ledger before retrieval, without source,
-anchors or labels. Add `--request-contracts /absolute/path/to/contracts.json`:
-this JSON object must map every frozen case ID to `{operation, constraints}`.
-Each constraint has a unique `id`, exact query quote `text`, and `kind`:
-`input`, `state`, `scope` or `result`. The runner binds its hash, passes one
-native `--request-contract` per case and rejects drift before finish. Omission
-uses the whole query with no parsed constraints; it does not remove constraints
-from the original query.
+Give the source reviewer only `packets/*.json` and the bound source files. Keep the suite, anchors, case kinds and preparation manifest away from them. The reviewer fills each packet's assessment template against the actual operations in the source and saves one assessment per opaque packet filename in a new directory. `unknown` is for a candidate the reviewer couldn't inspect enough. Every candidate needs an explicit judgment, and a missing assessment counts as a failed planned query.
 
-Give the source reviewer only `packets/*.json` and the bound source files.
-Withhold the suite, anchors, case kinds and preparation manifest. The reviewer
-uses each packet's assessment template, checks actual operations against the
-query and saves one assessment per opaque packet filename in a new directory.
-Use `unknown` for insufficient inspection. Every candidate needs an explicit
-judgment; a missing assessment remains a failed planned query.
+The packet carries the `operation-roles-v3` rubric. Freeze it before qualification. The roles, the `supporting_evidence` and `constraint_checks` fields, `query_ambiguities` and the witness rules are defined in the [concept search reference](../../docs/reference/concept-search.md). MCP checks structure, bindings and declared consistency. Independent source reviewers still have to check the claims. A role-contract change needs a new preparation and assessment, and replaying historical labels measures compatibility, not a fresh source review.
 
-Freeze the packet's `operation-roles-v3` rubric before qualification. Assign
-each relevant declaration `implementation`, `entrypoint`, `contract`,
-`essential_helper` or `supporting_context`. Cite its own behavior, then bind
-non-implementation roles to inspected caller/consumer/implementation ranges
-with `supporting_evidence` objects containing `path`, `source_sha256`,
-`start_line` and `end_line`. Entrypoints, contracts and helpers require evidence
-outside their declaration. Preserve unresolved intent in `query_ambiguities`;
-useful results for an ambiguous query may only be supporting context.
-Context must navigate to an existing requested operation satisfying every
-explicit constraint under a plausible interpretation. Opposite behavior,
-unsupported constraints, narrower operations and locations for implementing
-missing features are irrelevant. Keep uninspected constraints unknown. Prefer
-semantic roles for necessary operation-specific steps and concrete result
-entrypoints, including cached-result paths. A role-contract change requires
-new preparation and assessment; replayed historical labels measure compatibility
-separately from source reassessment under the new criterion.
-
-For every relevant judgment, record `witness.behavior`, a typed `relation`
-matching its role, and one matched source-bound `constraint_checks` entry for
-every declared constraint. Inspect the declaration's own contribution before
-selecting a role. Generic prerequisites are context; own operation-specific
-branches can establish a module or entrypoint role. State/result requirements
-cannot be replaced by omitted selectors or rendered instructions. MCP validates
-structure, bindings and declared consistency; independent source reviewers
-must still verify the claims. See the [full witness schema](../../docs/reference/mmcg.md#local-symbol-concept-search).
-
-Preparation adds a bounded `owned_scope` channel after lexical/body retrieval:
-at most two nominated file owners and sixteen additional matching runtime
-functions/methods per owner. Freeze and report this recall policy as part of
-the experiment. Source and candidate omissions remain coverage limits.
+Preparation adds a bounded `owned_scope` channel after lexical and body retrieval: at most two nominated file owners and sixteen extra matching runtime functions or methods per owner. Freeze and report this recall policy with the experiment.
 
 ```sh
 python3 -m evals.benchmark.concept_operation finish \
@@ -907,30 +583,15 @@ python3 -m evals.benchmark.concept_operation finish \
   --output /absolute/path/to/new-operation-report.json
 ```
 
-The runner makes native CLI calls and checks source, binary, database/WAL,
-fixture, runner, packet and assessment hashes. It does not invoke a model.
-Record the external reviewer and its inspection limits separately. Keep model
-assessment quality separate from deterministic protocol tests, and source
-review all emitted results with a second reviewer who cannot see variant,
-rank, prior labels or the first assessment. Protect previous useful results
-using case/path/name/declaration-line identities and exact source hashes.
-Protect navigation on the full returned `candidates` page. Report semantic
-quality on `semantic_candidates` separately from `supporting_context`; these
-two arrays partition the returned page, while their totals count assessed
-entries before `top` truncation. A retained useful helper/context declaration
-must not silently become proof that it implements the whole requested
-operation. Retain prior labels and role disagreements alongside adjudication.
+The runner makes native CLI calls and checks source, binary, database and WAL, fixture, runner, packet and assessment hashes. It doesn't call a model. Record the external reviewer and their inspection limits separately. Have a second reviewer source-review every emitted result without seeing the variant, rank, prior labels or the first assessment.
 
-Unknown assessments, query ambiguities, retrieval truncation and source omissions prevent a
-complete-absence claim. Keep incomplete negatives separate from known-empty
-negatives. If inputs drift, retain the attempt and create a new preparation;
-do not rewrite a packet or existing report. After inspecting qualification
-outputs, use a newly authored frozen set for further changes to retrieval or
-the review rubric.
+Protect earlier useful results by case, path, name, declaration line and exact source hash, and protect navigation on the full returned `candidates` page. Report semantic quality on `semantic_candidates` apart from `supporting_context`. These two arrays split the returned page between them, and their totals count assessed entries before `top` truncation. A useful helper or context declaration must never quietly turn into proof that it implements the whole operation. Keep prior labels and role disagreements next to the adjudication.
+
+Unknown assessments, query ambiguities, retrieval truncation and source omissions rule out a claim that nothing relevant exists. Keep incomplete negatives apart from known-empty ones. If inputs drift, keep the attempt and create a new preparation instead of rewriting a packet or report. After you inspect qualification outputs, use a newly authored frozen set for further changes to retrieval or the rubric. The [source-witness study](../baselines/concept-witness-20261016.md) is the retained run of this procedure.
 
 ## Plan development resource repetitions
 
-Before running a resource screen, simulate its exact task-level sign-flip test:
+Before you run a resource screen, simulate its exact task-level sign-flip test:
 
 ```sh
 python3 -m evals.benchmark.resource_power \
@@ -938,21 +599,13 @@ python3 -m evals.benchmark.resource_power \
   --simulations 20000 --seed 20261015
 ```
 
-This standard-library calculation makes no model calls. It evaluates eight
-independent tasks, a true token ratio of 0.90, paired run log-ratio SD 0.25,
-task SDs 0.03/0.05/0.08 and even repetitions from 8 through 64 per arm. The
-output includes exact-test rejection fractions, Monte Carlo intervals, a null
-size check, input hashes and producer-attempt costs for two or four arms. It
-also evaluates 12 and 16 tasks with eight repetitions under task SDs 0.05/0.08.
-It selects the first tested repetition count whose marginal Wilson lower bound
-reaches 80%; nuisance uncertainty remains separate. Existing outputs are never
-replaced; use a new path when changing inputs or the simulation.
+This standard-library calculation makes no model call. It evaluates eight independent tasks, a true token ratio of 0.90, a paired run log-ratio SD of 0.25, task SDs of 0.03, 0.05 and 0.08, and even repetitions from 8 through 64 per arm. It also evaluates 12 and 16 tasks with eight repetitions under task SDs of 0.05 and 0.08. The output has exact-test rejection fractions, Monte Carlo intervals, a null size check, input hashes and producer-attempt costs for two or four arms. It picks the first tested repetition count whose marginal Wilson lower bound reaches 80%. The command never replaces an existing output, so use a new path when you change inputs or the simulation. How to read the retained run is in the [resource power report](../baselines/resource-power-20261015.md).
 
-The primary contrast is low-effort lexical map on versus map off. Four-arm costs
-assume equal repetitions in every effort × map cell; the interaction needs its
-own variance and effect-size plan. These are Normal-model development planning
-estimates. Detection at an assumed 10% reduction does not establish a reduction
-of at least 10%, acceptance non-inferiority or product qualification. Inspect
-the sensitivity results before freezing a design.
+## Test the harness
 
-See the [source-witness study](../baselines/concept-witness-20261016.md) for source and runtime bindings, useful-result preservation, independent relevance results and the limits of retained local historical evidence.
+```sh
+python3 -m unittest tests.evals.benchmark.test_trials tests.evals.benchmark.test_claude \
+  tests.evals.benchmark.test_corpus tests.evals.benchmark.test_review tests.evals.benchmark.test_judge
+```
+
+These tests use real disposable files and processes and fixture adapters. They make no model calls and don't measure model quality.

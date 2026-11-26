@@ -20,11 +20,8 @@ use std::path::{Path, PathBuf};
 
 mod collection;
 mod curation;
-mod habit_generations;
 mod habit_review;
-mod habit_supersession;
 mod preferences;
-mod supersession;
 pub(super) use collection::{
     CollectedCandidate, CollectionBatch, CollectionSource, CollectionSourceSelection,
     CollectionStats,
@@ -37,7 +34,7 @@ pub(super) use preferences::fixture_preference;
 const MAX_STYLE_STORE_SIZE: u64 = 64 * 1024 * 1024;
 // Raise this when a release changes stored data, for example `feedback_key`,
 // and migrate the older version in `open`.
-const STYLE_STORE_VERSION: i64 = 1;
+const STYLE_STORE_VERSION: i64 = 2;
 
 /// Raw per-detector tallies, summable across repos. Keys like `indent.space`.
 pub type Counts = BTreeMap<String, i64>;
@@ -92,15 +89,12 @@ pub struct Feedback {
     pub last_at: String,
     /// Distinct sessions or memory files that stated it.
     pub sources: i64,
-    /// `candidate`, accepted `active`, or terminal `rejected` / `superseded`.
+    /// `candidate`, accepted `active`, or terminal `rejected`.
     pub status: String,
     /// All retained evidence and immutable candidate receipts, including legacy rows.
     pub evidence_revision: String,
     /// Exact definition/evidence revision explicitly accepted by the author.
     pub accepted_revision: Option<String>,
-    /// Replacement review is separate from the review of source evidence.
-    pub relations_revision: String,
-    pub superseded_by: Option<String>,
 }
 
 impl Feedback {
@@ -144,12 +138,6 @@ pub struct FeedbackEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Habit {
     pub id: i64,
-    pub generation: i64,
-    pub generation_root: i64,
-    pub renewed_from: Option<i64>,
-    pub renewed_as: Option<i64>,
-    /// Terminal state retained when this claim became a renewal parent.
-    pub(crate) renewal_status: Option<String>,
     pub when: String,
     pub behavior: String,
     pub outcome: String,
@@ -168,9 +156,6 @@ pub struct Habit {
     pub evidence_revision: String,
     /// Exact definition and evidence revision reviewed as observed.
     pub observed_revision: Option<String>,
-    /// Reviewed replacement relations, independent of the source review digest.
-    pub relations_revision: String,
-    pub superseded_by: Option<i64>,
 }
 
 impl Habit {
@@ -190,33 +175,12 @@ impl Habit {
         ] {
             digest_str(&mut hash, field);
         }
-        // Existing generation-one review pins remain valid after migration.
-        if self.generation != 1 {
-            hash.update(b"habit-generation-identity-v1\0");
-            hash.update(self.generation.to_le_bytes());
-            hash.update(self.generation_root.to_le_bytes());
-            hash.update(self.renewed_from.unwrap_or(0).to_le_bytes());
-        }
         crate::hex::encode(&hash.finalize())
     }
 
-    pub(super) fn retired_status(&self) -> Option<&str> {
-        if self.superseded_by.is_some() || self.status == "superseded" {
-            Some("superseded")
-        } else if self.renewed_as.is_some() {
-            Some(self.renewal_status.as_deref().unwrap_or("rejected"))
-        } else if self.status == "rejected" {
-            Some("rejected")
-        } else {
-            None
-        }
-    }
-
     pub(super) fn observation_problem(&self) -> Option<&'static str> {
-        if self.retired_status().is_some()
-            || !matches!(self.status.as_str(), "candidate" | "stale" | "observed")
-        {
-            Some("a rejected or superseded habit cannot be observed")
+        if !matches!(self.status.as_str(), "candidate" | "stale" | "observed") {
+            Some("a rejected habit cannot be observed")
         } else if self.episodes < 2 || self.sources < 2 {
             Some("observation needs support from two distinct sessions and task episodes")
         } else if !self.scope.starts_with("project:") && self.repositories < 2 {
@@ -293,7 +257,6 @@ pub struct Aggregate {
     /// Distinct commit OIDs with a measured diff and no conflicting context.
     pub commits_sampled: i64,
     pub added_lines_sampled: i64,
-    pub identities: Vec<String>,
     /// Sum of distinct sampled Git commits' tallies.
     pub counts: Counts,
     /// Distinct listed Git commits in SHA order, including explicit conflicts.
@@ -309,7 +272,7 @@ impl Aggregate {
     /// evidence and never affect the rendered Markdown.
     pub fn profile_revision(&self) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"mastermind-style-aggregate-v9\0");
+        digest.update(b"mastermind-style-aggregate-v10\0");
         digest.update((self.repos as u64).to_le_bytes());
         digest.update((self.legacy_repos as u64).to_le_bytes());
         digest.update(self.commits_total.to_le_bytes());
@@ -326,7 +289,6 @@ impl Aggregate {
                 &entry.last_at,
                 &entry.status,
                 &entry.evidence_revision,
-                &entry.relations_revision,
                 entry.accepted_revision.as_deref().unwrap_or(""),
             ] {
                 digest_str(&mut digest, field);
@@ -335,9 +297,6 @@ impl Aggregate {
         }
         for habit in &self.habits {
             digest.update(habit.id.to_le_bytes());
-            digest.update(habit.generation.to_le_bytes());
-            digest.update(habit.generation_root.to_le_bytes());
-            digest.update(habit.renewed_from.unwrap_or(0).to_le_bytes());
             for field in [
                 &habit.when,
                 &habit.behavior,
@@ -348,7 +307,6 @@ impl Aggregate {
                 &habit.workflow,
                 &habit.status,
                 &habit.evidence_revision,
-                &habit.relations_revision,
                 habit.observed_revision.as_deref().unwrap_or(""),
             ] {
                 digest_str(&mut digest, field);
@@ -547,7 +505,7 @@ impl ProfileStore {
                  scope          TEXT NOT NULL,
                  role           TEXT NOT NULL,
                  workflow       TEXT NOT NULL,
-                 status         TEXT NOT NULL CHECK(status IN ('candidate', 'observed', 'stale', 'rejected', 'superseded'))
+                 status         TEXT NOT NULL CHECK(status IN ('candidate', 'observed', 'stale', 'rejected'))
              );
              CREATE UNIQUE INDEX IF NOT EXISTS persona_claim_unique ON persona_claim
                  (kind, when_text, behavior, outcome, exception_text, scope, role, workflow);
@@ -600,7 +558,7 @@ impl ProfileStore {
         }
         collection::ensure_schema(&mut conn)?;
         if version < STYLE_STORE_VERSION {
-            migrate_feedback_keys(&mut conn)?;
+            migrate(&mut conn, version)?;
         }
         verify_store_identity(&root, &target, expected_identity, false)?;
         Ok(Self { conn })
@@ -618,6 +576,15 @@ impl ProfileStore {
                 )),
             )
         })
+    }
+
+    /// Open an existing store for writing without creating it. Writable opens
+    /// convert an older format, so automatic paths use this before reading.
+    pub(crate) fn open_existing(path: &Path) -> SqlResult<Option<Self>> {
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            _ => Self::open(path).map(Some),
+        }
     }
 
     pub(crate) fn open_optional_read_only(path: &Path) -> SqlResult<Option<Self>> {
@@ -648,7 +615,12 @@ impl ProfileStore {
         )?;
         verify_store_identity(&root, &target, expected, true)?;
         conn.execute_batch("PRAGMA query_only = ON;")?;
-        format_version(&conn)?;
+        if format_version(&conn)? < 2 && has_replacement_records(&conn)? {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                Some("style store holds preference or habit replacement records from an older mmcg; the next automatic profile refresh or any command that writes the profile converts them".into()),
+            ));
+        }
         verify_store_identity(&root, &target, expected, true)?;
         Ok(Some(Self { conn }))
     }
@@ -708,11 +680,6 @@ impl ProfileStore {
             )?;
         }
         tx.commit()
-    }
-
-    /// Wipe everything — `--force` rebuilds the whole profile from scratch.
-    pub fn reset(&mut self) -> SqlResult<()> {
-        self.conn.execute_batch(DELETE_ALL)
     }
 
     /// Read access is fail-closed for stores predating this table. A grant is
@@ -790,7 +757,6 @@ impl ProfileStore {
                 commits_total: 0,
                 commits_sampled: 0,
                 added_lines_sampled: 0,
-                identities: Vec::new(),
                 counts: Counts::new(),
                 commits: Vec::new(),
                 feedback: self.feedback()?,
@@ -863,13 +829,6 @@ impl ProfileStore {
             |r| r.get::<_, i64>(0),
         )? as usize;
 
-        let mut idstmt = self
-            .conn
-            .prepare("SELECT DISTINCT email FROM identity ORDER BY email")?;
-        let identities: Vec<String> = idstmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<SqlResult<_>>()?;
-
         let feedback = self.feedback()?;
         Ok(Aggregate {
             repos,
@@ -880,7 +839,6 @@ impl ProfileStore {
                 .filter(|c| c.counts.get("diff.sampled").copied().unwrap_or(0) > 0)
                 .count() as i64,
             added_lines_sampled: counts.get("diff.lines").copied().unwrap_or(0),
-            identities,
             counts,
             commits,
             feedback,
@@ -977,14 +935,6 @@ impl ProfileStore {
         let Some(status) = status else {
             return Ok(None);
         };
-        if status == "superseded"
-            || habit_supersession::has_successor(&tx, id)?
-            || habit_generations::has_child(&tx, id)?
-        {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "a retired habit cannot receive evidence".into(),
-            ));
-        }
         if status != "rejected" {
             let scope: String = tx.query_row(
                 "SELECT scope FROM persona_claim WHERE id = ?1",
@@ -1193,12 +1143,9 @@ const DELETE_ALL: &str = "DELETE FROM commit_counter; DELETE FROM sampled_commit
                           DELETE FROM feedback_source; DELETE FROM feedback; \
                           DELETE FROM feedback_acceptance; DELETE FROM persona_candidate_feedback; \
                           DELETE FROM persona_feedback_dismissal; \
-                          DELETE FROM feedback_supersession; \
                           DELETE FROM profile_reader_grant; \
                           DELETE FROM persona_evidence_rebind; \
                           DELETE FROM persona_habit_observation; \
-                          DELETE FROM persona_habit_supersession; \
-                          DELETE FROM persona_habit_generation; \
                           DELETE FROM persona_review_event; DELETE FROM persona_claim_evidence; \
                           DELETE FROM persona_claim; \
                           DELETE FROM persona_candidate_habit; DELETE FROM persona_candidate_review; DELETE FROM persona_candidate_revision; \
@@ -1275,26 +1222,26 @@ fn record_habit_tx(
     validate_habit_project_scope(claim.scope, evidence.project)?;
     if target.is_none() {
         tx.execute(
-        "INSERT OR IGNORE INTO persona_claim \
-             (kind, when_text, behavior, outcome, exception_text, scope, role, workflow, status, generation) \
-             VALUES ('habit', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'candidate', 1)",
-        params![
-            claim.when,
-            claim.behavior,
-            claim.outcome,
-            claim.exception,
-            claim.scope,
-            claim.role,
-            claim.workflow
-        ],
-    )?;
+            "INSERT OR IGNORE INTO persona_claim \
+             (kind, when_text, behavior, outcome, exception_text, scope, role, workflow, status) \
+             VALUES ('habit', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'candidate')",
+            params![
+                claim.when,
+                claim.behavior,
+                claim.outcome,
+                claim.exception,
+                claim.scope,
+                claim.role,
+                claim.workflow
+            ],
+        )?;
     }
     let (id, status): (i64, String) = tx
         .query_row(
             "SELECT id, status FROM persona_claim WHERE kind = 'habit' AND when_text = ?1 \
              AND behavior = ?2 AND outcome = ?3 AND exception_text = ?4 \
              AND scope = ?5 AND role = ?6 AND workflow = ?7 \
-             AND ((?8 IS NULL AND generation=1) OR id=?8)",
+             AND (?8 IS NULL OR id=?8) ORDER BY id DESC LIMIT 1",
             params![
                 claim.when,
                 claim.behavior,
@@ -1313,14 +1260,6 @@ fn record_habit_tx(
                 "target habit missing or definition/scope/role/workflow differs".into(),
             )
         })?;
-    if status == "superseded"
-        || habit_supersession::has_successor(tx, id)?
-        || habit_generations::has_child(tx, id)?
-    {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "a retired habit cannot be proposed again".into(),
-        ));
-    }
     if candidate_only && status != "candidate" {
         return Err(rusqlite::Error::InvalidParameterName(
             "existing habit already reviewed; proposal cannot add evidence".into(),
@@ -1338,12 +1277,7 @@ fn invalidate_habit_observation(tx: &rusqlite::Transaction<'_>, id: i64) -> SqlR
         [id],
     )?;
     tx.execute(
-        "UPDATE persona_claim SET status=CASE WHEN EXISTS(SELECT 1 FROM persona_habit_supersession WHERE old_id=?1)
-         THEN 'superseded' WHEN EXISTS(SELECT 1 FROM persona_habit_generation WHERE parent_id=?1)
-         THEN (SELECT parent_status FROM persona_habit_generation WHERE parent_id=?1)
-         ELSE 'stale' END WHERE id=?1 AND (status='observed'
-         OR EXISTS(SELECT 1 FROM persona_habit_supersession WHERE old_id=?1)
-         OR EXISTS(SELECT 1 FROM persona_habit_generation WHERE parent_id=?1))",
+        "UPDATE persona_claim SET status='stale' WHERE id=?1 AND status='observed'",
         [id],
     )?;
     Ok(())
@@ -1502,11 +1436,103 @@ pub fn feedback_key(statement: &str, category: &str, scope: &str) -> String {
     format!("{words}--{}", &suffix[..16])
 }
 
+fn migrate(conn: &mut Connection, version: i64) -> SqlResult<()> {
+    let tx = conn.transaction()?;
+    retire_replacement_records(&tx)?;
+    if version < 1 {
+        migrate_feedback_keys(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", STYLE_STORE_VERSION)?;
+    collection::check_size(&tx)?;
+    tx.commit()
+}
+
+fn has_table(conn: &Connection, table: &str) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |r| r.get(0),
+    )
+}
+
+fn has_replacement_records(conn: &Connection) -> SqlResult<bool> {
+    for table in [
+        "feedback_supersession",
+        "persona_habit_supersession",
+        "persona_habit_generation",
+    ] {
+        if has_table(conn, table)?
+            && conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                r.get(0)
+            })?
+        {
+            return Ok(true);
+        }
+    }
+    let superseded = |table: &str| -> SqlResult<bool> {
+        Ok(has_table(conn, table)?
+            && conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE status='superseded')"),
+                [],
+                |r| r.get(0),
+            )?)
+    };
+    Ok(superseded("feedback")? || superseded("persona_claim")?)
+}
+
+/// Format 1 could replace a preference or habit by another and renew a
+/// retired habit as a new claim. Those records are no longer read: a replaced
+/// entry becomes rejected, and a renewed claim returns to review because its
+/// review revision no longer covers the lineage. Each change gets a review
+/// event, so the history shows why the status moved.
+fn retire_replacement_records(tx: &rusqlite::Transaction<'_>) -> SqlResult<()> {
+    let mut replaced = String::from("status='superseded'");
+    if has_table(tx, "feedback_supersession")? {
+        replaced += " OR key IN (SELECT old_key FROM feedback_supersession)";
+    }
+    tx.execute_batch(&format!(
+        "INSERT INTO feedback_review_event(key,status,at_epoch,reviewed_revision)
+            SELECT key,'replacement_removed:'||status||'->rejected',unixepoch(),NULL
+            FROM feedback WHERE status!='rejected' AND ({replaced});
+         DELETE FROM feedback_acceptance WHERE key IN (SELECT key FROM feedback WHERE {replaced});
+         UPDATE feedback SET status='rejected' WHERE {replaced};
+         DROP TABLE IF EXISTS feedback_supersession;"
+    ))?;
+    let mut replaced = String::from("status='superseded'");
+    if has_table(tx, "persona_habit_supersession")? {
+        replaced += " OR id IN (SELECT old_id FROM persona_habit_supersession)";
+    }
+    let renewed = has_table(tx, "persona_habit_generation")?;
+    if renewed {
+        replaced += " OR id IN (SELECT parent_id FROM persona_habit_generation)";
+    }
+    tx.execute_batch(&format!(
+        "INSERT INTO persona_review_event(claim_id,status,at_epoch,reviewed_revision)
+            SELECT id,'replacement_removed:'||status||'->rejected',unixepoch(),NULL
+            FROM persona_claim WHERE status!='rejected' AND ({replaced});
+         DELETE FROM persona_habit_observation WHERE claim_id IN (SELECT id FROM persona_claim WHERE {replaced});
+         UPDATE persona_claim SET status='rejected' WHERE {replaced};
+         DROP TABLE IF EXISTS persona_habit_supersession;"
+    ))?;
+    if renewed {
+        tx.execute_batch(
+            "INSERT INTO persona_review_event(claim_id,status,at_epoch,reviewed_revision)
+                SELECT id,'renewal_removed:'||status||'->candidate',unixepoch(),NULL FROM persona_claim
+                WHERE id IN (SELECT child_id FROM persona_habit_generation) AND status IN ('observed','stale');
+             UPDATE persona_claim SET status='candidate'
+                WHERE id IN (SELECT child_id FROM persona_habit_generation) AND status IN ('observed','stale');
+             DELETE FROM persona_habit_observation WHERE claim_id IN (SELECT child_id FROM persona_habit_generation);
+             DROP TABLE persona_habit_generation;",
+        )?;
+    }
+    Ok(())
+}
+
 /// Existing stores keyed feedback by statement alone. Re-key in one
 /// transaction, preserving review status, dates, quotes, and source links.
-fn migrate_feedback_keys(conn: &mut Connection) -> SqlResult<()> {
+fn migrate_feedback_keys(tx: &rusqlite::Transaction<'_>) -> SqlResult<()> {
     let entries = {
-        let mut stmt = conn.prepare("SELECT key, statement, category, scope FROM feedback")?;
+        let mut stmt = tx.prepare("SELECT key, statement, category, scope FROM feedback")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1517,7 +1543,6 @@ fn migrate_feedback_keys(conn: &mut Connection) -> SqlResult<()> {
         })?;
         rows.collect::<SqlResult<Vec<_>>>()?
     };
-    let tx = conn.transaction()?;
     for (old, statement, category, scope) in entries {
         let new = feedback_key(&statement, &category, &scope);
         if old == new {
@@ -1553,18 +1578,8 @@ fn migrate_feedback_keys(conn: &mut Connection) -> SqlResult<()> {
             "UPDATE persona_feedback_dismissal SET feedback_key=?1 WHERE feedback_key=?2",
             params![new, old],
         )?;
-        tx.execute(
-            "UPDATE feedback_supersession SET old_key=?1 WHERE old_key=?2",
-            params![new, old],
-        )?;
-        tx.execute(
-            "UPDATE feedback_supersession SET new_key=?1 WHERE new_key=?2",
-            params![new, old],
-        )?;
     }
-    tx.pragma_update(None, "user_version", STYLE_STORE_VERSION)?;
-    collection::check_size(&tx)?;
-    tx.commit()
+    Ok(())
 }
 
 fn format_version(conn: &Connection) -> SqlResult<i64> {
@@ -1665,6 +1680,13 @@ mod tests {
         }]
     }
 
+    /// The `--force` mine: one transaction that wipes every stored row first.
+    pub(super) fn replace_all(store: &mut ProfileStore) {
+        store
+            .apply_mine(true, &[], "/replacement", &prov(None, 0), &[], &[])
+            .unwrap();
+    }
+
     fn prov(sha: Option<&str>, mined_at_epoch: i64) -> RepoProvenance {
         RepoProvenance {
             author: "me".into(),
@@ -1708,7 +1730,10 @@ mod tests {
         assert_eq!(agg.commits_total, 20);
         assert_eq!(agg.counts["indent.space"], 50);
         assert_eq!(agg.counts["indent.tab"], 10);
-        assert_eq!(agg.identities, vec!["a@x".to_string(), "b@x".to_string()]);
+        assert_eq!(
+            s.owner_signals().unwrap().1,
+            vec!["a@x".to_string(), "b@x".to_string()]
+        );
         assert_eq!(
             s.repo_meta("/a")
                 .unwrap()
@@ -1798,7 +1823,6 @@ mod tests {
             commits_total: 10,
             commits_sampled: 8,
             added_lines_sampled: 120,
-            identities: vec!["private@example.test".into()],
             counts: evidence[0].counts.clone(),
             commits: evidence.clone(),
             feedback: Vec::new(),
@@ -1810,7 +1834,6 @@ mod tests {
             commits_total: baseline.commits_total,
             commits_sampled: baseline.commits_sampled,
             added_lines_sampled: baseline.added_lines_sampled,
-            identities: vec!["another-private@example.test".into()],
             counts: baseline.counts.clone(),
             commits: evidence,
             feedback: Vec::new(),
@@ -2091,7 +2114,7 @@ mod tests {
             store.aggregate().unwrap().profile_revision(),
             original_revision
         );
-        store.reset().unwrap();
+        replace_all(&mut store);
         assert!(store.habit_rebinds(claim.id).unwrap().is_empty());
     }
 
@@ -2143,7 +2166,7 @@ mod tests {
             .unwrap();
         assert_eq!((reviewed.projects, reviewed.episodes), (2, 3));
         assert_eq!(store.habit_evidence(first.id).unwrap().len(), 3);
-        store.reset().unwrap();
+        replace_all(&mut store);
         assert!(store.habits().unwrap().is_empty());
     }
 
@@ -2228,7 +2251,7 @@ mod tests {
         assert_eq!(s.set_feedback_status("zzz", "active").unwrap(), 0);
         assert_eq!(s.aggregate().unwrap().feedback.len(), 1);
 
-        s.reset().unwrap();
+        replace_all(&mut s);
         assert!(s.feedback().unwrap().is_empty());
     }
 
@@ -2343,6 +2366,121 @@ mod tests {
     }
 
     #[test]
+    fn format_one_replacements_become_rejected_and_renewed_claims_return_to_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style.db");
+        let mut db = ProfileStore::open(&path).unwrap();
+        let entry = |db: &ProfileStore, statement: &str| {
+            db.feedback()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.statement == statement)
+                .unwrap()
+        };
+        let observe = |db: &mut ProfileStore, id: i64| {
+            let revision = db.habit(id).unwrap().unwrap().review_revision();
+            db.review_habit(id, "observed", Some(&revision))
+                .unwrap()
+                .unwrap();
+        };
+        for statement in ["Prefer short replies", "Prefer detailed replies"] {
+            preferences::fixture_preference(&mut db, statement, "global");
+            let current = entry(&db, statement);
+            db.review_feedback(&current.key, "active", Some(&current.review_revision()))
+                .unwrap();
+        }
+        let replaced = entry(&db, "Prefer short replies").key;
+        let successor = entry(&db, "Prefer detailed replies").key;
+        let [old, new, parent, child] = [
+            "Checks contracts first",
+            "Checks contracts and callers first",
+            "Writes the test after the fix",
+            "Writes the failing test first",
+        ]
+        .map(|behavior| habit_review::fixture_habit(&mut db, behavior).id);
+        for id in [old, new, child] {
+            observe(&mut db, id);
+        }
+        db.review_habit(parent, "rejected", None).unwrap().unwrap();
+        db.conn
+            .execute_batch(&format!(
+                "CREATE TABLE feedback_supersession (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL,
+                    old_revision TEXT NOT NULL, new_revision TEXT NOT NULL, reviewed_at INTEGER NOT NULL);
+                 INSERT INTO feedback_supersession VALUES ('{replaced}','{successor}','a','b',0);
+                 UPDATE feedback SET status='superseded' WHERE key='{replaced}';
+                 CREATE TABLE persona_habit_supersession (old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL,
+                    old_revision TEXT NOT NULL, new_revision TEXT NOT NULL, reviewed_at INTEGER NOT NULL);
+                 INSERT INTO persona_habit_supersession VALUES ({old},{new},'a','b',0);
+                 CREATE TABLE persona_habit_generation (parent_id INTEGER PRIMARY KEY, child_id INTEGER NOT NULL,
+                    root_id INTEGER NOT NULL, parent_revision TEXT NOT NULL, parent_status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL);
+                 INSERT INTO persona_habit_generation VALUES ({parent},{child},{parent},'a','rejected',0);
+                 PRAGMA user_version=1;"
+            ))
+            .unwrap();
+        drop(db);
+
+        let error = ProfileStore::open_read_only(&path).err().unwrap();
+        assert!(
+            error.to_string().contains("next automatic profile refresh"),
+            "{error}"
+        );
+
+        let db = ProfileStore::open(&path).unwrap();
+        let retired = entry(&db, "Prefer short replies");
+        assert_eq!(
+            (retired.status.as_str(), retired.accepted_revision),
+            ("rejected", None)
+        );
+        assert_eq!(entry(&db, "Prefer detailed replies").status, "active");
+        let habit = |id: i64| db.habit(id).unwrap().unwrap();
+        assert_eq!(
+            (habit(old).status.as_str(), habit(old).observed_revision),
+            ("rejected", None)
+        );
+        assert_eq!(habit(new).status, "observed");
+        assert_eq!(habit(parent).status, "rejected");
+        assert_eq!(
+            (habit(child).status.as_str(), habit(child).observed_revision),
+            ("candidate", None)
+        );
+        let migrated = |db: &ProfileStore| -> Vec<String> {
+            let mut stmt = db
+                .conn
+                .prepare(
+                    "SELECT key||' '||status FROM feedback_review_event WHERE status LIKE '%_removed:%'
+                     UNION ALL SELECT claim_id||' '||status FROM persona_review_event WHERE status LIKE '%_removed:%'",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<SqlResult<_>>().unwrap()
+        };
+        assert_eq!(
+            migrated(&db),
+            [
+                format!("{replaced} replacement_removed:superseded->rejected"),
+                format!("{old} replacement_removed:observed->rejected"),
+                format!("{child} renewal_removed:observed->candidate"),
+            ]
+        );
+        for table in [
+            "feedback_supersession",
+            "persona_habit_supersession",
+            "persona_habit_generation",
+        ] {
+            assert!(!has_table(&db.conn, table).unwrap(), "{table}");
+        }
+        drop(db);
+        ProfileStore::open_read_only(&path).unwrap();
+        let db = ProfileStore::open(&path).unwrap();
+        assert_eq!(
+            migrated(&db).len(),
+            3,
+            "a second open does not migrate again"
+        );
+    }
+
+    #[test]
     fn key_migration_rolls_back_before_exceeding_store_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("style.db");
@@ -2396,7 +2534,7 @@ mod tests {
         db.conn
             .execute_batch("PRAGMA max_page_count=2147483646")
             .unwrap();
-        let error = migrate_feedback_keys(&mut db.conn).unwrap_err();
+        let error = migrate(&mut db.conn, 0).unwrap_err();
         assert!(error.to_string().contains("64 MiB"), "{error}");
         let legacy: i64 = db
             .conn
@@ -2518,7 +2656,7 @@ mod tests {
         let aggregate = s.aggregate().unwrap();
         assert_eq!(aggregate.repos, 1);
         assert_eq!(aggregate.counts["x"], 10);
-        assert_eq!(aggregate.identities, vec!["author@example.test"]);
+        assert_eq!(s.owner_signals().unwrap().1, vec!["author@example.test"]);
         assert_eq!(
             s.repo_meta("/checkout")
                 .unwrap()
@@ -2564,7 +2702,7 @@ mod tests {
         let aggregate = store.aggregate().unwrap();
         assert_eq!(aggregate.repos, 1);
         assert_eq!(aggregate.counts["x"], 10);
-        assert_eq!(aggregate.identities, vec!["old@example.test"]);
+        assert_eq!(store.owner_signals().unwrap().1, vec!["old@example.test"]);
         assert_eq!(
             store
                 .repo_meta("/old")
@@ -2576,15 +2714,16 @@ mod tests {
     }
 
     #[test]
-    fn reset_wipes_everything() {
+    fn forced_mine_wipes_previous_repositories() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = ProfileStore::open(&dir.path().join("style.db")).unwrap();
         s.apply_mine(false, &[], "/a", &prov(None, 0), &[], &commit(&[("x", 10)]))
             .unwrap();
-        s.reset().unwrap();
+        replace_all(&mut s);
         let agg = s.aggregate().unwrap();
         assert_eq!(agg.repos, 0);
         assert!(agg.counts.is_empty());
+        assert!(s.repo_meta("/a").unwrap().is_none());
     }
 
     #[test]

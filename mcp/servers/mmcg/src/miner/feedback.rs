@@ -1325,7 +1325,6 @@ pub fn show(prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
         "Proposal history: {}",
         db.candidate_feedback_history(None, Some(&entry.key))?
     );
-    println!("Relations: {}", db.feedback_relations(&entry.key)?);
     let evidence = db.feedback_evidence(&entry.key)?;
     if evidence.is_empty() {
         println!("No per-source quote retained for this legacy entry; re-import its source before review.");
@@ -1409,72 +1408,6 @@ pub fn dismiss_source(
         |_| None,
     )?;
     println!("Dismissed source {candidate}; inspect feedback show before any further review.");
-    Ok(())
-}
-
-/// Explicit replacement, after reviewing both exact definitions and their
-/// retained evidence. Only the successor needs sources that are still current.
-pub fn supersede(
-    old_prefix: &str,
-    new_prefix: &str,
-    old_revision: &str,
-    new_revision: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !std::io::stdin().is_terminal() {
-        return Err("supersede requires the author's interactive terminal".into());
-    }
-    if !super::collection::valid_id(old_revision) || !super::collection::valid_id(new_revision) {
-        return Err("both review revisions must be full 64-character keys".into());
-    }
-    let path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
-    // An invalid request must not initialize a new empty profile.
-    store::ProfileStore::open_read_only(&path)?;
-    let (receipt, _) = publish_profile(
-        &path,
-        &profile_path()?,
-        false,
-        |db| {
-            let entries = db.feedback()?;
-            let resolve = |prefix: &str| -> Result<&store::Feedback, String> {
-                let mut matches = entries.iter().filter(|entry| entry.key.starts_with(prefix));
-                let entry = matches
-                    .next()
-                    .ok_or_else(|| format!("no feedback key starts with `{prefix}`"))?;
-                if matches.next().is_some() {
-                    return Err(format!(
-                        "`{prefix}` matches multiple keys; use a longer prefix"
-                    ));
-                }
-                Ok(entry)
-            };
-            let old = resolve(old_prefix)?;
-            let new = resolve(new_prefix)?;
-            if old.key == new.key {
-                return Err("a preference cannot supersede itself".into());
-            }
-            // SQL may have committed while a previous Markdown write failed.
-            // This receipt precedes current revision/status/source gates: a
-            // retry publishes today's state without reactivating the successor.
-            if let Some(receipt) =
-                db.feedback_supersession_retry(&old.key, &new.key, old_revision, new_revision)?
-            {
-                return Ok(receipt);
-            }
-            if old.review_revision() != old_revision || new.review_revision() != new_revision {
-                return Err("review revision changed; inspect both preferences again".into());
-            }
-            super::profile::feedback_sources_current(db, new, &mut QuoteSourceVerifier::new())?;
-            Ok(db.supersede_feedback(&old.key, &new.key, old_revision, new_revision)?)
-        },
-        |_| None,
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "relation": "supersedes", "receipt": receipt,
-            "note": "Stored statuses shown. Publication separately revalidates current sources. Retrying a committed replacement does not accept it again."
-        }))?
-    );
     Ok(())
 }
 

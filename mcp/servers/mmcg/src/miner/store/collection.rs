@@ -59,22 +59,10 @@ pub(super) fn ensure_schema(conn: &mut Connection) -> SqlResult<()> {
          CREATE INDEX IF NOT EXISTS persona_candidate_feedback_key ON persona_candidate_feedback(feedback_key);
          CREATE TABLE IF NOT EXISTS feedback_acceptance (key TEXT PRIMARY KEY, revision TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS persona_habit_observation (claim_id INTEGER PRIMARY KEY, revision TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS persona_habit_supersession (
-             old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL,
-             old_revision TEXT NOT NULL, new_revision TEXT NOT NULL,
-             reviewed_at INTEGER NOT NULL, CHECK(old_id != new_id)
-         );
-         CREATE INDEX IF NOT EXISTS persona_habit_supersession_new ON persona_habit_supersession(new_id);
          CREATE TABLE IF NOT EXISTS persona_feedback_dismissal (
              candidate_id TEXT PRIMARY KEY, feedback_key TEXT NOT NULL, reviewed_revision TEXT NOT NULL,
              dismissed_at INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS feedback_supersession (
-             old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL,
-             old_revision TEXT NOT NULL, new_revision TEXT NOT NULL,
-             reviewed_at INTEGER NOT NULL, CHECK(old_key != new_key)
-         );
-         CREATE INDEX IF NOT EXISTS feedback_supersession_new ON feedback_supersession(new_key);",
+         );",
     )?;
     let has_review_revision = tx.prepare("SELECT 1 FROM pragma_table_info('feedback_review_event') WHERE name='reviewed_revision'")?.exists([])?;
     if !has_review_revision {
@@ -84,8 +72,6 @@ pub(super) fn ensure_schema(conn: &mut Connection) -> SqlResult<()> {
     if !has_habit_revision {
         tx.execute_batch("ALTER TABLE persona_review_event ADD COLUMN reviewed_revision TEXT")?;
     }
-    super::habit_supersession::migrate_status(&tx)?;
-    super::habit_generations::ensure_schema(&tx)?;
     check_size(&tx)?;
     tx.commit()
 }
@@ -656,7 +642,7 @@ mod tests {
             .unwrap();
         db.set_source_sync_enabled("source-a", "/project", false)
             .unwrap();
-        db.reset().unwrap();
+        crate::miner::store::tests::replace_all(&mut db);
         db.collect_candidates(&[b]).unwrap();
         assert!(db.collection_sources("/project", "", 10, true).unwrap()[0].sync_enabled);
         // A read-only older store has no exclusion policy and is not migrated.
@@ -711,7 +697,7 @@ mod tests {
         let removed = db.collected_candidate("source-a").unwrap().unwrap();
         assert!(!removed.present);
         assert_eq!(removed.status, "dismissed");
-        db.reset().unwrap();
+        crate::miner::store::tests::replace_all(&mut db);
         assert!(db.collected_candidate("source-a").unwrap().is_none());
         assert!(db.collection_source("source-a").unwrap().is_none());
         assert!(db.candidate_history("source-a").unwrap()["reviews"]

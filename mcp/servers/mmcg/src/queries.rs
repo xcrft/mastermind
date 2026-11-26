@@ -4,8 +4,8 @@
 //! and JSON serialization for the MCP layer.
 
 use crate::store::{
-    FileEntry, InterruptSource, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit,
-    ScratchpadEntry, Store, Symbol, TaskSpecHit,
+    FileEntry, InterruptSource, MapBoundaryMatch, MapBoundaryScope, ProjectHistoryHit, Store,
+    Symbol, TaskSpecHit,
 };
 use serde::Serialize;
 #[cfg(test)]
@@ -504,9 +504,9 @@ pub struct StatusResponse {
     /// `stale_files` is the conservative compatibility sentinel `1`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness_error: Option<&'static str>,
-    /// Bounded sample of stale paths that exist but cannot be indexed as regular
-    /// files inside the root, such as symlinks. They stay stale until removed
-    /// or ignored.
+    /// Bounded sample of listed sources that exist but cannot be indexed as
+    /// regular files inside the root, such as symlinks. They never index, so
+    /// they are stale only while the index still holds rows for them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unindexable_sources: Vec<String>,
     /// Git submodules in the inventory. Their files belong to another
@@ -799,39 +799,6 @@ pub struct CentralityResponse {
 
 pub const CENTRALITY_DEFAULT_TOP: u32 = 20;
 pub const CENTRALITY_MAX_TOP: u32 = 200;
-
-#[derive(Debug, Serialize)]
-pub struct ScratchpadReadResponse {
-    pub since: Option<i64>,
-    pub agent: Option<String>,
-    pub kind: Option<String>,
-    pub total: u32,
-    pub count: u32,
-    pub truncated: bool,
-    pub limit: u32,
-    pub entries: Vec<ScratchpadEntry>,
-}
-
-pub fn scratchpad_read(
-    store: &Store,
-    since: Option<i64>,
-    agent: Option<&str>,
-    kind: Option<&str>,
-    limit: u32,
-) -> rusqlite::Result<ScratchpadReadResponse> {
-    let (total, entries) = store.scratchpad_read_bounded(since, agent, kind, limit)?;
-    let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
-    Ok(ScratchpadReadResponse {
-        since,
-        agent: agent.map(String::from),
-        kind: kind.map(String::from),
-        total,
-        count,
-        truncated: count < total,
-        limit,
-        entries,
-    })
-}
 
 #[derive(Debug, Serialize)]
 pub struct TaskSearchResponse {
@@ -1659,7 +1626,7 @@ pub fn bounded_symbol_diff_response(
         truncated,
         truncation_reason,
         row_limit: top,
-        source_file_limit: crate::diff::CHANGE_FILE_LIMIT as u32,
+        source_file_limit: crate::git::CHANGE_FILE_LIMIT as u32,
         coverage,
         precision_notes: vec![
             "symbol_changes_compare_syntactically_extracted_declarations".to_string(),
@@ -2845,7 +2812,7 @@ pub(crate) fn validate_change_impact_snapshot_ignoring_path(
         .files
         .items
         .iter()
-        .map(|file| crate::diff::WorkingTreeChangedFile {
+        .map(|file| crate::git::WorkingTreeChangedFile {
             path: file.path.clone(),
             status: file.status.clone(),
         })
@@ -2858,11 +2825,11 @@ pub(crate) fn validate_change_impact_snapshot_ignoring_path(
         })
         .transpose()?;
     let interrupted = || store.work_interrupted();
-    crate::diff::validate_working_tree_projection_controlled(
+    crate::git::validate_working_tree_projection_controlled(
         &repository_root,
         &impact.baseline.baseline_oid,
         &impact.baseline.head_oid,
-        crate::diff::WorkingTreeSnapshotExpectation {
+        crate::git::WorkingTreeSnapshotExpectation {
             files: &expected_files,
             files_truncated: impact.worktree_files_truncated,
             skipped_non_utf8_paths: impact.skipped_non_utf8_paths,
@@ -2878,15 +2845,15 @@ pub(crate) fn validate_change_impact_snapshot_ignoring_path(
         .map_err(|_| ChangeImpactError::SnapshotChanged)
 }
 
-impl From<crate::diff::WorkingTreeDiffError> for ChangeImpactError {
-    fn from(error: crate::diff::WorkingTreeDiffError) -> Self {
+impl From<crate::git::WorkingTreeDiffError> for ChangeImpactError {
+    fn from(error: crate::git::WorkingTreeDiffError) -> Self {
         match error {
-            crate::diff::WorkingTreeDiffError::InvalidRef
-            | crate::diff::WorkingTreeDiffError::GitUnavailable => Self::InvalidRef,
-            crate::diff::WorkingTreeDiffError::SnapshotChanged => Self::SnapshotChanged,
-            crate::diff::WorkingTreeDiffError::GitTimeout => Self::GitTimeout,
-            crate::diff::WorkingTreeDiffError::GitOutputLimit => Self::GitOutputLimit,
-            crate::diff::WorkingTreeDiffError::IndexStale => Self::IndexStale,
+            crate::git::WorkingTreeDiffError::InvalidRef
+            | crate::git::WorkingTreeDiffError::GitUnavailable => Self::InvalidRef,
+            crate::git::WorkingTreeDiffError::SnapshotChanged => Self::SnapshotChanged,
+            crate::git::WorkingTreeDiffError::GitTimeout => Self::GitTimeout,
+            crate::git::WorkingTreeDiffError::GitOutputLimit => Self::GitOutputLimit,
+            crate::git::WorkingTreeDiffError::IndexStale => Self::IndexStale,
         }
     }
 }
@@ -3631,11 +3598,11 @@ pub fn change_impact(
     }
     #[cfg(test)]
     run_impact_test_hook(ImpactTestStage::BeforeGitSnapshotRecheck);
-    crate::diff::validate_working_tree_projection_controlled(
+    crate::git::validate_working_tree_projection_controlled(
         &repository_root,
         &working.baseline_oid,
         &working.head_oid,
-        crate::diff::WorkingTreeSnapshotExpectation {
+        crate::git::WorkingTreeSnapshotExpectation {
             files: &working.files,
             files_truncated: working.files_truncated,
             skipped_non_utf8_paths: working.skipped_non_utf8_paths,
@@ -3755,7 +3722,7 @@ pub fn change_impact(
         tests: tests_collection,
         disciplines,
         limits: ImpactLimits {
-            changed_files: crate::diff::CHANGE_FILE_LIMIT as u32,
+            changed_files: crate::git::CHANGE_FILE_LIMIT as u32,
             changed_seeds: CHANGE_SEED_LIMIT as u32,
             graph_rows: IMPACT_ROW_LIMIT as u32,
             impact: top as u32,
@@ -6041,15 +6008,6 @@ pub(crate) fn map_cycle_components(edges: &[(String, String)]) -> Vec<Vec<String
     components
 }
 
-pub fn project_map(
-    store: &Store,
-    path: &str,
-    depth: u8,
-    top: u32,
-) -> Result<ProjectMapResponse, String> {
-    project_map_with_options(store, path, depth, top, false)
-}
-
 /// Empty head-side projection for consumers that still need to explain a
 /// fully deleted scope. The ordinary `map` command keeps its explicit
 /// no-files error; Lens uses this only when Git impact proves the deletion.
@@ -7675,15 +7633,20 @@ mod tests {
             .insert_edge(caller_b, Some(wrong), "wrong", "calls", 6)
             .unwrap();
 
-        let percent = serde_json::to_value(project_map(&store, "src/%dir", 2, 1).unwrap()).unwrap();
+        let percent = serde_json::to_value(
+            project_map_with_options(&store, "src/%dir", 2, 1, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(percent["files"]["total"], 1);
         assert_eq!(percent["hotspots"]["items"][0]["name"], "wanted");
         assert_eq!(
             percent["components"]["items"][0]["boundaries"]["items"][0]["name"],
             "wanted"
         );
-        let underscore =
-            serde_json::to_value(project_map(&store, "src/_dir", 2, 1).unwrap()).unwrap();
+        let underscore = serde_json::to_value(
+            project_map_with_options(&store, "src/_dir", 2, 1, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(underscore["files"]["total"], 1);
         std::fs::remove_file(&path).ok();
     }
@@ -7697,8 +7660,14 @@ mod tests {
         store.upsert_file("src/app/mod.rs", 1, 1).unwrap();
         store.upsert_file("src/application/main.rs", 1, 1).unwrap();
 
-        let first = serde_json::to_value(project_map(&store, "src/app", 2, 20).unwrap()).unwrap();
-        let second = serde_json::to_value(project_map(&store, "src/app", 2, 20).unwrap()).unwrap();
+        let first = serde_json::to_value(
+            project_map_with_options(&store, "src/app", 2, 20, false).unwrap(),
+        )
+        .unwrap();
+        let second = serde_json::to_value(
+            project_map_with_options(&store, "src/app", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(first, second);
         assert_eq!(first["scope"]["kind"], "directory");
         assert_eq!(first["files"]["total"], 1);
@@ -7708,8 +7677,10 @@ mod tests {
         );
         assert_eq!(first["entry_points"]["items"][0]["file"], "src/app/mod.rs");
 
-        let file =
-            serde_json::to_value(project_map(&store, "src/main.rs", 2, 20).unwrap()).unwrap();
+        let file = serde_json::to_value(
+            project_map_with_options(&store, "src/main.rs", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(file["scope"]["kind"], "file");
         assert_eq!(file["components"]["items"][0]["path"], "src/main.rs");
         std::fs::remove_file(&path).ok();
@@ -7725,7 +7696,14 @@ mod tests {
                 .unwrap();
         }
 
-        let map = project_map(&store, "src", 1, (MAP_ENTRY_LIMIT + 1).try_into().unwrap()).unwrap();
+        let map = project_map_with_options(
+            &store,
+            "src",
+            1,
+            (MAP_ENTRY_LIMIT + 1).try_into().unwrap(),
+            false,
+        )
+        .unwrap();
         assert!(map.is_partial());
         assert_eq!(map.truncation_reasons(), vec!["entry_point_limit"]);
         let value = serde_json::to_value(map).unwrap();
@@ -7874,7 +7852,9 @@ mod tests {
             .insert_edge(caller, Some(target), "target", "calls", 2)
             .unwrap();
 
-        let value = serde_json::to_value(project_map(&store, "src", 1, 20).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, "src", 1, 20, false).unwrap())
+                .unwrap();
         let top_keys = value
             .as_object()
             .unwrap()
@@ -7953,8 +7933,10 @@ mod tests {
             .map(String::from)
             .collect()
         );
-        let file =
-            serde_json::to_value(project_map(&store, "src/app/main.rs", 2, 20).unwrap()).unwrap();
+        let file = serde_json::to_value(
+            project_map_with_options(&store, "src/app/main.rs", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(file["components"]["items"][0]["path"], "src/app/main.rs");
         std::fs::remove_file(&path).ok();
     }
@@ -7985,12 +7967,16 @@ mod tests {
                 .unwrap();
         }
 
-        let exact = serde_json::to_value(project_map(&store, "src", 2, 3).unwrap()).unwrap();
+        let exact =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 3, false).unwrap())
+                .unwrap();
         assert_eq!(exact["hotspots"]["total"], 3);
         assert_eq!(exact["hotspots"]["truncated"], false);
         assert!(exact["hotspots"].get("truncation_reason").is_none());
 
-        let probed = serde_json::to_value(project_map(&store, "src", 2, 2).unwrap()).unwrap();
+        let probed =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 2, false).unwrap())
+                .unwrap();
         assert!(probed["hotspots"]["total"].is_null());
         assert_eq!(probed["hotspots"]["returned"], 2);
         assert_eq!(probed["hotspots"]["truncated"], true);
@@ -8008,7 +7994,9 @@ mod tests {
                 .unwrap();
         }
 
-        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap();
         assert_eq!(value["scope"]["aggregation_paths_truncated"], true);
         for section in ["files", "languages", "components", "entry_points"] {
             assert!(value[section]["total"].is_null());
@@ -8045,7 +8033,9 @@ mod tests {
                 .unwrap();
         }
 
-        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap();
         assert!(value["cycles"]["total"].is_null());
         assert_eq!(value["cycles"]["returned"], 0);
         assert_eq!(value["cycles"]["truncated"], true);
@@ -8082,7 +8072,10 @@ mod tests {
                 .insert_edge(right, Some(left), &left_name, "imports", 1)
                 .unwrap();
         }
-        let count = serde_json::to_value(project_map(&count_store, "src", 2, 20).unwrap()).unwrap();
+        let count = serde_json::to_value(
+            project_map_with_options(&count_store, "src", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(count["cycles"]["total"], (MAP_CYCLE_LIMIT + 1) as u32);
         assert_eq!(count["cycles"]["returned"], MAP_CYCLE_LIMIT as u32);
         assert_eq!(count["cycles"]["truncated"], true);
@@ -8110,8 +8103,10 @@ mod tests {
                 .insert_edge(ids[index], Some(ids[next]), &names[next], "imports", 1)
                 .unwrap();
         }
-        let member =
-            serde_json::to_value(project_map(&member_store, "src", 2, 20).unwrap()).unwrap();
+        let member = serde_json::to_value(
+            project_map_with_options(&member_store, "src", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(member["cycles"]["total"], 1);
         assert_eq!(member["cycles"]["returned"], 0);
         assert_eq!(member["cycles"]["truncated"], true);
@@ -8150,7 +8145,8 @@ mod tests {
                     .insert_edge(caller, Some(target), name, "calls", 1)
                     .unwrap();
             }
-            serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap()
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap()
         }
 
         let first_path = tmp_db("project_map_stable_first");
@@ -8164,7 +8160,8 @@ mod tests {
             .unwrap();
         let store = Store::open(&second_path).unwrap();
         let second_after =
-            serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap();
         assert_eq!(first, second_after);
         std::fs::remove_file(&first_path).ok();
         std::fs::remove_file(&second_path).ok();
@@ -8196,7 +8193,8 @@ mod tests {
             store
                 .insert_edge(caller, target, "tied", "calls", 1)
                 .unwrap();
-            serde_json::to_vec(&project_map(&store, "src", 2, 20).unwrap()).unwrap()
+            serde_json::to_vec(&project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap()
         }
 
         let first_path = tmp_db("project_map_semantic_ties_first");
@@ -8210,7 +8208,8 @@ mod tests {
             .unwrap();
         let second_after = {
             let store = Store::open(&second_path).unwrap();
-            serde_json::to_vec(&project_map(&store, "src", 2, 20).unwrap()).unwrap()
+            serde_json::to_vec(&project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap()
         };
         assert_eq!(first, second_after);
         std::fs::remove_file(&first_path).ok();
@@ -8229,7 +8228,9 @@ mod tests {
         store.upsert_file("src/a.rs", 1, 1).unwrap();
         store.upsert_file("src/b.rs", 1, 1).unwrap();
 
-        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap();
         assert_eq!(value["files"]["total"], 2);
         assert_eq!(value["files"]["returned"], 2);
         assert_eq!(value["files"]["truncated"], false);
@@ -8244,7 +8245,9 @@ mod tests {
             store.upsert_file(file, 1, 1).unwrap();
         }
 
-        let value = serde_json::to_value(project_map(&store, ".", 1, 1).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, ".", 1, 1, false).unwrap())
+                .unwrap();
         assert_eq!(value["components"]["returned"], 1);
         assert_eq!(value["components"]["truncated"], true);
         assert_eq!(value["components"]["truncation_reason"], "top_limit");
@@ -8290,8 +8293,10 @@ mod tests {
             .insert_edge(outside, Some(nested_target), "nested_target", "calls", 2)
             .unwrap();
 
-        let directory =
-            serde_json::to_value(project_map(&directory_store, "src/app", 1, 20).unwrap()).unwrap();
+        let directory = serde_json::to_value(
+            project_map_with_options(&directory_store, "src/app", 1, 20, false).unwrap(),
+        )
+        .unwrap();
         let directory_components = directory["components"]["items"].as_array().unwrap();
         let dot = directory_components
             .iter()
@@ -8352,7 +8357,9 @@ mod tests {
             )
             .unwrap();
 
-        let root = serde_json::to_value(project_map(&root_store, ".", 1, 20).unwrap()).unwrap();
+        let root =
+            serde_json::to_value(project_map_with_options(&root_store, ".", 1, 20, false).unwrap())
+                .unwrap();
         let root_components = root["components"]["items"].as_array().unwrap();
         let dot = root_components
             .iter()
@@ -8397,7 +8404,9 @@ mod tests {
                 .unwrap();
         }
 
-        let value = serde_json::to_value(project_map(&store, "src", 2, 20).unwrap()).unwrap();
+        let value =
+            serde_json::to_value(project_map_with_options(&store, "src", 2, 20, false).unwrap())
+                .unwrap();
         let boundaries = &value["components"]["items"][0]["boundaries"];
         assert_eq!(boundaries["total"], MAP_BOUNDARY_LIMIT as u32);
         assert_eq!(boundaries["returned"], MAP_BOUNDARY_LIMIT as u32);
@@ -8432,7 +8441,10 @@ mod tests {
                 .insert_edge(cap_caller, Some(target), &name, "calls", index as u32 + 1)
                 .unwrap();
         }
-        let cap = serde_json::to_value(project_map(&cap_store, "src", 2, 20).unwrap()).unwrap();
+        let cap = serde_json::to_value(
+            project_map_with_options(&cap_store, "src", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         let cap_boundaries = &cap["components"]["items"][0]["boundaries"];
         assert!(cap_boundaries["total"].is_null());
         assert_eq!(cap_boundaries["returned"], MAP_BOUNDARY_LIMIT as u32);
@@ -8472,8 +8484,10 @@ mod tests {
                     .unwrap();
             }
         }
-        let global =
-            serde_json::to_value(project_map(&global_store, "src", 1, 20).unwrap()).unwrap();
+        let global = serde_json::to_value(
+            project_map_with_options(&global_store, "src", 1, 20, false).unwrap(),
+        )
+        .unwrap();
         let components = global["components"]["items"].as_array().unwrap();
         let known_probe = components
             .iter()

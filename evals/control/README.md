@@ -1,18 +1,6 @@
 # Completion contract and executable evaluation
 
-This evaluation checks publication of a new completed iteration.
-
-| Layer | Check | Retained result |
-|---|---|---|
-| Finite model | Every reachable publication requires all six obligations | 65 states, 586 transitions, 0 violations |
-| Mutation detection | Remove each guard and require a reachable counterexample | 6/6 detected |
-| CLI conformance | Run exact named regressions through the production CLI and library | [91/91 passed on main 3.2.2](../baselines/control-main-322-20261008-public.json) |
-| Lens UI | Check privacy, coverage and delivery metadata | 1 aggregate DOM/static suite passed |
-
-The [2026-09-28 integration report](../baselines/control-loop-integration-20260928-01.json)
-records a clean starting revision and 175 unchanged source files. The run took
-244.6 seconds, including local build and fixture overhead. The proof applies to
-the finite model. It does not prove full Rust refinement or arbitrary goal achievement.
+This evaluation checks one rule: the controller publishes a completed task iteration only when all six obligations hold. It proves the rule on a finite model, removes each guard to show the proof would catch it, and runs exact named regressions through the production CLI, the library and the Lens UI. The retained results are in the [scorecard](../scorecard.md).
 
 ## Run
 
@@ -33,7 +21,7 @@ python3 -m evals.control --source-repo /path/to/current-mastermind \
 | Selected tests | Every exact test must run and pass, missing/ignored/renamed/failed tests fail the eval |
 | Lens UI | One aggregate DOM/static suite via `node --test --test-reporter=tap`, not a browser run |
 | Source binding | Hashes before and after execution must match |
-| Profile delivery | Requires 3.2.2+; four profile-budget CLI tests and twelve exact library regressions, absent/ignored tests fail |
+| Profile delivery | Needs 3.2.2 or newer sources. Four profile-budget CLI tests and twelve exact library regressions, and absent or ignored tests fail |
 | Output | `report.json`, raw Cargo stdout/stderr per target and `lens.stdout`/`lens.stderr` |
 | Report provenance | Starting revision, dirty-tree flag, source manifest, platform and wall time |
 | Trust boundary | Owner-writable local records, no runner signature or model-quality assessment |
@@ -71,7 +59,7 @@ availability and freshness are abstracted inside each bit.
 |---|---|
 | Contract is true and sufficient | Define criteria that capture the user's outcome |
 | Records and validators are intact | Validate identity, schema, scope and current source bytes |
-| No unseen mutation before publication | Establish consistent validation/publication under concurrency |
+| No unseen mutation before publication | Keep validation and publication consistent under concurrency |
 | Bounded I/O terminates | Enforce process and storage bounds |
 | Evidence owner is trusted | Hashes alone cannot detect an owner rewriting the entire chain |
 
@@ -141,7 +129,7 @@ conformance checks, not exhaustive coverage of code, interleavings or environmen
 
 Onboarding, persona, context, intake, worker, readiness, guarded execution and UI
 checks are adjacent boundaries.
-They do not add obligations to the six-bit theorem or establish model benefit,
+They do not add obligations to the six-bit theorem or show model benefit,
 native before-effect enforcement or verified native loading.
 
 ## Reading results
@@ -159,8 +147,7 @@ native before-effect enforcement or verified native loading.
 
 Real-task false completion, user corrections, unsupported conclusions, tokens
 and time require a fixed, independently reviewed task corpus. See
-[measurement definitions](../README.md#measurement-contract) and the
-[current scorecard](../scorecard.md).
+[measurement definitions](../README.md#what-we-measure).
 
 Overall `passed` requires model, CLI and UI success with unchanged sources. A
 nonzero exit, output/timeout stop or missing runtime cannot become a passing

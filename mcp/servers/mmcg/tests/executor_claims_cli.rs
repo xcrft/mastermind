@@ -603,11 +603,14 @@ fn executor_claim_failures_reach_cli_ci_envelopes_and_controller_state() {
             ),
             expected
         );
-        let state = run_task::load_state(&run_task::state_file_path(fixture.root(), &path))
-            .unwrap()
-            .unwrap();
+        let state = mmcg::task_record::load_state(&mmcg::task_record::state_file_path(
+            fixture.root(),
+            &path,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(
-            run_task::release_file_path(fixture.root(), &path).exists(),
+            mmcg::task_record::release_file_path(fixture.root(), &path).exists(),
             actual_addition
         );
         assert!(

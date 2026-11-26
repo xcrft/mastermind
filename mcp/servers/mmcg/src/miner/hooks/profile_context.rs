@@ -44,7 +44,7 @@ pub(super) fn deliver(
         )?;
         let body = std::str::from_utf8(&file.bytes)?;
         let spec = crate::spec::parse_str(spec_path, body);
-        if crate::run_task::hash_text(body) != *digest || spec.frontmatter_error.is_some() {
+        if crate::task_record::hash_text(body) != *digest || spec.frontmatter_error.is_some() {
             return Ok(None);
         }
         let fm = spec.frontmatter.as_ref();
@@ -56,7 +56,7 @@ pub(super) fn deliver(
             })
             .map(str::to_owned)
             .collect();
-        let state = crate::run_task::load_state(&crate::run_task::state_file_path(
+        let state = crate::task_record::load_state(&crate::task_record::state_file_path(
             root,
             Path::new(spec_path),
         ))?;

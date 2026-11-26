@@ -381,19 +381,28 @@ fn unresolved_removal_acknowledgements_fail_ci_bundle_and_controller() {
             ),
             expected
         );
-        let state = run_task::load_state(&run_task::state_file_path(fixture.root(), &path))
-            .unwrap()
-            .unwrap();
+        let state = mmcg::task_record::load_state(&mmcg::task_record::state_file_path(
+            fixture.root(),
+            &path,
+        ))
+        .unwrap()
+        .unwrap();
         if let Some(failure) = failure {
-            assert!(!run_task::release_file_path(fixture.root(), &path).exists());
+            assert!(!mmcg::task_record::release_file_path(fixture.root(), &path).exists());
             assert_eq!(state.next_step.as_deref(), Some("planner_review"));
             assert!(state.held_snapshot_sha256.is_none());
             assert!(std::fs::read_to_string(path.with_file_name("audit.md"))
                 .unwrap()
                 .contains(failure));
             let parsed = spec::parse_file(&path).unwrap();
-            let report =
-                audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
+            let report = audit_spec::run_with_report(
+                &parsed,
+                &fixture.store,
+                fixture.root(),
+                "baseline",
+                None,
+            )
+            .unwrap();
             let bundle = audit_spec::Bundle::from_report_full(&report, None, None, None, None);
             assert_eq!(bundle.verdict, "broken");
             assert!(bundle.discrepancies.iter().any(|finding| matches!(
@@ -418,7 +427,7 @@ fn unresolved_removal_acknowledgements_fail_ci_bundle_and_controller() {
                 state.held_snapshot_sha256.is_none(),
                 "lite mode has no strict-policy snapshot"
             );
-            assert!(run_task::release_file_path(fixture.root(), &path).exists());
+            assert!(mmcg::task_record::release_file_path(fixture.root(), &path).exists());
         }
     }
 }
@@ -585,7 +594,9 @@ fn ci_accepts_acknowledged_file_deletion_without_weakening_preflight() {
             .unwrap();
         assert_eq!(fixture.audit(&path, true)["verdict"], "held");
         let parsed = spec::parse_file(&path).unwrap();
-        let report = audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
+        let report =
+            audit_spec::run_with_report(&parsed, &fixture.store, fixture.root(), "baseline", None)
+                .unwrap();
         let bundle = audit_spec::Bundle::from_report_full(
             &report,
             None,

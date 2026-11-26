@@ -53,10 +53,13 @@ impl Fixture {
     fn spec(&self) -> PathBuf {
         self.root().join(SPEC)
     }
-    fn state(&self) -> run_task::RunState {
-        run_task::load_state(&run_task::state_file_path(self.root(), &self.spec()))
-            .unwrap()
-            .unwrap()
+    fn state(&self) -> mmcg::task_record::RunState {
+        mmcg::task_record::load_state(&mmcg::task_record::state_file_path(
+            self.root(),
+            &self.spec(),
+        ))
+        .unwrap()
+        .unwrap()
     }
     fn audit_evidence(&self) -> Value {
         let body = std::fs::read_to_string(self.spec().with_file_name("audit.md")).unwrap();
@@ -289,7 +292,11 @@ impl Fixture {
     }
     fn state_json(&self) -> Value {
         serde_json::from_slice(
-            &std::fs::read(run_task::state_file_path(self.root(), &self.spec())).unwrap(),
+            &std::fs::read(mmcg::task_record::state_file_path(
+                self.root(),
+                &self.spec(),
+            ))
+            .unwrap(),
         )
         .unwrap()
     }
@@ -457,9 +464,11 @@ fn controller_attributes_only_changes_after_the_initial_worktree() {
         audit["ownership"]["unchanged_prior_files"],
         json!(["deleted-before.txt", DOC, "local-notes.md", "unfinished.py"])
     );
-    let release =
-        std::fs::read_to_string(run_task::release_file_path(fixture.root(), &fixture.spec()))
-            .unwrap();
+    let release = std::fs::read_to_string(mmcg::task_record::release_file_path(
+        fixture.root(),
+        &fixture.spec(),
+    ))
+    .unwrap();
     assert!(release.contains("service.py"));
     for prior in [DOC, "deleted-before.txt", "local-notes.md", "unfinished.py"] {
         assert!(!release.contains(prior), "{release}");
@@ -604,7 +613,7 @@ fn controller_never_infers_legacy_ownership_or_accepts_missing_preimages() {
         assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
         let baseline = fixture.state().baseline_ref;
         if case == "legacy" {
-            let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
+            let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
             let mut state: Value =
                 serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
             state.as_object_mut().unwrap().remove("initial_worktree");
@@ -639,7 +648,7 @@ fn controller_never_infers_legacy_ownership_or_accepts_missing_preimages() {
             "{case}"
         );
         assert_eq!(fixture.state().baseline_ref, baseline);
-        assert!(!run_task::release_file_path(fixture.root(), &fixture.spec()).exists());
+        assert!(!mmcg::task_record::release_file_path(fixture.root(), &fixture.spec()).exists());
     }
 }
 
@@ -971,9 +980,9 @@ fn declared_docs_controller_rejects_deletion_clears_approval_and_recovers() {
     let mut held = fixture.state();
     assert!(held.history_snapshot_sha256.is_some());
     held.held_snapshot_sha256 = Some("old-held".into());
-    run_task::save_state_in_repository(
+    mmcg::task_record::save_state_in_repository(
         fixture.root(),
-        &run_task::state_file_path(fixture.root(), &fixture.spec()),
+        &mmcg::task_record::state_file_path(fixture.root(), &fixture.spec()),
         &held,
     )
     .unwrap();

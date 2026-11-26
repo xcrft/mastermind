@@ -2443,7 +2443,7 @@ mod map_tests {
                 .unwrap();
         }
 
-        let map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let map = queries::project_map_with_options(&store, ".", 2, 20, false).unwrap();
         let text = render_map_text(&map);
         assert!(text.contains("Coverage"));
         assert!(text.contains("cycles: 1/1"));
@@ -2478,7 +2478,7 @@ mod map_tests {
             .insert_edge(b, Some(a), "alpha", "imports", 2)
             .unwrap();
 
-        let mut map = queries::project_map(&store, ".", 2, 20).unwrap();
+        let mut map = queries::project_map_with_options(&store, ".", 2, 20, false).unwrap();
         map.entry_points.truncated = true;
         map.entry_points.truncation_reason = Some("entry_point_limit");
         let sarif = mmcg::sarif_export::project_map(&map);

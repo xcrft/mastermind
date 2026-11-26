@@ -199,8 +199,8 @@ test("edited ownership and unowned collisions block before npm and leave the use
     const output = f.run(["--client", "codex"]);
     assert.equal(output.status, 1, kind);
     assert.equal(output.report.status, "failed");
-    const reason = { edited: /edited owned workflow artifact/, unowned: /unowned workflow artifact conflicts/, invalid_manifest: /invalid workflow manifest/ }[kind];
-    assert.match(output.report.reason, reason);
+    if (kind === "invalid_manifest") assert.match(output.report.reason, /invalid workflow manifest/);
+    else assert.deepEqual(output.report.workflows.conflicts.map((row) => row.kind), [kind]);
     assert.deepEqual(f.calls(), []);
     assert.equal(fs.readFileSync(skill, "utf8"), before);
   }
@@ -225,8 +225,9 @@ test("new bundle conflicts and edits during npm stop adapter updates after a suc
     assert.equal(output.report.status, "partial");
     assert.equal(output.report.package.status, "updated");
     assert.equal(output.report.package.binary.status, "verified");
-    assert.match(output.report.reason, mode === "new_collision"
-      ? /unowned workflow artifact conflicts/ : /edited owned workflow artifact/);
+    assert.deepEqual(output.report.workflows.conflicts.map((row) => row.kind),
+      [mode === "new_collision" ? "unowned" : "edited"]);
+    assert.match(output.report.recovery.at(-1), /mastermind update --workflow-only --client codex --move-aside/);
     assert.equal(f.manifest("codex").version, "1.0.0");
     assert.equal(fs.readFileSync(user, "utf8"), "user skill\n");
     if (mode === "concurrent_edit") assert.equal(fs.readFileSync(f.env.FIXTURE_USER_EDIT, "utf8"), "edited while npm was running\n");
@@ -258,4 +259,102 @@ test("npm failure package identity drift and mismatched native versions never be
     if (mode === "binary_version") assert.equal(output.report.package.binary.status, "failed");
     if (mode === "npm_partial") assert.equal(output.report.package.status, "unverified_after_attempt");
   }
+});
+
+function conflictHome(f) {
+  f.install("claude", "full");
+  const skills = path.join(f.home, ".claude", "skills");
+  const outside = path.join(f.root, "dotfiles-skill");
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "SKILL.md"), "linked target\n");
+  fs.writeFileSync(path.join(skills, "mastermind-task-planning", "SKILL.md"), "first edit\n");
+  fs.writeFileSync(path.join(skills, "mastermind-test-audit", "SKILL.md"), "second edit\n");
+  fs.rmSync(path.join(skills, "mastermind-task-executor"), { recursive: true });
+  fs.symlinkSync(outside, path.join(skills, "mastermind-task-executor"), "dir");
+  fs.symlinkSync(outside, path.join(skills, "mastermind-test-impact", "nested"), "dir");
+  fs.writeFileSync(path.join(skills, "mastermind-project-map", ".DS_Store"), "finder\n");
+  return { skills, outside };
+}
+
+const CONFLICTS = [
+  ["linked", "mastermind-task-executor"],
+  ["edited", "mastermind-task-planning"],
+  ["edited", "mastermind-test-audit"],
+  ["linked", "mastermind-test-impact"],
+];
+
+test("one update run lists every edited and linked entry with a next step and writes nothing", (t) => {
+  const f = fixture(t);
+  const { skills } = conflictHome(f);
+  const output = f.run(["--client", "claude"]);
+  assert.equal(output.status, 1);
+  assert.equal(output.report.status, "failed");
+  assert.deepEqual(output.report.workflows.conflicts.map(({ kind, name }) => [kind, name]), CONFLICTS);
+  const installed = path.join(skills, "mastermind-task-planning");
+  for (const [kind, name] of CONFLICTS) {
+    assert.ok(output.report.reason.includes(`${kind} ${path.join(skills, name)}`), output.report.reason);
+  }
+  const share = path.join(fs.realpathSync(f.packageRoot), "share");
+  assert.deepEqual(output.report.recovery, [
+    `Compare each listed entry with the bundled copy in ${share}, then run mastermind update --client claude --move-aside `
+      + "to move every listed entry into <client root>/.mastermind-preserved/<time>/ and install the bundled copies",
+  ]);
+  assert.deepEqual(f.calls(), []);
+  assert.equal(fs.readFileSync(path.join(installed, "SKILL.md"), "utf8"), "first edit\n");
+  assert.equal(fs.existsSync(path.join(f.home, ".claude", ".mastermind-preserved")), false);
+});
+
+test("move-aside renames every conflict into a retained folder and installs the bundle", (t) => {
+  for (const mode of ["workflow_only", "package"]) {
+    const f = fixture(t);
+    const { skills, outside } = conflictHome(f);
+    const output = f.run(mode === "package" ? ["--move-aside"] : ["--workflow-only", "--move-aside"]);
+    assert.equal(output.status, 0, JSON.stringify(output.report));
+    assert.equal(output.report.status, "complete");
+    const version = mode === "package" ? "2.0.0" : "1.0.0";
+    const moved = output.report.workflows.preserved;
+    assert.deepEqual(moved.map(({ kind, name }) => [kind, name]), CONFLICTS);
+    for (const row of moved) {
+      const relative = path.relative(path.join(f.home, ".claude", ".mastermind-preserved"), row.preserved).split(path.sep);
+      assert.deepEqual(relative.slice(1), [row.kind, row.name]);
+    }
+    assert.equal(fs.readFileSync(path.join(moved[1].preserved, "SKILL.md"), "utf8"), "first edit\n");
+    assert.equal(fs.lstatSync(moved[0].preserved).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(path.join(outside, "SKILL.md"), "utf8"), "linked target\n");
+    for (const name of ["mastermind-task-planning", "mastermind-task-executor", "mastermind-test-impact"]) {
+      assert.equal(fs.lstatSync(path.join(skills, name)).isSymbolicLink(), false);
+      assert.deepEqual(fs.readdirSync(path.join(skills, name)), ["SKILL.md"]);
+      assert.equal(fs.readFileSync(path.join(skills, name, "SKILL.md"), "utf8"), `${name} ${version}\n`);
+    }
+    assert.equal(f.manifest("claude").version, version);
+  }
+});
+
+test("move-aside refuses a linked preserved folder before it moves anything", (t) => {
+  const f = fixture(t);
+  const { skills } = conflictHome(f);
+  const target = path.join(f.root, "preserved-target");
+  fs.mkdirSync(target);
+  const preserved = path.join(f.home, ".claude", ".mastermind-preserved");
+  fs.symlinkSync(target, preserved, "dir");
+  const output = f.run(["--workflow-only", "--move-aside"]);
+  assert.equal(output.status, 1, JSON.stringify(output.report));
+  assert.match(output.report.reason, /preserved directory cannot be a symbolic link/);
+  assert.match(output.report.recovery[0], /Replace the symbolic link .* with a regular directory/);
+  assert.deepEqual(output.report.workflows.preserved, []);
+  assert.deepEqual(fs.readdirSync(target), []);
+  assert.equal(fs.readFileSync(path.join(skills, "mastermind-task-planning", "SKILL.md"), "utf8"), "first edit\n");
+  assert.equal(fs.lstatSync(path.join(skills, "mastermind-task-executor")).isSymbolicLink(), true);
+});
+
+test("dry-run with move-aside lists the planned moves and changes nothing", (t) => {
+  const f = fixture(t);
+  const { skills } = conflictHome(f);
+  const output = f.run(["--dry-run", "--move-aside"]);
+  assert.equal(output.status, 0, JSON.stringify(output.report));
+  assert.deepEqual(output.report.workflows.conflicts.map(({ kind, name }) => [kind, name]), CONFLICTS);
+  assert.equal(output.report.workflows.preserved, undefined);
+  assert.equal(fs.lstatSync(path.join(skills, "mastermind-task-executor")).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(f.home, ".claude", ".mastermind-preserved")), false);
+  assert.deepEqual(f.calls(), []);
 });

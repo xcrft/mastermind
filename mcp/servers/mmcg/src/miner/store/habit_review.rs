@@ -1,27 +1,15 @@
 //! Exact review of habit definitions, evidence and provenance.
 
-use super::{collection, digest_str, Habit, ProfileStore, SqlResult};
+use super::{collection, digest_str, has_table, Habit, ProfileStore, SqlResult};
 use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-
-fn has_table(conn: &Connection, table: &str) -> SqlResult<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        [table],
-        |r| r.get(0),
-    )
-}
 
 pub(super) fn read_habits(conn: &Connection, id: Option<i64>) -> SqlResult<Vec<Habit>> {
     if !has_table(conn, "persona_claim")? || !has_table(conn, "persona_claim_evidence")? {
         return Ok(Vec::new());
     }
-    let has_generation = conn
-        .prepare("SELECT 1 FROM pragma_table_info('persona_claim') WHERE name='generation'")?
-        .exists([])?;
-    let generation = if has_generation { "c.generation" } else { "1" };
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
             "SELECT c.id, c.when_text, c.behavior, c.outcome, c.exception_text, c.scope, \
              c.role, c.workflow, c.status, \
              COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.relation = 'supports' AND e.attribution = 'human_turn' \
@@ -33,18 +21,13 @@ pub(super) fn read_habits(conn: &Connection, id: Option<i64>) -> SqlResult<Vec<H
              COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.relation = 'supports' AND e.attribution = 'human_turn' \
                   AND e.repository != '' THEN e.repository END), \
              COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.relation = 'contradicts' THEN e.id END), \
-             COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.relation = 'limits' THEN e.id END), {generation} \
+             COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.relation = 'limits' THEN e.id END) \
              FROM persona_claim c LEFT JOIN persona_claim_evidence e ON e.claim_id = c.id \
              WHERE c.kind = 'habit' AND (?1 IS NULL OR c.id=?1) GROUP BY c.id ORDER BY c.id",
-        ))?;
+        )?;
     let rows = stmt.query_map([id], |row| {
         Ok(Habit {
             id: row.get(0)?,
-            generation: row.get(15)?,
-            generation_root: row.get(0)?,
-            renewed_from: None,
-            renewed_as: None,
-            renewal_status: None,
             when: row.get(1)?,
             behavior: row.get(2)?,
             outcome: row.get(3)?,
@@ -61,8 +44,6 @@ pub(super) fn read_habits(conn: &Connection, id: Option<i64>) -> SqlResult<Vec<H
             limitations: row.get(14)?,
             evidence_revision: String::new(),
             observed_revision: None,
-            relations_revision: String::new(),
-            superseded_by: None,
         })
     })?;
     let mut habits: Vec<Habit> = rows.collect::<SqlResult<_>>()?;
@@ -163,8 +144,6 @@ pub(super) fn read_habits(conn: &Connection, id: Option<i64>) -> SqlResult<Vec<H
             .unwrap_or_default();
         habit.observed_revision = pins.get(&habit.id).cloned();
     }
-    super::habit_supersession::load_relations(conn, id, &mut habits)?;
-    super::habit_generations::load_relations(conn, id, &mut habits)?;
     Ok(habits)
 }
 
@@ -191,14 +170,6 @@ impl ProfileStore {
         if !matches!(status, "observed" | "rejected") {
             return Ok(Err(
                 "habit review status must be observed or rejected".into()
-            ));
-        }
-        if habit.status == "superseded"
-            || habit.superseded_by.is_some()
-            || habit.renewed_as.is_some()
-        {
-            return Ok(Err(
-                "a retired habit cannot be observed or rejected again".into()
             ));
         }
         if status == "observed" {
@@ -602,7 +573,7 @@ mod tests {
             db.habit_review_history(habit.id).unwrap()["items"][0]["reviewed_revision"].is_null()
         );
         observe(&mut db, habit.id);
-        db.reset().unwrap();
+        crate::miner::store::tests::replace_all(&mut db);
         let new = fixture_habit(&mut db, "Checks contracts before delivery");
         assert_eq!(new.id, habit.id);
         assert_eq!(new.observed_revision, None);

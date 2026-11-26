@@ -712,3 +712,40 @@ fn init_help_names_both_total_byte_budgets() {
     assert!(help.contains("--worktree-max-total-bytes"), "{help}");
     assert!(help.contains("--snapshot-max-total-bytes"), "{help}");
 }
+
+#[test]
+fn revoking_profile_access_converts_a_format_one_store_with_replacement_records() {
+    let f = Fixture::new();
+    let output = f.run(&["miner", "access", "grant", "--client", "codex"]);
+    assert!(output.status.success(), "{output:?}");
+    let store = f.home.join(".mastermind/style.db");
+    rusqlite::Connection::open(&store)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE feedback_supersession (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL,
+                old_revision TEXT NOT NULL, new_revision TEXT NOT NULL, reviewed_at INTEGER NOT NULL);
+             INSERT INTO feedback_supersession VALUES ('old','new','a','b',0);
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+    let listed = f.run(&["miner", "access", "list"]);
+    assert!(!listed.status.success(), "{listed:?}");
+    assert!(
+        String::from_utf8_lossy(&listed.stderr).contains("next automatic profile refresh"),
+        "{listed:?}"
+    );
+
+    let revoked = f.run(&["miner", "access", "revoke", "--client", "codex"]);
+    assert!(revoked.status.success(), "{revoked:?}");
+    let version: i64 = rusqlite::Connection::open(&store)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    let listed = f.run(&["miner", "access", "list"]);
+    assert!(listed.status.success(), "{listed:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        "No profile access grants.\n"
+    );
+}

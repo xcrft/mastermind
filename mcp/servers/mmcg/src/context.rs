@@ -65,12 +65,16 @@ pub enum ContextError {
     BudgetTooSmall,
     /// The index exists but kept changing while its snapshot was copied.
     IndexSnapshotUnavailable,
+    /// The index exists but cannot be opened, for example because a newer
+    /// mmcg wrote it or its snapshot ran out of time.
+    IndexUnavailable,
 }
 
 impl ContextError {
     pub fn code(self) -> &'static str {
         match self {
             Self::IndexSnapshotUnavailable => "context_index_snapshot_unavailable",
+            Self::IndexUnavailable => "context_index_unavailable",
             Self::InvalidSelection => "invalid_context_selection",
             Self::RootUnavailable => "context_root_unavailable",
             Self::Serialization => "context_serialization_failed",
@@ -134,7 +138,12 @@ pub fn from_paths(
     let budget_ms = crate::store::query_budget_ms_from_env(crate::store::DEFAULT_CLI_BUDGET_MS);
     let deadline = (budget_ms > 0)
         .then(|| std::time::Instant::now() + std::time::Duration::from_millis(budget_ms));
-    let store = open_index(|| Store::open_read_only_with_deadline(index_path, deadline))?;
+    let store = match index_path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => Some(open_index(|| {
+            Store::open_read_only_with_deadline(index_path, deadline)
+        })?),
+    };
     if let Some(store) = store.as_ref() {
         store.push_work_budget(crate::store::WorkBudget::from_millis(budget_ms));
     }
@@ -145,23 +154,24 @@ pub fn from_paths(
     result
 }
 
-/// A missing or unreadable index builds the context without one. A snapshot
-/// that a concurrent write invalidated is retried once and then reported, as
-/// the context built without it would fail delivery as changed sources.
-fn open_index(
-    mut open: impl FnMut() -> rusqlite::Result<Store>,
-) -> Result<Option<Store>, ContextError> {
+/// Only an absent index builds the context without one. An index that exists
+/// but does not open is reported, as the context built without it would fail
+/// delivery as changed sources. A snapshot that a concurrent write
+/// invalidated is retried once first.
+fn open_index(mut open: impl FnMut() -> rusqlite::Result<Store>) -> Result<Store, ContextError> {
     let busy = |error: &rusqlite::Error| {
         error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
     };
+    let unavailable = |error: rusqlite::Error| {
+        if busy(&error) {
+            ContextError::IndexSnapshotUnavailable
+        } else {
+            ContextError::IndexUnavailable
+        }
+    };
     match open() {
-        Ok(store) => Ok(Some(store)),
-        Err(error) if busy(&error) => match open() {
-            Ok(store) => Ok(Some(store)),
-            Err(error) if busy(&error) => Err(ContextError::IndexSnapshotUnavailable),
-            Err(_) => Ok(None),
-        },
-        Err(_) => Ok(None),
+        Err(error) if busy(&error) => open().map_err(unavailable),
+        opened => opened.map_err(unavailable),
     }
 }
 
@@ -348,7 +358,7 @@ pub fn build(
             }
         }
     }
-    let work = crate::workflow_status::task_overview(root, 20);
+    let work = crate::task_status::task_overview(root, 20);
     let work_status = work["status"].as_str().unwrap_or("unavailable").to_owned();
 
     let not_enabled = omitted("not_enabled", "profile_audience_not_configured");
@@ -634,10 +644,39 @@ mod tests {
                 Store::open_ephemeral()
             }
         });
-        assert!(retried.unwrap().is_some());
+        assert!(retried.is_ok());
 
-        let missing = open_index(|| Err(rusqlite::Error::InvalidPath("absent.db".into())));
-        assert!(missing.unwrap().is_none());
+        let mut attempts = 0;
+        let refused = open_index(|| {
+            attempts += 1;
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some("the index has schema version 10, newer than schema version 9".into()),
+            ))
+        });
+        assert_eq!(
+            (refused.err(), attempts),
+            (Some(ContextError::IndexUnavailable), 1)
+        );
+    }
+
+    #[test]
+    fn an_index_that_exists_but_does_not_open_is_reported() {
+        let root = tempfile::tempdir().unwrap();
+        let options = ContextOptions {
+            since: "HEAD".into(),
+            paths: Vec::new(),
+            role: queries::BriefRole::parse("planner").unwrap(),
+            workflow: None,
+            query: None,
+            budget_tokens: 8000,
+        };
+        let not_an_index = root.path().join("index.db");
+        std::fs::write(&not_an_index, b"not a database").unwrap();
+        assert_eq!(
+            from_paths(root.path(), &not_an_index, &options, None).err(),
+            Some(ContextError::IndexUnavailable)
+        );
     }
 
     #[test]

@@ -1,23 +1,20 @@
 //! Initial task inputs distinguish prior local work from the executor's changes.
 
 use crate::bounded_fs::{self, BoundedReadError, ReadControl, RootCapability};
-use crate::diff::{self, WorkingTreeChangedFile};
+use crate::git::WorkingTreeChangedFile;
 use crate::onboarding;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const MAX_ENTRIES: usize = 1_000;
-const MANIFEST_LIMIT: usize = 512 * 1024;
-const FILE_LIMIT: u64 = crate::indexer::MAX_INDEXABLE_FILE_SIZE;
-/// Bytes of regular files an initial worktree may hold until the project sets
-/// its own budget.
-pub(crate) const DEFAULT_WORKTREE_MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const INITIAL_WORKTREE_MAX_ENTRIES: usize = 1_000;
+const INITIAL_WORKTREE_MANIFEST_LIMIT: usize = 512 * 1024;
+pub(crate) const INITIAL_WORKTREE_FILE_LIMIT: u64 = crate::indexer::MAX_INDEXABLE_FILE_SIZE;
 /// Version 2 inventories include edits behind assume-unchanged and
 /// skip-worktree. A version 1 manifest left those out, so comparing it with a
 /// current inventory would charge them to the executor. It is still read.
-const SCHEMA_VERSION: u32 = 2;
+pub(crate) const INITIAL_WORKTREE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +28,79 @@ pub struct InitialWorktree {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_bytes: Option<u64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialPath {
+    pub path: String,
+    pub state: PathState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathState {
+    Missing,
+    Regular {
+        sha256: String,
+        bytes: u64,
+        executable: bool,
+    },
+}
+
+impl InitialWorktree {
+    pub(crate) fn validate(&self, baseline: &str) -> Result<(), String> {
+        if !(1..=INITIAL_WORKTREE_SCHEMA_VERSION).contains(&self.schema_version)
+            || self.baseline_oid != baseline
+            || !crate::git::is_full_git_oid(baseline)
+            || self.entries.len() > INITIAL_WORKTREE_MAX_ENTRIES
+            || self
+                .max_total_bytes
+                .is_some_and(|max| !onboarding::total_bytes_in_range(max))
+            || serde_json::to_vec(self).map_err(|e| e.to_string())?.len()
+                > INITIAL_WORKTREE_MANIFEST_LIMIT
+        {
+            return Err("initial_worktree_invalid".into());
+        }
+        let mut previous: Option<&str> = None;
+        let mut budget =
+            ByteBudget::worktree(self.max_total_bytes.unwrap_or(onboarding::MAX_TOTAL_BYTES));
+        for entry in &self.entries {
+            let path = bounded_fs::normalize_repository_relative_path(Path::new(&entry.path))
+                .map_err(|_| "initial_worktree_path_invalid")?;
+            if path != entry.path
+                || path.starts_with(".mastermind/")
+                || previous.is_some_and(|previous| previous >= path.as_str())
+            {
+                return Err("initial_worktree_path_invalid".into());
+            }
+            if let PathState::Regular { sha256, bytes, .. } = &entry.state {
+                if sha256.len() != 64
+                    || !sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || *bytes > INITIAL_WORKTREE_FILE_LIMIT
+                {
+                    return Err("initial_worktree_file_invalid".into());
+                }
+                if let Err(message) = budget.charge(*bytes, Some(&entry.path)) {
+                    return Err(format!("initial_worktree_byte_limit: {message}"));
+                }
+            }
+            previous = Some(&entry.path);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn revision(&self) -> Result<String, String> {
+        Ok(crate::hex::sha256(
+            serde_json::to_vec(self).map_err(|e| e.to_string())?,
+        ))
+    }
+}
+
+/// Bytes of regular files an initial worktree may hold until the project sets
+/// its own budget.
+pub(crate) const DEFAULT_WORKTREE_MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
 /// A total byte allowance over a group of files, charged file by file. One
 /// type charges every budget and words every exhausted-budget error, so each
@@ -114,24 +184,6 @@ impl ByteBudget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InitialPath {
-    pub path: String,
-    pub state: PathState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PathState {
-    Missing,
-    Regular {
-        sha256: String,
-        bytes: u64,
-        executable: bool,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OwnershipEvidence {
     pub basis: &'static str,
@@ -149,54 +201,6 @@ pub(crate) struct Comparison {
 }
 
 impl InitialWorktree {
-    pub(crate) fn validate(&self, baseline: &str) -> Result<(), String> {
-        if !(1..=SCHEMA_VERSION).contains(&self.schema_version)
-            || self.baseline_oid != baseline
-            || !diff::is_full_git_oid(baseline)
-            || self.entries.len() > MAX_ENTRIES
-            || self
-                .max_total_bytes
-                .is_some_and(|max| !onboarding::total_bytes_in_range(max))
-            || serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > MANIFEST_LIMIT
-        {
-            return Err("initial_worktree_invalid".into());
-        }
-        let mut previous: Option<&str> = None;
-        let mut budget =
-            ByteBudget::worktree(self.max_total_bytes.unwrap_or(onboarding::MAX_TOTAL_BYTES));
-        for entry in &self.entries {
-            let path = bounded_fs::normalize_repository_relative_path(Path::new(&entry.path))
-                .map_err(|_| "initial_worktree_path_invalid")?;
-            if path != entry.path
-                || path.starts_with(".mastermind/")
-                || previous.is_some_and(|previous| previous >= path.as_str())
-            {
-                return Err("initial_worktree_path_invalid".into());
-            }
-            if let PathState::Regular { sha256, bytes, .. } = &entry.state {
-                if sha256.len() != 64
-                    || !sha256
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    || *bytes > FILE_LIMIT
-                {
-                    return Err("initial_worktree_file_invalid".into());
-                }
-                if let Err(message) = budget.charge(*bytes, Some(&entry.path)) {
-                    return Err(format!("initial_worktree_byte_limit: {message}"));
-                }
-            }
-            previous = Some(&entry.path);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn revision(&self) -> Result<String, String> {
-        Ok(crate::hex::sha256(
-            serde_json::to_vec(self).map_err(|e| e.to_string())?,
-        ))
-    }
-
     pub(crate) fn preimages(
         &self,
         root: &Path,
@@ -212,8 +216,8 @@ impl InitialWorktree {
                         let file = bounded_fs::read_regular_file(
                             root,
                             &blob_path(root, spec, sha256),
-                            FILE_LIMIT,
-                            FILE_LIMIT,
+                            INITIAL_WORKTREE_FILE_LIMIT,
+                            INITIAL_WORKTREE_FILE_LIMIT,
                             ReadControl::default(),
                         )
                         .map_err(|_| "initial_worktree_preimage_unavailable")?;
@@ -231,7 +235,7 @@ impl InitialWorktree {
 }
 
 fn blob_path(root: &Path, spec: &Path, hash: &str) -> PathBuf {
-    crate::run_task::state_file_path(root, spec)
+    crate::task_record::state_file_path(root, spec)
         .with_file_name("preflight-inputs")
         .join(hash)
 }
@@ -240,11 +244,11 @@ fn artifacts(root: &Path, spec: &Path) -> Result<BTreeSet<String>, String> {
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
     [
         spec.to_path_buf(),
-        crate::run_task::executor_report_path(spec),
-        crate::run_task::audit_file_path(spec),
-        crate::run_task::release_file_path(root, spec),
-        crate::run_task::history_review_file_path(root, spec),
-        crate::run_task::state_file_path(root, spec),
+        crate::task_record::executor_report_path(spec),
+        crate::task_record::audit_file_path(spec),
+        crate::task_record::release_file_path(root, spec),
+        crate::task_record::history_review_file_path(root, spec),
+        crate::task_record::state_file_path(root, spec),
     ]
     .into_iter()
     .map(|path| {
@@ -265,8 +269,8 @@ fn state(
     match bounded_fs::read_regular_file_with_capability(
         root,
         &root.requested_root().join(path),
-        FILE_LIMIT,
-        FILE_LIMIT,
+        INITIAL_WORKTREE_FILE_LIMIT,
+        INITIAL_WORKTREE_FILE_LIMIT,
         ReadControl {
             deadline: Some(deadline),
             interrupted: None,
@@ -301,7 +305,7 @@ fn inventory(
     baseline: &str,
     deadline: Instant,
 ) -> Result<Vec<WorkingTreeChangedFile>, String> {
-    diff::complete_worktree_paths_controlled(
+    crate::git::complete_worktree_paths_controlled(
         root,
         baseline,
         Some(".mastermind"),
@@ -321,18 +325,18 @@ pub(crate) fn capture(
     baseline: &str,
     max_total_bytes: u64,
 ) -> Result<InitialWorktree, String> {
-    let deadline = Instant::now() + diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
     let artifacts = artifacts(root, spec)?;
     let files = inventory(root, baseline, deadline)?
         .into_iter()
         .filter(|file| !artifacts.contains(&file.path))
         .collect::<Vec<_>>();
-    if files.len() > MAX_ENTRIES {
+    if files.len() > INITIAL_WORKTREE_MAX_ENTRIES {
         return Err("initial_worktree_file_limit".into());
     }
     let mut initial = InitialWorktree {
-        schema_version: SCHEMA_VERSION,
+        schema_version: INITIAL_WORKTREE_SCHEMA_VERSION,
         baseline_oid: baseline.into(),
         entries: Vec::new(),
         max_total_bytes: Some(max_total_bytes),
@@ -349,8 +353,8 @@ pub(crate) fn capture(
             match bounded_fs::read_regular_file(
                 root,
                 &path,
-                FILE_LIMIT,
-                FILE_LIMIT,
+                INITIAL_WORKTREE_FILE_LIMIT,
+                INITIAL_WORKTREE_FILE_LIMIT,
                 ReadControl::default(),
             ) {
                 Ok(existing) if existing.bytes == bytes => {}
@@ -393,7 +397,7 @@ pub(crate) fn compare(
     initial.validate(&initial.baseline_oid)?;
     // An older manifest stays readable for status and history, but cannot be
     // compared with an inventory that sees more.
-    if initial.schema_version < SCHEMA_VERSION {
+    if initial.schema_version < INITIAL_WORKTREE_SCHEMA_VERSION {
         return Err("initial_worktree_schema_outdated: start a new task".into());
     }
     let capability = RootCapability::open(root).map_err(|e| e.to_string())?;
@@ -471,7 +475,7 @@ mod tests {
             Path::new("."),
             Path::new("spec.md"),
             &initial,
-            Instant::now() + diff::git_timeout(),
+            Instant::now() + crate::git::git_timeout(),
         )
         .err();
         assert_eq!(
@@ -484,7 +488,7 @@ mod tests {
 
     fn manifest(max_total_bytes: Option<u64>, sizes: &[u64]) -> InitialWorktree {
         InitialWorktree {
-            schema_version: SCHEMA_VERSION,
+            schema_version: INITIAL_WORKTREE_SCHEMA_VERSION,
             baseline_oid: "0".repeat(40),
             entries: sizes
                 .iter()
@@ -624,10 +628,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::File::create(directory.path().join(name))
             .unwrap()
-            .set_len(FILE_LIMIT + 1)
+            .set_len(INITIAL_WORKTREE_FILE_LIMIT + 1)
             .unwrap();
         let root = RootCapability::open(directory.path()).unwrap();
-        let error = state(&root, name, Instant::now() + diff::git_timeout()).unwrap_err();
+        let error = state(&root, name, Instant::now() + crate::git::git_timeout()).unwrap_err();
         assert!(
             error.starts_with("initial_worktree_file_unavailable: big\\u{1b}[2J.bin: "),
             "{error}"

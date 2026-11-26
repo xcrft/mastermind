@@ -272,13 +272,6 @@ impl VerifyEntry {
             VerifyEntry::Label(_) => None,
         }
     }
-    /// Human-readable label (the string for Label, the cmd for Command).
-    pub fn label(&self) -> &str {
-        match self {
-            VerifyEntry::Label(s) => s,
-            VerifyEntry::Command { cmd } | VerifyEntry::Observed { cmd, .. } => cmd,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -465,7 +458,7 @@ fn is_snapshot_heading(name: &str) -> bool {
 /// `##` and a tab, a setext heading or one inside a list item, whose claims
 /// no gate reads.
 fn nested_snapshot_headings(body: &str) -> Vec<UnparsedLine> {
-    let lines = crate::context_doctor::prose_lines(body);
+    let lines = crate::document_sections::prose_lines(body);
     let underline = |index: usize| {
         lines.get(index + 1).is_some_and(|next| {
             let text = next.text.trim();
@@ -681,7 +674,7 @@ fn split_sections(body: &str) -> (BTreeMap<String, String>, Vec<String>, Vec<Str
     let mut seen_section_keys = HashSet::new();
     let mut duplicate_section_keys = Vec::new();
     let mut current: Option<(String, String)> = None;
-    let prose_indexes: HashSet<usize> = crate::context_doctor::prose_lines(body)
+    let prose_indexes: HashSet<usize> = crate::document_sections::prose_lines(body)
         .into_iter()
         .map(|line| line.index)
         .collect();
@@ -759,7 +752,7 @@ fn commit_section(
 /// is unparsed and yields no claim. Any other line is a planner note.
 fn extract_snapshot(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<SymbolClaim> {
     let mut out: Vec<SymbolClaim> = Vec::new();
-    for line in crate::context_doctor::prose_lines(body) {
+    for line in crate::document_sections::prose_lines(body) {
         let trimmed = line.text.trim();
         if trimmed.is_empty() {
             continue;
@@ -1136,7 +1129,7 @@ fn number_like(word: &str) -> bool {
 fn extract_mentioned_files(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in crate::context_doctor::prose_lines(body) {
+    for line in crate::document_sections::prose_lines(body) {
         extract_mentioned_files_from_line(line.text, &mut out, &mut seen);
     }
     out
@@ -1197,7 +1190,7 @@ fn looks_like_path(s: &str) -> bool {
 /// unparsed.
 fn extract_verify_commands(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for line in crate::context_doctor::prose_lines(body) {
+    for line in crate::document_sections::prose_lines(body) {
         let Some(marker) = directive(line.text) else {
             continue;
         };
@@ -1262,7 +1255,7 @@ fn extract_find_blocks(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<Find
     let mut out: Vec<FindBlock> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_phase: Option<String> = None;
-    let prose_indexes: HashSet<usize> = crate::context_doctor::prose_lines(body)
+    let prose_indexes: HashSet<usize> = crate::document_sections::prose_lines(body)
         .into_iter()
         .map(|line| line.index)
         .collect();
@@ -1343,7 +1336,7 @@ fn extract_find_blocks(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<Find
             if let Some((fence, indent, opener_column)) = opened {
                 let lead = next.len() - next.trim_start_matches([' ', '\t']).len();
                 // Four columns past the opener is content, not a closer.
-                let column = crate::context_doctor::width(&next[..lead], 0);
+                let column = crate::document_sections::width(&next[..lead], 0);
                 if column <= opener_column + 3 && fence_closes(next, fence) {
                     lines.next();
                     break;
@@ -1354,7 +1347,7 @@ fn extract_find_blocks(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<Find
             } else {
                 if let Some(fence) = fence_opener(next) {
                     let indent = next.len() - next.trim_start_matches([' ', '\t']).len();
-                    let column = crate::context_doctor::width(&next[..indent], 0);
+                    let column = crate::document_sections::width(&next[..indent], 0);
                     opened = Some((fence, indent, column));
                     lines.next();
                     continue;
@@ -2188,7 +2181,7 @@ breaking_changes:
         assert_eq!(t.symbols[0].callers(), Some(4));
         // Verify list is mixed: label + cmd object.
         assert_eq!(fm.verify.len(), 2);
-        assert_eq!(fm.verify[0].label(), "typecheck");
+        assert!(matches!(&fm.verify[0], VerifyEntry::Label(label) if label == "typecheck"));
         assert!(fm.verify[0].command().is_none());
         assert_eq!(fm.verify[1].command(), Some("npm test -- billing"));
         // Expected docs.

@@ -12,7 +12,7 @@ pub struct CiOpts {
 }
 
 fn changed_task_folders(root: &Path, since: &str) -> Result<BTreeSet<PathBuf>, String> {
-    let changed = mmcg::diff::changed_paths_under(root, since, ".mastermind/tasks")
+    let changed = mmcg::git::changed_paths_under(root, since, ".mastermind/tasks")
         .map_err(|error| format!("git diff changed tasks: {error}"))?;
     let mut folders = BTreeSet::new();
     let tasks_prefix = Path::new(".mastermind/tasks");

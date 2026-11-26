@@ -38,6 +38,11 @@ const MAX_TEXT: usize = 16 * 1024;
 // count and markers. A decision that needs complete capture waits this long
 // after the hook started for it to finish, inside install::HOOK_TIMEOUT_SECS.
 const DELIVERY_WAIT: Duration = Duration::from_millis(1500);
+// All writer lock waits of one delivery end here, measured from the hook start.
+// The rest of install::HOOK_TIMEOUT_SECS is for recording a failure as a gap,
+// so a busy journal cannot leave a marker without one.
+const LOCK_WAIT: Duration = Duration::from_millis(2500);
+const GAP_WAIT: Duration = Duration::from_millis(2900);
 
 fn hash(value: &Value) -> String {
     crate::hex::sha256(value.to_string().as_bytes())
@@ -124,7 +129,7 @@ pub fn setup_report(
     } else if let Some(reader) = profile_client {
         Some(reader.to_owned())
     } else {
-        configured_profile_client(&root, client_id)?
+        configured_profile_client(&root, client_id, true)?
     };
     // Revoke first. Installation grants capture only after the native config
     // has been safely written, so a failed install cannot enable collection.
@@ -165,7 +170,13 @@ pub fn setup_report(
 
 /// Reuse the configured audience, or an already granted native client. This
 /// never creates a store or grants a new reader access.
-pub fn configured_profile_client(root: &Path, client_id: &str) -> Result<Option<String>, Error> {
+/// `convert` is passed to [`crate::onboarding::profile_access`]: automatic
+/// task paths convert an older store, read-only diagnostics do not.
+pub fn configured_profile_client(
+    root: &Path,
+    client_id: &str,
+    convert: bool,
+) -> Result<Option<String>, Error> {
     client(client_id)?;
     let root = root.canonicalize()?;
     if crate::onboarding::load(&root)?.is_some_and(|settings| {
@@ -184,7 +195,7 @@ pub fn configured_profile_client(root: &Path, client_id: &str) -> Result<Option<
             }
         }
     }
-    Ok(crate::onboarding::profile_access(&root, client_id)?.then(|| client_id.to_owned()))
+    Ok(crate::onboarding::profile_access(&root, client_id, convert)?.then(|| client_id.to_owned()))
 }
 
 /// Completion records this optional local refresh independently from its
@@ -194,7 +205,7 @@ pub fn refresh_task_profile(root: &Path, selected: Option<&str>) -> Option<Value
     let reader = selected.map(str::to_owned).or_else(|| {
         ["claude", "codex"]
             .into_iter()
-            .find_map(|client| configured_profile_client(root, client).ok().flatten())
+            .find_map(|client| configured_profile_client(root, client, true).ok().flatten())
     })?;
     Some(profile::refresh_for_task(root, &reader).unwrap_or_else(
         |_| json!({"status":"failed","reason":"local_profile_refresh_unavailable","model":false}),
@@ -319,7 +330,13 @@ pub(crate) fn review_queue(root: &Path, audience: &str) -> Value {
 
 pub fn recover(client_id: &str, root: &Path) -> Result<(), Error> {
     client(client_id)?;
-    let root = root.canonicalize()?;
+    // A deleted or renamed project keeps its grant and markers. Its stored
+    // canonical root is accepted as given; any other path finds no grant.
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => root.to_path_buf(),
+        Err(error) => return Err(error.into()),
+    };
     let grant = Journal::open(true)?.recover(client_id, &root)?;
     print(
         &json!({"grant":grant,"note":"A new capture generation invalidates earlier evidence. Restart the client session; this does not declare a missing event recovered."}),
@@ -349,6 +366,7 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     // marker stays without a journal gap; status reports such markers.
     let delivery = fence::begin(client_id, &root)?;
     let mut db = Journal::open(true)?;
+    db.wait_until(started + LOCK_WAIT)?;
     let Some(grant) = db.begin_capture(client_id, &root)? else {
         delivery.clear()?;
         return print(&json!({}));
@@ -356,16 +374,10 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
     // A failure in deliver records one durable gap and keeps its marker until
     // recovery. Later events then clear their own marker at once, so a
     // persistent journal failure cannot exhaust the fence directory.
-    let delivered = match deliver(
-        &mut db,
-        &grant,
-        &delivery,
-        client_id,
-        &root,
-        started + DELIVERY_WAIT,
-    ) {
+    let delivered = match deliver(&mut db, &grant, &delivery, client_id, &root, started) {
         Ok(delivered) => delivered,
         Err(failure) => {
+            db.wait_until(started + GAP_WAIT)?;
             db.finish_ignored(&grant, failure.gap)?;
             return Err(failure.message.into());
         }
@@ -377,11 +389,14 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
         native_session,
     }) = delivered
     else {
+        db.wait_until(started + GAP_WAIT)?;
         db.finish_ignored(&grant, None)?;
         delivery.clear()?;
         return print(&json!({}));
     };
     delivery.clear()?;
+    // Capture is committed. Optional follow-up work keeps the same budget.
+    db.wait_until(started + LOCK_WAIT)?;
     if kind == "SessionStart" && receipt["status"] == "recorded" {
         if let Err(error) = background::on_session_start(client_id, &root, &native_session) {
             // Capture has already committed. A failed optional worker start
@@ -452,6 +467,8 @@ pub fn receive(client_id: &str, root: &Path) -> Result<(), Error> {
                     // client allows on top of the ordinary budget.
                     let deadline = (Instant::now() + DELIVERY_WAIT)
                         .min(started + Duration::from_secs(config.timeout_secs) + DELIVERY_WAIT);
+                    // The refiner extends this hook's client timeout by its own.
+                    db.wait_until(started + Duration::from_secs(config.timeout_secs) + LOCK_WAIT)?;
                     intake = db.finish_intake(
                         &grant,
                         &intake,
@@ -517,9 +534,20 @@ struct DeliveryFailure {
 
 impl<E: Into<Error>> From<E> for DeliveryFailure {
     fn from(error: E) -> Self {
+        let error = error.into();
+        // A full journal needs space freed before recovery, unlike other
+        // delivery failures, so status names it separately.
+        let full = error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DiskFull);
         Self {
-            gap: Some("capture_delivery_failed"),
-            message: error.into().to_string(),
+            gap: Some(if full {
+                "journal_full"
+            } else {
+                "capture_delivery_failed"
+            }),
+            message: error.to_string(),
         }
     }
 }
@@ -530,7 +558,7 @@ fn deliver(
     delivery: &fence::Fence,
     client_id: &str,
     root: &Path,
-    deadline: Instant,
+    started: Instant,
 ) -> Result<Option<Delivered>, DeliveryFailure> {
     if !delivery.current()? {
         return Err(DeliveryFailure {
@@ -615,7 +643,7 @@ fn deliver(
         // The task mining decision under the writer lock needs this delivery
         // to be the only one admitted, and checks that itself. A failed or
         // timed out wait only means that decision fails closed.
-        let _ = db.await_other_deliveries(grant, 1, deadline);
+        let _ = db.await_other_deliveries(grant, 1, started + DELIVERY_WAIT);
     }
     if !delivery.current()? {
         return Err(DeliveryFailure {
@@ -623,6 +651,7 @@ fn deliver(
             message: "capture was revoked during delivery".into(),
         });
     }
+    db.wait_until(started + LOCK_WAIT)?;
     let receipt = db.receive(grant, incoming, &project, &repository)?;
     Ok(Some(Delivered {
         value,

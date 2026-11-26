@@ -608,29 +608,9 @@ fn parse_request<'a>(
 }
 
 /// Prepare an unverified pool and exact source bindings. No provider is invoked.
-pub fn prepare(
-    store: &Store,
-    root: &Path,
-    query: &str,
-    top: u32,
-    include_tests: bool,
-) -> Result<ReviewPacket, String> {
-    prepare_with_hints(store, root, query, top, include_tests, &[])
-}
-
-/// Client hints broaden recall only; the original query defines relevance.
-pub fn prepare_with_hints(
-    store: &Store,
-    root: &Path,
-    query: &str,
-    top: u32,
-    include_tests: bool,
-    hints: &[String],
-) -> Result<ReviewPacket, String> {
-    prepare_with_contract(store, root, query, top, include_tests, hints, None)
-}
-
-/// Bind an explicit client ledger without changing recall or asserting its semantics.
+///
+/// Client hints broaden recall only; the original query defines relevance. An
+/// explicit client ledger is bound without changing recall or asserting its semantics.
 pub fn prepare_with_contract(
     store: &Store,
     root: &Path,
@@ -1465,12 +1445,14 @@ mod tests {
     #[test]
     fn body_only_operation_and_topic_neighbor_require_explicit_source_judgments() {
         let (dir, store) = indexed();
-        let packet = prepare(
+        let packet = prepare_with_contract(
             &store,
             dir.path(),
             "reject cross origin browser requests",
             5,
             false,
+            &[],
+            None,
         )
         .unwrap();
         let accepted = packet
@@ -1513,7 +1495,16 @@ mod tests {
     #[test]
     fn unknown_is_preserved_and_incomplete_assessments_cannot_be_empty_success() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 5, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            5,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let result = finish(&store, dir.path(), &packet, &packet.assessment_template).unwrap();
         assert_eq!(result.review_status, "incomplete");
         assert_eq!(result.unknown_count, packet.candidates.len() as u32);
@@ -1544,7 +1535,8 @@ mod tests {
                 kind: ConstraintKind::Scope,
             }],
         };
-        let default = prepare(&store, dir.path(), query, 5, false).unwrap();
+        let default =
+            prepare_with_contract(&store, dir.path(), query, 5, false, &[], None).unwrap();
         let packet =
             prepare_with_contract(&store, dir.path(), query, 5, false, &[], Some(&contract))
                 .unwrap();
@@ -1753,12 +1745,14 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(
+        let packet = prepare_with_contract(
             &store,
             dir.path(),
             "process input after reserving call budget",
             5,
             false,
+            &[],
+            None,
         )
         .unwrap();
         let owner = packet
@@ -1834,7 +1828,16 @@ mod tests {
     #[test]
     fn bound_helper_evidence_and_navigation_have_distinct_public_roles() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 5, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            5,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let helper = packet
             .candidates
             .iter()
@@ -1900,7 +1903,16 @@ mod tests {
     #[test]
     fn helper_roles_reject_missing_forged_and_self_only_support() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 5, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            5,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let candidate = packet
             .candidates
             .iter()
@@ -1991,7 +2003,16 @@ mod tests {
     #[test]
     fn changed_source_forged_packet_and_unbound_citations_are_rejected() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 5, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            5,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let mut forged = packet.clone();
         forged.candidates[0].name = "invented".into();
         assert_eq!(
@@ -2022,7 +2043,16 @@ mod tests {
     #[test]
     fn a_prior_role_contract_requires_a_fresh_packet_and_assessment() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 5, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            5,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let mut prior = packet.clone();
         prior.role_contract = "operation-roles-v2".into();
         prior.packet_sha256 = packet_digest(&prior).unwrap();
@@ -2049,7 +2079,8 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(&store, dir.path(), "quartz", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "quartz", 5, false, &[], None).unwrap();
         assert_eq!(packet.operation_candidates_total, 65);
         assert_eq!(packet.candidates.len(), BODY_TOP);
         let mut assessment = packet.assessment_template.clone();
@@ -2070,7 +2101,8 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(&store, dir.path(), "zircon", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "zircon", 5, false, &[], None).unwrap();
         assert!(packet.candidates.is_empty());
         assert!(packet
             .omissions
@@ -2088,7 +2120,8 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(&store, dir.path(), "quartz", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "quartz", 5, false, &[], None).unwrap();
         assert_eq!(
             packet
                 .candidates
@@ -2104,7 +2137,8 @@ mod tests {
         assert!(secret_like_source_line(
             "const SECRET: &str = \"actual_credential_value\";"
         ));
-        let packet = prepare(&store, dir.path(), "credential", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "credential", 5, false, &[], None).unwrap();
         let candidate = packet
             .candidates
             .iter()
@@ -2120,7 +2154,16 @@ mod tests {
     #[test]
     fn relevant_lexical_rows_keep_their_page_order_before_source_supplements() {
         let (dir, store) = indexed();
-        let packet = prepare(&store, dir.path(), "cross origin browser", 1, false).unwrap();
+        let packet = prepare_with_contract(
+            &store,
+            dir.path(),
+            "cross origin browser",
+            1,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
         let lexical = packet
             .candidates
             .iter()
@@ -2172,12 +2215,14 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(&store, dir.path(), "zircon", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "zircon", 5, false, &[], None).unwrap();
         assert!(packet
             .candidates
             .iter()
             .any(|candidate| candidate.name == "searchable"));
-        let packet = prepare(&store, dir.path(), "amber", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "amber", 5, false, &[], None).unwrap();
         assert!(packet
             .candidates
             .iter()
@@ -2185,7 +2230,8 @@ mod tests {
         assert!(!serde_json::to_string(&packet)
             .unwrap()
             .contains("opaque_private_payload"));
-        let packet = prepare(&store, dir.path(), "quartz", 5, false).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), "quartz", 5, false, &[], None).unwrap();
         assert!(packet.candidates.is_empty());
         assert!(packet.omissions.iter().any(|omission| omission
             .reason
@@ -2199,13 +2245,14 @@ mod tests {
     fn client_hints_discover_missing_vocabulary_without_changing_intent_or_binding() {
         let (dir, store) = indexed();
         let query = "enforce request boundary";
-        let plain = prepare(&store, dir.path(), query, 5, false).unwrap();
+        let plain = prepare_with_contract(&store, dir.path(), query, 5, false, &[], None).unwrap();
         assert!(!plain
             .candidates
             .iter()
             .any(|candidate| candidate.name == "accept"));
         let hints = vec!["cross origin browser".to_string()];
-        let packet = prepare_with_hints(&store, dir.path(), query, 5, false, &hints).unwrap();
+        let packet =
+            prepare_with_contract(&store, dir.path(), query, 5, false, &hints, None).unwrap();
         assert_eq!(packet.query, query);
         assert_eq!(packet.hints, hints);
         assert!(packet.recall_terms.iter().any(|term| term == "origin"));
@@ -2235,7 +2282,8 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                prepare_with_hints(&store, dir.path(), query, 5, false, &hints).unwrap_err(),
+                prepare_with_contract(&store, dir.path(), query, 5, false, &hints, None)
+                    .unwrap_err(),
                 reason
             );
         }

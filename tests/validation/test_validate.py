@@ -125,6 +125,24 @@ class ContractRuleTests(unittest.TestCase):
             "must use a full 40-character commit SHA",
         ),
         (
+            "Docker Rust version",
+            validate.validate_rust_toolchain_source,
+            ("rust-toolchain.toml", "Dockerfile.audit-action", ".github/workflows"),
+            "Dockerfile.audit-action",
+            lambda text: re.sub(r"cargo \+[0-9.]+", "cargo +0.0.0", text, count=1),
+            "to match rust-toolchain.toml",
+        ),
+        (
+            "workflow Rust version",
+            validate.validate_rust_toolchain_source,
+            ("rust-toolchain.toml", "Dockerfile.audit-action", ".github/workflows"),
+            ".github/workflows/publish-npm.yml",
+            lambda text: text.replace(
+                "rustup toolchain install --no-self-update", "rustup toolchain install 1.0.0 --no-self-update", 1
+            ),
+            "rust-toolchain.toml stays the only version",
+        ),
+        (
             "executor report schema",
             validate.validate_executor_report_schema_contract,
             (

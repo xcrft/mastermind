@@ -8,7 +8,7 @@
 mod junit;
 mod otel;
 
-use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
+use crate::git::{run_bounded_git_controlled, WorkingTreeDiffError};
 use crate::queries::ChangeImpactResponse;
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use globset::{GlobBuilder, GlobMatcher};
@@ -489,31 +489,6 @@ impl SourceFailure {
             Self::Git(_) => "Git history was unavailable.",
         }
     }
-}
-
-pub fn collect(
-    root: &Path,
-    options: &EvidenceOptions,
-    impact: &ChangeImpactResponse,
-    deadline: Option<Instant>,
-) -> EvidenceSnapshot {
-    collect_with_extensions(
-        root,
-        options,
-        &EvidenceExtensionOptions::default(),
-        impact,
-        deadline,
-    )
-}
-
-pub fn collect_with_extensions(
-    root: &Path,
-    options: &EvidenceOptions,
-    extensions: &EvidenceExtensionOptions,
-    impact: &ChangeImpactResponse,
-    deadline: Option<Instant>,
-) -> EvidenceSnapshot {
-    collect_internal(root, options, extensions, impact, None, false, deadline)
 }
 
 pub fn collect_with_store(
@@ -3945,7 +3920,7 @@ mod tests {
         git(root.path(), &["commit", "-qm", "second"]);
 
         let mut collector = collector(root.path(), &["src/pay.rs"]);
-        let head_oid = crate::diff::current_head_oid(root.path()).unwrap();
+        let head_oid = crate::git::current_head_oid(root.path()).unwrap();
         fs::write(root.path().join("src/pay.rs"), "one\ntwo\nthree\nfour\n").unwrap();
         git(root.path(), &["config", "user.name", "Later Author"]);
         git(root.path(), &["add", "src/pay.rs"]);
@@ -3985,7 +3960,7 @@ mod tests {
         git(root.path(), &["commit", "-qm", "second binary"]);
 
         let mut collector = collector(root.path(), &["assets/logo.bin"]);
-        let head_oid = crate::diff::current_head_oid(root.path()).unwrap();
+        let head_oid = crate::git::current_head_oid(root.path()).unwrap();
         collector.load_git_history(10, "git-history".into(), &head_oid);
         let snapshot = collector.finish(10);
 

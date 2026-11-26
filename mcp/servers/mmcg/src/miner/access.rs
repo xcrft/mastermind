@@ -43,11 +43,14 @@ pub fn configure(
     }
     let root = root.to_str().ok_or("profile access root is not UTF-8")?;
     let path = ProfileStore::db_path().ok_or("could not resolve home directory")?;
-    if !allowed && ProfileStore::open_optional_read_only(&path)?.is_none() {
-        return Ok(());
+    let store = if allowed {
+        Some(ProfileStore::open(&path)?)
+    } else {
+        ProfileStore::open_existing(&path)?
+    };
+    if let Some(mut store) = store {
+        store.set_reader_grant(root, client_id, allowed)?;
     }
-    let mut store = ProfileStore::open(&path)?;
-    store.set_reader_grant(root, client_id, allowed)?;
     Ok(())
 }
 

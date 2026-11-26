@@ -41,9 +41,12 @@ pub struct Evidence {
 impl Evidence {
     pub(super) fn complete(&self) -> bool {
         self.schema_version == VERSION
-            && hex(&self.manifest_sha256, 64)
+            && crate::hex::is_lower(&self.manifest_sha256, 64)
             && valid_session(&self.native_session_id)
-            && self.decisions_sha256.as_deref().is_some_and(|v| hex(v, 64))
+            && self
+                .decisions_sha256
+                .as_deref()
+                .is_some_and(|v| crate::hex::is_lower(v, 64))
             && self.observed_calls <= CALL_LIMIT
             && self.allowed_calls == Some(self.observed_calls)
             && self.denied_calls == Some(0)
@@ -131,8 +134,8 @@ fn read_json<T: serde::de::DeserializeOwned>(
     cap: u64,
 ) -> Result<T, String> {
     let bytes = read(root, path, cap, Instant::now() + Duration::from_secs(2))?;
-    let value =
-        crate::setup::parse_json_unique(&bytes).map_err(|_| "invocation_guard_invalid_json")?;
+    let value = crate::strict_json::parse(&bytes, crate::strict_json::Floats::Reject)
+        .map_err(|_| "invocation_guard_invalid_json")?;
     serde_json::from_value(value).map_err(|_| "invocation_guard_invalid_schema".into())
 }
 
@@ -251,7 +254,7 @@ impl Prepared {
         {
             return Err("invocation_guard_protected_scope".into());
         }
-        let report = crate::run_task::executor_report_path(Path::new(&task.binding.spec_path));
+        let report = crate::task_record::executor_report_path(Path::new(&task.binding.spec_path));
         write_paths.push(
             bounded_fs::normalize_repository_relative_path(&report)
                 .map_err(|_| "invocation_guard_report_path_invalid")?,
@@ -559,11 +562,11 @@ fn current(
     {
         return Err("invocation_guard_owner_not_running".into());
     }
-    let state_path = crate::run_task::state_file_path(
+    let state_path = crate::task_record::state_file_path(
         root.canonical_root(),
         Path::new(&manifest.binding.spec_path),
     );
-    let state = crate::run_task::parse_run_state(&read(
+    let state = crate::task_record::parse_run_state(&read(
         root,
         &state_path,
         RECEIPT_LIMIT,
@@ -579,7 +582,7 @@ fn current(
     {
         return Err("invocation_guard_task_changed".into());
     }
-    crate::run_task::validate_bound_state_identity(
+    crate::task_record::validate_bound_state_identity(
         &manifest.binding.repository_identity,
         &manifest.binding.spec_path,
         &state,
@@ -700,7 +703,7 @@ fn authorize(
             }
             let path = checked_path(root, text("file_path")?, true)?;
             let report =
-                crate::run_task::executor_report_path(Path::new(&manifest.binding.spec_path));
+                crate::task_record::executor_report_path(Path::new(&manifest.binding.spec_path));
             if !manifest.write_paths.contains(&path)
                 || (protected(&path) && Path::new(&path) != report)
                 || path == manifest.binding.spec_path
@@ -803,8 +806,8 @@ pub(super) fn hook(path: &Path) -> Result<bool, String> {
     let digest = json_sha(&manifest)?;
     current(&root, path, &manifest, &digest)?;
     let bytes = read_event()?;
-    let event =
-        crate::setup::parse_json_unique(&bytes).map_err(|_| "invocation_guard_input_invalid")?;
+    let event = crate::strict_json::parse(&bytes, crate::strict_json::Floats::Accept)
+        .map_err(|_| "invocation_guard_input_invalid")?;
     let text = |field| {
         event
             .get(field)
@@ -943,4 +946,39 @@ fn read_event() -> Result<Vec<u8>, String> {
 #[cfg(not(unix))]
 pub(super) fn hook(_path: &Path) -> Result<bool, String> {
     Err("invocation_guard_unsupported_platform".into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ledger_that_repeats_a_decision_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RootCapability::open(directory.path()).unwrap();
+        let decision = |allowed: bool| {
+            json!({"name": "Bash", "input_sha256": "0".repeat(64), "allowed": allowed, "reason": "policy"})
+                .to_string()
+        };
+        let ledger = |decisions: String| {
+            format!(
+                r#"{{"schema_version":1,"manifest_sha256":"{}","conflict":false,"decisions":{{{decisions}}}}}"#,
+                "0".repeat(64)
+            )
+        };
+        let path = Path::new("ledger.json");
+        let single = ledger(format!(r#""call":{}"#, decision(false)));
+        std::fs::write(directory.path().join(path), single).unwrap();
+        assert!(read_json::<Ledger>(&root, path, LEDGER_LIMIT).is_ok());
+        let repeated = ledger(format!(
+            r#""call":{},"call":{}"#,
+            decision(false),
+            decision(true)
+        ));
+        std::fs::write(directory.path().join(path), repeated).unwrap();
+        assert_eq!(
+            read_json::<Ledger>(&root, path, LEDGER_LIMIT).unwrap_err(),
+            "invocation_guard_invalid_json"
+        );
+    }
 }

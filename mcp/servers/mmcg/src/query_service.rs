@@ -227,9 +227,9 @@ fn refresh(store: &mut Store) -> Result<Refresh, Error> {
         Some(crate::store::InterruptSource::Budget)
     );
     match indexed {
-        Ok(stats) if stats.files_failed == 0 => Ok(Refresh::Completed),
-        // A finished run reports its failed paths, such as unindexable ones,
-        // even when it used up the budget.
+        Ok(stats) if stats.complete() => Ok(Refresh::Completed),
+        // A finished run reports its failed paths even when it used up the
+        // budget.
         Ok(_) => Ok(Refresh::Incomplete),
         Err(crate::indexer::IndexError::LimitExceeded { dimension, cap }) => {
             Err(Error::RefreshLimit { dimension, cap })
@@ -374,14 +374,6 @@ pub(crate) fn concept_current(
     .map_err(Error::Concept)
 }
 
-pub fn build_concept_current(
-    store: &mut Store,
-    query: &str,
-    top: u32,
-) -> Result<queries::ConceptResponse, queries::ConceptError> {
-    build_concept_current_with_tests(store, query, top, false)
-}
-
 pub fn build_concept_current_with_tests(
     store: &mut Store,
     query: &str,
@@ -442,7 +434,7 @@ pub(crate) fn brief_current(
         return Err(Error::Brief(queries::BriefError::RootMismatch));
     }
     let interrupted = || store.work_interrupted();
-    crate::diff::validate_commit_ref_controlled(
+    crate::git::validate_commit_ref_controlled(
         &root,
         since,
         store.request_deadline(),
@@ -450,16 +442,16 @@ pub(crate) fn brief_current(
     )
     .map_err(|error| {
         Error::Brief(match error {
-            crate::diff::WorkingTreeDiffError::InvalidRef
-            | crate::diff::WorkingTreeDiffError::GitUnavailable => queries::BriefError::InvalidRef,
-            crate::diff::WorkingTreeDiffError::SnapshotChanged => {
+            crate::git::WorkingTreeDiffError::InvalidRef
+            | crate::git::WorkingTreeDiffError::GitUnavailable => queries::BriefError::InvalidRef,
+            crate::git::WorkingTreeDiffError::SnapshotChanged => {
                 queries::BriefError::SnapshotChanged
             }
-            crate::diff::WorkingTreeDiffError::GitTimeout
-            | crate::diff::WorkingTreeDiffError::GitOutputLimit => {
+            crate::git::WorkingTreeDiffError::GitTimeout
+            | crate::git::WorkingTreeDiffError::GitOutputLimit => {
                 queries::BriefError::WorkLimitExceeded
             }
-            crate::diff::WorkingTreeDiffError::IndexStale => queries::BriefError::IndexStale,
+            crate::git::WorkingTreeDiffError::IndexStale => queries::BriefError::IndexStale,
         })
     })?;
     with_fresh_index(store, |store| {
@@ -532,25 +524,6 @@ fn review_still_current(store: &Store) -> Result<(), Error> {
         return Err(Error::Review("concept_review_source_changed".into()));
     }
     Ok(())
-}
-
-pub fn build_concept_review_current(
-    store: &mut Store,
-    query: &str,
-    top: u32,
-    include_tests: bool,
-) -> Result<crate::concept_review::ReviewPacket, String> {
-    build_concept_review_current_with_hints(store, query, top, include_tests, &[])
-}
-
-pub fn build_concept_review_current_with_hints(
-    store: &mut Store,
-    query: &str,
-    top: u32,
-    include_tests: bool,
-    hints: &[String],
-) -> Result<crate::concept_review::ReviewPacket, String> {
-    build_concept_review_current_with_contract(store, query, top, include_tests, hints, None)
 }
 
 pub fn build_concept_review_current_with_contract(

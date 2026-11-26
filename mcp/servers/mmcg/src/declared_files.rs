@@ -136,12 +136,12 @@ fn issue(file: &str, reason: &'static str) -> Issue {
 enum Phase<'a> {
     Preflight,
     PreflightWithDeletions {
-        files: &'a [crate::diff::WorkingTreeChangedFile],
+        files: &'a [crate::git::WorkingTreeChangedFile],
         baseline: DeletionBaseline<'a>,
     },
     Postflight {
         baseline: DeletionBaseline<'a>,
-        files: &'a [crate::diff::WorkingTreeChangedFile],
+        files: &'a [crate::git::WorkingTreeChangedFile],
     },
 }
 
@@ -154,7 +154,7 @@ pub(crate) fn preflight_with_deletions(
     spec: &ParsedSpec,
     root: &Path,
     control: ReadControl<'_>,
-    files: &[crate::diff::WorkingTreeChangedFile],
+    files: &[crate::git::WorkingTreeChangedFile],
     baseline: DeletionBaseline<'_>,
 ) -> Vec<Issue> {
     check(
@@ -171,7 +171,7 @@ pub(crate) fn postflight(
     root: &Path,
     control: ReadControl<'_>,
     baseline: DeletionBaseline<'_>,
-    files: &[crate::diff::WorkingTreeChangedFile],
+    files: &[crate::git::WorkingTreeChangedFile],
     accepts_deletion: impl Fn(&str) -> bool,
 ) -> Vec<Issue> {
     check(
@@ -431,7 +431,7 @@ impl Checker<'_> {
         &mut self,
         targets: &BTreeMap<String, Target>,
         baseline: &str,
-        files: &[crate::diff::WorkingTreeChangedFile],
+        files: &[crate::git::WorkingTreeChangedFile],
     ) -> Vec<Issue> {
         let created = targets
             .iter()
@@ -518,7 +518,7 @@ impl Checker<'_> {
         paths: &[&str],
         baseline: &str,
     ) -> Result<BTreeMap<String, String>, &'static str> {
-        if !crate::diff::is_full_git_oid(baseline) {
+        if !crate::git::is_full_git_oid(baseline) {
             return Err("creation_baseline_unavailable");
         }
         let mut found = BTreeMap::new();
@@ -546,7 +546,7 @@ impl Checker<'_> {
                 "--",
             ];
             args.extend_from_slice(&paths[offset..end]);
-            let output = crate::diff::run_bounded_git_controlled(
+            let output = crate::git::run_bounded_git_controlled(
                 root.requested_root(),
                 &args,
                 None,
@@ -660,7 +660,7 @@ mod tests {
             preimages: Some(&preimages),
         };
         let parsed = deletion_spec("./assets\\old.bin");
-        let files = [crate::diff::WorkingTreeChangedFile {
+        let files = [crate::git::WorkingTreeChangedFile {
             path: "assets/old.bin".into(),
             status: "deleted".into(),
         }];
@@ -687,11 +687,11 @@ mod tests {
         .is_empty());
         for inventory in [
             vec![],
-            vec![crate::diff::WorkingTreeChangedFile {
+            vec![crate::git::WorkingTreeChangedFile {
                 path: "assets/old.bin".into(),
                 status: "modified".into(),
             }],
-            vec![crate::diff::WorkingTreeChangedFile {
+            vec![crate::git::WorkingTreeChangedFile {
                 path: "other.bin".into(),
                 status: "deleted".into(),
             }],
@@ -805,7 +805,7 @@ mod tests {
             ("missing", Some("deletion_baseline_missing")),
         ] {
             let parsed = deletion_spec(file);
-            let files = [crate::diff::WorkingTreeChangedFile {
+            let files = [crate::git::WorkingTreeChangedFile {
                 path: file.into(),
                 status: "deleted".into(),
             }];
@@ -841,7 +841,7 @@ mod tests {
             ("regular", None, Some("deletion_baseline_missing")),
         ] {
             let parsed = deletion_spec(file);
-            let files = [crate::diff::WorkingTreeChangedFile {
+            let files = [crate::git::WorkingTreeChangedFile {
                 path: file.into(),
                 status: "deleted".into(),
             }];
@@ -866,7 +866,7 @@ mod tests {
             );
         }
         let parsed = deletion_spec("regular");
-        let files = [crate::diff::WorkingTreeChangedFile {
+        let files = [crate::git::WorkingTreeChangedFile {
             path: "regular".into(),
             status: "deleted".into(),
         }];
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn deletes_reject_normalized_role_conflicts_and_do_not_admit_missing_touches_or_docs() {
         let root = tempfile::tempdir().unwrap();
-        let files = [crate::diff::WorkingTreeChangedFile {
+        let files = [crate::git::WorkingTreeChangedFile {
             path: "docs/old.md".into(),
             status: "deleted".into(),
         }];
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn deletes_recheck_absence_receipts_on_retry_and_postflight() {
         let root = tempfile::tempdir().unwrap();
-        let files = [crate::diff::WorkingTreeChangedFile {
+        let files = [crate::git::WorkingTreeChangedFile {
             path: "old.bin".into(),
             status: "deleted".into(),
         }];
@@ -1006,7 +1006,7 @@ mod tests {
             "dangling/missing",
         ] {
             let parsed = deletion_spec(file);
-            let files = [crate::diff::WorkingTreeChangedFile {
+            let files = [crate::git::WorkingTreeChangedFile {
                 path: file.into(),
                 status: "deleted".into(),
             }];

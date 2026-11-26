@@ -42,7 +42,7 @@ macro_rules! import_family {
 const SCHEMA_VERSION: &str = "9";
 /// Tables that query tools read without checking for them. Optional semantic
 /// and fact tables are checked where they are used.
-const TOOL_TABLES: [&str; 9] = [
+const TOOL_TABLES: [&str; 8] = [
     "symbols",
     "edges",
     "files",
@@ -51,12 +51,14 @@ const TOOL_TABLES: [&str; 9] = [
     "document_section_fts",
     "project_evidence",
     "project_claim",
-    "scratchpad",
 ];
 const PRODUCTION_CLASSIFICATION_META_KEY: &str = "production_classification_version";
 const PRODUCTION_CLASSIFICATION_VERSION: &str = "production-paths-v2";
 pub const CONCEPT_NORMALIZATION_META_KEY: &str = "concept_normalization_version";
 pub const CONCEPT_NORMALIZATION_VERSION: &str = "mmcg-concepts-v5";
+/// The concept key also holds the dirty marker, which loses the version that
+/// wrote it. This key keeps the newest contract that finalized the index.
+const CONCEPT_NORMALIZATION_NEWEST_META_KEY: &str = "concept_normalization_newest_version";
 pub const CONCEPT_DOCUMENTATION_SUPPORTED_LANGUAGES: &str = "javascript,python,rust,tsx,typescript";
 pub const CONCEPT_DOCUMENTATION_INDEXED_META_KEY: &str = "concept_documentation_indexed_count";
 pub const CONCEPT_DOCUMENTATION_SECRET_OMITTED_META_KEY: &str =
@@ -334,21 +336,6 @@ const GRAPH_SCHEMA_DDL: &str = r#"
                 evidence_id    TEXT NOT NULL UNIQUE REFERENCES project_evidence(id)
             );
 
-            -- Cross-agent scratchpad. Live in-session channel between Mastermind
-            -- subagents (planner → executor → auditor); counterpart to the
-            -- cross-session `.mastermind/tasks/_lessons.md`.
-            -- Additive table — no SCHEMA_VERSION bump needed; IF NOT EXISTS lets
-            -- existing DBs adopt it without a rebuild.
-            CREATE TABLE IF NOT EXISTS scratchpad (
-                id    INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts    INTEGER NOT NULL,
-                agent TEXT NOT NULL,
-                kind  TEXT NOT NULL,
-                body  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_scratchpad_ts ON scratchpad(ts);
-            CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(agent);
-
             -- Optional SCIP semantic overlay. These tables are additive and
             -- deliberately separate from `symbols` / `edges`: Tree-sitter is
             -- still the default graph and remains usable when no overlay exists.
@@ -550,6 +537,10 @@ fn graph_schema_object_names() -> Vec<&'static str> {
 }
 
 fn stored_schema_version(connection: &Connection) -> SqlResult<Option<String>> {
+    stored_meta_value(connection, "schema_version")
+}
+
+fn stored_meta_value(connection: &Connection, key: &str) -> SqlResult<Option<String>> {
     let meta_exists: bool = connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
@@ -562,27 +553,61 @@ fn stored_schema_version(connection: &Connection) -> SqlResult<Option<String>> {
         return Ok(None);
     }
     connection
-        .query_row(
-            "SELECT value FROM meta WHERE key='schema_version'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
         .optional()
 }
 
-/// A newer binary wrote this graph. Rebuilding it here would destroy data
-/// that binary still reads, so the open fails instead.
-fn refuse_newer_schema(stored: Option<&str>) -> SqlResult<()> {
-    let current: u64 = SCHEMA_VERSION.parse().expect("numeric schema version");
-    match stored.and_then(|stored| stored.parse::<u64>().ok()) {
-        Some(stored) if stored > current => Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
-            Some(format!(
-                "the index has schema version {stored}, newer than version {current} that this mmcg supports; use a newer mmcg binary"
-            )),
+/// Contract labels end in `-v<N>`. Any other stored value, such as the dirty
+/// marker, is not newer.
+fn contract_number(label: &str, current: &str) -> Option<u64> {
+    let (family, _) = current.rsplit_once("-v")?;
+    label.strip_prefix(family)?.strip_prefix("-v")?.parse().ok()
+}
+
+fn newer_index_error(what: &str, stored: &str, current: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(format!(
+            "the index has {what} {stored}, newer than {what} {current} that this mmcg supports; use a newer mmcg binary"
         )),
-        _ => Ok(()),
+    )
+}
+
+/// A newer binary wrote this index. Rebuilding or migrating it here would
+/// downgrade data that binary still reads, so every open fails instead.
+fn refuse_newer_index(connection: &Connection) -> SqlResult<()> {
+    let current: u64 = SCHEMA_VERSION.parse().expect("numeric schema version");
+    if let Some(stored) = stored_schema_version(connection)? {
+        if stored.parse::<u64>().is_ok_and(|stored| stored > current) {
+            return Err(newer_index_error("schema version", &stored, SCHEMA_VERSION));
+        }
     }
+    for (what, keys, current) in [
+        (
+            "extractor contract",
+            &[crate::indexer::EXTRACTOR_CONTRACT_META_KEY][..],
+            crate::indexer::EXTRACTOR_CONTRACT_VERSION,
+        ),
+        (
+            "concept contract",
+            &[
+                CONCEPT_NORMALIZATION_META_KEY,
+                CONCEPT_NORMALIZATION_NEWEST_META_KEY,
+            ][..],
+            CONCEPT_NORMALIZATION_VERSION,
+        ),
+    ] {
+        let current_number = contract_number(current, current).expect("numbered contract");
+        for key in keys {
+            let stored = stored_meta_value(connection, key)?.unwrap_or_default();
+            if contract_number(&stored, current).is_some_and(|stored| stored > current_number) {
+                return Err(newer_index_error(what, &stored, current));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn column_exists(connection: &Connection, table: &str, column: &str) -> SqlResult<bool> {
@@ -1062,10 +1087,7 @@ fn unreferenced_candidates_sql() -> String {
                AND s.kind != 'module'
                AND (?1 IS NOT NULL OR s.kind != 'constant')
                AND lower(s.name) != 'main'
-               AND NOT (
-                   s.name LIKE 'test_%'
-                   AND (s.file_path LIKE '%test%' OR s.file_path LIKE '%spec%')
-               )
+               AND NOT (substr(s.name, 1, 5) = 'test_' AND s.production = 0)
                AND (s.decorators IS NULL OR (
                    s.decorators NOT LIKE '%,fixture,%'
                    AND s.decorators NOT LIKE '%,pytest.fixture,%'
@@ -1187,16 +1209,6 @@ fn normalize_repo_relative(path: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Edge {
-    pub id: i64,
-    pub from_id: i64,
-    pub to_id: Option<i64>,
-    pub to_name: String,
-    pub kind: String, // "calls" | "references" | "imports" | "inherits"
-    pub line: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
     pub indexed_at: i64,
@@ -1217,15 +1229,6 @@ pub struct ProjectHistoryEntry {
     pub path: String,
     pub kind: String,
     pub title: String,
-    pub body: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScratchpadEntry {
-    pub id: i64,
-    pub ts: i64,
-    pub agent: String,
-    pub kind: String,
     pub body: String,
 }
 
@@ -2918,15 +2921,21 @@ impl Drop for SnapshotDirectory {
 }
 
 /// Remove every live snapshot directory. Only for a process about to exit:
-/// stores that still use one fail afterwards.
+/// stores that still use one fail afterwards. Windows refuses to delete a
+/// file that SQLite still holds open, so there a snapshot in use stays behind
+/// and the failure is printed.
 pub(crate) fn remove_snapshot_directories() {
-    // Best effort: the process exits next either way.
     for path in SNAPSHOT_DIRECTORIES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .drain(..)
     {
-        let _ = std::fs::remove_dir_all(path);
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            eprintln!(
+                "[mmcg] could not remove index snapshot {}: {error}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -3546,6 +3555,77 @@ fn connection_index_root(connection: &Connection) -> SqlResult<Option<String>> {
         .optional()
 }
 
+/// Open the index file beneath `parent` without following links, creating it
+/// when `existing` is `None`, and prove that SQLite holds the file inspected
+/// before, or the one just created. Managed and explicit writable opens share it.
+fn open_verified_index(
+    parent: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    existing: Option<crate::bounded_fs::StableFileIdentity>,
+    label: &str,
+) -> SqlResult<(Connection, crate::bounded_fs::StableFileIdentity)> {
+    validate_writable_sidecars(parent, path)?;
+    let expected = match existing {
+        Some(identity) => identity,
+        None => {
+            let (file, identity) =
+                crate::bounded_fs::create_regular_file_with_capability(parent, path, false)
+                    .map_err(|error| sqlite_bounded_error(&format!("create {label}"), error))?;
+            drop(file);
+            identity
+        }
+    };
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let opened = inspect_opened_index(parent, path, label)?;
+    let matches = if existing.is_some() {
+        opened == expected
+    } else {
+        opened.same_object(expected)
+    };
+    if !matches {
+        return Err(sqlite_snapshot_changed());
+    }
+    verify_sqlite_main_file_identity(&connection, expected)?;
+    Ok((connection, expected))
+}
+
+/// After schema setup, the path must still name the file SQLite holds and
+/// its sidecars must still be safe to write.
+fn verify_opened_index(
+    parent: &crate::bounded_fs::RootCapability,
+    store: &Store,
+    expected: crate::bounded_fs::StableFileIdentity,
+    label: &str,
+) -> SqlResult<()> {
+    if !inspect_opened_index(parent, store.db_path(), label)?.same_object(expected) {
+        return Err(sqlite_snapshot_changed());
+    }
+    verify_sqlite_main_file_identity(&store.conn, expected)?;
+    validate_writable_sidecars(parent, store.db_path())
+}
+
+fn inspect_opened_index(
+    parent: &crate::bounded_fs::RootCapability,
+    path: &Path,
+    label: &str,
+) -> SqlResult<crate::bounded_fs::StableFileIdentity> {
+    parent
+        .verify()
+        .map_err(|error| sqlite_bounded_error(&format!("verify {label} parent"), error))?;
+    crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
+        parent,
+        path,
+        crate::bounded_fs::ReadControl::default(),
+    )
+    .map_err(|error| sqlite_bounded_error(&format!("verify {label} identity"), error))?
+    .ok_or_else(sqlite_snapshot_changed)
+}
+
 impl Store {
     /// MCP serving may refresh only the canonical repository-owned index.
     /// Explicit custom paths are opened through the non-mutating snapshot
@@ -3579,46 +3659,10 @@ impl Store {
                 crate::bounded_fs::ReadControl::default(),
             )
             .map_err(|error| sqlite_bounded_error("inspect managed index", error))?;
-        validate_writable_sidecars(&state, &expected)?;
-        let expected_identity = match existing_identity {
-            Some(identity) => identity,
-            None => {
-                let (file, identity) = crate::bounded_fs::create_regular_file_with_capability(
-                    &state, &expected, false,
-                )
-                .map_err(|error| sqlite_bounded_error("create managed index", error))?;
-                drop(file);
-                identity
-            }
-        };
-        let connection = Connection::open_with_flags(
-            &expected,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        let (connection, expected_identity) =
+            open_verified_index(&state, &expected, existing_identity, "managed index")?;
         root.verify()
             .map_err(|error| sqlite_bounded_error("verify managed repository root", error))?;
-        state
-            .verify()
-            .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
-        let opened_identity =
-            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
-                &state,
-                &expected,
-                crate::bounded_fs::ReadControl::default(),
-            )
-            .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?
-            .ok_or_else(sqlite_snapshot_changed)?;
-        let identity_matches = if existing_identity.is_some() {
-            opened_identity == expected_identity
-        } else {
-            opened_identity.same_object(expected_identity)
-        };
-        if !identity_matches {
-            return Err(sqlite_snapshot_changed());
-        }
-        verify_sqlite_main_file_identity(&connection, expected_identity)?;
         if existing_identity.is_some() {
             let authorized = connection_index_root(&connection)?
                 .and_then(|stored| PathBuf::from(stored).canonicalize().ok())
@@ -3643,22 +3687,7 @@ impl Store {
         store.init_schema()?;
         root.verify()
             .map_err(|error| sqlite_bounded_error("verify managed repository root", error))?;
-        state
-            .verify()
-            .map_err(|error| sqlite_bounded_error("verify managed index directory", error))?;
-        let opened_identity =
-            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
-                &state,
-                store.db_path(),
-                crate::bounded_fs::ReadControl::default(),
-            )
-            .map_err(|error| sqlite_bounded_error("verify managed index identity", error))?
-            .ok_or_else(sqlite_snapshot_changed)?;
-        if !opened_identity.same_object(expected_identity) {
-            return Err(sqlite_snapshot_changed());
-        }
-        verify_sqlite_main_file_identity(&store.conn, expected_identity)?;
-        validate_writable_sidecars(&state, store.db_path())?;
+        verify_opened_index(&state, &store, expected_identity, "managed index")?;
         Ok(store)
     }
 
@@ -3719,44 +3748,8 @@ impl Store {
             .map_err(|error| sqlite_bounded_error("inspect writable index", error))?
             .ok_or_else(sqlite_snapshot_changed)?;
         }
-        validate_writable_sidecars(&parent, &db_path)?;
-        let expected_identity = match existing_identity {
-            Some(identity) => identity,
-            None => {
-                let (file, identity) = crate::bounded_fs::create_regular_file_with_capability(
-                    &parent, &db_path, false,
-                )
-                .map_err(|error| sqlite_bounded_error("create writable index", error))?;
-                drop(file);
-                identity
-            }
-        };
-        let conn = Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        parent
-            .verify()
-            .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
-        let opened_identity =
-            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
-                &parent,
-                &db_path,
-                crate::bounded_fs::ReadControl::default(),
-            )
-            .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?
-            .ok_or_else(sqlite_snapshot_changed)?;
-        let identity_matches = if existing_identity.is_some() {
-            opened_identity == expected_identity
-        } else {
-            opened_identity.same_object(expected_identity)
-        };
-        if !identity_matches {
-            return Err(sqlite_snapshot_changed());
-        }
-        verify_sqlite_main_file_identity(&conn, expected_identity)?;
+        let (conn, expected_identity) =
+            open_verified_index(&parent, &db_path, existing_identity, "writable index")?;
         conn.execute_batch(WRITER_PRAGMAS)?;
         let store = Self::from_connection(
             conn,
@@ -3767,23 +3760,10 @@ impl Store {
         )?;
         if initialize_schema {
             store.init_schema()?;
+        } else {
+            refuse_newer_index(&store.conn)?;
         }
-        parent
-            .verify()
-            .map_err(|error| sqlite_bounded_error("verify writable index parent", error))?;
-        let opened_identity =
-            crate::bounded_fs::inspect_direct_regular_file_identity_with_capability(
-                &parent,
-                store.db_path(),
-                crate::bounded_fs::ReadControl::default(),
-            )
-            .map_err(|error| sqlite_bounded_error("verify writable index identity", error))?
-            .ok_or_else(sqlite_snapshot_changed)?;
-        if !opened_identity.same_object(expected_identity) {
-            return Err(sqlite_snapshot_changed());
-        }
-        verify_sqlite_main_file_identity(&store.conn, expected_identity)?;
-        validate_writable_sidecars(&parent, store.db_path())?;
+        verify_opened_index(&parent, &store, expected_identity, "writable index")?;
         Ok(store)
     }
 
@@ -3864,6 +3844,7 @@ impl Store {
             Some(source_snapshot_state),
             Arc::new(AtomicU8::new(INTERRUPT_NONE)),
         )?;
+        refuse_newer_index(&store.conn)?;
         // Normalize only the private copy before sealing it for queries.
         store.with_work_budget(
             WorkBudget {
@@ -4371,7 +4352,8 @@ impl Store {
     }
 
     /// Exclusive cross-process lock for one index write: an index run, a
-    /// refresh or a watcher update. Readers never take it. A writer waits
+    /// refresh, a watcher update, or a fact or SCIP import. Readers and
+    /// schema migration, which runs in one IMMEDIATE transaction, never take it. A writer waits
     /// until the request deadline or [`WRITER_LOCK_TIMEOUT`], whichever comes
     /// first, then gets a retryable busy error. Private snapshots and
     /// in-memory stores have no other writer, so they need no lock.
@@ -4410,6 +4392,7 @@ impl Store {
     }
 
     fn init_schema(&self) -> SqlResult<()> {
+        refuse_newer_index(&self.conn)?;
         // A current schema needs no DDL, so opening it takes no write lock and
         // never waits behind a running index.
         if self.graph_schema_current()? && self.concept_schema_objects_current()? {
@@ -4418,7 +4401,6 @@ impl Store {
             });
         }
         let stored = stored_schema_version(&self.conn)?;
-        refuse_newer_schema(stored.as_deref())?;
         if stored.as_deref() == Some(SCHEMA_VERSION) {
             // Repair a partially missing FTS5 corpus before the general
             // CREATE TABLE batch asks SQLite to initialize its broken
@@ -4431,13 +4413,13 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         // Another process may have migrated while this one waited for the lock.
+        refuse_newer_index(&tx)?;
         let stored = stored_schema_version(&tx)?;
-        refuse_newer_schema(stored.as_deref())?;
         if stored.is_some() && stored.as_deref() != Some(SCHEMA_VERSION) {
             // An older derived graph schema is dropped and rebuilt by the next
             // index, while repository identity and the durable auxiliary
             // channels stay. Keeping `index_root` is essential: otherwise
-            // retained history or scratchpad rows make the next in-place index
+            // retained history rows make the next in-place index
             // run look like unsafe, unbound data.
             eprintln!(
                 "[mmcg] schema version mismatch (have {:?}, need {}). Rebuilding — re-run `mastermind index <root>` to repopulate.",
@@ -5601,6 +5583,7 @@ impl Store {
 
         let tx = self.conn.transaction()?;
         let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
+        let restore_production = Self::production_classification_current_on(&tx)?;
 
         // Purge any existing data for this file.
         tx.execute(
@@ -5706,6 +5689,9 @@ impl Store {
         if restore_contract && corpus.is_some() {
             Self::set_concept_contract_current(&tx)?;
         }
+        if restore_production {
+            Self::set_production_classification_current(&tx)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -5726,6 +5712,7 @@ impl Store {
         self.conn.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
         let result = (|| {
             let restore_contract = Self::incremental_concept_contract_current_on(&self.conn)?;
+            let restore_production = Self::production_classification_current_on(&self.conn)?;
             self.conn.execute(
                 "INSERT INTO symbols(name, kind, file_path, line_start, line_end, signature, parent_id, production)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -5744,6 +5731,9 @@ impl Store {
             insert_concept_document(&self.conn, symbol_id, name, file_path, signature, "")?;
             if restore_contract {
                 Self::set_concept_contract_current(&self.conn)?;
+            }
+            if restore_production {
+                Self::set_production_classification_current(&self.conn)?;
             }
             Ok(symbol_id)
         })();
@@ -5920,6 +5910,34 @@ impl Store {
         Ok(())
     }
 
+    /// The insert triggers revoke the production stamp so that writes from
+    /// older runtimes get reclassified. This runtime classifies every row it
+    /// writes, so a write that started from a current stamp restores it and
+    /// the next open stays read-only.
+    fn production_classification_current_on(connection: &Connection) -> SqlResult<bool> {
+        Ok(connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [PRODUCTION_CLASSIFICATION_META_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .as_deref()
+            == Some(PRODUCTION_CLASSIFICATION_VERSION))
+    }
+
+    fn set_production_classification_current(connection: &Connection) -> SqlResult<()> {
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                PRODUCTION_CLASSIFICATION_META_KEY,
+                PRODUCTION_CLASSIFICATION_VERSION
+            ],
+        )?;
+        Ok(())
+    }
+
     fn set_concept_contract_current(connection: &Connection) -> SqlResult<()> {
         connection.execute(
             "INSERT INTO meta(key, value) VALUES (?1, ?2)
@@ -6007,14 +6025,12 @@ impl Store {
                 crate::indexer::EXTRACTOR_CONTRACT_VERSION
             ],
         )?;
-        tx.execute(
-            "INSERT INTO meta(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![
-                CONCEPT_NORMALIZATION_META_KEY,
-                CONCEPT_NORMALIZATION_VERSION
-            ],
-        )?;
+        for key in [
+            CONCEPT_NORMALIZATION_META_KEY,
+            CONCEPT_NORMALIZATION_NEWEST_META_KEY,
+        ] {
+            set_meta_on(&tx, key, CONCEPT_NORMALIZATION_VERSION)?;
+        }
         let rows: u32 =
             tx.query_row("SELECT COUNT(*) FROM symbol_concepts", [], |row| row.get(0))?;
         tx.commit()?;
@@ -6886,10 +6902,6 @@ impl Store {
     /// Largest files by their last symbol's end line. Exact line count is not
     /// stored, so this is a maintainability ranking proxy. Honors
     /// `production_only`; bounded by `limit`.
-    pub fn largest_files(&self, production_only: bool, limit: usize) -> SqlResult<Vec<FileSize>> {
-        self.largest_files_scoped("", "root", production_only, limit)
-    }
-
     pub(crate) fn largest_files_scoped(
         &self,
         scope: &str,
@@ -7090,21 +7102,10 @@ impl Store {
     /// - `path_prefix`: literal prefix for `file_path`. `None` = whole index;
     ///   SQL wildcard characters have no special meaning.
     /// - `language`, `kind`: standard filters.
-    /// - `top`: result count (caller decides — no hard cap).
+    /// - `top`: result count, at least one. The total before truncation comes first.
     ///
     /// Excludes synthetic `<module>` symbols (always-zero in-degree under
     /// name-matched edges) and symbols referenced nowhere (in-degree 0).
-    pub fn centrality(
-        &self,
-        path_prefix: Option<&str>,
-        language: Option<&str>,
-        kind: Option<&str>,
-        top: u32,
-    ) -> SqlResult<Vec<(Symbol, u32, u32)>> {
-        self.centrality_rows(path_prefix, language, kind, top)
-            .map(|(_, rows)| rows)
-    }
-
     pub(crate) fn centrality_bounded(
         &self,
         path_prefix: Option<&str>,
@@ -9274,11 +9275,6 @@ impl Store {
         }
     }
 
-    /// Back-compat name — defaults to leaf-name lookup. No language filter.
-    pub fn imported_by(&self, name: &str) -> SqlResult<Vec<String>> {
-        self.imported_by_name(name, None)
-    }
-
     /// Total symbol count (for status checks).
     pub fn symbol_count(&self) -> SqlResult<u32> {
         let count: u32 = self
@@ -9327,103 +9323,6 @@ impl Store {
             parent_id: r.get(7)?,
             decorators: r.get(8)?,
         })
-    }
-
-    /// Append a scratchpad entry. Returns the inserted row id + unix timestamp.
-    /// `kind` is freeform, conventionally `intent`/`note`/`handoff`/`risk`. The
-    /// ≤ 8 KiB `body` bound is enforced by the caller (MCP layer); Store accepts
-    /// whatever it's passed.
-    pub fn scratchpad_append(
-        &mut self,
-        agent: &str,
-        kind: &str,
-        body: &str,
-    ) -> SqlResult<(i64, i64)> {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        self.conn.execute(
-            "INSERT INTO scratchpad(ts, agent, kind, body) VALUES (?1, ?2, ?3, ?4)",
-            params![ts, agent, kind, body],
-        )?;
-        Ok((self.conn.last_insert_rowid(), ts))
-    }
-
-    /// Read scratchpad entries, newest first. All filters optional.
-    pub fn scratchpad_read(
-        &self,
-        since_ts: Option<i64>,
-        agent: Option<&str>,
-        kind: Option<&str>,
-        limit: u32,
-    ) -> SqlResult<Vec<ScratchpadEntry>> {
-        self.scratchpad_read_rows(since_ts, agent, kind, limit)
-            .map(|(_, entries)| entries)
-    }
-
-    pub(crate) fn scratchpad_read_bounded(
-        &self,
-        since_ts: Option<i64>,
-        agent: Option<&str>,
-        kind: Option<&str>,
-        limit: u32,
-    ) -> SqlResult<(u32, Vec<ScratchpadEntry>)> {
-        self.scratchpad_read_rows(since_ts, agent, kind, limit)
-    }
-
-    fn scratchpad_read_rows(
-        &self,
-        since_ts: Option<i64>,
-        agent: Option<&str>,
-        kind: Option<&str>,
-        limit: u32,
-    ) -> SqlResult<(u32, Vec<ScratchpadEntry>)> {
-        let mut sql = String::from(
-            "SELECT id, ts, agent, kind, body, COUNT(*) OVER() AS total
-             FROM scratchpad WHERE 1=1",
-        );
-        let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(ts) = since_ts {
-            sql.push_str(" AND ts >= ?");
-            params_dyn.push(Box::new(ts));
-        }
-        if let Some(a) = agent {
-            sql.push_str(" AND agent = ?");
-            params_dyn.push(Box::new(a.to_string()));
-        }
-        if let Some(k) = kind {
-            sql.push_str(" AND kind = ?");
-            params_dyn.push(Box::new(k.to_string()));
-        }
-        sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
-        params_dyn.push(Box::new(i64::from(limit.max(1))));
-
-        let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(bound), |row| {
-            Ok((
-                ScratchpadEntry {
-                    id: row.get(0)?,
-                    ts: row.get(1)?,
-                    agent: row.get(2)?,
-                    kind: row.get(3)?,
-                    body: row.get(4)?,
-                },
-                row.get::<_, i64>(5)?,
-            ))
-        })?;
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let mut total = 0_i64;
-        let mut entries = Vec::new();
-        for row in rows {
-            let (entry, row_total) = row?;
-            total = row_total;
-            if entries.len() < limit {
-                entries.push(entry);
-            }
-        }
-        Ok((total.clamp(0, i64::from(u32::MAX)) as u32, entries))
     }
 }
 
@@ -9669,16 +9568,22 @@ mod tests {
             .insert_symbol("t", "function", "tests/big_test.rs", 1, 2000, None, None)
             .unwrap();
 
-        let all = store.largest_files(false, 10).unwrap();
+        let all = store.largest_files_scoped("", "root", false, 10).unwrap();
         assert_eq!(all[0].file, "tests/big_test.rs");
         assert_eq!(all[0].lines, 2000);
         assert!(all.iter().any(|r| r.file == "src/god.rs" && r.lines == 900));
 
-        let prod = store.largest_files(true, 10).unwrap();
+        let prod = store.largest_files_scoped("", "root", true, 10).unwrap();
         assert_eq!(prod[0].file, "src/god.rs");
         assert!(!prod.iter().any(|r| r.file == "tests/big_test.rs"));
 
-        assert_eq!(store.largest_files(false, 1).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .largest_files_scoped("", "root", false, 1)
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -10641,9 +10546,6 @@ mod tests {
                     body: "durable history".into(),
                 }])
                 .unwrap();
-            store
-                .scratchpad_append("planner", "handoff", "live note")
-                .unwrap();
             store.upsert_file("src/lib.rs", 1, 1).unwrap();
             store
                 .insert_symbol("entry", "function", "src/lib.rs", 1, 2, None, None)
@@ -10683,10 +10585,6 @@ mod tests {
             )
             .unwrap();
         assert!(!legacy_task_cache_exists);
-        assert_eq!(
-            store.scratchpad_read(None, None, None, 10).unwrap().len(),
-            1
-        );
         std::fs::remove_file(path).ok();
     }
 
@@ -10824,6 +10722,18 @@ mod tests {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params!["Main", "function", "src/program.cs", 1, 3, None::<&str>, None::<i64>, "csharp", None::<&str>],
         ).unwrap();
+        for (name, file) in [
+            ("tested_total", "src/inspector.py"),
+            ("test_helper", "src/contest.py"),
+        ] {
+            conn.execute(
+                "INSERT INTO symbols(name, kind, file_path, line_start, line_end, language)
+                 VALUES (?1, 'function', ?2, 1, 3, 'python')",
+                params![name, file],
+            )
+            .unwrap();
+        }
+        store.ensure_production_classification().unwrap();
 
         let unref = store.unreferenced(None, None).unwrap();
         let names: Vec<&str> = unref.iter().map(|s| s.name.as_str()).collect();
@@ -10846,6 +10756,9 @@ mod tests {
             !names.contains(&"Main"),
             "conventional main entry points are not dead-code candidates"
         );
+        // Only a `test_` prefix in a test path marks a test, not substrings.
+        assert!(names.contains(&"tested_total"), "{names:?}");
+        assert!(names.contains(&"test_helper"), "{names:?}");
         std::fs::remove_file(&path).ok();
     }
 
@@ -10895,7 +10808,11 @@ mod tests {
             .unwrap();
         assert!(unreferenced.is_empty());
         let degrees = store
-            .with_work_budget(budget, || store.centrality(None, None, Some("method"), 300))
+            .with_work_budget(budget, || {
+                store
+                    .centrality_bounded(None, None, Some("method"), 300)
+                    .map(|(_, rows)| rows)
+            })
             .unwrap();
         assert_eq!(degrees.len(), 300);
         assert!(degrees.iter().all(|(_, degree, _)| *degree == 300));
@@ -11104,7 +11021,10 @@ mod tests {
             .insert_edge(c1, Some(medium), "medium", "calls", 33)
             .unwrap();
 
-        let ranked = store.centrality(None, None, None, 10).unwrap();
+        let ranked = store
+            .centrality_bounded(None, None, None, 10)
+            .map(|(_, rows)| rows)
+            .unwrap();
         let by_name: std::collections::HashMap<&str, u32> = ranked
             .iter()
             .map(|(s, deg, _coll)| (s.name.as_str(), *deg))
@@ -11121,7 +11041,10 @@ mod tests {
         assert_eq!(ranked[0].0.name, "popular");
 
         // top=1 returns only the top symbol.
-        let top1 = store.centrality(None, None, None, 1).unwrap();
+        let top1 = store
+            .centrality_bounded(None, None, None, 1)
+            .map(|(_, rows)| rows)
+            .unwrap();
         assert_eq!(top1.len(), 1);
         assert_eq!(top1[0].0.name, "popular");
         let (total, bounded) = store.centrality_bounded(None, None, None, 1).unwrap();
@@ -11967,13 +11890,19 @@ mod tests {
             .unwrap();
 
         // Prefix src/api/ excludes the class in src/core/.
-        let api_only = store.centrality(Some("src/api/"), None, None, 10).unwrap();
+        let api_only = store
+            .centrality_bounded(Some("src/api/"), None, None, 10)
+            .map(|(_, rows)| rows)
+            .unwrap();
         let names: Vec<&str> = api_only.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(names.contains(&"api_target"));
         assert!(!names.contains(&"CoreClass"));
 
         // Kind filter: class only.
-        let classes = store.centrality(None, None, Some("class"), 10).unwrap();
+        let classes = store
+            .centrality_bounded(None, None, Some("class"), 10)
+            .map(|(_, rows)| rows)
+            .unwrap();
         let class_names: Vec<&str> = classes.iter().map(|(s, _, _)| s.name.as_str()).collect();
         assert!(class_names.contains(&"CoreClass"));
         assert!(!class_names.contains(&"api_target"));
@@ -12083,7 +12012,8 @@ mod tests {
 
         let central = |prefix| {
             store
-                .centrality(Some(prefix), None, None, 10)
+                .centrality_bounded(Some(prefix), None, None, 10)
+                .map(|(_, rows)| rows)
                 .unwrap()
                 .into_iter()
                 .map(|(symbol, _, _)| symbol.name)
@@ -12643,71 +12573,6 @@ mod tests {
     }
 
     #[test]
-    fn scratchpad_append_and_read_newest_first() {
-        let path = tmp_db("scratchpad_basic");
-        let mut store = Store::open(&path).unwrap();
-        let (id1, ts1) = store
-            .scratchpad_append("planner", "intent", "drafting spec 042")
-            .unwrap();
-        // 1-second separation makes ORDER BY ts DESC deterministic.
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let (id2, ts2) = store
-            .scratchpad_append("executor", "handoff", "phase 1 done, ready for audit")
-            .unwrap();
-        assert!(id2 > id1);
-        assert!(ts2 >= ts1);
-
-        // No filters → newest first.
-        let all = store.scratchpad_read(None, None, None, 10).unwrap();
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].agent, "executor");
-        assert_eq!(all[1].agent, "planner");
-
-        // Filter by agent.
-        let only_planner = store
-            .scratchpad_read(None, Some("planner"), None, 10)
-            .unwrap();
-        assert_eq!(only_planner.len(), 1);
-        assert_eq!(only_planner[0].body, "drafting spec 042");
-
-        // Filter by kind.
-        let only_handoff = store
-            .scratchpad_read(None, None, Some("handoff"), 10)
-            .unwrap();
-        assert_eq!(only_handoff.len(), 1);
-
-        // Filter by since_ts — exclude the first entry.
-        let since_second = store.scratchpad_read(Some(ts2), None, None, 10).unwrap();
-        assert_eq!(since_second.len(), 1);
-        assert_eq!(since_second[0].agent, "executor");
-
-        // Limit.
-        let (total, only_one) = store.scratchpad_read_bounded(None, None, None, 1).unwrap();
-        assert_eq!(total, 2);
-        assert_eq!(only_one.len(), 1);
-        assert_eq!(only_one[0].agent, "executor");
-
-        let (filtered_total, filtered) = store
-            .scratchpad_read_bounded(None, Some("planner"), Some("intent"), 1)
-            .unwrap();
-        assert_eq!(filtered_total, 1);
-        assert_eq!(filtered.len(), 1);
-    }
-
-    #[test]
-    fn scratchpad_table_idempotent_across_opens() {
-        // Re-opening an existing DB must not error (CREATE TABLE IF NOT EXISTS).
-        let path = tmp_db("scratchpad_idempotent");
-        {
-            let mut store = Store::open(&path).unwrap();
-            store.scratchpad_append("a", "n", "hi").unwrap();
-        }
-        let store = Store::open(&path).unwrap();
-        let rows = store.scratchpad_read(None, None, None, 10).unwrap();
-        assert_eq!(rows.len(), 1);
-    }
-
-    #[test]
     fn impact_of_many_preserves_seed_evidence_and_minimum_depth() {
         let path = tmp_db("impact_many_evidence");
         let store = Store::open(&path).unwrap();
@@ -13209,7 +13074,10 @@ mod tests {
                 // `centrality` (no production_only param — always the
                 // whole index) is only compared at production_only=false.
                 if !production_only {
-                    let actual = store.centrality(None, None, None, 1000).unwrap();
+                    let actual = store
+                        .centrality_bounded(None, None, None, 1000)
+                        .map(|(_, rows)| rows)
+                        .unwrap();
                     let mut expected: Vec<(String, String, String, u32, u32, u32)> = symbols
                         .iter()
                         .filter(|s| s.kind != "module")
@@ -13251,7 +13119,10 @@ mod tests {
                     // itself is computed across all edges regardless of the
                     // caller's language.
                     for language in GEN_LANGUAGES {
-                        let actual = store.centrality(None, Some(language), None, 1000).unwrap();
+                        let actual = store
+                            .centrality_bounded(None, Some(language), None, 1000)
+                            .map(|(_, rows)| rows)
+                            .unwrap();
                         let mut expected: Vec<(String, String, String, u32, u32, u32)> = symbols
                             .iter()
                             .filter(|s| s.kind != "module" && s.language == *language)
@@ -14468,6 +14339,116 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_contract_is_refused_by_every_open_without_touching_the_graph() {
+        let newer_extractor = {
+            let (family, number) = crate::indexer::EXTRACTOR_CONTRACT_VERSION
+                .rsplit_once("-v")
+                .unwrap();
+            format!("{family}-v{}", number.parse::<u64>().unwrap() + 1)
+        };
+        let newer_concepts = {
+            let (family, number) = CONCEPT_NORMALIZATION_VERSION.rsplit_once("-v").unwrap();
+            format!("{family}-v{}", number.parse::<u64>().unwrap() + 1)
+        };
+        for (name, key, stored, current) in [
+            (
+                "newer_extractor_refused",
+                crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                newer_extractor.as_str(),
+                crate::indexer::EXTRACTOR_CONTRACT_VERSION,
+            ),
+            (
+                "newer_concepts_refused",
+                CONCEPT_NORMALIZATION_META_KEY,
+                newer_concepts.as_str(),
+                CONCEPT_NORMALIZATION_VERSION,
+            ),
+            (
+                "newer_dirty_concepts_refused",
+                CONCEPT_NORMALIZATION_NEWEST_META_KEY,
+                newer_concepts.as_str(),
+                CONCEPT_NORMALIZATION_VERSION,
+            ),
+        ] {
+            let path = tmp_db(name);
+            {
+                let store = Store::open(&path).unwrap();
+                store
+                    .insert_symbol("kept", "function", "src/lib.rs", 1, 2, None, None)
+                    .unwrap();
+                store.set_meta(key, stored).unwrap();
+            }
+            for (open_name, opened) in [
+                ("open", Store::open(&path)),
+                ("read-only", Store::open_read_only(&path)),
+                (
+                    "without migration",
+                    Store::open_existing_without_migration(&path),
+                ),
+            ] {
+                let error = match opened {
+                    Ok(_) => panic!("{name}: {open_name} must refuse a newer contract"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains(stored) && error.contains(current) && error.contains("newer"),
+                    "{name}: {open_name}: {error}"
+                );
+            }
+            let raw = Connection::open(&path).unwrap();
+            let symbols: i64 = raw
+                .query_row("SELECT count(*) FROM symbols", [], |row| row.get(0))
+                .unwrap();
+            let kept: String = raw
+                .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!((symbols, kept.as_str()), (1, stored), "{name}");
+            drop(raw);
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn an_older_contract_still_opens_for_rebuild() {
+        let path = tmp_db("older_contract_opens");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .set_meta(
+                    crate::indexer::EXTRACTOR_CONTRACT_META_KEY,
+                    "mmcg-extractors-v1",
+                )
+                .unwrap();
+            store
+                .set_meta(CONCEPT_NORMALIZATION_META_KEY, CONCEPT_CONTRACT_DIRTY)
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(!store.extractor_contract_current().unwrap());
+        drop(store);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn finalizing_records_the_newest_concept_contract() {
+        let path = tmp_db("newest_concept_contract");
+        let store = Store::open(&path).unwrap();
+        store.finalize_index_contracts_current().unwrap();
+        store.mark_concept_contract_dirty().unwrap();
+        assert_eq!(
+            store
+                .meta_value(CONCEPT_NORMALIZATION_NEWEST_META_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(CONCEPT_NORMALIZATION_VERSION)
+        );
+        drop(store);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn a_schema_missing_an_added_column_is_not_current() {
         let path = tmp_db("added_column_missing");
         let store = Store::open(&path).unwrap();
@@ -14542,6 +14523,58 @@ mod tests {
         let reopened = Store::open(&path);
         writer.execute_batch("ROLLBACK").unwrap();
         assert!(reopened.is_ok(), "{:?}", reopened.err());
+        drop(reopened);
+        drop(writer);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opening_an_index_after_a_file_commit_needs_no_write_lock() {
+        let path = tmp_db("open_after_commit_without_write_lock");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store
+                .commit_file(PendingFile {
+                    path: "src/lib.rs".to_string(),
+                    mtime: 1,
+                    content_sha256: "hash".to_string(),
+                    language: "rust".to_string(),
+                    symbols: vec![PendingSymbol {
+                        name: "run".to_string(),
+                        kind: "function".to_string(),
+                        line_start: 1,
+                        line_end: 2,
+                        signature: Some("fn run()".to_string()),
+                        parent_index: None,
+                        decorators: None,
+                    }],
+                    edges: Vec::new(),
+                })
+                .unwrap();
+            store
+                .insert_symbol("tool", "function", "tests/t.rs", 1, 2, None, None)
+                .unwrap();
+        }
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reopened = Store::open(&path);
+        writer.execute_batch("ROLLBACK").unwrap();
+        let reopened = reopened.unwrap();
+        let production: Vec<(String, bool)> = reopened
+            .conn
+            .prepare("SELECT file_path, production FROM symbols ORDER BY file_path")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<SqlResult<_>>()
+            .unwrap();
+        assert_eq!(
+            production,
+            vec![
+                ("src/lib.rs".to_string(), true),
+                ("tests/t.rs".to_string(), false)
+            ]
+        );
         drop(reopened);
         drop(writer);
         std::fs::remove_file(&path).ok();

@@ -154,7 +154,7 @@ pub(super) fn drain(db: &mut Journal, grant: &Grant) -> Result<Value, Error> {
         && grant.profile_client.as_deref().is_some_and(|reader| {
             !db.profile_delivery_disabled(&grant.client, root)
                 .unwrap_or(true)
-                && crate::onboarding::profile_access(root, reader).unwrap_or(false)
+                && crate::onboarding::profile_access(root, reader, true).unwrap_or(false)
         });
     if !enabled {
         return Ok(json!({"status":"paused","reason":"profile_access_unavailable","model":false}));

@@ -314,25 +314,27 @@ fn find_preflight_public_verifier_observes_store_interruption() {
 #[test]
 fn find_preflight_controller_revokes_approval_and_recovers() {
     let fixture = Fixture::new(1);
-    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
+    let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
     fixture.write(INPUT, &[0xff]);
     assert_eq!(fixture.controller(true), run_task::Outcome::PreFailed);
-    assert!(run_task::load_state(&state_path).unwrap().is_none());
+    assert!(mmcg::task_record::load_state(&state_path)
+        .unwrap()
+        .is_none());
     fixture.write(INPUT, b"needle");
     assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
-    let mut approved = run_task::load_state(&state_path).unwrap().unwrap();
+    let mut approved = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     approved.held_snapshot_sha256 = Some("old-held".into());
     approved.history_snapshot_sha256 = Some("old-history".into());
-    run_task::save_state_in_repository(fixture.root(), &state_path, &approved).unwrap();
+    mmcg::task_record::save_state_in_repository(fixture.root(), &state_path, &approved).unwrap();
     fixture.write(INPUT, &[0xff]);
     assert_eq!(fixture.controller(true), run_task::Outcome::PreFailed);
-    let failed = run_task::load_state(&state_path).unwrap().unwrap();
+    let failed = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(failed.baseline_ref, approved.baseline_ref);
     assert_eq!(failed.next_step.as_deref(), Some("run_preflight"));
     assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());
     fixture.write(INPUT, b"needle");
     assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
-    let recovered = run_task::load_state(&state_path).unwrap().unwrap();
+    let recovered = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(recovered.baseline_ref, approved.baseline_ref);
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
 }
@@ -345,9 +347,9 @@ fn find_postflight_accepts_replacement_independently_of_git_baseline() {
         fixture.change(1);
         let baseline = git(fixture.root(), &["rev-parse", "baseline"]);
         assert_eq!(fixture.controller(true), run_task::Outcome::PreReady);
-        let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
+        let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
         assert_eq!(
-            run_task::load_state(&state_path)
+            mmcg::task_record::load_state(&state_path)
                 .unwrap()
                 .unwrap()
                 .baseline_ref,
@@ -375,7 +377,7 @@ fn find_postflight_accepts_replacement_independently_of_git_baseline() {
         assert_eq!(bundle["manifest"]["verdict"], "held");
         assert_eq!(bundle["manifest"]["discrepancies"], json!([]));
         assert_eq!(
-            run_task::load_state(&state_path)
+            mmcg::task_record::load_state(&state_path)
                 .unwrap()
                 .unwrap()
                 .baseline_ref,

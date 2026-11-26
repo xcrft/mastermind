@@ -35,8 +35,9 @@ mastermind query facts --path src --top 100
 | Bind the revision | `--report-revision` is the full lowercase commit OID of the indexed HEAD. When a SARIF run declares `versionControlProvenance` for this repository, it must name the same revision |
 | Map report entries | Every fact maps to an indexed repository file. A JUnit testcase needs a `file` attribute and a SARIF result needs a location. OTLP spans without a code path are skipped. Repeated coverage lines are merged |
 | Fit text | Control characters become spaces. Titles, messages and labels over the manifest limits are cut with `…` |
-| Bind the report | Record its exact size and digest |
-| Parse or mapping failure | Reject the whole adaptation and name the entries that could not map |
+| Bind the report | Record its exact size and digest. The input path must be an exact UTF-8 repository-relative path, and ambiguous Unix backslash aliases are rejected |
+| Duplicates | Exact duplicate findings collapse by their content-derived IDs |
+| Parse or mapping failure | Reject the whole adaptation. `report_entry_without_path` and `report_entry_outside_index` give the counts of entries that could not map, and `artifact_revision_mismatch` names a revision conflict |
 | Cut or empty report | Reject an XML report without its closing elements, an LCOV record without `end_of_record`, a JUnit suite that lists fewer cases than its `tests` total or declares failures without a failed case, and a report with no facts. Only an empty SARIF scan produces an empty dataset that clears the previous one |
 
 ## Write a custom producer
@@ -124,7 +125,7 @@ mastermind enrich --facts mastermind-facts.json \
 | Signing input or event | Contract |
 |---|---|
 | Key ID | Use the ID printed by key generation |
-| Key generation | Refuses existing paths. Creates the private seed with Unix mode `0600` |
+| Key generation | Refuses existing paths and needs exact UTF-8 output paths. Writes the public key first, then the private seed with Unix mode `0600`, so a failure cannot leave a seed without its public key |
 | Incomplete policy | Import fails |
 | `--revoked-key-id` | Overrides trust |
 | Verified import | Stores the key and signature proof |
@@ -139,6 +140,9 @@ for the signed statement.
 | Operation or condition | Result |
 |---|---|
 | `query facts`, `mmcg_facts`, Lens or review export | Same data with source and producer provenance. Unsigned imports stay labeled unsigned |
+| Order | Annotations come errors first, then warnings |
+| `--top N` cuts a source | That source is `partial`, with a `normalized_fact_limit` diagnostic naming returned and total facts |
+| Lens drops findings at its per-file or global cap | That source is also `partial`, and a review export does not attest it |
 | Relationship with matching source and target | Can corroborate an existing returned edge. Cannot create or remove codegraph topology |
 | Runtime or coverage fact | Retains its own evidence type |
 | Successful import | Atomically replaces only `(producer.name, dataset)` |
@@ -148,13 +152,25 @@ for the signed statement.
 
 ## Validation boundary
 
+The complete manifest is validated before the previous dataset is touched.
+
 | Validation | Rejection condition |
 |---|---|
-| Schema, fact IDs and capabilities | Unsupported shape, identity or value |
-| Repository and source bindings | Wrong repository/revision, indexed source hash or artifact hash |
-| File access | Over-limit input, nonregular file, symlink, noncanonical path or path substitution |
+| Schema, fact IDs and capabilities | Unknown or duplicate fields, unsupported shape, identity, value or capability |
+| Repository and source bindings | Wrong repository or revision, indexed source hash, artifact size or hash, or a stale codegraph file |
+| File access | Over-limit input, nonregular file, symlink, path traversal, noncanonical path or path substitution |
 
-Producers have no direct SQLite access. Manifests cannot run commands, fetch
-network resources, install tools, or add MCP handlers. For exact input and
-response limits, see the
-[fact-ingestion reference](reference/mmcg.md#declarative-fact-ingestion-sdk).
+| Limit | Value |
+|---|---|
+| Manifest | 16 MiB |
+| Referenced source files | 10,000 files, 512 MiB in total |
+| Provenance artifacts | 64, 32 MiB each, 256 MiB in total |
+| Facts per manifest | 100,000 |
+| Facts returned by `query facts` and `mmcg_facts` | `--top` 1 to 400 |
+| Facts shown in Lens | 200 |
+| Field sizes in bytes | IDs 256. Producer name, dataset, provenance kind, category and relation 128. Version 128. Path 4 KiB. Title 256. Message 4 KiB. Label 512 |
+
+Producers have no direct SQLite access. Manifests cannot load native code, run
+commands, fetch network resources, install grammars or tools, add MCP handlers,
+define policy rules or change the codegraph. Only Mastermind writes the
+normalized tables.

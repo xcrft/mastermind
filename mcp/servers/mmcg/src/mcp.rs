@@ -29,7 +29,6 @@ const MCP_RESULT_MAX: usize = 8 * 1024 * 1024;
 const MCP_RESULT_VALUE_MAX: usize = MCP_RESULT_MAX - MCP_FRAME_MAX;
 const SERVER_NOT_INITIALIZED: i32 = -32002;
 const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
-const SCRATCHPAD_BODY_MAX: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -284,16 +283,6 @@ static TOOLS: &[ToolDef] = &[
         handle_recent_changes,
     ),
     read_only_tool("mmcg_status", schema_status, handle_status),
-    additive_tool(
-        "mmcg_scratchpad_append",
-        schema_scratchpad_append,
-        handle_scratchpad_append,
-    ),
-    read_only_tool(
-        "mmcg_scratchpad_read",
-        schema_scratchpad_read,
-        handle_scratchpad_read,
-    ),
     read_only_tool(
         "mmcg_change_class",
         schema_change_class,
@@ -1720,16 +1709,6 @@ fn bounded_u64_arg(
     }
 }
 
-fn opt_i64_arg(args: &Value, name: &str) -> Result<Option<i64>, HandlerError> {
-    match args.get(name) {
-        None => Ok(None),
-        Some(value) => value
-            .as_i64()
-            .map(Some)
-            .ok_or_else(|| HandlerError::InvalidArguments(format!("Invalid argument: {name}"))),
-    }
-}
-
 /// Every language the indexer can parse. One list so a new extractor cannot
 /// reach the index while staying invisible in the tool schemas.
 const LANGUAGES: [&str; 11] = [
@@ -2501,40 +2480,8 @@ fn schema_recent_changes() -> Value {
 fn schema_status() -> Value {
     json!({
         "name": "mmcg_status",
-        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, `freshness_error` explains when the scan could not establish a count, and `unindexable_sources` names up to 20 stale paths that are not regular files, such as symlinks. `skipped_submodules` counts Git submodules, which are never indexed. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
+        "description": "Show index health — file count, symbol count, exact UTF-8 db path when representable, structural extractor compatibility, deterministic concept-corpus compatibility, live durable-history freshness, and bounded source freshness. A native database path that JSON cannot represent exactly returns `db_path: null` with `db_path_error`. `history_freshness` is `fresh`, `stale`, `incomplete`, `snapshot_changed`, or `unknown`; an unavailable scan includes `history_freshness_error`. `freshness_basis: path_and_mtime` states the structural metadata contract. `stale_files` counts up to 100 added, deleted, or mtime-changed indexable paths; `stale_files_truncated` discloses a larger set, `freshness_error` explains when the scan could not establish a count, and `unindexable_sources` names up to 20 listed sources that are not regular files, such as symlinks. They never index and do not make the index stale, except a path that was indexed while it was a regular file: it stays in `stale_files` until the next index purges its old rows. `skipped_submodules` counts Git submodules, which are never indexed. Structural tools automatically refresh a stale managed `.mastermind/mmcg.db` before querying. Custom external indexes remain manual-refresh-only; unavailable or failed refreshes return `index_stale` with the same coverage fields.",
         "inputSchema": { "type": "object", "properties": {} }
-    })
-}
-
-fn schema_scratchpad_append() -> Value {
-    json!({
-        "name": "mmcg_scratchpad_append",
-        "description": "Append a one-line intent / note / handoff to the cross-agent scratchpad. Live in-session channel between Mastermind subagents (planner → executor → auditor). Use to hand off context the next agent needs without polluting the chat or the spec. Persists in `.mastermind/mmcg.db` (additive table, gitignored). Reviewed durable knowledge belongs in CONTEXT.md or `_lessons.md`, not the scratchpad. Body capped at 8 KiB — scratchpad is for one-liners, not blob dumps.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Agent identifier — conventionally `planner` / `executor` / `auditor` / `critic`, but freeform." },
-                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Entry kind — conventionally `intent` / `note` / `handoff` / `risk`, but freeform." },
-                "body": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "The one-line content. ≤ 8 KiB of UTF-8." }
-            },
-            "required": ["agent", "kind", "body"]
-        }
-    })
-}
-
-fn schema_scratchpad_read() -> Value {
-    json!({
-        "name": "mmcg_scratchpad_read",
-        "description": "Read recent scratchpad entries, newest first. All filters optional — call with no args to get the last 20 entries. Use `since` (unix seconds) to grab entries since you last checked. The response echoes the effective filters and reports exact filtered coverage and truncation.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "since": { "type": "integer", "description": "Unix timestamp (seconds). Only entries with `ts >= since` are returned." },
-                "agent": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by agent identifier." },
-                "kind": { "type": "string", "minLength": 1, "pattern": NON_BLANK_PATTERN, "description": "Filter by entry kind." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "Maximum entries returned; exact filtered total and truncation are reported." }
-            }
-        }
     })
 }
 
@@ -3309,30 +3256,6 @@ pub fn brief_current_envelope_bytes(
     brief_envelope_bytes_for_version(ProtocolVersion::Current, packet)
 }
 
-/// Build a brief with the current MCP envelope and shared refresh policy.
-pub fn build_brief_current(
-    store: &mut Store,
-    root: &std::path::Path,
-    since: &str,
-    role: queries::BriefRole,
-    budget_tokens: u32,
-) -> Result<queries::BriefPacket, queries::BriefError> {
-    crate::query_service::build_brief_current(
-        store,
-        root,
-        since,
-        role,
-        budget_tokens,
-        &brief_current_envelope_bytes,
-    )
-}
-
-pub use crate::query_service::{
-    build_concept_current, build_concept_current_with_tests, build_concept_review_current,
-    build_concept_review_current_with_contract, build_concept_review_current_with_hints,
-    finish_concept_review_current,
-};
-
 fn map_query_error(store: &Store, error: crate::query_service::Error) -> HandlerError {
     use crate::query_service::Error;
     match error {
@@ -3750,51 +3673,6 @@ fn handle_status(store: &mut Store, _args: &Value) -> Result<Value, HandlerError
     .map_err(|error| HandlerError::internal("serialize_response", error))
 }
 
-fn handle_scratchpad_append(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let agent = non_blank_str_arg(args, "agent")?;
-    let kind = non_blank_str_arg(args, "kind")?;
-    let body = non_blank_str_arg(args, "body")?;
-    if agent.chars().any(char::is_control) {
-        return Err(HandlerError::InvalidArguments(
-            "Invalid argument: agent".into(),
-        ));
-    }
-    if kind.chars().any(char::is_control) {
-        return Err(HandlerError::InvalidArguments(
-            "Invalid argument: kind".into(),
-        ));
-    }
-    if body
-        .chars()
-        .any(|character| matches!(character, '\r' | '\n'))
-    {
-        return Err(HandlerError::InvalidArguments(
-            "Invalid argument: body".into(),
-        ));
-    }
-    if body.len() > SCRATCHPAD_BODY_MAX {
-        return Err(HandlerError::InvalidArguments(
-            "Scratchpad body exceeds 8 KiB".into(),
-        ));
-    }
-    ensure_schema_compatible(store)?;
-    let (id, ts) = store
-        .scratchpad_append(agent, kind, body)
-        .map_err(|error| HandlerError::internal("scratchpad_write", error))?;
-    Ok(json!({ "id": id, "ts": ts }))
-}
-
-fn handle_scratchpad_read(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
-    let since = opt_i64_arg(args, "since")?;
-    let agent = opt_non_blank_str_arg(args, "agent")?;
-    let kind = opt_non_blank_str_arg(args, "kind")?;
-    let limit = bounded_u64_arg(args, "limit", 20, 1, 200)? as u32;
-    ensure_schema_compatible(store)?;
-    let r = queries::scratchpad_read(store, since, agent, kind, limit)
-        .map_err(|error| HandlerError::internal("scratchpad_read", error))?;
-    serde_json::to_value(r).map_err(|error| HandlerError::internal("serialize_response", error))
-}
-
 fn handle_context(store: &mut Store, args: &Value) -> Result<Value, HandlerError> {
     let since = non_blank_str_arg(args, "since")?.to_owned();
     let role = opt_enum_arg(args, "role", &["planner", "executor", "auditor"])?
@@ -3930,6 +3808,10 @@ fn handle_change_class(store: &mut Store, args: &Value) -> Result<Value, Handler
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_service::{
+        build_concept_current_with_tests, build_concept_review_current_with_contract,
+        finish_concept_review_current,
+    };
     use std::io::Cursor;
 
     fn unwrap_content(v: &serde_json::Value) -> serde_json::Value {
@@ -4455,7 +4337,7 @@ mod tests {
         for line in [
             r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
             r#"{"jsonrpc":"2.0","method":"tools/list","params":{}}"#,
-            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_scratchpad_append","arguments":{"agent":"executor","kind":"test","body":"must not write"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_status","arguments":{}}}"#,
             r#"{"jsonrpc":"2.0","method":"ping","params":{}}"#,
             r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
         ] {
@@ -4478,13 +4360,9 @@ mod tests {
         let none = handle_line(
             &mut state,
             &mut store,
-            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_scratchpad_append","arguments":{"agent":"executor","kind":"test","body":"must not write"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"mmcg_status","arguments":{}}}"#,
         );
         assert!(none.is_none());
-        assert!(store
-            .scratchpad_read(None, None, None, 10)
-            .unwrap()
-            .is_empty());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -4636,9 +4514,9 @@ mod tests {
         assert!(current.get("_meta").is_none());
 
         let array = json!([{ "body": "handoff" }]);
-        let scratchpad = tool_result(ProtocolVersion::Current, array.clone(), false).unwrap();
-        assert_eq!(unwrap_content(&scratchpad), array);
-        assert_eq!(scratchpad["structuredContent"], json!({ "entries": array }));
+        let wrapped = tool_result(ProtocolVersion::Current, array.clone(), false).unwrap();
+        assert_eq!(unwrap_content(&wrapped), array);
+        assert_eq!(wrapped["structuredContent"], json!({ "entries": array }));
 
         let bounded = tool_result(
             ProtocolVersion::Current,
@@ -4681,7 +4559,6 @@ mod tests {
             "mmcg_team_map",
             "mmcg_recent_changes",
             "mmcg_status",
-            "mmcg_scratchpad_read",
             "mmcg_change_class",
             "mmcg_context",
             "mmcg_profile",
@@ -4712,7 +4589,7 @@ mod tests {
             "mmcg_concept",
             "mmcg_concept_prepare",
         ];
-        let additions = ["mmcg_scratchpad_append", "mmcg_mining_submit"];
+        let additions = ["mmcg_mining_submit"];
         let expected: std::collections::BTreeSet<_> = readers
             .iter()
             .chain(&refreshers)
@@ -4842,8 +4719,6 @@ mod tests {
             ("mmcg_change_impact", &["root"]),
             ("mmcg_test_impact", &["root"]),
             ("mmcg_brief", &["root"]),
-            ("mmcg_scratchpad_append", &["agent", "kind", "body"]),
-            ("mmcg_scratchpad_read", &["agent", "kind"]),
             ("mmcg_change_class", &["file"]),
         ];
         let listed = tools_list(ProtocolVersion::Current);
@@ -4920,11 +4795,6 @@ mod tests {
                 handle_centrality,
                 json!({ "kind": "\r\n" }),
                 "Invalid argument: kind",
-            ),
-            (
-                handle_scratchpad_read,
-                json!({ "agent": "" }),
-                "Invalid argument: agent",
             ),
             (
                 handle_search,
@@ -5046,16 +4916,6 @@ mod tests {
                 handle_centrality,
                 json!({ "top": 201 }),
                 "Invalid argument: top",
-            ),
-            (
-                handle_scratchpad_read,
-                json!({ "since": 1.5 }),
-                "Invalid argument: since",
-            ),
-            (
-                handle_scratchpad_read,
-                json!({ "limit": 0 }),
-                "Invalid argument: limit",
             ),
             (
                 handle_recent_changes,
@@ -5423,8 +5283,10 @@ mod tests {
         crate::indexer::Indexer::new(root.path())
             .index_all(&mut store, true)
             .unwrap();
-        let expected =
-            serde_json::to_value(queries::project_map(&store, ".", 2, 20).unwrap()).unwrap();
+        let expected = serde_json::to_value(
+            queries::project_map_with_options(&store, ".", 2, 20, false).unwrap(),
+        )
+        .unwrap();
         let actual = handle_map(&mut store, &json!({})).unwrap();
         assert_eq!(actual, expected);
         let production_expected = serde_json::to_value(
@@ -5583,7 +5445,9 @@ mod tests {
     fn concept_review_searches_only_the_source_bound_pool() {
         let (root, mut store) = impact_fixture("review-query-count");
         queries::CONCEPT_TEST_CALLS.with(|calls| calls.set(0));
-        let packet = build_concept_review_current(&mut store, "value", 10, false).unwrap();
+        let packet =
+            build_concept_review_current_with_contract(&mut store, "value", 10, false, &[], None)
+                .unwrap();
         assert_eq!(queries::CONCEPT_TEST_CALLS.with(|calls| calls.get()), 1);
         queries::CONCEPT_TEST_CALLS.with(|calls| calls.set(0));
         let result =
@@ -5632,8 +5496,10 @@ mod tests {
         crate::indexer::Indexer::new(&root)
             .index_all(&mut store, true)
             .unwrap();
-        let expected =
-            serde_json::to_value(build_concept_current(&mut store, "value", 10).unwrap()).unwrap();
+        let expected = serde_json::to_value(
+            build_concept_current_with_tests(&mut store, "value", 10, false).unwrap(),
+        )
+        .unwrap();
         assert!(!expected.to_string().to_lowercase().contains("topsecret"));
         assert!(store
             .search_concepts("\"topsecret\"", 10)
@@ -5649,9 +5515,10 @@ mod tests {
         assert_eq!(unwrap_content(&actual), expected);
         assert_eq!(actual["structuredContent"], expected);
 
-        let documentation =
-            serde_json::to_value(build_concept_current(&mut store, "retrievalquartz", 10).unwrap())
-                .unwrap();
+        let documentation = serde_json::to_value(
+            build_concept_current_with_tests(&mut store, "retrievalquartz", 10, false).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             documentation["candidates"][0]["matched_fields"],
             json!(["documentation"])
@@ -6313,12 +6180,13 @@ mod tests {
     #[test]
     fn brief_cli_and_mcp_share_the_same_exactly_budgeted_packet() {
         let (root, mut store) = impact_fixture("brief-shared");
-        let expected = build_brief_current(
+        let expected = crate::query_service::build_brief_current(
             &mut store,
             &root,
             "HEAD",
             queries::BriefRole::Executor,
             8_000,
+            &brief_current_envelope_bytes,
         )
         .unwrap();
         let result = handle_tools_call(
@@ -6355,12 +6223,13 @@ mod tests {
         drop(store);
         let mut custom = crate::store::Store::open_for_serve(&db, None).unwrap();
         assert_eq!(
-            build_brief_current(
+            crate::query_service::build_brief_current(
                 &mut custom,
                 &root.join("src"),
                 "HEAD",
                 queries::BriefRole::Executor,
                 8_000,
+                &brief_current_envelope_bytes,
             )
             .unwrap_err(),
             queries::BriefError::RootMismatch
@@ -6526,8 +6395,15 @@ mod tests {
         assert_eq!(payload["history_freshness"], "stale");
         assert!(serde_json::to_vec(&result).unwrap().len() <= 256 * 4);
         assert_eq!(
-            build_brief_current(&mut store, &root, "HEAD", queries::BriefRole::Executor, 256)
-                .unwrap_err(),
+            crate::query_service::build_brief_current(
+                &mut store,
+                &root,
+                "HEAD",
+                queries::BriefRole::Executor,
+                256,
+                &brief_current_envelope_bytes
+            )
+            .unwrap_err(),
             queries::BriefError::IndexStale
         );
         assert_eq!(
@@ -7088,91 +6964,6 @@ mod checks {
             changed_since_root(&store, Some(unrelated.path().to_str().unwrap())),
             Err(HandlerError::InvalidArguments(message)) if message == "root_mismatch"
         ));
-    }
-
-    #[test]
-    fn scratchpad_round_trip_via_tools_call() {
-        let path = std::env::temp_dir().join("mmcg_mcp_scratchpad.db");
-        let _ = std::fs::remove_file(&path);
-        let mut store = crate::store::Store::open(&path).unwrap();
-
-        let append_env = handle_tools_call(
-            ProtocolVersion::Current,
-            &mut store,
-            &serde_json::json!({
-                "name": "mmcg_scratchpad_append",
-                "arguments": {
-                    "agent": "planner",
-                    "kind": "intent",
-                    "body": "spec 001 ready for executor"
-                }
-            }),
-        )
-        .unwrap();
-        let append = unwrap_content(&append_env);
-        assert!(append.get("id").and_then(|v| v.as_i64()).is_some());
-        assert!(append.get("ts").and_then(|v| v.as_i64()).is_some());
-
-        let read_env = handle_tools_call(
-            ProtocolVersion::Current,
-            &mut store,
-            &serde_json::json!({
-                "name": "mmcg_scratchpad_read",
-                "arguments": { "limit": 10 }
-            }),
-        )
-        .unwrap();
-        let read = unwrap_content(&read_env);
-        assert_eq!(read["since"], Value::Null);
-        assert_eq!(read["agent"], Value::Null);
-        assert_eq!(read["kind"], Value::Null);
-        assert_eq!(read["total"], 1);
-        assert_eq!(read["count"], 1);
-        assert_eq!(read["truncated"], false);
-        assert_eq!(read["limit"], 10);
-        let arr = read["entries"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["agent"], "planner");
-        assert_eq!(arr[0]["kind"], "intent");
-        assert_eq!(arr[0]["body"], "spec 001 ready for executor");
-
-        let too_big = "x".repeat(8 * 1024 + 1);
-        let too_big_env = handle_tools_call(
-            ProtocolVersion::Current,
-            &mut store,
-            &serde_json::json!({
-                "name": "mmcg_scratchpad_append",
-                "arguments": { "agent": "a", "kind": "n", "body": too_big }
-            }),
-        )
-        .unwrap();
-        assert_eq!(too_big_env["isError"], true);
-
-        for arguments in [
-            json!({ "agent": "", "kind": "note", "body": "body" }),
-            json!({ "agent": "planner", "kind": " ", "body": "body" }),
-            json!({ "agent": "planner\nother", "kind": "note", "body": "body" }),
-            json!({ "agent": "planner", "kind": "note\r", "body": "body" }),
-            json!({ "agent": "planner", "kind": "note", "body": "" }),
-            json!({ "agent": "planner", "kind": "note", "body": "line 1\nline 2" }),
-        ] {
-            let invalid = handle_tools_call(
-                ProtocolVersion::Current,
-                &mut store,
-                &json!({
-                    "name": "mmcg_scratchpad_append",
-                    "arguments": arguments
-                }),
-            )
-            .unwrap();
-            assert_eq!(invalid["isError"], true);
-        }
-        assert_eq!(
-            store.scratchpad_read(None, None, None, 10).unwrap().len(),
-            1
-        );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     fn exercise_change_class_round_trip(tmp: &std::path::Path) {
@@ -8106,8 +7897,6 @@ mod checks {
             "mmcg_team_map",
             "mmcg_recent_changes",
             "mmcg_status",
-            "mmcg_scratchpad_append",
-            "mmcg_scratchpad_read",
             "mmcg_change_class",
             "mmcg_context",
             "mmcg_profile",

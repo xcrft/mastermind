@@ -16,7 +16,8 @@ controller. The AI client supplies the model and tool runtime.
 | Evidence | A source, observed check result or review bound to specific inputs |
 | Mining | Collection and analysis that proposes personal evidence and candidates |
 | Indexing | Construction of a searchable view of current code or documents |
-| Completion | A controller decision that this iteration meets its recorded contract |
+| Audit verdict | Held when the diff, report and receipts match the approved contract, Drift when the change leaves the approved scope, Broken when evidence is missing or inconsistent |
+| Completion | A controller decision that this iteration meets its recorded contract. The task state is then `learned` |
 
 Personal preferences guide behavior. They do not grant tool permissions,
 change acceptance criteria or make project claims true.
@@ -73,7 +74,6 @@ use MCP and the file-based workflow. See [setup](getting-started.md) and
 | Markdown | Canonical project decisions and readable profile exports |
 | MCP | Expose bounded queries to an AI client |
 | Context assembler | Combine checked layers and report missing, stale or omitted data |
-| Vector retrieval, if added | Find candidates by similarity, then apply the same source, scope and review checks |
 
 Context preview reads independently checked layers. It does not re-index files,
 activate candidates or create one atomic snapshot across all stores.
@@ -106,13 +106,13 @@ delivery without a personality completeness score. See [persona hooks](guides/pe
 | Project history | Resolved decisions for current Context/Lesson bytes | Required update or unresolved review |
 | Publication | Revalidation through the shared completion gate | Any invalidated obligation |
 
-Resume, native auto-review and repeated postflight use that gate before
-publishing `learned`. A completed iteration is historical. An explicit re-audit
+Resume, native auto-review and repeated postflight use that gate before they
+mark the task `learned`. A completed iteration stays a record of that iteration. An explicit re-audit
 evaluates the current work.
 
-Legacy report-only tasks retain their weaker compatibility contract. Use
-structured acceptance and observed `verify.run` checks for the full recorded
-proof chain. Schemas are in the [reference](reference/mmcg.md).
+A task with report-only checks gets the weaker reported-result contract. Use
+structured acceptance and observed `verify[].run` checks for the full recorded
+chain. The fields are in [specs, reports and CI](reference/spec-and-report.md).
 
 ## Boundaries and evaluation
 

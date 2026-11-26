@@ -773,7 +773,7 @@ fn validate_attestation(
             "unsupported schema_version".into(),
         ));
     }
-    if !crate::diff::is_full_git_oid(&attestation.head_oid) || attestation.head_oid != head_oid {
+    if !crate::git::is_full_git_oid(&attestation.head_oid) || attestation.head_oid != head_oid {
         return Err(ReviewPackageError::InvalidAttestation(
             "head_oid does not match the review snapshot".into(),
         ));
@@ -2227,7 +2227,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let imported = crate::facts::import(&store, &manifest_path).unwrap();
+        let imported = crate::facts::import_with_trust(
+            &store,
+            &manifest_path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         let manifest_digest = imported.source.manifest_sha256;
         drop(store);
 
@@ -2308,7 +2313,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        crate::facts::import(&store, &manifest_path).unwrap();
+        crate::facts::import_with_trust(
+            &store,
+            &manifest_path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         drop(store);
 
         let output = repository.path().join("fact-review");

@@ -11,9 +11,10 @@
 #   environment so a human approves before the exact artifact upload runs.
 #
 # Layout: three jobs.
-#   `verify` runs always (tag check, validator, tests, package). It prepares
+#   `verify` runs always (tag check, validator, package). It prepares
 #     Cargo registry metadata beside the verified `.crate` and seals both with
-#     SHA-256. No secrets, no environment — tests don't wait on approval gates.
+#     SHA-256. No secrets, no environment. Tests are not repeated here: they
+#     ran in push CI on the same commit, and `publish` requires that CI green.
 #   `publish` only runs if verify passes, downloads those exact bytes, checks
 #     their hashes, and uploads the verified `.crate` through Cargo's documented
 #     registry Web API. It never asks `cargo publish` to package the source again.
@@ -41,7 +42,7 @@ permissions:
 
 jobs:
   verify:
-    name: Verify (tag + validator + tests + package)
+    name: Verify (tag + validator + package)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -53,11 +54,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: 1.100.0
-          components: clippy, rustfmt
+      # rustup reads the channel, profile and components from rust-toolchain.toml.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install --no-self-update
 
       - name: Install Python for validator and artifact publisher
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -100,9 +100,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install --require-hashes -r scripts/requirements.txt
           python scripts/validate.py
-
-      - name: cargo test --all --release --locked
-        run: cargo test --all --release --locked
 
       - name: cargo package (builds the tarball that would ship to crates.io)
         run: cargo package --locked
@@ -214,11 +211,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: 1.100.0
-          components: clippy, rustfmt
+      # rustup reads the channel, profile and components from rust-toolchain.toml.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install --no-self-update
 
       - name: Install from crates.io and run shipped binary smoke
         run: bash scripts/smoke-installed-crate-release.sh mcp/servers/mmcg/Cargo.toml

@@ -25,6 +25,15 @@ pub fn sha256(bytes: impl AsRef<[u8]>) -> String {
     encode(&Sha256::digest(bytes))
 }
 
+/// Whether `value` is exactly `length` lowercase hex digits, the only form a
+/// stored digest, receipt or invocation identifier may take.
+pub fn is_lower(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Feeds every byte `inner` accepts to `hasher`. `sha2` 0.11 hashers no longer
 /// implement `io::Write`, and the bounded copy helpers write into one.
 pub struct Sha256Writer<'a, W> {
@@ -47,6 +56,14 @@ impl<W: Write> Write for Sha256Writer<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lowercase_check_rejects_uppercase_other_lengths_and_non_hex() {
+        assert!(is_lower("0123456789abcdef", 16));
+        assert!(!is_lower("0123456789ABCDEF", 16));
+        assert!(!is_lower("0123456789abcdef", 15));
+        assert!(!is_lower("0123456789abcdeg", 16));
+    }
 
     #[test]
     fn encodes_known_sha256_vector() {

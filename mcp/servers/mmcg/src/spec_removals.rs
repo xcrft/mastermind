@@ -1,6 +1,6 @@
 //! Bind removal acknowledgements to parser ordinals in one immutable baseline.
 
-use crate::diff::{self, DeclarationChanges, RemovedDeclarations};
+use crate::diff::{DeclarationChanges, RemovedDeclarations};
 use crate::indexer::{extractor_for_path, parse_baseline_blob};
 use crate::spec::{ParsedSpec, SymbolSpec};
 use crate::spec_symbols::{components, normalize_file, snapshot_scopes, Scope, Unresolved};
@@ -226,13 +226,18 @@ impl Baseline {
             }
             paths.sort();
             paths.dedup();
-            if paths.len() > diff::CHANGE_FILE_LIMIT {
+            if paths.len() > crate::git::CHANGE_FILE_LIMIT {
                 return Err(Unresolved::unavailable("baseline_file_limit"));
             }
         }
-        let mut blobs =
-            diff::baseline_blobs_for_paths_controlled(root, oid, &paths, Some(deadline), None)
-                .map_err(|error| Unresolved::unavailable(error.code()))?;
+        let mut blobs = crate::git::baseline_blobs_for_paths_controlled(
+            root,
+            oid,
+            &paths,
+            Some(deadline),
+            None,
+        )
+        .map_err(|error| Unresolved::unavailable(error.code()))?;
         if let Some(preimages) = preimages {
             for path in &paths {
                 if let Some(bytes) = preimages.get(path) {
@@ -409,7 +414,7 @@ fn regular_paths(
     let mut batches: Vec<Vec<String>> = vec![Vec::new()];
     let mut argument_bytes = 0usize;
     if let Some(requested) = requested {
-        if requested.len() > diff::CHANGE_FILE_LIMIT {
+        if requested.len() > crate::git::CHANGE_FILE_LIMIT {
             return Err(Unresolved::unavailable("baseline_file_limit"));
         }
         for path in requested {
@@ -439,11 +444,11 @@ fn regular_paths(
         check_deadline(deadline)?;
         let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", oid, "--"];
         args.extend(batch.iter().map(String::as_str));
-        let output = diff::run_bounded_git_controlled(
+        let output = crate::git::run_bounded_git_controlled(
             root,
             &args,
             None,
-            diff::GIT_OUTPUT_LIMIT,
+            crate::git::GIT_OUTPUT_LIMIT,
             Some(deadline),
             None,
         )
@@ -452,7 +457,7 @@ fn regular_paths(
             return Err(Unresolved::unavailable("baseline_inventory_failed"));
         }
         output_bytes = output_bytes.saturating_add(output.stdout.len());
-        if output_bytes > diff::GIT_OUTPUT_LIMIT {
+        if output_bytes > crate::git::GIT_OUTPUT_LIMIT {
             return Err(Unresolved::unavailable("baseline_inventory_limit"));
         }
         for entry in output
@@ -474,7 +479,7 @@ fn regular_paths(
                 && extractor_for_path(Path::new(path)).is_some()
             {
                 paths.insert(path.to_string());
-                if paths.len() > diff::CHANGE_FILE_LIMIT {
+                if paths.len() > crate::git::CHANGE_FILE_LIMIT {
                     return Err(Unresolved::unavailable("baseline_file_limit"));
                 }
             }
@@ -581,7 +586,7 @@ mod tests {
         // Build the large tree in Git's index without creating thousands of
         // working files or invoking the application indexer.
         let mut rows = String::new();
-        for index in 0..diff::CHANGE_FILE_LIMIT {
+        for index in 0..crate::git::CHANGE_FILE_LIMIT {
             rows.push_str(&format!("100644 {blob}\tsrc/file_{index:05}.py\n"));
         }
         git(

@@ -35,7 +35,7 @@ struct Marker {
 }
 
 fn marker_path(root: &Path, spec: &Path) -> PathBuf {
-    crate::run_task::state_file_path(root, spec).with_extension("intake.json")
+    crate::task_record::state_file_path(root, spec).with_extension("intake.json")
 }
 
 fn read_marker(
@@ -200,7 +200,7 @@ fn task_identity(root: &RootCapability, spec: &Path) -> Result<(String, String, 
     }
     let repository = crate::facts::repository_identity(root.canonical_root())?;
     root.verify()?;
-    Ok((repository, relative, crate::run_task::hash_text(text)))
+    Ok((repository, relative, crate::task_record::hash_text(text)))
 }
 
 fn validate_task(root: &RootCapability, binding: &TaskBinding) -> Result<(), Error> {
@@ -253,7 +253,7 @@ pub(super) fn active(
         if marker.status != "bound" || marker.binding != binding {
             return Err("task binding changed".into());
         }
-        let state = crate::run_task::load_state(&crate::run_task::state_file_path(
+        let state = crate::task_record::load_state(&crate::task_record::state_file_path(
             root.canonical_root(),
             Path::new(&binding.spec_path),
         ))?;
@@ -282,8 +282,8 @@ pub(in crate::miner) fn bind(
 ) -> Result<Value, Error> {
     let root = RootCapability::open(repo)?;
     let (_, relative, _) = task_identity(&root, spec)?;
-    let state_path = crate::run_task::state_file_path(root.canonical_root(), Path::new(&relative));
-    let _controller = crate::run_task::controller_lock(root.canonical_root(), &state_path)?;
+    let _controller =
+        crate::task_record::lock_task_controller(root.canonical_root(), Path::new(&relative))?;
     let identity = task_identity(&root, Path::new(&relative))?;
     let path = marker_path(root.canonical_root(), Path::new(&relative));
     let old = read_marker(&root, &path)?;

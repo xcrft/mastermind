@@ -137,7 +137,7 @@ fn digest(value: &str, length: usize) -> bool {
 }
 
 pub fn receipt_path(root: &Path, spec: &Path) -> PathBuf {
-    let state = crate::run_task::state_file_path(root, spec);
+    let state = crate::task_record::state_file_path(root, spec);
     if state.file_name().is_some_and(|name| name == "state.json") {
         state.with_file_name("review-invocation.json")
     } else {
@@ -210,7 +210,8 @@ pub(crate) fn validate_evidence(
         return Err("review_invocation_pin_mismatch".into());
     }
     let receipt: Receipt =
-        serde_json::from_slice(&bytes).map_err(|_| "review_invocation_receipt_invalid")?;
+        crate::strict_json::from_slice(&bytes, crate::strict_json::Floats::Reject)
+            .map_err(|_| "review_invocation_receipt_invalid")?;
     let native = receipt
         .invocation
         .as_ref()
@@ -249,8 +250,7 @@ pub(crate) fn validate_evidence(
 
 pub fn run(spec: &Path, repository: &Path, options: &Options) -> Result<Report, String> {
     invocation::require_native_runtime()?;
-    let state_path = crate::run_task::state_file_path(repository, spec);
-    let _lock = crate::run_task::controller_lock(repository, &state_path)?;
+    let _lock = crate::task_record::lock_task_controller(repository, spec)?;
     run_locked(spec, repository, options)
 }
 
@@ -271,9 +271,9 @@ pub(crate) fn run_locked(
     state.semantic_review_required = true;
     state.semantic_review_sha256 = None;
     state.last_artifact = Some("review-invocation.json".into());
-    crate::run_task::save_state_in_repository(
+    crate::task_record::save_state_in_repository(
         repository,
-        &crate::run_task::state_file_path(repository, spec),
+        &crate::task_record::state_file_path(repository, spec),
         &state,
     )
     .map_err(|_| "review_invocation_state_write_failed")?;
@@ -385,7 +385,7 @@ fn execute(
     }
     fresh(spec, repository, &request)?;
     let terminal = terminal.ok_or("review_invocation_result_missing")?;
-    let value = crate::setup::parse_json_unique(terminal.as_bytes())
+    let value = crate::strict_json::parse(terminal.as_bytes(), crate::strict_json::Floats::Accept)
         .map_err(|_| "review_invocation_report_invalid")?;
     let assessment: NativeAssessment =
         serde_json::from_value(value).map_err(|_| "review_invocation_report_invalid")?;
@@ -440,11 +440,11 @@ fn source_path(raw: &[u8]) -> Result<String, String> {
 /// Compare actual bounded file bytes, not Git's cached stat or index flags.
 /// An oversized/unsupported packet is an explicit failure, never a partial diff.
 fn source_changes(root: &RootCapability, baseline: &str) -> Result<Changes, String> {
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let git_limited = |args: &[&str], limit: usize| -> Result<Vec<u8>, String> {
         let mut controlled = vec!["-c", "core.fsmonitor=false", "-c", "diff.external="];
         controlled.extend_from_slice(args);
-        let output = crate::diff::run_bounded_git_controlled(
+        let output = crate::git::run_bounded_git_controlled(
             root.requested_root(),
             &controlled,
             None,
@@ -458,7 +458,7 @@ fn source_changes(root: &RootCapability, baseline: &str) -> Result<Changes, Stri
         }
         Ok(output.stdout)
     };
-    let git = |args: &[&str]| git_limited(args, crate::diff::GIT_OUTPUT_LIMIT);
+    let git = |args: &[&str]| git_limited(args, crate::git::GIT_OUTPUT_LIMIT);
     let mut paths = BTreeSet::new();
     let mut modes = BTreeMap::new();
     for entry in git(&["ls-tree", "-r", "-z", baseline])?
@@ -497,7 +497,7 @@ fn source_changes(root: &RootCapability, baseline: &str) -> Result<Changes, Stri
         return Err("review_invocation_file_limit".into());
     }
     let paths = paths.into_iter().collect::<Vec<_>>();
-    let blobs = crate::diff::baseline_blobs_for_paths_controlled(
+    let blobs = crate::git::baseline_blobs_for_paths_controlled(
         root.requested_root(),
         baseline,
         &paths,

@@ -28,7 +28,7 @@
 
 use crate::diff::{self, DiffError, SymbolDiff};
 use crate::executor_claims;
-pub use crate::executor_claims::{ClaimCheck, ClaimEvidence, ClaimStatus};
+pub use crate::executor_claims::{ClaimCheck, ClaimStatus};
 use crate::executor_report::{Claim, ExecutorReport};
 use crate::spec::{ParsedSpec, SymbolClaim};
 use crate::spec_removals;
@@ -461,19 +461,6 @@ fn render_finding(f: &Finding) -> String {
     }
 }
 
-/// Run all Phase A checks against a parsed spec.
-///
-/// `git_ref` must resolve via `git rev-parse` in `repo_root` (baseline for
-/// symbols-changed-since). `store` is the live index at HEAD.
-pub fn run(
-    spec: &ParsedSpec,
-    store: &Store,
-    repo_root: &Path,
-    git_ref: &str,
-) -> Result<Report, DiffError> {
-    run_internal(spec, store, repo_root, git_ref, false, None, None).map(|(report, _)| report)
-}
-
 fn run_internal(
     spec: &ParsedSpec,
     store: &Store,
@@ -485,7 +472,7 @@ fn run_internal(
 ) -> Result<(Report, Option<crate::verify_spec::Report>), DiffError> {
     // Worktree-scoped, not `<ref>..HEAD` — post-flight audits work that has not
     // been committed yet. See the module header.
-    let deadline = Instant::now() + diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let index_version = store
         .data_version()
         .map_err(|_| DiffError::GitFailed("index_version_unavailable".into()))?;
@@ -746,11 +733,11 @@ fn run_internal(
     // the derived diff, so a concurrent edit cannot make file evidence look
     // consistent with a different revision.
     if removal_plan.is_some() || has_claims || has_canonical_report {
-        diff::validate_working_tree_projection_controlled(
+        crate::git::validate_working_tree_projection_controlled(
             repo_root,
             &worktree.baseline_oid,
             &worktree.head_oid,
-            diff::WorkingTreeSnapshotExpectation {
+            crate::git::WorkingTreeSnapshotExpectation {
                 files: task
                     .as_ref()
                     .map_or(worktree.files.as_slice(), |task| task.raw_files.as_slice()),
@@ -886,9 +873,13 @@ pub fn run_ci_with_report(
     Ok((verification.expect("CI verification requested"), report))
 }
 
-/// Run Phase A checks + executor-report mechanical checks.
+/// Run all Phase A checks against a parsed spec, plus executor-report
+/// mechanical checks when a report is given.
 ///
-/// `executor_report == None` is equivalent to `run()`. When present, adds:
+/// `git_ref` must resolve via `git rev-parse` in `repo_root` (baseline for
+/// symbols-changed-since). `store` is the live index at HEAD.
+///
+/// An executor report adds:
 ///  - Per-claim declaration-addition and compatible-call-candidate evidence
 ///  - Unresolved outcomes for stale, ambiguous or unavailable source evidence
 ///  - Canonical report completion and repository-contained task identity
@@ -1500,7 +1491,7 @@ fn resolve_commit(root: &Path, reference: &str) -> Result<String, Box<dyn std::e
         128,
     )?;
     let oid = std::str::from_utf8(&bytes)?.trim().to_ascii_lowercase();
-    if !crate::diff::is_full_git_oid(&oid) {
+    if !crate::git::is_full_git_oid(&oid) {
         return Err("git did not return a full object ID".into());
     }
     Ok(oid)
@@ -1511,7 +1502,7 @@ fn git_bytes(
     args: &[&str],
     limit: usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = crate::diff::run_bounded_git_controlled(root, args, None, limit, None, None)
+    let output = crate::git::run_bounded_git_controlled(root, args, None, limit, None, None)
         .map_err(|error| format!("audit_git_{}", error.code()))?;
     if !output.success {
         return Err("audit_git_failed".into());
@@ -1647,7 +1638,7 @@ fn parse_name_status(
 }
 
 fn resolve_head_sha(root: Option<&Path>) -> String {
-    crate::diff::current_head_oid(root.unwrap_or_else(|| Path::new(".")))
+    crate::git::current_head_oid(root.unwrap_or_else(|| Path::new(".")))
         .ok()
         .map(|oid| oid[..oid.len().min(12)].to_string())
         .unwrap_or_else(|| "unknown".to_string())
@@ -1875,7 +1866,7 @@ fn compute_verdict(findings: &[Finding]) -> Verdict {
 fn extract_planned_test_names(body: &str) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
-    let prose = crate::context_doctor::prose_lines(body)
+    let prose = crate::document_sections::prose_lines(body)
         .into_iter()
         .map(|line| line.text)
         .collect::<Vec<_>>()
@@ -1927,6 +1918,7 @@ fn is_test_name(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor_claims::ClaimEvidence;
     use crate::indexer::Indexer;
     use crate::spec;
     use std::env;
@@ -2206,7 +2198,7 @@ Add caller2() in `src/lib.py`
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
 
         // helper now has 2 callers — drift; scope_creep.py wasn't in spec.
         assert!(r.findings.iter().any(
@@ -2254,11 +2246,12 @@ Edit `src/lib.py`
         let mut store = Store::open(dir.join("idx.db")).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
 
-        let r = run(
+        let r = run_with_report(
             &spec::parse_str("spec.md", SCOPE_SPEC),
             &store,
             &dir,
             "HEAD",
+            None,
         )
         .unwrap();
 
@@ -2314,11 +2307,12 @@ Edit `src/lib.py`
         let mut store = Store::open(dir.join("idx.db")).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
 
-        let error = run(
+        let error = run_with_report(
             &spec::parse_str("spec.md", SCOPE_SPEC),
             &store,
             &dir,
             "baseline",
+            None,
         )
         .unwrap_err();
 
@@ -2369,7 +2363,7 @@ Edit `src/lib.py`
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(r.findings.iter().any(|f| matches!(
             f,
             Finding::SnapshotSignatureDrift { symbol, spec_says, .. }
@@ -2417,7 +2411,7 @@ Edit `src/lib.py`
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(r.findings.iter().any(|f| matches!(
             f,
             Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "will_be_removed"
@@ -2442,7 +2436,7 @@ Edit `src/lib.py`
         let mut store = Store::open(dir.join("idx.db")).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
         let s = spec::parse_str("spec.md", "## Goals\n- Simplify the module\n");
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         let removed: Vec<_> = r
             .findings
             .iter()
@@ -2479,7 +2473,7 @@ Edit `src/lib.py`
         let mut store = Store::open(dir.join("idx.db")).unwrap();
         Indexer::new(dir).index_all(&mut store, false).unwrap();
         let s = spec::parse_str("spec.md", "## Goals\n- Change the code\n");
-        let mut removed = run(&s, &store, dir, "baseline")
+        let mut removed = run_with_report(&s, &store, dir, "baseline", None)
             .unwrap()
             .findings
             .into_iter()
@@ -2624,7 +2618,7 @@ Edit `src/lib.py`
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(!r.findings.iter().any(|f| matches!(
             f,
             Finding::RemovedSymbolNotAcknowledged { symbol, .. } if symbol == "old_api"
@@ -2669,7 +2663,7 @@ Edit `src/lib.py`
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(r.findings.iter().any(|f| matches!(
             f,
             Finding::PlannedTestNotAdded { test } if test == "test_missing"
@@ -2743,7 +2737,7 @@ breaking_changes:
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(
             r.findings.iter().any(|f| matches!(
                 f,
@@ -2793,7 +2787,7 @@ breaking_changes:
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(
             !r.findings.iter().any(|f| matches!(
                 f,
@@ -2903,7 +2897,7 @@ breaking_changes:
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
         assert!(r.findings.iter().any(
             |f| matches!(f, Finding::SnapshotSymbolGone { symbol } if symbol == "will_be_removed")
         ));
@@ -2924,11 +2918,11 @@ breaking_changes:
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
         let parsed = spec::parse_str("spec.md", "---\nmode: lite\ntouches:\n  - file: README.md\n    scope: file\n    reason: Update setup instructions\n---\n## Goals\nUpdate setup instructions.\n");
         assert!(parsed.frontmatter_error.is_none());
-        let report = run(&parsed, &store, &dir, "HEAD").unwrap();
+        let report = run_with_report(&parsed, &store, &dir, "HEAD", None).unwrap();
         assert_eq!(report.verdict, Verdict::Held, "{:?}", report.findings);
 
         write(&dir, "undeclared.yaml", "enabled: true\n");
-        let report = run(&parsed, &store, &dir, "HEAD").unwrap();
+        let report = run_with_report(&parsed, &store, &dir, "HEAD", None).unwrap();
         assert!(report.findings.iter().any(|finding| matches!(
             finding, Finding::UnexpectedFile { file } if file == "undeclared.yaml"
         )));
@@ -2936,7 +2930,7 @@ breaking_changes:
 
         fs::remove_file(dir.join("undeclared.yaml")).unwrap();
         fs::remove_file(dir.join("README.md")).unwrap();
-        let report = run(&parsed, &store, &dir, "HEAD").unwrap();
+        let report = run_with_report(&parsed, &store, &dir, "HEAD", None).unwrap();
         assert!(report.findings.iter().any(|finding| matches!(
             finding, Finding::DeclaredFileUnavailable { file: Some(file), .. } if file == "README.md"
         )));
@@ -2955,11 +2949,25 @@ breaking_changes:
         let mut store = Store::open(dir.join("idx.db")).unwrap();
         Indexer::new(&dir).index_all(&mut store, false).unwrap();
         let held = "---\nmode: lite\ntouches:\n  - file: README.md\n    scope: file\n    reason: Update setup instructions\n---\n## Goals\nUpdate setup instructions.\n";
-        let report = run(&spec::parse_str("spec.md", held), &store, &dir, "HEAD").unwrap();
+        let report = run_with_report(
+            &spec::parse_str("spec.md", held),
+            &store,
+            &dir,
+            "HEAD",
+            None,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Held, "{:?}", report.findings);
 
         let unparsed = format!("{held}## Pre-edit Snapshot\n`setup` — 2 callers\n");
-        let report = run(&spec::parse_str("spec.md", &unparsed), &store, &dir, "HEAD").unwrap();
+        let report = run_with_report(
+            &spec::parse_str("spec.md", &unparsed),
+            &store,
+            &dir,
+            "HEAD",
+            None,
+        )
+        .unwrap();
         assert!(report.findings.iter().any(|finding| matches!(
             finding, Finding::UnparsedLine { reason, .. } if reason == "snapshot_line_unparsed"
         )));
@@ -3029,7 +3037,7 @@ touches:
 - O(1)
 ";
         let s = spec::parse_str("spec.md", spec_body);
-        let r = run(&s, &store, &dir, "baseline").unwrap();
+        let r = run_with_report(&s, &store, &dir, "baseline", None).unwrap();
 
         let missing: Vec<&str> = r
             .findings

@@ -77,10 +77,10 @@ jobs:
             console.log("✓ root package.json shape OK (7 platform deps, versions in lockstep)");
           '
 
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: 1.100.0
-          components: clippy, rustfmt
+      # rustup reads the channel, profile and components from rust-toolchain.toml.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install --no-self-update
 
       - name: Cache cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

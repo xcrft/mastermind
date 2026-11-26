@@ -918,7 +918,7 @@ enum PolicyCmd {
         #[arg(long, default_value = ".", value_parser = absolute_path)]
         root: PathBuf,
         /// Repository-owned v1 policy file.
-        #[arg(long, default_value = "mastermind-policy.yml")]
+        #[arg(long, default_value = mmcg::policy::DEFAULT_CONFIG_PATH)]
         config: PathBuf,
         #[arg(long, value_enum, default_value_t = PolicyFormat::Text)]
         format: PolicyFormat,
@@ -1672,16 +1672,6 @@ enum FeedbackCmd {
     },
     /// Mark a preference rejected; later repeats stay rejected.
     Reject { key: String },
-    /// Replace one reviewed preference with another in the same category/scope.
-    Supersede {
-        key: String,
-        #[arg(long = "with")]
-        successor: String,
-        #[arg(long)]
-        old_revision: String,
-        #[arg(long)]
-        new_revision: String,
-    },
     /// Withdraw one inbox source while retaining its quotes and receipt history.
     DismissSource {
         key: String,
@@ -1695,12 +1685,6 @@ enum FeedbackCmd {
 
 #[derive(Subcommand)]
 enum HabitCmd {
-    /// Start a new unreviewed generation of a rejected or superseded description.
-    Renew {
-        id: i64,
-        #[arg(long)]
-        revision: String,
-    },
     /// Propose a conditional behavior with one exact quote from a human turn.
     Propose {
         /// Project root matching the transcript's verified cwd.
@@ -1760,16 +1744,6 @@ enum HabitCmd {
     Dismiss {
         id: i64,
         evidence_id: i64,
-    },
-    /// Replace a habit within the same scope, role and workflow after review.
-    Supersede {
-        id: i64,
-        #[arg(long = "with")]
-        successor: i64,
-        #[arg(long)]
-        old_revision: String,
-        #[arg(long)]
-        new_revision: String,
     },
     Reject {
         id: i64,
@@ -2125,6 +2099,13 @@ fn run_cli_inner(
             for path in &stats.skipped_submodule_paths {
                 eprintln!("skipped submodule: {path:?}");
             }
+            let listed_submodules = stats.skipped_submodule_paths.len();
+            if stats.files_skipped_submodule as usize > listed_submodules {
+                eprintln!(
+                    "skipped {} submodules in total, {listed_submodules} listed",
+                    stats.files_skipped_submodule
+                );
+            }
             for path in &stats.failed_paths {
                 eprintln!("failed source: {path:?}");
             }
@@ -2135,16 +2116,27 @@ fn run_cli_inner(
                 eprintln!("extractor contract changed: rebuilt all structural data");
             }
             if stats.files_failed > 0 {
-                eprintln!(
-                    "error: {} source files failed to index; the index stays stale until they index or are removed (symlinks and other non-regular files never index)",
-                    stats.files_failed
-                );
+                let retryable = stats.files_failed.saturating_sub(stats.files_unindexable);
+                let mut message =
+                    format!("error: {} source files failed to index", stats.files_failed);
+                if retryable > 0 {
+                    message.push_str(&format!(
+                        "; {retryable} keep the index stale until they index or are removed"
+                    ));
+                }
+                if stats.files_unindexable > 0 {
+                    message.push_str(&format!(
+                        "; {} are not regular files, such as symlinks: they never index and do not make the index stale",
+                        stats.files_unindexable
+                    ));
+                }
+                eprintln!("{message}");
                 drop(store);
                 std::process::exit(1);
             }
         }
         Cmd::Workflow(WorkflowCmd::Audit { root, json }) => {
-            let report = mmcg::workflow_status::audit_workflow(&root);
+            let report = mmcg::workflow_audit::audit_workflow(&root);
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -2771,13 +2763,13 @@ fn run_cli_inner(
         Cmd::Next(NextArgs { root }) => {
             let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
+            let ws = mmcg::task_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_next_text());
         }
         Cmd::Resume(ResumeArgs { root, task }) => {
             let root = canonical_root(root)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let ws = mmcg::workflow_status::WorkflowStatus::scan_with_index(&root, &index_path);
+            let ws = mmcg::task_status::WorkflowStatus::scan_with_index(&root, &index_path);
             print!("{}", ws.render_resume_text(task.as_deref()));
         }
         Cmd::Init(options) => {
@@ -3506,12 +3498,6 @@ fn run_cli_inner(
                     feedback::set_status(&key, "active", Some(&revision))?
                 }
                 FeedbackCmd::Reject { key } => feedback::set_status(&key, "rejected", None)?,
-                FeedbackCmd::Supersede {
-                    key,
-                    successor,
-                    old_revision,
-                    new_revision,
-                } => feedback::supersede(&key, &successor, &old_revision, &new_revision)?,
                 FeedbackCmd::DismissSource {
                     key,
                     candidate,
@@ -3563,13 +3549,6 @@ fn run_cli_inner(
                     habit::review(id, "observed", Some(&revision))?
                 }
                 HabitCmd::Dismiss { id, evidence_id } => habit::dismiss(id, evidence_id)?,
-                HabitCmd::Renew { id, revision } => habit::renew(id, &revision)?,
-                HabitCmd::Supersede {
-                    id,
-                    successor,
-                    old_revision,
-                    new_revision,
-                } => habit::supersede(id, successor, &old_revision, &new_revision)?,
                 HabitCmd::Reject { id } => habit::review(id, "rejected", None)?,
             }
         }

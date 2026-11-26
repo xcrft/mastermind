@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,7 +31,13 @@ class ReleaseVersionTests(unittest.TestCase):
             notes = "### Fixed\n\n- A release note.\n"
             source = root / "CHANGELOG.md"
             source.write_text(
-                source.read_text(encoding="utf-8").replace("## [Unreleased]\n", f"## [Unreleased]\n\n{notes}", 1),
+                # Replace whatever the real Unreleased section holds, so the test owns its notes.
+                re.sub(
+                    r"(?ms)^## \[Unreleased\]\n.*?(?=^## \[)",
+                    lambda _: f"## [Unreleased]\n\n{notes}\n",
+                    source.read_text(encoding="utf-8"),
+                    count=1,
+                ),
                 encoding="utf-8",
             )
             old = release_version.source_version(root)
@@ -67,16 +74,18 @@ class ReleaseVersionTests(unittest.TestCase):
 
 
 class RequireGreenCiTests(unittest.TestCase):
-    """The fake gh prints the status for each workflow from FAKE_<NAME> variables."""
+    """The fake gh prints FAKE_<NAME> for runs of FAKE_EVENT (default push), and no run otherwise."""
 
-    def run_gate(self, results: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    def run_gate(
+        self, results: dict[str, str], *args: str, event: str = "push"
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             fake = Path(directory) / "gh"
             fake.write_text(
                 "#!/usr/bin/env bash\n"
-                'for a; do case "$prev" in --workflow) wf=$a;; esac; prev=$a; done\n'
+                'for a; do case "$prev" in --workflow) wf=$a;; --event) ev=$a;; esac; prev=$a; done\n'
                 'key=FAKE_${wf%.yml}; key=${key//-/_}\n'
-                'printf "%s\\n" "${!key}"\n',
+                'if [ "$ev" = "$FAKE_EVENT" ]; then printf "%s\\n" "${!key}"; else echo "null null"; fi\n',
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -84,10 +93,11 @@ class RequireGreenCiTests(unittest.TestCase):
                 "PATH": f"{directory}:{os.environ['PATH']}",
                 "CI_WAIT_SECONDS": "0",
                 "CI_POLL_SECONDS": "0",
+                "FAKE_EVENT": event,
             }
             env.update({f"FAKE_{name.replace('-', '_')}": value for name, value in results.items()})
             return subprocess.run(
-                ["bash", str(GATE), "owner/repo", "abc123"], env=env, capture_output=True, text=True
+                ["bash", str(GATE), "owner/repo", "abc123", *args], env=env, capture_output=True, text=True
             )
 
     ALL_GREEN = {name: "completed success" for name in ("ci-mmcg", "ci-npm", "validate", "supply-chain")}
@@ -106,6 +116,17 @@ class RequireGreenCiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("did not finish", result.stderr)
         self.assertIn("validate.yml", result.stderr)
+
+    def test_dispatch_dry_runs_are_read_for_their_own_event_and_workflows(self):
+        dry_runs = {"publish-mmcg": "completed success", "publish-npm": "completed success"}
+        args = ("workflow_dispatch", "publish-mmcg.yml", "publish-npm.yml")
+        self.assertEqual(self.run_gate(dry_runs, *args, event="workflow_dispatch").returncode, 0)
+        result = self.run_gate(dry_runs, *args, event="push")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("publish-mmcg.yml publish-npm.yml", result.stderr)
+
+    def test_an_event_without_workflows_is_a_usage_error(self):
+        self.assertEqual(self.run_gate(self.ALL_GREEN, "workflow_dispatch").returncode, 2)
 
 
 if __name__ == "__main__":

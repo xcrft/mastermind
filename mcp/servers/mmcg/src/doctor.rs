@@ -230,17 +230,9 @@ impl Report {
     }
 }
 
-/// Run every check against `root`. Returns a structured report.
-///
-/// `mmcg_binary` is the binary used for the MCP-serve handshake check (usually
-/// `std::env::current_exe()`). Passed in so tests can override.
-pub fn run(root: &Path, mmcg_binary: &Path) -> Report {
-    run_with_index(root, mmcg_binary, &root.join(".mastermind/mmcg.db"))
-}
-
 /// Run every check against `root` using the selected index database.
 pub fn run_with_index(root: &Path, mmcg_binary: &Path, index_path: &Path) -> Report {
-    let workflow_audit = crate::workflow_status::audit_workflow_for_doctor(root);
+    let workflow_audit = crate::workflow_audit::audit_workflow_for_doctor(root);
     let index = DoctorIndex::inspect(index_path);
     let mut checks = vec![
         check_binary(),
@@ -295,6 +287,25 @@ fn capture_fence_check(report: Result<serde_json::Value, Box<dyn std::error::Err
         };
     }
     let unknown = report["unknown_prefixes"].as_u64().unwrap_or(0);
+    let mut hint = "a marker is a delivery that is running or never reached the journal; inspect `mastermind miner hooks status --client <client>` in each project and run `mastermind miner hooks recover --client <client>` there".to_owned();
+    for detail in report["prefix_details"].as_array().into_iter().flatten() {
+        let (prefix, count, age) = (
+            detail["prefix"].as_str().unwrap_or(""),
+            &detail["markers"],
+            &detail["oldest_marker_age_seconds"],
+        );
+        match (detail["client"].as_str(), detail["project_root"].as_str()) {
+            (Some(client), Some(root)) if detail["project_exists"] == false => {
+                hint.push_str(&format!(
+                    "; {count} markers (oldest {age}s) belong to {root}, which no longer exists: run `mastermind miner hooks recover --client {client} --project-root '{root}'`"
+                ));
+            }
+            (Some(_), Some(_)) => {}
+            _ => hint.push_str(&format!(
+                "; {count} markers (oldest {age}s) have no known grant: once no client session uses that project, remove the files starting with {prefix} from ~/.mastermind/.persona-capture"
+            )),
+        }
+    }
     Check {
         name,
         status: Status::Warn,
@@ -304,9 +315,7 @@ fn capture_fence_check(report: Result<serde_json::Value, Box<dyn std::error::Err
             report["oldest_marker_age_seconds"],
             if unknown == 1 { "prefix" } else { "prefixes" },
         ),
-        hint: Some(
-            "a marker is a delivery that is running or never reached the journal; inspect `mastermind miner hooks status --client <client>` in each project and run `mastermind miner hooks recover --client <client>` there. Recover cannot reach a prefix with no known grant: once no client session uses that project, remove its files from ~/.mastermind/.persona-capture by hand".into(),
-        ),
+        hint: Some(hint),
     }
 }
 
@@ -324,13 +333,17 @@ fn hook_readiness_check(
     ));
     let report = match report {
         Ok(report) => report,
-        Err(_) => {
+        Err(error) => {
+            // The error is the actionable part, for example a journal written
+            // by a newer mmcg that this binary refuses to read.
             return Check {
                 name,
                 status: Status::Warn,
-                message: "hook readiness is unavailable, no provider or worker was started".into(),
+                message: format!(
+                    "hook readiness is unavailable, no provider or worker was started: {error}"
+                ),
                 hint,
-            }
+            };
         }
     };
     if report["configured"] == false {
@@ -437,9 +450,9 @@ fn check_profile_budget(root: &Path) -> Check {
         hint: None,
     };
     let budget = crate::onboarding::profile_budget_tokens(root);
-    let reader = ["claude", "codex"]
-        .into_iter()
-        .find_map(|client| crate::miner::hooks::configured_profile_client(root, client).ok()?);
+    let reader = ["claude", "codex"].into_iter().find_map(|client| {
+        crate::miner::hooks::configured_profile_client(root, client, false).ok()?
+    });
     let Some(reader) = reader else {
         return not_configured();
     };
@@ -737,7 +750,7 @@ fn check_index_freshness(root: &Path, index: &DoctorIndex) -> Check {
         };
     }
     let deadline = std::time::Instant::now() + DOCTOR_FRESHNESS_TIMEOUT;
-    let freshness = match crate::workflow_status::scan_index_freshness(root, store, deadline) {
+    let freshness = match crate::task_status::scan_index_freshness(root, store, deadline) {
         Ok(freshness) => freshness,
         Err(error) => {
             return Check {
@@ -1426,7 +1439,7 @@ fn format_bytes(n: u64) -> String {
 }
 
 fn check_workflow_mcp_contract(
-    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+    report: Option<&crate::workflow_audit::WorkflowAuditReport>,
 ) -> Check {
     workflow_diagnostic_check(
         "subagent MCP scoping",
@@ -1448,7 +1461,7 @@ fn check_workflow_mcp_contract(
 }
 
 fn check_workflow_runtime_contract(
-    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+    report: Option<&crate::workflow_audit::WorkflowAuditReport>,
 ) -> Check {
     workflow_diagnostic_check(
         "subagent runtime contract",
@@ -1474,7 +1487,7 @@ fn check_workflow_runtime_contract(
 
 fn workflow_diagnostic_check(
     name: &'static str,
-    report: Option<&crate::workflow_status::WorkflowAuditReport>,
+    report: Option<&crate::workflow_audit::WorkflowAuditReport>,
     includes: impl Fn(&str) -> bool,
     ok_message: &str,
 ) -> Check {
@@ -2300,9 +2313,16 @@ mod tests {
         );
         assert_eq!(absent.status, Status::Ok);
         assert!(absent.hint.is_none());
-        let unknown = hook_readiness_check("codex", Err("synthetic private diagnostic".into()));
+        let unknown = hook_readiness_check(
+            "codex",
+            Err("hook journal format version 2 is newer; upgrade mmcg".into()),
+        );
         assert_eq!(unknown.status, Status::Warn);
-        assert!(!unknown.message.contains("private diagnostic"));
+        assert!(
+            unknown.message.contains("upgrade mmcg"),
+            "{}",
+            unknown.message
+        );
         let incomplete = hook_readiness_check(
             "claude",
             Ok(
@@ -2366,17 +2386,17 @@ mod tests {
 
     #[test]
     fn doctor_consumes_shared_workflow_analyzer_diagnostics() {
-        let report = crate::workflow_status::WorkflowAuditReport {
+        let report = crate::workflow_audit::WorkflowAuditReport {
             schema_version: 1,
             root: "/tmp/workflow".into(),
             layout: "installed".into(),
             client: Some("claude".into()),
             profile: Some("core".into()),
-            limits: crate::workflow_status::WorkflowAuditLimits::default(),
+            limits: crate::workflow_audit::WorkflowAuditLimits::default(),
             complete: true,
             nodes: Vec::new(),
             edges: Vec::new(),
-            diagnostics: vec![crate::workflow_status::WorkflowDiagnostic {
+            diagnostics: vec![crate::workflow_audit::WorkflowDiagnostic {
                 code: "mmcg_server_scope_missing".into(),
                 severity: "error".into(),
                 message: "missing scope".into(),

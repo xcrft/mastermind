@@ -9,7 +9,8 @@
 //! Runs in the foreground until stdin closes or Ctrl-C.
 
 use crate::indexer::{
-    extractor_for_path, IndexError, IndexStats, Indexer, SourceMatcher, PROJECT_DECISION_DIRS,
+    extractor_for_path, store_error, IndexError, IndexStats, Indexer, SourceMatcher,
+    PROJECT_DECISION_DIRS,
 };
 use crate::store::Store;
 use notify::event::{ModifyKind, RenameMode};
@@ -72,7 +73,7 @@ pub fn run(root: PathBuf, mut store: Store) -> Result<(), Box<dyn std::error::Er
             "[mastermind watch] initial: indexed {} (unchanged {}, purged {}) in {} ms",
             stats.files_indexed, stats.files_unchanged, stats.files_purged, stats.duration_ms
         ),
-        Err(error) => record_failure(&mut pending_changes, Instant::now(), error)?,
+        Err(error) => record_index_error(&mut pending_changes, Instant::now(), error)?,
     }
     eprintln!("[mastermind watch] watching {}", root.display());
 
@@ -238,7 +239,7 @@ fn handle_event(
                 }
             }
             if let Err(error) = purge(store, purge_paths, "rename purged") {
-                return record_failure(pending, Instant::now(), error);
+                return record_index_error(pending, Instant::now(), error);
             }
 
             if full_refresh {
@@ -314,9 +315,7 @@ fn queue_change(pending: &mut PendingChanges, path: PathBuf, now: Instant) -> st
 
 fn refresh_index(indexer: &Indexer, store: &mut Store) -> Result<IndexStats, IndexError> {
     let stats = indexer.index_all(store, false)?;
-    // A symlinked or otherwise unindexable source fails every retry the same
-    // way, so it is reported, not retried.
-    if stats.files_failed > stats.files_unindexable {
+    if !stats.complete() {
         return Err(IndexError::Other(format!(
             "refresh failed for {} file(s)",
             stats.files_failed - stats.files_unindexable
@@ -356,8 +355,31 @@ fn refresh_all(
             );
             Ok(())
         }
-        Err(error) => record_failure(pending, now, error),
+        Err(error) => record_index_error(pending, now, error),
     }
+}
+
+/// Another writer holding the index is not a failure of this watcher: its
+/// run may take longer than every retry together. Wait for it with a full
+/// refresh that never uses up the retry budget.
+fn record_index_error(
+    pending: &mut PendingChanges,
+    now: Instant,
+    error: IndexError,
+) -> std::io::Result<()> {
+    if !matches!(error, IndexError::Busy) {
+        return record_failure(pending, now, error);
+    }
+    pending.paths.clear();
+    pending
+        .full_refresh
+        .get_or_insert(PendingRefresh {
+            ready_at: now,
+            failures: 0,
+        })
+        .ready_at = now + RETRY_DELAY;
+    eprintln!("[mastermind watch] another process is writing the index, retrying full refresh");
+    Ok(())
 }
 
 fn record_failure(
@@ -411,7 +433,7 @@ fn flush_settled(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 pending.paths.remove(&path);
                 if let Err(error) = purge_removed(store, &path, indexer.root()) {
-                    return record_failure(pending, now, error);
+                    return record_index_error(pending, now, error);
                 }
                 continue;
             }
@@ -427,6 +449,7 @@ fn flush_settled(
                 pending.paths.remove(&path);
                 eprintln!("[mastermind watch] skipped {}: {reason:?}", path.display());
             }
+            Err(IndexError::Busy) => return record_index_error(pending, now, IndexError::Busy),
             Err(error) => {
                 return record_failure(pending, now, format!("{}: {error}", path.display()));
             }
@@ -435,34 +458,52 @@ fn flush_settled(
     Ok(())
 }
 
-/// Purge a removed path and every indexed path under it.
-fn purge_removed(store: &mut Store, path: &Path, root: &Path) -> Result<(), String> {
+/// Purge a removed path and every indexed path under it. The path is checked
+/// again under the writer lock, so rows another writer indexed after the path
+/// came back stay.
+fn purge_removed(store: &mut Store, path: &Path, root: &Path) -> Result<(), IndexError> {
     let Some(rel) = relative_path(path, root) else {
         return Ok(());
     };
-    let indexed_paths = store.indexed_paths().map_err(|error| error.to_string())?;
     let descendant_prefix = format!("{rel}/");
-    let purge_paths: Vec<String> = indexed_paths
-        .into_iter()
-        .filter(|indexed| indexed == &rel || indexed.starts_with(&descendant_prefix))
-        .collect();
-    purge(store, purge_paths, "purged")
+    let indexed_under = |store: &Store| -> Result<Vec<String>, IndexError> {
+        Ok(store
+            .indexed_paths()
+            .map_err(store_error)?
+            .into_iter()
+            .filter(|indexed| indexed == &rel || indexed.starts_with(&descendant_prefix))
+            .collect())
+    };
+    if indexed_under(store)?.is_empty() {
+        return Ok(());
+    }
+    let _writer = store.lock_writer().map_err(store_error)?;
+    if path.symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    let purge_paths = indexed_under(store)?;
+    purge_locked(store, purge_paths, "purged")
 }
 
 /// Purge under the writer lock, so a concurrent index never sees half of it.
-fn purge(store: &mut Store, mut paths: Vec<String>, done: &str) -> Result<(), String> {
+fn purge(store: &mut Store, paths: Vec<String>, done: &str) -> Result<(), IndexError> {
     if paths.is_empty() {
         return Ok(());
     }
+    let _writer = store.lock_writer().map_err(store_error)?;
+    purge_locked(store, paths, done)
+}
+
+fn purge_locked(store: &mut Store, mut paths: Vec<String>, done: &str) -> Result<(), IndexError> {
     paths.sort();
     paths.dedup();
-    let _writer = store
-        .lock_writer()
-        .map_err(|error| format!("purge failed: {error}"))?;
     for rel in paths {
         store
             .purge_file(&rel)
-            .map_err(|error| format!("purge failed {rel}: {error}"))?;
+            .map_err(|error| match store_error(error) {
+                IndexError::Busy => IndexError::Busy,
+                error => IndexError::Other(format!("purge failed {rel}: {error}")),
+            })?;
         eprintln!("[mastermind watch] {done} {rel}");
     }
     Ok(())
@@ -650,6 +691,65 @@ mod tests {
             .search_symbols("after_recovery", None, None)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_busy_writer_never_uses_up_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("changing.rs");
+        let database = root.join("index.db");
+        std::fs::write(&source, "pub fn before_wait() {}\n").unwrap();
+        let mut store = Store::open(&database).unwrap();
+        let indexer = Indexer::new(&root);
+        indexer.index_all(&mut store, false).unwrap();
+        std::fs::write(&source, "pub fn after_wait() {}\n").unwrap();
+        let other_writer = Store::open(&database).unwrap();
+        let held = other_writer.lock_writer().unwrap();
+
+        let mut pending = PendingChanges::default();
+        let start = Instant::now();
+        queue_change(&mut pending, source.clone(), start).unwrap();
+        let mut now = start + DEBOUNCE;
+        for _ in 0..=MAX_INDEX_ATTEMPTS {
+            // A short request deadline bounds each wait for the held lock.
+            store.push_work_budget(crate::store::WorkBudget {
+                deadline: Some(Duration::from_millis(20)),
+                op_ticks: None,
+            });
+            let flushed = flush_settled(&indexer, &mut store, &mut pending, now);
+            store.pop_work_budget();
+            flushed.unwrap();
+            let refresh = pending.full_refresh.as_ref().unwrap();
+            assert_eq!(refresh.failures, 0);
+            assert_eq!(refresh.ready_at, now + RETRY_DELAY);
+            now = refresh.ready_at;
+        }
+
+        drop(held);
+        flush_settled(&indexer, &mut store, &mut pending, now).unwrap();
+        assert!(pending.full_refresh.is_none());
+        assert_eq!(
+            store
+                .search_symbols("after_wait", None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_removal_is_not_purged_when_the_path_is_back_under_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("kept.rs");
+        std::fs::write(&source, "pub fn kept() {}\n").unwrap();
+        let mut store = Store::open(root.join("index.db")).unwrap();
+        Indexer::new(&root).index_all(&mut store, false).unwrap();
+
+        purge_removed(&mut store, &source, &root).unwrap();
+
+        assert_eq!(store.indexed_paths().unwrap(), vec!["kept.rs"]);
     }
 
     #[test]

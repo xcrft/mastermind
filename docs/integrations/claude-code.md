@@ -1,7 +1,9 @@
 # Claude Code integration
 
-Connect the local graph through MCP. Install the workflow bundle for skills
-and Claude's named subagents.
+`mastermind init --client claude` connects Claude Code to the local graph over
+MCP and installs the workflow bundle: skills, named subagents and the workflow
+block in `CLAUDE.md`. Claude Code is also the client that runs native task
+execution and review.
 
 ## Install the workflow
 
@@ -13,40 +15,34 @@ mastermind status
 mastermind doctor --workflow --client claude
 ```
 
-| Option | Result |
-|---|---|
-| Default | `core` skills |
-| `mastermind update --workflow-only --client claude --profile frontend` | Select the frontend skill bundle. Other profiles are `security` and `full` |
-| Restart Claude Code | Load the installed workflow |
+`doctor --workflow` checks the installed workflow files against the package.
+It comes from the npm package, so a cargo-only install doesn't have it.
+What else `init` does on the first run is in
+[getting started](../getting-started.md).
 
-First init also indexes the project, enables profile delivery and configures
-task mining in the current Claude agent. Restart Claude Code and review the
-definitions in `/hooks`. On Windows use `--mining off`, since native hooks
-require Unix. See [onboarding](../getting-started.md) for mode choices.
+Restart Claude Code and review the hook definitions in `/hooks`. Native hooks
+need macOS or Linux, so on Windows run `init` with `--mining off`.
+
+A fresh install selects the `core` skills. To switch the bundle:
+
+```bash
+mastermind update --workflow-only --client claude --profile frontend
+```
+
+The other profiles are `security` and `full`, and an update without `--profile`
+keeps the installed one.
 
 ## Register MCP only
 
-| Scope | Storage |
-|---|---|
-| User | Native `claude mcp` registration |
-| Project | Repository `.mcp.json` |
+MCP works without `init`. Setup previews the change, and `--write` applies it
+while keeping unrelated entries.
 
-```bash
-mastermind setup claude --scope user
-mastermind setup claude --scope user --write
-```
+| Scope | Where it goes | Commands |
+|---|---|---|
+| User | Native `claude mcp` registration | `mastermind setup claude --scope user`, then the same with `--write` |
+| Project | The repository's `.mcp.json` | `mastermind setup claude --scope project --root .`, then the same with `--write` |
 
-For project scope:
-
-```bash
-mastermind setup claude --scope project --root .
-mastermind setup claude --scope project --root . --write
-```
-
-The command without `--write` previews the change. Setup preserves unrelated
-entries. MCP does not require `mastermind init`.
-
-## Verify or remove
+## Check or remove
 
 ```bash
 mastermind doctor
@@ -54,32 +50,30 @@ mastermind setup claude --scope project --root . --remove
 mastermind setup claude --scope project --root . --remove --write
 ```
 
-| Condition | Behavior |
-|---|---|
-| Removal | Use the installation scope |
-| Matching registration | No change needed |
-| Customized entry | Replacement requires `--force` and `--write` |
-| Forced file change | Backup under `~/.mastermind/setup-backups/` |
-| Doctor | Reads configuration and reports project health |
+`doctor` reads the configuration and reports project health. Remove with the
+scope you installed with. A registration that already matches needs no change,
+and a customized entry needs `--force` with `--write`. A forced change saves a
+backup under `~/.mastermind/setup-backups/`.
 
 ## Use it
 
-[Workflow](../workflow.md) covers handoff and `run-task --exec` with existing
-Claude authentication and permissions. [Persona hooks](../guides/persona-hooks.md)
-covers source inspection, candidate review and optional separate analysis.
+The [workflow guide](../workflow.md) covers handoff and `run-task --exec`,
+which uses your existing Claude authentication and permissions.
+[Persona hooks](../guides/persona-hooks.md) covers source inspection, candidate
+review and the optional separate miner.
 
 ## Route reasoning effort
 
-The core workflow includes `mastermind-agent-handoff`. Before a new agent, it
-selects effort through `mmcg_effort_route` or `mastermind effort-route` and applies
-the result through the available native control.
+The core workflow includes the `mastermind-agent-handoff` skill. Before it
+starts a new agent, it asks `mmcg_effort_route` or `mastermind effort-route` for
+an effort level and applies it through the control the client has:
 
 | Invocation | Control |
 |---|---|
-| New CLI session | `mastermind effort-route --request route.json --exec claude -- --print ...` submits `claude_args` |
-| Non-fork `Agent`, Claude Code 2.1.292 or later | Pass `effort: requested_effort`; `CLAUDE_CODE_EFFORT_LEVEL` takes precedence |
-| Older client or unsupported path | Keep agent defaults and record `not_applied` |
+| New CLI session | `mastermind effort-route --request route.json --exec claude -- --print ...` passes `claude_args` |
+| Non-fork `Agent`, Claude Code 2.1.292 or later | Pass `effort: requested_effort`. `CLAUDE_CODE_EFFORT_LEVEL` takes precedence |
+| Older client or another path | Keep the agent defaults and record `not_applied` |
 
-Keep the selected model and permissions. Already running sessions and subagents
-retain their settings. See [effort routing](../guides/effort-routing.md) for the
-request contract, verification and recovery.
+The selected model and permissions stay as they are, and sessions or subagents
+that are already running keep their settings. [Effort routing](../guides/effort-routing.md)
+has the request contract, checks and recovery.

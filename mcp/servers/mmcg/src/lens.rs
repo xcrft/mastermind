@@ -1037,10 +1037,10 @@ fn validated_index_paths(
     }
     let tracked_paths =
         crate::indexer::tracked_relative_paths(root).map_err(|error| match error {
-            crate::diff::WorkingTreeDiffError::GitTimeout => {
+            crate::git::WorkingTreeDiffError::GitTimeout => {
                 LensError::ImpactUnavailable(ChangeImpactError::GitTimeout)
             }
-            crate::diff::WorkingTreeDiffError::GitOutputLimit => {
+            crate::git::WorkingTreeDiffError::GitOutputLimit => {
                 LensError::ImpactUnavailable(ChangeImpactError::GitOutputLimit)
             }
             _ => LensError::IndexStale,
@@ -1467,7 +1467,7 @@ fn audit_repository_identity(root: &Path, deadline: Option<Instant>) -> Result<S
 fn audit_repository_identity_error(error: crate::facts::RepositoryIdentityError) -> LensError {
     match error {
         crate::facts::RepositoryIdentityError::Git(
-            crate::diff::WorkingTreeDiffError::GitTimeout,
+            crate::git::WorkingTreeDiffError::GitTimeout,
         ) => LensError::AnalysisTimeout,
         _ => LensError::RepositoryIdentityUnavailable,
     }
@@ -1556,7 +1556,7 @@ fn authors_by_component(
 ) -> Option<Vec<LensComponentAuthors>> {
     const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
     let max_count = window_commits.to_string();
-    let output = crate::diff::run_bounded_git_controlled(
+    let output = crate::git::run_bounded_git_controlled(
         root,
         &[
             "log",
@@ -1651,7 +1651,7 @@ fn churn_by_file(
 ) -> Option<HashMap<String, u32>> {
     const CHURN_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
     let max_count = window_commits.to_string();
-    let output = crate::diff::run_bounded_git_controlled(
+    let output = crate::git::run_bounded_git_controlled(
         root,
         &[
             "log",
@@ -3581,7 +3581,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        crate::facts::import(&writable, &manifest_path).unwrap();
+        crate::facts::import_with_trust(
+            &writable,
+            &manifest_path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         drop(writable);
 
         let store = Store::open_read_only(&index_path).unwrap();
@@ -3681,7 +3686,7 @@ mod tests {
     fn project_knowledge_omits_edited_and_deleted_adrs_without_hiding_code_evidence() {
         let (repo, _index_dir, index_path) = fixture();
         let code = fs::read(repo.path().join("src/lib.rs")).unwrap();
-        let head = crate::diff::current_head_oid(repo.path()).unwrap();
+        let head = crate::git::current_head_oid(repo.path()).unwrap();
         fs::create_dir_all(repo.path().join("docs/adr")).unwrap();
         let adr = repo.path().join("docs/adr/001-seed.md");
         fs::write(&adr, "# Seed contract\n\nKeep src/lib.rs deterministic.\n").unwrap();
@@ -3729,7 +3734,7 @@ mod tests {
                 .unwrap();
             }
             let stale = snapshot();
-            assert_eq!(crate::diff::current_head_oid(repo.path()).unwrap(), head);
+            assert_eq!(crate::git::current_head_oid(repo.path()).unwrap(), head);
             assert_eq!(fs::read(repo.path().join("src/lib.rs")).unwrap(), code);
             assert_eq!(stale["impact"]["impact"], fresh["impact"]["impact"]);
             assert_eq!(stale["evidence"]["partial"], true);
@@ -4109,7 +4114,7 @@ mod tests {
 
         assert!(matches!(
             audit_repository_identity_error(crate::facts::RepositoryIdentityError::Git(
-                crate::diff::WorkingTreeDiffError::GitTimeout
+                crate::git::WorkingTreeDiffError::GitTimeout
             )),
             LensError::AnalysisTimeout
         ));

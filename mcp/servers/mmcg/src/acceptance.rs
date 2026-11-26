@@ -238,9 +238,9 @@ pub fn inspect(spec_path: &Path, repo_root: &Path) -> Result<Report, String> {
     if declared(&spec).is_none() {
         return evaluate(&spec, &Ok(Vec::new()));
     }
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let observations = (|| {
-        let path = crate::run_task::state_file_path(repo_root, spec_path);
+        let path = crate::task_record::state_file_path(repo_root, spec_path);
         let file = bounded_fs::read_regular_file_with_capability(
             &root,
             &path,
@@ -252,7 +252,7 @@ pub fn inspect(spec_path: &Path, repo_root: &Path) -> Result<Report, String> {
             },
         )
         .map_err(|_| "acceptance_preflight_unavailable")?;
-        let state = crate::run_task::parse_run_state(&file.bytes)?;
+        let state = crate::task_record::parse_run_state(&file.bytes)?;
         crate::verification_receipts::inspect_checks(
             &spec,
             repo_root,

@@ -463,7 +463,7 @@ fn validate_snapshot(snapshot: &Snapshot, canonical_root: &str) -> Result<(), Do
     }
     if snapshot.version() == 0
         || snapshot.version() > 2
-        || !crate::diff::is_full_git_oid(&snapshot.revision().head)
+        || !crate::git::is_full_git_oid(&snapshot.revision().head)
     {
         return Err(DocumentGraphError::new("invalid_revision"));
     }

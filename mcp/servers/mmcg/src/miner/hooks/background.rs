@@ -1524,7 +1524,7 @@ pub fn run(id: &str, run_id: &str) -> Result<Value, Error> {
 fn refresh_profile(root: &Path, client: &str) -> Option<&'static str> {
     // History scans belong in the supervised background process, outside the
     // three-second capture hook. Reader grants are checked by the refresh too.
-    let result = super::configured_profile_client(root, client)
+    let result = super::configured_profile_client(root, client, true)
         .map(|reader| reader.and_then(|reader| super::refresh_task_profile(root, Some(&reader))));
     if result.as_ref().map_or(true, |result| {
         result.as_ref().is_some_and(|result| {
@@ -1623,13 +1623,7 @@ mod profile_refresh_tests {
                     "Synthetic history",
                 ],
             ] {
-                let output = Command::new("git")
-                    .current_dir(&root)
-                    .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath="])
-                    .args(&args)
-                    .output()
-                    .unwrap();
-                assert!(output.status.success(), "git {args:?}: {output:?}");
+                git(&root, &args);
             }
             let receipt = super::super::refresh_task_profile(&root, Some("codex")).unwrap();
             assert_eq!(receipt["status"], "no_authored_commits");
@@ -1643,6 +1637,83 @@ mod profile_refresh_tests {
             assert_eq!(report["run"]["reason"], "worker_processor_retry_pending");
             return;
         }
+        let output = run_in_child_home(
+            CHILD_ROOT,
+            "optional_refresh_reports_failure_without_failing_background_work",
+        );
+        let reports: Vec<Value> = String::from_utf8(output.stderr)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            reports,
+            vec![json!({"profile_refresh":"degraded","reason":"git_or_profile_unavailable"})]
+        );
+    }
+
+    #[test]
+    fn post_task_refresh_converts_a_format_one_store_with_replacement_records() {
+        const CHILD_ROOT: &str = "MASTERMIND_PROFILE_FORMAT_ONE_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let mut settings = crate::onboarding::Settings::local(&root);
+            settings.clients = vec!["codex".into()];
+            settings.profile_access = true;
+            crate::onboarding::Session::begin(&root)
+                .unwrap()
+                .save(&settings)
+                .unwrap();
+            crate::miner::access::configure(&root, "codex", true).unwrap();
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.name", "Profile Reader"],
+                vec!["config", "user.email", "reader@example.test"],
+                vec!["commit", "--allow-empty", "-qm", "Synthetic history"],
+            ] {
+                git(&root, &args);
+            }
+            let path = crate::miner::store::ProfileStore::db_path().unwrap();
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE persona_habit_supersession (old_id INTEGER PRIMARY KEY,
+                        new_id INTEGER NOT NULL, old_revision TEXT NOT NULL,
+                        new_revision TEXT NOT NULL, reviewed_at INTEGER NOT NULL);
+                     INSERT INTO persona_habit_supersession VALUES (1,2,'a','b',0);
+                     PRAGMA user_version=1;",
+                )
+                .unwrap();
+
+            let receipt = super::super::refresh_task_profile(&root, None).unwrap();
+            assert_eq!(receipt["status"], "refreshed", "{receipt}");
+            crate::miner::store::ProfileStore::open_read_only(&path).unwrap();
+            let version: i64 = rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
+            return;
+        }
+        run_in_child_home(
+            CHILD_ROOT,
+            "post_task_refresh_converts_a_format_one_store_with_replacement_records",
+        );
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath="])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+
+    /// The profile store lives under HOME, so each scenario runs in a child
+    /// test process with a disposable home and project root.
+    fn run_in_child_home(root_variable: &str, test: &str) -> std::process::Output {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("project");
         let home = temp.path().join("home");
@@ -1654,12 +1725,13 @@ mod profile_refresh_tests {
                 child.env_remove(name);
             }
         }
-        let output = child.args([
+        let output = child
+            .args([
                 "--exact",
-                "miner::hooks::background::profile_refresh_tests::optional_refresh_reports_failure_without_failing_background_work",
+                &format!("miner::hooks::background::profile_refresh_tests::{test}"),
                 "--nocapture",
             ])
-            .env(CHILD_ROOT, root.canonicalize().unwrap())
+            .env(root_variable, root.canonicalize().unwrap())
             .env("HOME", &home)
             .env("USERPROFILE", &home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1667,15 +1739,7 @@ mod profile_refresh_tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        let reports: Vec<Value> = String::from_utf8(output.stderr)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(
-            reports,
-            vec![json!({"profile_refresh":"degraded","reason":"git_or_profile_unavailable"})]
-        );
+        output
     }
 }
 

@@ -117,7 +117,11 @@ function lstatIfPresent(target) {
   }
 }
 
-function checkedDirectory(target, label, { create = false } = {}) {
+function layoutError(message, recovery) {
+  return Object.assign(new Error(message), { recovery: [recovery] });
+}
+
+export function checkedDirectory(target, label, { create = false } = {}) {
   let entry = lstatIfPresent(target);
   if (entry === null && create) {
     fs.mkdirSync(target, { recursive: true, mode: 0o700 });
@@ -125,10 +129,16 @@ function checkedDirectory(target, label, { create = false } = {}) {
   }
   if (entry === null) return false;
   if (entry.isSymbolicLink()) {
-    throw new Error(`workflow ${label} cannot be a symbolic link: ${target}`);
+    throw layoutError(
+      `workflow ${label} cannot be a symbolic link: ${target}`,
+      `Replace the symbolic link ${target} with a regular directory, then run again. Mastermind does not write through links`,
+    );
   }
   if (!entry.isDirectory()) {
-    throw new Error(`workflow ${label} must be a directory: ${target}`);
+    throw layoutError(
+      `workflow ${label} must be a directory: ${target}`,
+      `Move ${target} out of the way so Mastermind can create a directory there, then run again`,
+    );
   }
   return true;
 }
@@ -141,12 +151,17 @@ function checkedExistingPath(target, label) {
   return entry;
 }
 
+// Finder and Python leave these behind without any user edit. The bundle never
+// ships them (see scripts/stage-npm-share.sh), so recorded digests stay valid.
+const DEBRIS = /^(?:\.DS_Store|__pycache__|.+\.py[co])$/;
+
+// `code` tells a conflict check which kind of entry stopped the walk.
 export function artifactDigest(artifact) {
   const hash = createHash("sha256");
   const visit = (current, relative) => {
     const stat = fs.lstatSync(current);
     if (stat.isSymbolicLink()) {
-      throw new Error(`workflow bundle contains a symbolic link: ${current}`);
+      throw Object.assign(new Error(`workflow artifact contains a symbolic link: ${current}`), { code: "linked" });
     }
     if (stat.isFile()) {
       hash.update("file\0");
@@ -157,9 +172,9 @@ export function artifactDigest(artifact) {
       return;
     }
     if (!stat.isDirectory()) {
-      throw new Error(`workflow bundle contains an unsupported artifact: ${current}`);
+      throw Object.assign(new Error(`workflow artifact contains an unsupported entry: ${current}`), { code: "unsupported_entry" });
     }
-    const entries = fs.readdirSync(current).sort();
+    const entries = fs.readdirSync(current).filter((entry) => !DEBRIS.test(entry)).sort();
     for (const entry of entries) visit(path.join(current, entry), path.join(relative, entry));
   };
   const stat = fs.lstatSync(artifact);
@@ -471,37 +486,88 @@ function beginClientInstall({ share, target, client, version, profile, previous,
   }
 }
 
-// A local edit and an artifact Mastermind does not own are never replaced.
-// Content identical to the bundle is safe to take over: an interrupted install
-// and a copy made before manifests existed both look like that.
-// `root` is the client directory, `desired` holds the agent and skill names.
-export function assertPreserved(root, previous, desired, share, digest = artifactDigest) {
+export const PRESERVED = ".mastermind-preserved";
+
+export class WorkflowConflictError extends Error {
+  constructor(conflicts) {
+    super(`workflow files were left unchanged because they differ from what Mastermind installed: ${
+      conflicts.map((conflict) => `${conflict.kind} ${conflict.path}`).join(", ")}`);
+    this.conflicts = conflicts;
+  }
+}
+
+// `share` holds the bundled copies at <share>/agents/<name> and <share>/skills/<name>.
+export function moveAsideRecovery(command, share) {
+  return `Compare each listed entry with the bundled copy in ${share}, then run ${command} --move-aside `
+    + `to move every listed entry into <client root>/${PRESERVED}/<time>/ and install the bundled copies`;
+}
+
+function installedState(installed, digest) {
+  const entry = lstatIfPresent(installed);
+  if (entry === null) return null;
+  if (entry.isSymbolicLink()) return { problem: "linked" };
+  try {
+    return { digest: digest(installed) };
+  } catch (error) {
+    if (error?.code === "linked" || error?.code === "unsupported_entry") return { problem: error.code };
+    throw error;
+  }
+}
+
+// A local edit, a link and an artifact Mastermind does not own are never
+// replaced. Content identical to the bundle is safe to take over: an
+// interrupted install and a copy made before manifests existed both look like
+// that. `root` is the client directory, `desired` holds the agent and skill names.
+export function workflowConflicts(root, previous, desired, share, digest = artifactDigest) {
+  const conflicts = [];
   for (const kind of ["agents", "skills"]) {
     const owned = previous?.artifacts[kind] ?? [];
     if (!owned.length && !desired[kind].length) continue;
     checkedDirectory(path.join(root, kind), `${kind} directory`);
-    const bundled = (name) => desired[kind].includes(name)
-      && digest(path.join(root, kind, name)) === artifactDigest(path.join(share, kind, name));
-    for (const name of owned) {
+    for (const name of [...new Set([...owned, ...desired[kind]])].sort()) {
       const installed = path.join(root, kind, safeName(name, kind));
-      if (
-        checkedExistingPath(installed, "managed artifact") !== null
-        && digest(installed) !== previous.digests[`${kind}/${name}`]
-        && !bundled(name)
-      ) {
-        throw new Error(`edited owned workflow artifact, move it aside or restore it, then run again: ${installed}`);
+      const state = installedState(installed, digest);
+      if (state === null) continue;
+      const bundledPath = desired[kind].includes(name) ? path.join(share, kind, name) : null;
+      let problem = state.problem;
+      if (!problem) {
+        if (bundledPath && state.digest === artifactDigest(bundledPath)) continue;
+        if (owned.includes(name) && state.digest === previous.digests[`${kind}/${name}`]) continue;
+        problem = owned.includes(name) ? "edited" : "unowned";
       }
+      conflicts.push({ kind: problem, artifact: kind, name, path: installed, bundled: bundledPath });
     }
-    for (const name of desired[kind]) {
-      const installed = path.join(root, kind, safeName(name, kind));
-      if (
-        !owned.includes(name)
-        && checkedExistingPath(installed, "managed artifact") !== null
-        && !bundled(name)
-      ) {
-        throw new Error(`unowned workflow artifact conflicts with the new bundle, move it aside, then run again: ${installed}`);
-      }
+  }
+  return conflicts;
+}
+
+export function assertPreserved(root, previous, desired, share, digest = artifactDigest) {
+  const conflicts = workflowConflicts(root, previous, desired, share, digest);
+  if (conflicts.length) throw new WorkflowConflictError(conflicts);
+}
+
+// Renames each conflicting entry, never a link target, into a retained
+// directory outside skills/ and agents/. Every destination directory level is
+// created or checked first, so a linked level stops the run before any move.
+// `moved` receives every finished move, so a caller can report them even when
+// a later rename fails.
+export function preserveConflicts(conflicts, moved, now = new Date()) {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const destinations = conflicts.map((conflict) => {
+    let directory = path.dirname(path.dirname(conflict.path));
+    for (const level of [PRESERVED, stamp, conflict.kind]) {
+      directory = path.join(directory, level);
+      checkedDirectory(directory, "preserved directory", { create: true });
     }
+    return path.join(directory, conflict.name);
+  });
+  for (const [index, conflict] of conflicts.entries()) {
+    const destination = destinations[index];
+    if (lstatIfPresent(destination) !== null) {
+      throw new Error(`preserved workflow path already exists: ${destination}`);
+    }
+    fs.renameSync(conflict.path, destination);
+    moved.push({ ...conflict, preserved: destination });
   }
 }
 
@@ -574,7 +640,7 @@ export function workflowStatus({
   const bundle = bundled(share);
   return expandClients(client).map((name) => {
     const target = targetFor(home, name);
-    const rootPresent = checkedDirectory(target.root, "root");
+    const update = `mastermind update --workflow-only --client ${name}`;
     let manifest;
     let manifestError = null;
     try {
@@ -588,30 +654,43 @@ export function workflowStatus({
       agents: target.config.agents ? selected.subagents : [],
       skills: selected.skills,
     };
-    const missing = [];
-    const drifted = [];
+    const row = {
+      client: name,
+      root: target.root,
+      version,
+      profile: selectedProfile,
+      installed_version: manifest?.version ?? null,
+      manifest: manifestError ? "invalid" : manifest ? "present" : "missing",
+      manifest_error: manifestError,
+      layout_error: null,
+      missing: [],
+      drifted: [],
+      conflicts: [],
+      recovery: [],
+      parity: false,
+      expected,
+    };
     const expectedDigests = {};
-    for (const kind of ["agents", "skills"]) {
-      if (kind === "agents" && !target.config.agents) continue;
-      const directoryPresent = rootPresent && managedDirectory(target, kind);
-      for (const artifact of expected[kind]) {
-        const key = `${kind}/${artifact}`;
-        const bundledPath = path.join(share, kind, artifact);
-        expectedDigests[key] = artifactDigest(bundledPath);
-        const installedPath = artifactPath(target, kind, artifact);
-        const installed = directoryPresent
-          ? checkedExistingPath(installedPath, "managed artifact")
-          : null;
-        if (installed === null) {
-          missing.push(key);
-        } else {
-          try {
-            if (artifactDigest(installedPath) !== expectedDigests[key]) drifted.push(key);
-          } catch {
-            drifted.push(key);
-          }
+    try {
+      const rootPresent = checkedDirectory(target.root, "root");
+      for (const kind of ["agents", "skills"]) {
+        if (kind === "agents" && !target.config.agents) continue;
+        const directoryPresent = rootPresent && managedDirectory(target, kind);
+        for (const artifact of expected[kind]) {
+          const key = `${kind}/${artifact}`;
+          expectedDigests[key] = artifactDigest(path.join(share, kind, artifact));
+          const installed = directoryPresent
+            ? installedState(artifactPath(target, kind, artifact), artifactDigest)
+            : null;
+          if (installed === null) row.missing.push(key);
+          else if (installed.digest !== expectedDigests[key]) row.drifted.push(key);
         }
       }
+      if (!manifestError) row.conflicts = workflowConflicts(target.root, manifest, expected, share);
+    } catch (error) {
+      row.layout_error = error.message;
+      row.recovery = error.recovery ?? [];
+      return row;
     }
     const manifestMatches =
       manifest?.schema_version === MANIFEST_SCHEMA &&
@@ -620,23 +699,15 @@ export function workflowStatus({
       manifest?.profile === selectedProfile &&
       JSON.stringify(manifest?.artifacts) === JSON.stringify(expected) &&
       JSON.stringify(manifest?.digests) === JSON.stringify(expectedDigests);
-    return {
-      client: name,
-      root: target.root,
-      version,
-      profile: selectedProfile,
-      installed_version: manifest?.version ?? null,
-      manifest: manifestError ? "invalid" : manifest ? "present" : "missing",
-      manifest_error: manifestError,
-      missing,
-      drifted,
-      parity:
-        !manifestError &&
-        manifestMatches &&
-        missing.length === 0 &&
-        drifted.length === 0,
-      expected,
-    };
+    row.parity = !manifestError && manifestMatches && row.missing.length === 0 && row.drifted.length === 0;
+    if (row.conflicts.length) {
+      row.recovery = [moveAsideRecovery(update, share)];
+    } else if (manifestError) {
+      row.recovery = [`Move ${target.manifestPath} out of the way, then run ${update}. Files identical to the bundle are taken over and the others are listed`];
+    } else if (!row.parity) {
+      row.recovery = [update];
+    }
+    return row;
   });
 }
 
@@ -752,7 +823,10 @@ export async function main(argv = process.argv.slice(2)) {
           console.log(`    profile ${status.profile}; bundle ${status.version}; installed ${status.installed_version ?? "unknown"}; manifest ${status.manifest}`);
           for (const item of status.missing) console.log(`    missing ${item}`);
           for (const item of status.drifted) console.log(`    drifted ${item}`);
+          for (const item of status.conflicts) console.log(`    ${item.kind} ${item.path}`);
           if (status.manifest_error) console.log(`    ${status.manifest_error}`);
+          if (status.layout_error) console.log(`    ${status.layout_error}`);
+          for (const action of status.recovery) console.log(`    Next: ${action}`);
         }
         console.log("");
       }
@@ -787,6 +861,10 @@ export async function main(argv = process.argv.slice(2)) {
     return command === "install" && Object.values(mcp).some((registered) => !registered) ? 1 : 0;
   } catch (error) {
     console.error(`mastermind workflow: ${error.message}`);
+    for (const action of error.recovery ?? []) console.error(`Next: ${action}`);
+    if (error instanceof WorkflowConflictError) {
+      console.error(`Next: ${moveAsideRecovery("mastermind update --workflow-only", DEFAULT_SHARE)}`);
+    }
     return 1;
   }
 }

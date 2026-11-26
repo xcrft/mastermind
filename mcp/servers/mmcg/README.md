@@ -1,6 +1,6 @@
 ---
 name: mmcg
-description: Mastermind Codegraph — local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes bounded MCP tools.
+description: Mastermind Codegraph, a local multi-language code indexer for Python, TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++. Stores symbols, calls, imports, evidence, and project history in SQLite and exposes bounded MCP tools.
 metadata:
   version: 4.0.1
   authors:
@@ -22,7 +22,7 @@ metadata:
   source: this repository
 ---
 
-# mmcg — Mastermind Codegraph
+# mmcg (Mastermind Codegraph)
 
 mmcg indexes repository symbols, calls, imports and project evidence into a
 local SQLite database. Use the CLI, MCP server or Lens UI to inspect structure,
@@ -80,7 +80,7 @@ Vue SFC, Rust, C#, Go, Java, PHP and C/C++.
 `concept-review` prepares source evidence so the calling agent can judge which
 candidates implement the requested operation. `repo-map` is an experimental
 question-specific shortlist. Limits, roles and failure rules are in the
-[concept search](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md#local-symbol-concept-search)
+[concept search](https://github.com/xcrft/mastermind/blob/main/docs/reference/concept-search.md)
 and [repo-map](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md#question-specific-shortlist-repo-map)
 reference.
 
@@ -93,7 +93,7 @@ mmcg setup claude --scope user --write  # apply
 
 For direct stdio use, run `mmcg serve`. Structural MCP queries may refresh the
 managed index before reading it. Custom indexes require an explicit refresh.
-Other tools are read-only except local scratchpad writes and task-mining submissions.
+Other tools are read-only except task-mining submissions.
 
 See [client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations)
 for Claude Code, Codex, Cursor, Continue and generic MCP clients.
@@ -115,7 +115,8 @@ See the workflow and persona guides before enabling them.
 
 ## Reference and development
 
-- [CLI, MCP tools, limits and precision](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
+- [CLI, index, limits and precision](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md)
+- [MCP tools](https://github.com/xcrft/mastermind/blob/main/docs/reference/mcp.md)
 - [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md)
 - [Persona capture and review](https://github.com/xcrft/mastermind/blob/main/docs/guides/persona-hooks.md)
 - [Fact-ingestion contract](https://github.com/xcrft/mastermind/blob/main/docs/fact-ingestion-sdk.md)

@@ -127,6 +127,12 @@ pub fn is_task_entry(name: &str) -> bool {
     !name.starts_with('_') && !name.starts_with('.')
 }
 
+/// Whether a name in a `.mastermind/tasks` listing can be a task directory.
+/// Loose `*.md` notes beside the task directories are never tasks.
+pub fn is_task_directory_entry(name: &str) -> bool {
+    is_task_entry(name) && !name.ends_with(".md")
+}
+
 /// Enumerate canonical task contracts without following repository links or
 /// retaining an unbounded directory listing. `None` means the task directory
 /// is absent; an existing linked or non-directory path is an error.

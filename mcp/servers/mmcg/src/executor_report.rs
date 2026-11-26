@@ -65,10 +65,6 @@ pub struct ExecutorReport {
 }
 
 impl ExecutorReport {
-    pub fn is_empty(&self) -> bool {
-        self.canonical.is_none() && self.claims.is_empty() && self.verify.is_empty()
-    }
-
     pub(crate) fn completion_rejection(&self) -> Option<&'static str> {
         let metadata = self.canonical.as_ref()?;
         match metadata.status {
@@ -377,7 +373,13 @@ pub fn parse_repository_file(repo_root: &Path, path: &Path) -> Result<ExecutorRe
     parse_file_bytes(path, source.bytes)
 }
 
+/// The executor writes the report, and parse errors quote its keys and values,
+/// so every error is escaped before it can reach a terminal.
 pub fn parse_str(text: &str) -> Result<ExecutorReport, String> {
+    parse_text(text).map_err(|error| crate::terminal::escape(&error))
+}
+
+fn parse_text(text: &str) -> Result<ExecutorReport, String> {
     if text.len() as u64 > MAX_EXECUTOR_REPORT_BYTES {
         return Err(format!(
             "executor report exceeds {MAX_EXECUTOR_REPORT_BYTES}-byte limit"
@@ -578,6 +580,18 @@ mod tests {
         assert!(parse_str(&unsupported)
             .unwrap_err()
             .contains("unsupported executor report schema_version 2"));
+    }
+
+    #[test]
+    fn a_parse_error_shows_terminal_controls_from_the_report_as_escapes() {
+        let hostile = canonical_yaml("\"\\e]0;title\\a\\e[31mINJECTED\": 1\n");
+        let error = parse_str(&hostile).unwrap_err();
+        assert!(error.contains("unknown field"), "{error}");
+        assert!(
+            !error.contains('\u{1b}') && !error.contains('\u{7}'),
+            "{error:?}"
+        );
+        assert!(error.contains("\\u{1b}]0;title"), "{error}");
     }
 
     #[test]

@@ -151,9 +151,11 @@ fn ambiguous_snapshots_fail_cli_ci_controller_and_bundle() {
         },
     );
     assert_eq!(outcome, run_task::Outcome::PreFailed);
-    assert!(!run_task::state_file_path(fixture.root(), &path).exists());
+    assert!(!mmcg::task_record::state_file_path(fixture.root(), &path).exists());
     let parsed = spec::parse_file(&path).unwrap();
-    let report = audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
+    let report =
+        audit_spec::run_with_report(&parsed, &fixture.store, fixture.root(), "baseline", None)
+            .unwrap();
     let bundle = audit_spec::Bundle::from_report_full(&report, None, None, None, None);
     assert_eq!(bundle.snapshot_drift.len(), 1);
     assert!(
@@ -260,12 +262,15 @@ fn controller_keeps_scoped_snapshot_drift_and_ambiguity_pending_review() {
         );
         let audit = std::fs::read_to_string(path.with_file_name("audit.md")).unwrap();
         assert!(audit.contains(finding), "{audit}");
-        let state = run_task::load_state(&run_task::state_file_path(fixture.root(), &path))
-            .unwrap()
-            .unwrap();
+        let state = mmcg::task_record::load_state(&mmcg::task_record::state_file_path(
+            fixture.root(),
+            &path,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(state.next_step.as_deref(), Some("planner_review"));
         assert!(state.held_snapshot_sha256.is_none());
-        assert!(!run_task::release_file_path(fixture.root(), &path).exists());
+        assert!(!mmcg::task_record::release_file_path(fixture.root(), &path).exists());
     }
 }
 
@@ -283,7 +288,9 @@ fn snapshot_caller_query_failure_is_not_a_verified_zero() {
         finding, verify_spec::Finding::SnapshotUnresolved { reason, matches: None, .. }
             if reason == "caller_query_failed"
     )));
-    let audit = audit_spec::run(&parsed, &fixture.store, fixture.root(), "baseline").unwrap();
+    let audit =
+        audit_spec::run_with_report(&parsed, &fixture.store, fixture.root(), "baseline", None)
+            .unwrap();
     assert_eq!(audit.verdict, audit_spec::Verdict::Broken);
     assert!(audit.findings.iter().any(|finding| matches!(
         finding, audit_spec::Finding::SnapshotUnresolved { reason, matches: None, .. }

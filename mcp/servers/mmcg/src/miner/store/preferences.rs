@@ -1,8 +1,8 @@
 //! Revision-bound preferences and their immutable inbox provenance.
 
 use super::{
-    collection, digest_str, feedback_key, CollectedCandidate, Feedback, NewFeedback, ProfileStore,
-    SqlResult,
+    collection, digest_str, feedback_key, has_table, CollectedCandidate, Feedback, NewFeedback,
+    ProfileStore, SqlResult,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -11,14 +11,6 @@ use std::collections::BTreeMap;
 
 fn invalid(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
-}
-
-fn has_table(conn: &Connection, table: &str) -> SqlResult<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        [table],
-        |r| r.get(0),
-    )
 }
 
 pub(super) fn read_feedback(conn: &Connection) -> SqlResult<Vec<Feedback>> {
@@ -48,8 +40,6 @@ fn read_feedback_selected(conn: &Connection, key: Option<&str>) -> SqlResult<Vec
                 status: r.get(8)?,
                 evidence_revision: String::new(),
                 accepted_revision: None,
-                relations_revision: String::new(),
-                superseded_by: None,
             })
         })?
         .collect::<SqlResult<Vec<_>>>()?;
@@ -96,7 +86,6 @@ fn read_feedback_selected(conn: &Connection, key: Option<&str>) -> SqlResult<Vec
             crate::hex::encode(&hashes.remove(&entry.key).expect("entry hash").finalize());
         entry.accepted_revision = pins.get(&entry.key).cloned();
     }
-    super::supersession::load_relations(conn, key, &mut entries)?;
     Ok(entries)
 }
 
@@ -179,11 +168,9 @@ impl ProfileStore {
                 r.get(0)
             })
             .optional()?;
-        if matches!(old_status.as_deref(), Some("rejected" | "superseded"))
-            || super::supersession::has_successor(&tx, &key)?
-        {
+        if old_status.as_deref() == Some("rejected") {
             return Err(invalid(
-                "preference was rejected or superseded; a proposal cannot restore it",
+                "preference was rejected; a proposal cannot restore it",
             ));
         }
         if previous
@@ -325,7 +312,6 @@ impl ProfileStore {
                 current.review_revision() == entry.review_revision()
                     && current.status == entry.status
                     && current.accepted_revision == entry.accepted_revision
-                    && current.superseded_by == entry.superseded_by
             }))
     }
 
@@ -369,9 +355,7 @@ impl ProfileStore {
             params![candidate, entry.key, revision],
         )?;
         tx.execute(
-            "UPDATE feedback SET status=CASE WHEN status='rejected' THEN 'rejected'
-             WHEN status='superseded' OR EXISTS(SELECT 1 FROM feedback_supersession WHERE old_key=?1)
-             THEN 'superseded' ELSE 'candidate' END WHERE key=?1",
+            "UPDATE feedback SET status='candidate' WHERE key=?1 AND status!='rejected'",
             [&entry.key],
         )?;
         tx.execute("DELETE FROM feedback_acceptance WHERE key=?1", [&entry.key])?;
@@ -400,11 +384,6 @@ impl ProfileStore {
             .filter(|entry| entry.key.starts_with(prefix))
             .collect();
         if let [entry] = matches.as_slice() {
-            if entry.status == "superseded" || entry.superseded_by.is_some() {
-                return Err(invalid(
-                    "a superseded preference cannot be accepted or rejected again",
-                ));
-            }
             if status == "active"
                 && (!matches!(entry.status.as_str(), "candidate" | "active")
                     || revision != Some(entry.review_revision().as_str()))
@@ -825,7 +804,7 @@ mod tests {
             db.candidate_feedback_history(Some(&candidate.id), None)
                 .unwrap()
         );
-        db.reset().unwrap();
+        crate::miner::store::tests::replace_all(&mut db);
         assert!(db.feedback().unwrap().is_empty());
         assert!(db
             .feedback_candidate_bindings(&receipt.feedback_key)

@@ -55,7 +55,7 @@ or publish, accept, observe, dismiss, or reinterpret entries yourself.
    V2 also selects first-person engineering and conditional descriptions. Keep
    the whole condition, negation and exception; task-bound wording must remain
    visible. Implicit descriptions and long segments can remain unsupported.
-   The synthetic regression corpus in `docs/reference/persona-quality.md` does
+   The synthetic regression corpus in `docs/reference/persona-evidence.md` does
    not establish accuracy on this person's real history.
 3. When collection is requested, run the same command without `--dry-run`.
    It writes observations, evidence revisions and source checkpoints together.
@@ -83,8 +83,8 @@ or publish, accept, observe, dismiss, or reinterpret entries yourself.
    attributed to somebody else and task-specific constraints must not be
    described as the person's durable habits. Do not call `feedback add`,
    `habit propose`, `candidates propose-habit`, `candidates propose-preference`,
-   `feedback dismiss-source`, `feedback supersede`, `habit supersede`, `habit renew`, review commands, or direct SQL
-   writes in this collector.
+   `feedback dismiss-source`, review commands, or direct SQL writes in this
+   collector.
 
 ## Output
 
@@ -97,11 +97,8 @@ observation and its strict source checks. Preferences use `feedback show` then
 `feedback accept <key> --revision <review-revision>`; habits use `habit show`
 then `habit observe <id> --revision <review-revision>`. Both reviews bind the
 inspected definition and evidence. Legacy entries retain evidence for review.
-Replacing a habit uses a separate `habit supersede` review of both definitions
-and revisions; collecting another observation never establishes that relation.
-`habit renew` is also a separate author action: it creates an empty candidate
-generation. Evidence must be attached explicitly to its ID, and previous
-counterexamples remain available in the parent's history for review.
+To replace a habit or preference, the person rejects the old entry and reviews
+the new one. Collecting another observation never replaces an entry.
 Entries in supported categories can receive an exact inbox binding before
 publication. Memory imports use the unsupported `memory` category and need
 separate curation into a supported category; in-place category migration is

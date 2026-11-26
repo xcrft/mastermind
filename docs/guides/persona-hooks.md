@@ -1,57 +1,66 @@
 # Build a personal profile
 
-Run inside the repository you want to work on:
+At the end of this guide your agent gets your reviewed work preferences on
+every prompt, and you know how to review what it learned from you. Setup takes
+one command. Reviewing the first drafts takes a few minutes once some work has
+been captured. Native hooks need macOS or Linux. For Windows and other modes,
+see [getting started](../getting-started.md).
+
+Every rule this guide mentions is defined once in the
+[persona reference](../reference/persona.md).
+
+## Set up capture
+
+Run this inside the repository you work on:
 
 ```bash
 mastermind init
 mastermind status --json
 ```
 
-On first setup, Mastermind selects the active or installed native clients,
-enables profile delivery and uses `--mining task`. Hooks capture interactions
-locally. The current agent reports work preferences, choices or corrections
-from the original prompt, and local code saves drafts after a complete `Stop`.
-An empty report records that it found no signal. No separate model is
-launched. Extra context and tool use still consume the current client's usage.
-Drafts require review before they become active rules.
+On first setup, `init` picks the active or installed native clients, turns on
+profile delivery and sets `--mining task`. Hooks capture your interactions
+locally. The current agent reports work preferences, choices or corrections it
+saw in your original prompt, and local code saves them as drafts after a
+complete `Stop`. No separate model is launched, but the extra context and tool
+use count against the client's normal usage. Drafts need your review before
+they become rules. How task mining checks tickets and sources is in
+[task mining](../reference/persona.md#mining-in-the-current-task).
 
-For an existing background-mining installation, switch explicitly:
+If an older setup runs a background miner, switch to task mining:
 
 ```bash
 mastermind init --mining task
 ```
 
-Restart the client to load the MCP tool catalog, trust the project and review
-the generated definitions in `/hooks`. Init configures hooks but cannot grant
-client trust. Native hooks require macOS or Linux. See
-[onboarding](../getting-started.md) for other modes and Windows support.
+Then restart the client so it loads the MCP tool catalog, trust the project,
+and review the generated hook definitions in `/hooks`. `init` writes the hooks
+but cannot trust them for you.
 
-## Check capture
+## Check that capture works
 
 ```bash
 mastermind miner hooks status --client codex --project-root .
 ```
 
-Use `--client claude` for Claude Code. Its definitions live in
-`.claude/settings.local.json`, while Codex uses `.codex/hooks.json`.
+Use `--client claude` for Claude Code. Claude Code keeps its hook definitions
+in `.claude/settings.local.json` and Codex in `.codex/hooks.json`.
 
-| Observation | What to inspect |
+| Observation | What to look at |
 |---|---|
 | Registration | Current hook definitions, disable flags and client loading |
-| Capture | Grant for this client and canonical project root |
-| Session | `SessionStart` in the current capture generation |
+| Capture | The grant for this client and canonical project root |
+| Session | A `SessionStart` in the current capture generation |
 | Local analysis | Processed episode revisions and pending retries |
-| Task mining | Saved mode, staged/completed reports, empty results and skipped or unreported analysis |
+| Task mining | Saved mode, staged and completed reports, empty results and skipped or unreported analysis |
 | Profile delivery | Recorded offers, including withheld or omitted context |
 
-`status` reads these observations without starting a process or approving a
-claim. Event counts describe capture, not extraction accuracy. A profile offer
-does not establish that the model received or used it. The exact states and
-failure behavior are in the [capture contract](../reference/persona.md#native-capture).
-Readiness reports blocked episodes separately from turns awaiting `Stop` or tool
-results, and points to the affected capture when earlier activation was observed.
+`status` only reads. Event counts describe capture, not extraction quality,
+and an offer does not show that the model used it. Readiness lists blocked
+episodes apart from turns still waiting for `Stop` or tool results. The states
+are explained in [native capture](../reference/persona.md#native-capture).
 
-## Inspect candidates
+## Inspect drafts
 
 ```bash
 mastermind miner hooks episodes --project-root . --limit 20
@@ -59,52 +68,39 @@ mastermind miner hooks show '<capture-episode-id>'
 mastermind miner hooks draft '<draft-id>'
 ```
 
-`show` includes coverage gaps, retained user/assistant text, tool receipts,
-analysis receipts and draft IDs. Tool bodies are omitted; the bounded context
-keeps receipt summaries and a digest trace. Missing tool results still block
-mining.
-Read the full draft with `draft` before reviewing its meaning or source.
-A captured episode is an interaction unit. `Stop` ends a response, not
-necessarily the user's task.
+`show` lists coverage gaps, kept user and assistant text, tool receipts,
+analysis receipts and draft IDs. Tool bodies are not kept, and a missing tool
+result still blocks mining. Read the full draft with `draft` before you judge
+its meaning or source.
 
-Two automatic paths can create drafts:
+Drafts come from two places:
 
 | Path | Result |
 |---|---|
-| Local detector | Exact explicit statements, processed without a model when profile delivery is enabled |
-| Current task agent | Up to two candidates submitted through `mmcg_mining_submit`, sealed after complete capture |
+| Local detector | Exact explicit statements, found without a model while profile delivery is on |
+| Current task agent | Up to two candidates sent through `mmcg_mining_submit` and sealed after complete capture |
 
-The task agent submits an empty list when it finds no concrete signal. If it
-omits the report, `Stop` requests one continuation from the same agent. An
-unavailable tool or another missing report ends normally and is recorded as
-skipped analysis. The generated continuation is system input, not personal
-evidence. For example, “short reviews only for simple changes” must retain the
-condition, not become a general rule about every review.
+A good draft keeps its condition. "Short reviews only for simple changes" must
+stay conditional and not turn into a rule about every review. Only your
+original prose counts as evidence. Code, pasted text, quotes, assistant
+suggestions and tool output never do.
 
-Quotes must match eligible original user prose. Code, pasted material,
-quotations, assistant suggestions and tool output cannot supply positive
-personal evidence. Exact quotation does not establish human authorship or a
-correct interpretation. Ticket and source checks are specified in
-[task mining](../reference/persona.md#mining-in-the-current-task).
-
-To replay complete retained episodes through the local detector:
+To run the local detector again over complete kept episodes:
 
 ```bash
 mastermind miner hooks mine-local --project-root . --limit 16
 ```
 
-Use the returned `next_after` as `--after` to continue that pass. Replay makes
-no provider call and cannot reconstruct missing events. For extraction metrics,
-run `mastermind miner hooks evaluate-local --input evals/persona/local.json`.
-See [quality and evaluation](../reference/persona-quality.md).
+Pass the returned `next_after` as `--after` to continue the same pass. Replay
+calls no provider and cannot rebuild missing events. How the detector is
+measured is in [persona evidence](../reference/persona-evidence.md#explicit-statement-detector).
 
 ## Review authorship and the habit
 
-Inspect the cited words in your interactive terminal. Attest authorship only
-if you wrote them, rather than pasted or forwarded them.
-
-Check the draft's influence class too. Dependent or unknown-influence observations
-remain inspectable, but cannot supply unexposed habit support.
+Read the cited words in your interactive terminal. Attest authorship only for
+words you wrote yourself, not for text you pasted or forwarded. Check the
+draft's influence class too. A `dependent_observation` or `unknown_influence`
+draft stays inspectable but cannot support a habit.
 
 ```bash
 mastermind miner hooks propose '<draft-id>' --revision '<draft-revision>' \
@@ -112,53 +108,43 @@ mastermind miner hooks propose '<draft-id>' --revision '<draft-revision>' \
 mastermind miner habit show '<habit-id>'
 ```
 
-The proposal is still a candidate. Use a stable task or PR identity for
-`--episode`, reusing it across sessions, retries and forks of the same work.
-The generated capture ID is not that task identity.
+The proposal is still a candidate. For `--episode`, use a stable task or PR
+name and reuse it across sessions, retries and forks of the same work. The
+generated capture ID is not a task name.
 
-An active project habit needs current support from two distinct sessions and
-two distinct tasks, no unresolved counterevidence, and review of the exact
-revision:
+A project habit becomes active only with current support from two distinct
+sessions and two distinct tasks, no open counterevidence, and your review of
+the exact revision:
 
 ```bash
 mastermind miner habit observe '<habit-id>' --revision '<review-revision>'
 ```
 
-Do not relabel one task to manufacture independent support. Global habits have
-additional source requirements. See [review transitions](../reference/persona.md#review-preferences-and-habits)
-for preference approval, rejection, withdrawal and replacement.
+Don't relabel one task to fake independent support. Global habits need more,
+and preferences have their own rules, see
+[review transitions](../reference/persona.md#review-preferences-and-habits).
 
 ## Use the profile in a task
 
-With profile access enabled, each admitted prompt receives a planner selection
-through hook `additionalContext`. Literal repository paths in that prompt
-select relevant advice. Without paths, language-scoped advice is withheld.
-This also works in capture mode with the refiner disabled.
+With profile access on, each admitted prompt gets a planner slice through the
+hook's `additionalContext`. Name the files you mean in the prompt: literal
+repository paths select advice, and without paths the language-specific advice
+is left out. This works in capture mode with the refiner off too.
 
-Native task execution selects the executor's approved scope and refreshes
-committed Git observations before retrieval and after reviewed completion.
-Independent semantic review receives no personal profile. See
-[context packets](../reference/persona-context.md) for audience, scope and
-delivery receipts.
+Native task execution gets the executor slice for its approved scope, and the
+independent reviewer gets no profile. Who gets which slice is in
+[context packets](../reference/persona-context.md#who-gets-which-slice).
 
-The supervised miner records an optional profile refresh failure as
-`run.reason: profile_refresh_failed` in worker status and continues its work.
-A later successful refresh clears that warning. A terminal worker reason, such
-as a stop request or exhausted budget, takes precedence. This warning cannot
-approve or fail the core task.
-
-To disable automatic delivery while retaining capture and MCP read access:
+To stop automatic delivery and keep capture and MCP read access:
 
 ```bash
-mastermind miner hooks setup --client codex --disable-profile --write
+mastermind miner hooks setup --client codex --project-root . --disable-profile --write
 ```
 
-This also pauses automatic local extraction. To revoke profile access for the
-selected clients, use `mastermind init --profile-access off`. Reviewed advice
-is advisory and grants no tool permissions. Storage and access rules are in
-[the persona reference](../reference/persona.md#profile-access).
+This pauses automatic local extraction too. To revoke profile access for the
+selected clients, run `mastermind init --profile-access off`.
 
-## Optional: separate analysis
+## Optional: run separate analysis
 
 Send one inspected episode to its captured native client and model:
 
@@ -167,15 +153,13 @@ mastermind miner hooks analyze '<capture-episode-id>' \
   --revision '<episode-revision>' --provider native --timeout 60
 ```
 
-For a custom executable, replace the provider with
+For your own executable, replace `--provider native` with
 `--processor /absolute/path/to/persona-processor` and repeat
-`--processor-arg=VALUE` for arguments. Inspect retained text before sending it
-to a provider. Native login, model binding, isolation, JSON schema and resource
-limits are in the [processor contract](../reference/persona.md#hook-processor-contract).
+`--processor-arg=VALUE` for its arguments. Read the kept text first, because it
+goes to the provider. Isolation, JSON schema and limits are in the
+[processor contract](../reference/persona.md#hook-processor-contract).
 
-### Run a managed worker
-
-To opt into separate background requests for selected clients:
+To send separate background requests for the selected clients:
 
 ```bash
 mastermind init --mining on --provider native --max-calls 64 --max-runtime 3600
@@ -183,77 +167,77 @@ mastermind miner status --json
 mastermind miner stop
 ```
 
-Repeated init keeps existing counters. `mastermind miner start` explicitly
-renews a run. Automatic renewal, checkpoints and failure recovery are described
-once in [managed workers](../reference/persona.md#managed-workers).
+Repeated `init` keeps the spent counters, and `mastermind miner start` renews a
+run. Renewal, checkpoints and recovery are in
+[managed workers](../reference/persona.md#managed-workers).
 
-## Optional: prompt refinement
+## Optional: refine prompts
 
 ```bash
 mastermind init --refiner on --provider native
 mastermind miner hooks intake '<intake-id>'
 ```
 
-Refinement uses an extra provider request, outside the miner budget. The
-original prompt still reaches the agent. Inspect `intake` in `hooks show` for
-the proposed text and route. To bind an admitted intake to a planned spec:
+Each refinement is one extra provider request outside the miner budget, and
+the agent still gets your original prompt. Find the intake ID under `intake` in
+`hooks show`. To bind an intake to a planned spec:
 
 ```bash
 mastermind miner hooks bind-task '<intake-id>' --spec .mastermind/tasks/001-example/spec.md
 mastermind run-task .mastermind/tasks/001-example/spec.md --pre-only
 ```
 
-Binding records provenance without granting execution or approving scope.
-Exact revisions, replacement rules and failure states are in
+The binding records where the task came from. It does not approve scope or
+start execution. Replacement rules and failure states are in
 [prompt intake](../reference/persona.md#prompt-refinement-and-intake).
 
-## Maintain or remove evidence
+## Recover stopped capture
 
-Capture automatically archives inactive payloads when the working journal is
-under pressure. Archives retain their evidence revision and original gaps.
-They grow until evidence is explicitly forgotten. See
-[retention](../reference/persona.md#local-extraction-and-retention) for limits.
-
-For a failed capture generation, inspect the issue before recovery:
+Check what stopped before you recover:
 
 ```bash
 mastermind miner hooks status --client codex --project-root .
 mastermind miner hooks recover --client codex --project-root .
 ```
 
-Recovery starts a new generation. Restart the client afterward. Missing events
-remain missing, and changed evidence needs review again.
+Recovery starts a new capture generation. Restart the client afterwards.
+Missing events stay missing, and changed evidence needs review again.
 
 | What you see | What it means | What to do |
 |---|---|---|
 | `grant.gap` is `capture_delivery_failed` | A journal write failed, and capture for this client and project stopped | Fix the cause, then recover |
-| `capture.markers` is above 0, `grant.gap` is empty, and a next action names `recover` | A delivery stopped before it reached the journal, for example a killed hook or a journal that did not open. `oldest_marker_age_seconds` shows how long ago | When no turn is running, run `mastermind miner hooks recover --client CLIENT` |
+| `grant.gap` is `journal_full` | The journal reached its 64 MiB limit with rows that archiving cannot free | Run `mastermind miner hooks archive --project-root .`, list episodes with `mastermind miner hooks episodes --project-root .`, remove the ones you no longer need with `hooks forget`, then recover |
+| `capture.markers` is above 0, `grant.gap` is empty, and a next action names `recover` | A delivery stopped before it reached the journal, for example a killed hook or a journal that did not open. `oldest_marker_age_seconds` shows how long ago | When no turn is running, run `mastermind miner hooks recover --client CLIENT --project-root .` |
 | `grant.gap` is `capture_recovery_incomplete` | Recovery could not remove every marker, so capture stays stopped | Make `~/.mastermind/.persona-capture` writable for your user, then recover again |
 | Hook error or `capture_fence_error` names an unexpected entry | A file such as `.DS_Store` is in `~/.mastermind/.persona-capture`. No marker was created | Move that entry out of the directory |
-| Doctor `capture fence markers` reports prefixes with no known grant | Markers belong to a client and project that no longer have a grant | Recover the projects that have one. Remove the other marker files by hand once no session of that client runs |
+| Doctor `capture fence markers` names a project that no longer exists | The project folder was deleted or moved, and its grant and markers stayed | Run the `recover` command the hint prints, with `--project-root` set to the old path. It works without the folder |
+| Doctor `capture fence markers` reports markers with no known grant | Markers belong to a client and project that no longer have a grant | Recover the projects that have one. Remove the files that start with the printed prefix by hand once no session of that client runs |
 | Hook error `capture fence limit reached` | This client and project have 1,024 unfinished deliveries | Recover this client and project |
 | Hook error `capture fence directory is full` | Other projects hold 4,096 markers | Recover each client and project that has a `capture_delivery_failed` gap or pending deliveries |
-| `database_bytes` stays near `database_byte_limit` | Tool receipts or active episodes hold the journal | Run `mmcg miner hooks archive --project-root .` for each captured project, and repeat until `archived` is 0 and `database_bytes` stops falling. Then recover each stopped client and project |
-| Hook status reports `capture_journal_unavailable` | The journal is unreadable, over 64 MiB or written by a newer mmcg | Upgrade mmcg if the error names a newer format version. If the journal is too large, back it up and run `VACUUM` on it with `sqlite3` |
+| `database_bytes` stays near `database_byte_limit` | Active episodes, running sessions or rows that a task still needs fill the journal | Run `mastermind miner hooks archive --project-root .` for each captured project, and repeat until `archived` is 0 and `database_bytes` stops falling. Then recover each stopped client and project |
+| Hook status reports `capture_journal_unavailable` | The journal is unreadable, over 64 MiB or written by a newer version | Upgrade if the error names a newer format version. If the journal is too large, back it up and run `VACUUM` on it with `sqlite3` |
 
-Ending a session while capture is stopped records nothing, so do not wait for it.
-Recovery releases sessions of the old generation, and the next archive run
-removes their receipts.
+Ending a session while capture is stopped records nothing, so don't wait for
+it. Recovery releases the sessions of the old generation, and the next archive
+run removes their receipts. Archive limits are in
+[retention](../reference/persona.md#local-extraction-and-retention).
 
-To stop future capture and mining, use `mastermind init --mining off`. Direct
-hook removal is also available:
+## Remove evidence or stop capture
+
+To stop future capture and mining, run `mastermind init --mining off`. To
+remove only the hooks:
 
 ```bash
 mastermind miner hooks setup --client codex --project-root . --remove --write
 ```
 
-Removal revokes capture and retains local evidence. To remove an episode's raw
-text, archived copies and dependent drafts:
+Removal revokes capture and keeps local evidence. To delete an episode's raw
+text, archived copies and the drafts that depend on it:
 
 ```bash
 mastermind miner hooks forget '<capture-episode-id>' --revision '<episode-revision>'
 mastermind miner habit refresh
 ```
 
-Transferred profile audit quotes, backups and data already sent to an external
-processor are not erased by `forget`.
+`forget` does not erase transferred profile audit quotes, backups or data
+already sent to an external processor.

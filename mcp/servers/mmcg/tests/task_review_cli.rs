@@ -1985,7 +1985,7 @@ fn generated_follow_up_argv_executes_with_leading_dash_spec_and_check_id() {
         "files_modified":["service.py"], "claims":[], "defects":[], "verifications":verifications
     }).to_string());
     assert_success(&fixture.run(&["run-task", SPEC_ARG, "--post-only"]));
-    let state_path = mmcg::run_task::state_file_path(&fixture.root, &fixture.path(DASH_SPEC));
+    let state_path = mmcg::task_record::state_file_path(&fixture.root, &fixture.path(DASH_SPEC));
     let read_state =
         || -> Value { serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap() };
     assert_eq!(read_state()["spec_path"], DASH_SPEC);
@@ -2096,16 +2096,30 @@ fn quoted(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn old_artifact_names_beside_a_started_spec_are_refused_before_state_changes() {
+fn old_artifact_names_beside_a_spec_started_before_4_0_are_refused_before_state_changes() {
     const FLAT: &str = "docs/task.md";
+    const REFUSAL: &str = "started before each spec got its own";
     let fixture = Fixture::new();
     fixture.write(FLAT, &fs::read_to_string(fixture.path(SPEC)).unwrap());
     assert_success(&fixture.run(&["run-task", FLAT, "--pre-only"]));
-    let state_path = mmcg::run_task::state_file_path(&fixture.root, &fixture.path(FLAT));
-    let started = fs::read(&state_path).unwrap();
+    let state_path = mmcg::task_record::state_file_path(&fixture.root, &fixture.path(FLAT));
     fixture.write("docs/executor-report.md", "{}\n");
     fixture.write("docs/audit.md", "# Audit\n");
     fixture.write("docs/task.audit.md", "# Audit\n");
+
+    // A task started on 4.0 never wrote the old names, so they belong to
+    // someone else.
+    let current = fixture.run(&["run-task", FLAT, "--post-only"]);
+    assert!(
+        !String::from_utf8_lossy(&current.stderr).contains(REFUSAL),
+        "{current:?}"
+    );
+
+    // State from before 4.0 has no format version.
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state.as_object_mut().unwrap().remove("format_version");
+    fs::write(&state_path, state.to_string()).unwrap();
+    let started = fs::read(&state_path).unwrap();
     let output = fixture.run(&["run-task", FLAT]);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -2128,6 +2142,24 @@ fn old_artifact_names_beside_a_started_spec_are_refused_before_state_changes() {
         &fs::read_to_string(fixture.path(SPEC)).unwrap(),
     );
     assert_success(&fixture.run(&["run-task", "docs/other.md", "--pre-only"]));
+
+    // A spec named `audit.md` is not its own old audit.
+    const NAMED_AUDIT: &str = "notes/audit.md";
+    fixture.write(
+        NAMED_AUDIT,
+        &fs::read_to_string(fixture.path(SPEC)).unwrap(),
+    );
+    assert_success(&fixture.run(&["run-task", NAMED_AUDIT, "--pre-only"]));
+    let state_path = mmcg::task_record::state_file_path(&fixture.root, &fixture.path(NAMED_AUDIT));
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state.as_object_mut().unwrap().remove("format_version");
+    fs::write(&state_path, state.to_string()).unwrap();
+    let output = fixture.run(&["run-task", NAMED_AUDIT, "--post-only"]);
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(REFUSAL),
+        "{output:?}"
+    );
+    assert!(fixture.path(NAMED_AUDIT).exists());
 }
 
 #[test]
@@ -2144,7 +2176,7 @@ fn a_rejected_report_names_the_file_the_spec_reads() {
     fixture.write("docs/task.executor-report.md", "{}\n");
     let post = fixture.run(&["run-task", FLAT, "--post-only"]);
     assert!(!post.status.success(), "{post:?}");
-    let state_path = mmcg::run_task::state_file_path(&fixture.root, &fixture.path(FLAT));
+    let state_path = mmcg::task_record::state_file_path(&fixture.root, &fixture.path(FLAT));
     let state: Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
     assert_eq!(
         state["last_artifact"], "task.executor-report.md",
@@ -2179,6 +2211,15 @@ fn a_missing_spec_fails_without_creating_controller_files() {
         String::from_utf8_lossy(&output.stderr).contains("reading spec"),
         "{output:?}"
     );
+    fixture.write(INPUT, "{}");
+    let submit = fixture.run(&[
+        "review-task",
+        "submit",
+        "docs/missing.md",
+        "--report",
+        INPUT,
+    ]);
+    assert!(!submit.status.success(), "{submit:?}");
     assert!(!fixture.path(".mastermind/run-state").exists());
 }
 
@@ -2194,6 +2235,12 @@ fn a_folder_that_is_not_a_task_cannot_start_one() {
         "{output:?}"
     );
     assert!(!fixture.path(".mastermind/tasks/_draft/state.json").exists());
+    fixture.write(INPUT, "{}");
+    let submit = fixture.run(&["review-task", "submit", DRAFT, "--report", INPUT]);
+    assert!(!submit.status.success(), "{submit:?}");
+    assert!(!fixture
+        .path(".mastermind/tasks/_draft/state.controller.lock")
+        .exists());
     assert!(!fixture.path(".mastermind/run-state").exists());
     let ci = fixture.run(&["ci", "--since", "HEAD"]);
     assert!(

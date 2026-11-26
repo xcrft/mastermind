@@ -7,7 +7,10 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { PROFILE_NAMES, artifactDigest, assertPreserved, bundled, profileBundle, readManifest } from "./install.js";
+import {
+  PROFILE_NAMES, WorkflowConflictError, artifactDigest, bundled, checkedDirectory, moveAsideRecovery,
+  preserveConflicts, profileBundle, readManifest, workflowConflicts,
+} from "./install.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENTS = ["claude", "codex"];
@@ -18,7 +21,7 @@ const CHILD = "import { pathToFileURL } from 'node:url'; const { main } = await 
 
 function parseArgs(argv) {
   const values = argv[0] === "update" ? argv.slice(1) : argv;
-  const result = { client: null, profile: null, dryRun: false, workflowOnly: false, json: false };
+  const result = { client: null, profile: null, dryRun: false, workflowOnly: false, json: false, moveAside: false };
   const seen = new Set();
   for (let index = 0; index < values.length; index += 1) {
     const [flag, ...inline] = values[index].split("=");
@@ -30,7 +33,7 @@ function parseArgs(argv) {
       if (!choices.includes(value)) throw new Error(`${flag} requires ${choices.join(", ")}`);
       result[flag.slice(2)] = value;
     } else {
-      const key = { "--dry-run": "dryRun", "--workflow-only": "workflowOnly", "--json": "json" }[flag];
+      const key = { "--dry-run": "dryRun", "--workflow-only": "workflowOnly", "--json": "json", "--move-aside": "moveAside" }[flag];
       if (!key || inline.length) throw new Error(`unknown update argument: ${values[index]}`);
       result[key] = true;
     }
@@ -51,15 +54,8 @@ function regular(target, label, limit = 1024 * 1024) {
   return fs.readFileSync(target, "utf8");
 }
 
-function directory(target, label, required = false) {
-  const stat = entry(target);
-  if (!stat && !required) return false;
-  if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular directory: ${target}`);
-  return true;
-}
-
 function metadata(root, expectedName, expectedVersion = null) {
-  directory(root, "package root", true);
+  if (!checkedDirectory(root, "package root")) throw new Error(`package root does not exist: ${root}`);
   const value = JSON.parse(regular(path.join(root, "package.json"), "package metadata"));
   if (!PACKAGE.test(value.name) || !VERSION.test(value.version)
       || (expectedName && value.name !== expectedName)
@@ -69,11 +65,10 @@ function metadata(root, expectedName, expectedVersion = null) {
   return value;
 }
 
+// Bounds the walk before hashing. Links and special entries are left to
+// artifactDigest, which reports them as conflicts.
 function treeDigest(target, budget, depth = 0) {
-  const stat = entry(target);
-  if (!stat || stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
-    throw new Error(`workflow artifact is unavailable or linked: ${target}`);
-  }
+  const stat = fs.lstatSync(target);
   budget.entries += 1;
   budget.bytes += stat.isFile() ? stat.size : 0;
   if (depth > 32 || budget.entries > 8192 || budget.bytes > 64 * 1024 * 1024) {
@@ -89,7 +84,7 @@ function selectedClients(home, client) {
   if (client) return client === "all" ? CLIENTS : [client];
   return CLIENTS.filter((name) => {
     const root = path.join(home, `.${name}`);
-    if (!directory(root, "client root")) return false;
+    if (!checkedDirectory(root, "client root")) return false;
     const manifest = path.join(root, MANIFEST);
     if (!entry(manifest)) return false;
     regular(manifest, "ownership manifest");
@@ -101,15 +96,17 @@ function selectedClients(home, client) {
 
 // Preflight preserves edited owned files and collisions with unowned names.
 // Repeat it in the fresh package process after npm changes the bundle.
+// Every conflict of every selected client is collected before any write.
 function workflowPlan(home, packageRoot, names, profile) {
-  if (!names.length) return [];
+  if (!names.length) return { rows: [], conflicts: [] };
   const share = path.join(packageRoot, "share");
   const budget = { entries: 0, bytes: 0 };
   treeDigest(share, budget);
   const bundle = bundled(share);
-  return names.map((client) => {
+  const conflicts = [];
+  const rows = names.map((client) => {
     const root = path.join(home, `.${client}`);
-    directory(root, "client root");
+    checkedDirectory(root, "client root");
     const manifestPath = path.join(root, MANIFEST);
     if (entry(manifestPath)) regular(manifestPath, "ownership manifest");
     const previous = readManifest(manifestPath);
@@ -118,14 +115,15 @@ function workflowPlan(home, packageRoot, names, profile) {
     const desired = profileBundle(bundle, selected, share);
     for (const kind of ["agents", "skills"]) {
       if (kind === "agents" && client === "codex") continue;
-      directory(path.join(root, kind), "workflow artifact directory");
+      checkedDirectory(path.join(root, kind), `${kind} directory`);
     }
-    assertPreserved(root, previous, {
+    conflicts.push(...workflowConflicts(root, previous, {
       agents: client === "codex" ? [] : desired.subagents,
       skills: desired.skills,
-    }, share, (installed) => treeDigest(installed, budget));
+    }, share, (installed) => treeDigest(installed, budget)));
     return { client, profile: selected, installed_version: previous?.version ?? null, root };
   });
+  return { rows, conflicts };
 }
 
 function scopeFor(packageRoot, installMode, packageName) {
@@ -191,7 +189,8 @@ function child(nodePath, args, { cwd, timeout = 60_000 } = {}) {
   if (result.error || result.status !== 0) {
     const detail = (result.stderr || result.stdout || result.error?.message || `exit ${result.status}`)
       .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").trim().slice(-2048);
-    throw new Error(`child command failed${result.signal ? ` (${result.signal})` : ""}: ${detail}`);
+    throw Object.assign(new Error(`child command failed${result.signal ? ` (${result.signal})` : ""}: ${detail}`),
+      { stdout: result.stdout });
   }
   return result.stdout;
 }
@@ -217,6 +216,21 @@ function installWorkflows(context, flags, planned) {
   return { status: "updated", clients: result.clients };
 }
 
+function rerunCommand(flags) {
+  return ["mastermind update", flags.workflowOnly && "--workflow-only", flags.client && `--client ${flags.client}`,
+    flags.profile && `--profile ${flags.profile}`].filter(Boolean).join(" ");
+}
+
+function updateReport(stdout) {
+  try {
+    const value = JSON.parse(stdout);
+    return value?.schema_version === 1 && value.kind === "update" && typeof value.reason === "string"
+      && Array.isArray(value.recovery) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function display(report, json) {
   if (json) { console.log(JSON.stringify(report, null, 2)); return; }
   console.log(`Mastermind update: ${report.status}`);
@@ -226,6 +240,10 @@ function display(report, json) {
   if (report.package.command) console.log(`Package scope: ${report.package.install_mode} at ${report.package.command.cwd}`);
   console.log(`Workflows: ${report.workflows.status}`);
   for (const row of report.workflows.clients) console.log(`  ${row.client}: ${row.profile}`);
+  for (const row of report.workflows.preserved ?? []) console.log(`  moved ${row.kind} ${row.path} to ${row.preserved}`);
+  if (report.dry_run) {
+    for (const row of report.workflows.conflicts ?? []) console.log(`  would move ${row.kind} ${row.path}`);
+  }
   if (report.reason) console.log(report.reason);
   for (const action of report.recovery) console.log(`Next: ${action}`);
 }
@@ -237,13 +255,16 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     workflows: { status: "not_started", clients: [] }, recovery: [] };
   let packageAttempted = false;
   let workflowAttempted = false;
+  let flags = null;
+  let share = null;
   try {
-    const flags = parseArgs(argv);
+    flags = parseArgs(argv);
     json = flags.json;
     report.dry_run = flags.dryRun;
     const suppliedRoot = path.resolve(options.packageRoot ?? path.join(HERE, ".."));
-    directory(suppliedRoot, "package root", true);
+    if (!checkedDirectory(suppliedRoot, "package root")) throw new Error(`package root does not exist: ${suppliedRoot}`);
     const packageRoot = fs.realpathSync(suppliedRoot);
+    share = path.join(packageRoot, "share");
     const pkg = metadata(packageRoot, options.packageName, options.version);
     const context = { packageRoot, installMode: options.installMode ?? "unknown",
       packageName: pkg.name, version: pkg.version, nodePath: options.nodePath ?? process.execPath };
@@ -252,14 +273,22 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     if (!path.isAbsolute(home)) throw new Error("workflow home must be an absolute path");
     const names = selectedClients(home, flags.client);
     report.package = { ...report.package, name: pkg.name, install_mode: context.installMode, version_before: pkg.version };
-    report.workflows.clients = workflowPlan(home, packageRoot, names, flags.profile);
+    const plan = workflowPlan(home, packageRoot, names, flags.profile);
+    report.workflows.clients = plan.rows;
     report.workflows.status = names.length ? "planned" : "not_installed";
     report.package.status = flags.workflowOnly ? "not_requested" : "planned";
+    if (plan.conflicts.length) {
+      if (!flags.moveAside) throw new WorkflowConflictError(plan.conflicts);
+      report.workflows.conflicts = plan.conflicts;
+    }
     if (flags.workflowOnly) {
       if (flags.dryRun) report.status = "planned";
       else {
         workflowAttempted = names.length > 0;
-        report.workflows = installWorkflows(context, flags, report.workflows.clients);
+        // Only the process that installs moves entries, so a failed package
+        // step or a dry run leaves them where they are.
+        if (plan.conflicts.length) preserveConflicts(plan.conflicts, report.workflows.preserved = []);
+        report.workflows = { ...report.workflows, ...installWorkflows(context, flags, plan.rows) };
         report.status = "complete";
       }
     } else {
@@ -305,10 +334,19 @@ export async function main(argv = process.argv.slice(2), options = {}) {
             const selected = names.length === 2 ? "all" : names[0];
             const nextArgs = ["update", "--workflow-only", "--client", selected, "--json"];
             if (flags.profile) nextArgs.push("--profile", flags.profile);
+            if (flags.moveAside) nextArgs.push("--move-aside");
             const nextContext = { ...context, version: updated.version };
             workflowAttempted = true;
-            const raw = child(context.nodePath, ["--input-type=module", "--eval", CHILD,
-              "mastermind-update-bootstrap", updater, JSON.stringify(nextArgs), JSON.stringify(nextContext)], { cwd: packageRoot });
+            let raw;
+            try {
+              raw = child(context.nodePath, ["--input-type=module", "--eval", CHILD,
+                "mastermind-update-bootstrap", updater, JSON.stringify(nextArgs), JSON.stringify(nextContext)], { cwd: packageRoot });
+            } catch (error) {
+              const inner = updateReport(error.stdout);
+              if (!inner) throw error;
+              report.workflows = { ...report.workflows, ...inner.workflows, clients: report.workflows.clients };
+              throw Object.assign(new Error(inner.reason), { recovery: inner.recovery });
+            }
             const result = JSON.parse(raw);
             if (result.schema_version !== 1 || result.kind !== "update" || result.status !== "complete"
                 || result.package.version_before !== updated.version || result.workflows.status !== "updated"
@@ -328,7 +366,12 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     report.reason = error instanceof Error ? error.message : String(error);
     if (report.package.status === "attempted") report.package.status = "unverified_after_attempt";
     if (report.workflows.status === "planned") report.workflows.status = workflowAttempted ? "unverified_after_attempt" : "not_updated";
-    if (packageAttempted || workflowAttempted) {
+    if (error instanceof WorkflowConflictError) report.workflows.conflicts = error.conflicts;
+    report.recovery.push(...(error?.recovery ?? []));
+    if (error instanceof WorkflowConflictError) {
+      report.recovery.push(moveAsideRecovery(rerunCommand(flags), share));
+    }
+    if (!error?.recovery?.length && (packageAttempted || workflowAttempted)) {
       report.recovery.push("Inspect the reported package version and preserved workflow files, then run mastermind update --workflow-only");
     }
   }

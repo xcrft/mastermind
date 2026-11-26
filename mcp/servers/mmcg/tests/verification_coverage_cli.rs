@@ -217,7 +217,10 @@ fn verification_coverage_collects_explicit_commands_without_shell_equivalence() 
             "echo bare"
         ]
     );
-    assert_eq!(parsed.frontmatter.unwrap().verify[0].label(), "typecheck");
+    assert!(matches!(
+        &parsed.frontmatter.unwrap().verify[0],
+        spec::VerifyEntry::Label(label) if label == "typecheck"
+    ));
 }
 
 #[test]
@@ -569,21 +572,21 @@ fn verification_coverage_controller_rejects_recovers_and_never_executes_commands
     fixture.change();
     fixture.write_report(vec![passed(FIRST)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
-    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
-    let failed = run_task::load_state(&state_path).unwrap().unwrap();
+    let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
+    let failed = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(failed.next_step.as_deref(), Some("planner_review"));
     assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());
-    assert!(!run_task::release_file_path(fixture.root(), &fixture.spec()).exists());
+    assert!(!mmcg::task_record::release_file_path(fixture.root(), &fixture.spec()).exists());
     fixture.write_report(vec![passed(FIRST), passed(command)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostHeld);
-    let recovered = run_task::load_state(&state_path).unwrap().unwrap();
+    let recovered = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(recovered.baseline_ref, failed.baseline_ref);
     assert_eq!(recovered.iteration, failed.iteration);
     assert_eq!(recovered.next_step.as_deref(), Some("review_history"));
     assert!(recovered.history_snapshot_sha256.is_some());
     fixture.write_report(vec![passed(command)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
-    let repeated = run_task::load_state(&state_path).unwrap().unwrap();
+    let repeated = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
     assert!(repeated.history_snapshot_sha256.is_none());
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
@@ -890,20 +893,20 @@ fn zero_test_observations_controller_rejects_and_recovers_without_execution() {
     fixture.change();
     fixture.write_report(vec![observed(cmd, json!({"tests_run": 0})), passed(marker)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
-    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
-    let failed = run_task::load_state(&state_path).unwrap().unwrap();
+    let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
+    let failed = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(failed.next_step.as_deref(), Some("planner_review"));
     assert!(failed.history_snapshot_sha256.is_none());
-    assert!(!run_task::release_file_path(fixture.root(), &fixture.spec()).exists());
+    assert!(!mmcg::task_record::release_file_path(fixture.root(), &fixture.spec()).exists());
     fixture.write_report(vec![observed(cmd, json!({"tests_run": 2})), passed(marker)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostHeld);
-    let recovered = run_task::load_state(&state_path).unwrap().unwrap();
+    let recovered = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(recovered.baseline_ref, failed.baseline_ref);
     assert_eq!(recovered.iteration, failed.iteration);
     assert!(recovered.history_snapshot_sha256.is_some());
     fixture.write_report(vec![observed(cmd, json!({"tests_run": 0})), passed(marker)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
-    let repeated = run_task::load_state(&state_path).unwrap().unwrap();
+    let repeated = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
     assert!(repeated.held_snapshot_sha256.is_none() && repeated.history_snapshot_sha256.is_none());
     assert!(!fixture.root().join(".mastermind/should-not-run").exists());
@@ -1172,12 +1175,12 @@ fn test_scan_controller_recovers_without_claiming_test_execution() {
     fixture.change();
     fixture.write_report(vec![passed(SCAN_COMMAND), passed(marker)]);
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostDrift);
-    let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
-    let drift = run_task::load_state(&state_path).unwrap().unwrap();
+    let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
+    let drift = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(drift.next_step.as_deref(), Some("planner_review"));
     fixture.support_file(".mastermind/scan/src/lib.rs", b"\xff");
     assert_eq!(fixture.run_task(false), run_task::Outcome::PostHeld);
-    let held = run_task::load_state(&state_path).unwrap().unwrap();
+    let held = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
     assert_eq!(held.baseline_ref, drift.baseline_ref);
     assert_eq!(held.iteration, drift.iteration);
     fixture.write_report(vec![

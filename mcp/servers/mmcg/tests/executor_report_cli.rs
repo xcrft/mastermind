@@ -64,14 +64,14 @@ fn executor_report_retains_metadata_excerpts_and_empty_canonical_identity() {
         let roundtrip: ExecutorReport =
             serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
         assert_eq!(roundtrip, report);
-        assert!(!report.is_empty());
+        assert!(report.canonical.is_some());
     }
     let mut empty = canonical("complete");
     empty["phases"] = json!([]);
     empty["files_modified"] = json!([]);
     let report = parsed(&empty);
     assert!(report.claims.is_empty() && report.verify.is_empty());
-    assert!(!report.is_empty());
+    assert!(report.canonical.is_some());
     assert_eq!(report.canonical.unwrap().status, ReportStatus::Complete);
 }
 
@@ -616,12 +616,12 @@ fn executor_report_controller_rejects_incomplete_wrong_and_legacy_reports_then_r
             run_task::Outcome::PostBroken,
             "{mode}"
         );
-        let state_path = run_task::state_file_path(fixture.root(), &fixture.spec());
-        let failed = run_task::load_state(&state_path).unwrap().unwrap();
+        let state_path = mmcg::task_record::state_file_path(fixture.root(), &fixture.spec());
+        let failed = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
         assert_eq!(failed.next_step.as_deref(), Some("planner_review"));
         assert!(failed.blocking_reason.is_some());
         assert!(failed.held_snapshot_sha256.is_none() && failed.history_snapshot_sha256.is_none());
-        assert!(!run_task::release_file_path(fixture.root(), &fixture.spec()).exists());
+        assert!(!mmcg::task_record::release_file_path(fixture.root(), &fixture.spec()).exists());
         if matches!(mode, "legacy" | "ambiguous") {
             assert_eq!(failed.last_artifact.as_deref(), Some("executor-report.md"));
         }
@@ -631,14 +631,14 @@ fn executor_report_controller_rejects_incomplete_wrong_and_legacy_reports_then_r
             run_task::Outcome::PostHeld,
             "recovery: {mode}"
         );
-        let recovered = run_task::load_state(&state_path).unwrap().unwrap();
+        let recovered = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
         assert_eq!(recovered.baseline_ref, failed.baseline_ref);
         assert_eq!(recovered.iteration, failed.iteration);
         assert_eq!(recovered.next_step.as_deref(), Some("review_history"));
         assert!(recovered.history_snapshot_sha256.is_some());
         fixture.write_report(&canonical("partial"));
         assert_eq!(fixture.run_task(false), run_task::Outcome::PostBroken);
-        let repeated = run_task::load_state(&state_path).unwrap().unwrap();
+        let repeated = mmcg::task_record::load_state(&state_path).unwrap().unwrap();
         assert_eq!(repeated.next_step.as_deref(), Some("planner_review"));
         assert!(repeated.history_snapshot_sha256.is_none());
     }

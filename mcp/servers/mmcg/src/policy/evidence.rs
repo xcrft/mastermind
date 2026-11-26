@@ -7,13 +7,13 @@ use super::{
 use crate::bounded_fs::{
     self, BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
-use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
 use crate::evidence::{EvidenceExtensionOptions, EvidenceOptions};
+use crate::git::{run_bounded_git_controlled, WorkingTreeDiffError};
 use crate::indexer::{extractor_for_path, parse_blob, MAX_INDEXABLE_FILE_SIZE};
 use crate::queries::{ChangeImpactResponse, ImpactEngine};
-#[cfg(test)]
-use crate::run_task::RunState;
 use crate::store::{PendingFile, Store};
+#[cfg(test)]
+use crate::task_record::RunState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -608,6 +608,9 @@ fn resolve_cpp_include(source: &str, encoded: &str, paths: &BTreeSet<String>) ->
     resolved
 }
 
+/// Include paths name headers relative to the including file, so `..` steps
+/// up a directory here. A path that climbs above the root resolves to nothing,
+/// and the result is only matched against indexed paths, never opened.
 fn normalize_relative(path: &str) -> Option<String> {
     let mut parts = Vec::new();
     for part in path.split('/') {
@@ -777,7 +780,7 @@ fn collect_workflow_evidence(
         else {
             continue;
         };
-        let state = match crate::run_task::parse_run_state(state_body.as_bytes()) {
+        let state = match crate::task_record::parse_run_state(state_body.as_bytes()) {
             Ok(state) => state,
             Err(error) => {
                 gaps.push(gap(
@@ -793,11 +796,11 @@ fn collect_workflow_evidence(
         };
         if state.baseline_ref != baseline_oid
             || !matches!(state.status.as_str(), "history_review_required" | "learned")
-            || !crate::run_task::spec_hash_matches(&state.spec_hash, &spec_body)
+            || !crate::task_record::spec_hash_matches(&state.spec_hash, &spec_body)
         {
             continue;
         }
-        if let Err(error) = crate::run_task::validate_bound_state_identity(
+        if let Err(error) = crate::task_record::validate_bound_state_identity(
             &repository_identity,
             &expected_spec_path,
             &state,
@@ -968,7 +971,7 @@ impl<'a> WorkflowArtifacts<'a> {
         self.snapshots.push((
             path.to_path_buf(),
             file.identity,
-            crate::run_task::hash_text(&body),
+            crate::task_record::hash_text(&body),
         ));
         Ok(Some(body))
     }
@@ -986,7 +989,7 @@ impl<'a> WorkflowArtifacts<'a> {
             )?;
             let body =
                 String::from_utf8(file.bytes).map_err(|_| BoundedReadError::SnapshotChanged)?;
-            if crate::run_task::hash_text(&body) != *expected_hash {
+            if crate::task_record::hash_text(&body) != *expected_hash {
                 return Err(BoundedReadError::SnapshotChanged);
             }
         }
@@ -1033,6 +1036,16 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn cpp_includes_resolve_parent_directories_without_leaving_the_root() {
+        let paths = BTreeSet::from(["src/common/util.h".to_string(), "util.h".to_string()]);
+        assert_eq!(
+            resolve_cpp_include("src/net/socket.cpp", "../common/util.h", &paths),
+            BTreeSet::from(["src/common/util.h".to_string()])
+        );
+        assert_eq!(normalize_relative("../../util.h"), None);
+    }
+
     fn external_workflow_fixture(version: u32) -> (tempfile::TempDir, tempfile::TempDir, String) {
         let repo = tempfile::tempdir().unwrap();
         let evidence = tempfile::tempdir().unwrap();
@@ -1065,7 +1078,7 @@ mod tests {
         let mut state = serde_json::json!({
             "status": "learned", "spec_path": ".mastermind/tasks/001-critical/spec.md",
             "repository_identity": crate::facts::repository_identity(repo.path()).unwrap(),
-            "spec_hash": crate::run_task::hash_text(spec), "baseline_ref": baseline,
+            "spec_hash": crate::task_record::hash_text(spec), "baseline_ref": baseline,
             "held_snapshot_sha256": snapshot, "started_at": 1,
         });
         if version != 1 {
@@ -1175,7 +1188,7 @@ mod tests {
             if mutation == "invalid_touch" {
                 let spec = "---\nmode: strict\ntouches:\n  - file: critical.txt\n  - file: ../escape\n---\n# Critical\n";
                 fs::write(task.join("spec.md"), spec).unwrap();
-                state["spec_hash"] = crate::run_task::hash_text(spec).into();
+                state["spec_hash"] = crate::task_record::hash_text(spec).into();
             } else if mutation == "wrong_version" {
                 state["held_snapshot_sha256"] =
                     crate::run_task::strict_snapshot_for_version_at_default_budget(
@@ -1469,7 +1482,7 @@ mod tests {
         fs::write(
             task.join("state.json"),
             serde_json::to_vec(&RunState {
-                format_version: crate::run_task::RUN_STATE_FORMAT_VERSION,
+                format_version: crate::task_record::RUN_STATE_FORMAT_VERSION,
                 status: "learned".into(),
                 risk: Some("low".into()),
                 next_step: Some("close".into()),
@@ -1478,7 +1491,7 @@ mod tests {
                 spec_path: ".mastermind/tasks/001-payment/spec.md".into(),
                 repository_identity: Some(crate::facts::repository_identity(root.path()).unwrap()),
                 intake_revision: None,
-                spec_hash: crate::run_task::hash_text(spec_body),
+                spec_hash: crate::task_record::hash_text(spec_body),
                 baseline_ref: baseline.clone(),
                 initial_worktree: None,
                 preflight_approval_sha256: None,
@@ -1724,7 +1737,12 @@ rules:
             .unwrap(),
         )
         .unwrap();
-        crate::facts::import(&store, &fact_manifest).unwrap();
+        crate::facts::import_with_trust(
+            &store,
+            &fact_manifest,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         fs::write(
             repo.join("services/payment/b.py"),
             "from services.payment.a import a\ndef b():\n    return a()\n",
@@ -1819,7 +1837,7 @@ rules:
             },
         )
         .unwrap_err();
-        assert_eq!(error.code(), "policy_evidence_unavailable");
+        assert_eq!(error.code, "policy_evidence_unavailable");
         assert!(error.to_string().contains("index_stale"));
     }
 

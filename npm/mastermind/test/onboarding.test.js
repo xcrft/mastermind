@@ -200,6 +200,23 @@ test("one npm init installs workflows, mines in the task and delivers the profil
   assert.equal(currentWorkflow.clients[0].installed_version, pkg.version);
   assert.equal(currentWorkflow.clients[0].parity, true);
   assert.equal(currentWorkflow.next_action, undefined);
+  const edited = path.join(home, ".codex", "skills", CORE[0], "SKILL.md");
+  fs.writeFileSync(edited, "Local edit.\n");
+  const conflicted = mastermind(["status", "--json"], { FIXTURE_FORBID_NATIVE: "1" }).clients[0].workflow;
+  assert.equal(conflicted.status, "missing_or_stale");
+  assert.equal(conflicted.next_actions.length, 1);
+  assert.match(conflicted.next_actions[0], /^Compare each listed entry with the bundled copy in .*--client codex --move-aside/);
+  const conflictedText = run(process.execPath, [launcher, "status"], { FIXTURE_FORBID_NATIVE: "1" }).stdout;
+  assert.ok(conflictedText.includes(`edited ${path.dirname(edited)}`), conflictedText);
+  const blocked = spawnSync(process.execPath, [launcher, "init"], { cwd: root, env, encoding: "utf8", timeout: 60_000 });
+  assert.notEqual(blocked.status, 0, blocked.stdout);
+  assert.match(blocked.stdout, /codex\.workflow — workflow files were left unchanged/);
+  assert.ok(blocked.stdout.includes(`edited ${path.dirname(edited)}`), blocked.stdout);
+  assert.match(blocked.stdout, /Next: Compare each listed entry with the bundled copy in /);
+  assert.equal(blocked.stdout.includes("{\"schema_version\""), false, blocked.stdout);
+  assert.equal(fs.readFileSync(edited, "utf8"), "Local edit.\n");
+  const moved = mastermind(["update", "--workflow-only", "--move-aside", "--json"]).workflows.preserved;
+  assert.equal(fs.readFileSync(path.join(moved[0].preserved, "SKILL.md"), "utf8"), "Local edit.\n");
   const hooks = JSON.parse(fs.readFileSync(path.join(root, ".codex", "hooks.json"), "utf8"));
   assert.ok(hooks.hooks.SessionStart[0].hooks[0].command.includes(launcher));
   // Package replacement must reach existing hooks without another init.

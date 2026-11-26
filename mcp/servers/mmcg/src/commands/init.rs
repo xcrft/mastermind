@@ -746,7 +746,7 @@ fn monorepo_ecosystems(root: &Path) -> Result<Vec<&'static str>, String> {
         .iter()
         .map(|(_, pathspec)| *pathspec)
         .collect::<Vec<_>>();
-    let presence = mmcg::diff::tracked_pathspec_presence(root, &pathspecs)
+    let presence = mmcg::git::tracked_pathspec_presence(root, &pathspecs)
         .map_err(|error| error.to_string())?;
     let mut ecosystems = BTreeSet::new();
     for ((ecosystem, _), present) in probes.into_iter().zip(presence) {

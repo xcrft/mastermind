@@ -1,7 +1,9 @@
 //! Cold episode payloads. The journal retains identity, deduplication and review
-//! bindings; immutable private files retain the exact cited source bytes. Tool
-//! receipts of ended sessions are dropped, because tool traffic is what fills the
-//! journal and the archived episode already holds its trace.
+//! bindings; immutable private files retain the exact cited source bytes. Once a
+//! session has ended, rows derived from its archived episodes share the
+//! episode's lifecycle: event receipts are dropped, because the archived episode
+//! already holds its trace, and intake and task mining rows shrink to a summary
+//! in the episode's metadata. Otherwise they would fill the journal for ever.
 
 use super::*;
 use crate::bounded_fs::AtomicWriteExpectation;
@@ -9,11 +11,21 @@ use crate::bounded_fs::AtomicWriteExpectation;
 // One hook delivery must stay short. Pressure repeats on later events, so a
 // large backlog drains over several compactions.
 const MAX_DROPPED_RECEIPTS: i64 = 4096;
+const MAX_RETIRED_EPISODES: i64 = 64;
 // Session ids hash the generation, so no event can reach a session after its
 // grant moves on, and such a session never records SessionEnd.
 const SUPERSEDED: &str = "json_extract(s.data,'$.generation') IS NOT (SELECT g.generation
     FROM hook_grant g WHERE g.client=json_extract(s.data,'$.client')
     AND g.project_root=json_extract(s.data,'$.project_root'))";
+// A session without SessionEnd may still be running, even when it has no
+// active turn right now. Its rows still pair tool results and deduplicate replays.
+fn ended() -> String {
+    format!(
+        "({SUPERSEDED} OR (json_extract(s.data,'$.started')=0
+        AND json_type(s.data,'$.active') IS NOT 'text'
+        AND EXISTS(SELECT 1 FROM hook_event x WHERE x.session=s.id AND x.kind='SessionEnd')))"
+    )
+}
 
 fn target(conn: &Connection, digest: &str) -> Result<PathBuf, Error> {
     if !super::super::collection::valid_id(digest) {
@@ -94,7 +106,8 @@ pub(super) fn compact(
     // The active episode can still receive Stop, tools or next-turn context.
     // Queued work and reviewed citations resolve through the same archive reader.
     // Dropping first frees pages, because a full journal refuses the writes below.
-    drop_tool_receipts(conn)?;
+    drop_event_receipts(conn)?;
+    retire_derived(conn)?;
     let ids = {
         let mut stmt = conn.prepare(&format!(
             "SELECT e.id FROM hook_episode e JOIN hook_session s ON s.id=e.session
@@ -118,45 +131,119 @@ pub(super) fn compact(
             break;
         }
         archived += 1;
-        let episode = load_episode(conn, id)?;
-        let key = write(conn, &episode)?;
-        let mut metadata = serde_json::to_value(&episode)?;
-        metadata["events"] = json!([]);
-        metadata["exposures"] = json!([]);
-        metadata["archive"] = json!(key);
-        conn.execute(
-            "UPDATE hook_episode SET data=?2 WHERE id=?1",
-            params![id, metadata.to_string()],
-        )?;
-        conn.execute(
-            "INSERT OR IGNORE INTO hook_archive_file(digest,episode) VALUES(?1,?2)",
-            params![key, id],
-        )?;
+        store(conn, &load_episode(conn, id)?)?;
     }
-    drop_tool_receipts(conn)?;
+    drop_event_receipts(conn)?;
+    retire_derived(conn)?;
     Ok(archived)
 }
 
-// A running session still pairs tool results and deduplicates replays through
-// these rows. A session without SessionEnd may still be running, even when it
-// has no active turn right now. Receipts carry no payload and pressure comes
+/// Moves the episode's text into a new archive file and keeps its metadata.
+pub(super) fn store(conn: &Connection, episode: &Episode) -> Result<(), Error> {
+    let key = write(conn, episode)?;
+    let mut metadata = serde_json::to_value(episode)?;
+    metadata["events"] = json!([]);
+    metadata["exposures"] = json!([]);
+    metadata["archive"] = json!(key);
+    let retired: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(data,'$.retired') FROM hook_episode WHERE id=?1",
+            [&episode.id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(retired) = retired {
+        metadata["retired"] = serde_json::from_str(&retired)?;
+    }
+    conn.execute(
+        "UPDATE hook_episode SET data=?2 WHERE id=?1",
+        params![episode.id, metadata.to_string()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO hook_archive_file(digest,episode) VALUES(?1,?2)",
+        params![key, episode.id],
+    )?;
+    Ok(())
+}
+
+// SessionStart and SessionEnd stay: they establish that a session ended, and a
+// resumed session checks them. Receipts carry no payload and pressure comes
 // from the shared journal, so this is not limited to one project.
-fn drop_tool_receipts(conn: &Connection) -> Result<(), Error> {
+fn drop_event_receipts(conn: &Connection) -> Result<(), Error> {
     conn.execute(
         &format!(
             "DELETE FROM hook_event WHERE rowid IN (
             SELECT e.rowid FROM hook_session s CROSS JOIN hook_event e ON e.session=s.id
-            WHERE e.kind IN ('PreToolUse','PostToolUse','PostToolUseFailure')
-            AND ({SUPERSEDED} OR (json_extract(s.data,'$.started')=0
-                AND json_type(s.data,'$.active') IS NOT 'text'
-                AND EXISTS(SELECT 1 FROM hook_event x WHERE x.session=s.id AND x.kind='SessionEnd')))
+            WHERE e.kind NOT IN ('SessionStart','SessionEnd') AND {}
             AND NOT EXISTS(SELECT 1 FROM hook_episode x WHERE x.id=e.episode
                 AND json_type(x.data,'$.archive') IS NULL)
-            LIMIT ?1)"
+            LIMIT ?1)",
+            ended()
         ),
         [MAX_DROPPED_RECEIPTS],
     )?;
     Ok(())
+}
+
+// An intake that a task binding cites stays, because the binding verifies its
+// response. Unfinished task mining keeps its offer until the finalizer is done,
+// and a pending intake until its hook can no longer publish it.
+fn retire_derived(conn: &Connection) -> Result<(), Error> {
+    let ids = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT e.id FROM hook_episode e JOIN hook_session s ON s.id=e.session
+            WHERE json_type(e.data,'$.archive') IS NOT NULL AND json_type(e.data,'$.retired') IS NULL
+            AND {}
+            AND (EXISTS(SELECT 1 FROM hook_intake i WHERE i.episode=e.id)
+                OR EXISTS(SELECT 1 FROM hook_task_mining t WHERE t.episode=e.id))
+            AND NOT EXISTS(SELECT 1 FROM hook_task_mining t WHERE t.episode=e.id
+                AND json_extract(t.data,'$.status')='submitted')
+            AND NOT EXISTS(SELECT 1 FROM hook_task_finalization f WHERE f.episode=e.id AND f.completed=0)
+            AND NOT EXISTS(SELECT 1 FROM hook_intake i WHERE i.episode=e.id
+                AND json_extract(i.data,'$.status')='pending'
+                AND coalesce(json_extract(i.data,'$.pending_until'),0)>=unixepoch())
+            LIMIT ?1",
+            ended()
+        ))?;
+        let rows = stmt.query_map([MAX_RETIRED_EPISODES], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let summary = json!({
+            "intake": super::intake::intake_summary(conn, &id)?,
+            "task_mining": super::task_mining::task_mining_receipt(conn, &id)?,
+        });
+        // Delete before the metadata grows, so a full journal can still retire.
+        conn.execute(
+            "DELETE FROM hook_intake WHERE episode=?1 AND id NOT IN (SELECT intake FROM hook_task_binding)",
+            [&id],
+        )?;
+        conn.execute("DELETE FROM hook_task_mining WHERE episode=?1", [&id])?;
+        conn.execute("DELETE FROM hook_task_finalization WHERE episode=?1", [&id])?;
+        conn.execute(
+            "UPDATE hook_episode SET data=json_set(data,'$.retired',json(?2)) WHERE id=?1",
+            params![id, summary.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+/// The summary that `retire_derived` kept for a derived row it deleted.
+pub(super) fn retired(conn: &Connection, episode: &str, key: &str) -> Result<Option<Value>, Error> {
+    let summary: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(data,'$.retired') FROM hook_episode WHERE id=?1",
+            [episode],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(summary
+        .map(|summary| serde_json::from_str::<Value>(&summary))
+        .transpose()?
+        .map(|mut summary| summary[key].take())
+        .filter(|value| !value.is_null()))
 }
 
 // Freed pages are reused, so they do not count toward the journal byte limit.
@@ -165,6 +252,13 @@ pub(super) fn used_bytes(conn: &Connection) -> Result<u64, Error> {
     let free: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     let size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     Ok(((pages - free) * size) as u64)
+}
+
+// The limit SQLite enforces on this connection, which `open_target` sets.
+pub(super) fn limit_bytes(conn: &Connection) -> Result<u64, Error> {
+    let pages: i64 = conn.query_row("PRAGMA max_page_count", [], |row| row.get(0))?;
+    let size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    Ok(pages.saturating_mul(size) as u64)
 }
 
 pub(super) fn queued_delete(conn: &Connection, id: &str) -> Result<(), Error> {
@@ -195,13 +289,26 @@ pub(super) fn drain_deletes(conn: &Connection) -> Result<(), Error> {
 }
 
 impl Journal {
+    /// Each transaction keeps the delivery compaction budget, so hook
+    /// deliveries waiting for the writer lock still fit their own budget.
     pub fn compact(&mut self, root: Option<&Path>, limit: usize) -> Result<usize, Error> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count = compact(&tx, root, limit, None)?;
-        tx.commit()?;
-        Ok(count)
+        let mut total = 0;
+        loop {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let count = compact(
+                &tx,
+                root,
+                limit - total,
+                Some(Instant::now() + COMPACTION_BUDGET),
+            )?;
+            tx.commit()?;
+            total += count;
+            if count == 0 || total >= limit {
+                return Ok(total);
+            }
+        }
     }
 
     pub fn retention(&self) -> Result<Value, Error> {

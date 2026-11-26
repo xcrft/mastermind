@@ -102,13 +102,9 @@ impl ProfileStore {
                 params![evidence_id, claim_id],
                 |row| row.get(0),
             )?;
-            if matches!(status.as_str(), "rejected" | "superseded")
-                || !active
-                || super::habit_supersession::has_successor(&tx, *claim_id)?
-                || super::habit_generations::has_child(&tx, *claim_id)?
-            {
+            if status == "rejected" || !active {
                 return Err(invalid(
-                    "habit or evidence was rejected or superseded; a proposal cannot restore it",
+                    "habit or evidence was rejected; a proposal cannot restore it",
                 ));
             }
             if old_revision == &candidate.revision {

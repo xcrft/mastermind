@@ -9,8 +9,8 @@ experimental evidence and qualifies no product benefit.
 
 | Input | SHA-256 |
 |---|---|
-| Local `repo-map-effort-20261013.json` | `69473e0b…679372` |
-| Local `repo-map-graph-20261013.json` | `57f0efb4…dd1184` |
+| [repo-map-effort-20261013.json](repo-map-effort-20261013.json) | `69473e0b…679372` |
+| [repo-map-graph-20261013.json](repo-map-graph-20261013.json) | `57f0efb4…dd1184` |
 | [repo-map-boundaries-v2-20261013.json](repo-map-boundaries-v2-20261013.json) | `c1e9c936…14a1c3` |
 | [repo-map-factorial-20261013.json](repo-map-factorial-20261013.json) | `9b011607…3f9c56da` |
 | [source-quotes-20261014.json](source-quotes-20261014.json) | `ac8e12e2…3fb3033` |

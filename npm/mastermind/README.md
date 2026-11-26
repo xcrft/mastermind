@@ -4,64 +4,57 @@
 [![CI status](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml/badge.svg)](https://github.com/xcrft/mastermind/actions/workflows/ci-mmcg.yml)
 [![MIT license](https://img.shields.io/badge/license-MIT-4f46e5.svg)](https://github.com/xcrft/mastermind/blob/main/LICENSE)
 
-Local repository context and task-evidence workflows for coding agents.
-The package supplies a prebuilt binary as `mastermind` and `mmcg`.
-It indexes source code, Markdown documentation, and Vue SFC script blocks with
-source-backed symbols and relationships.
+Mastermind indexes your code and documentation locally, gives coding agents
+that context over MCP and prompt hooks, and checks a task's evidence before it
+counts as done. This package provides the prebuilt native binary as both
+`mastermind` and `mmcg`. It indexes source code, Markdown and Vue SFC script
+blocks.
 
 ## Quick start
 
-Requires Node.js 24+. Run inside your repository:
+You need Node.js 24 or later, and no Rust toolchain. Run inside your repository:
 
 ```bash
 npm install -g @xcraftmind/mastermind
 mastermind init
 ```
 
-The first run detects the active client, or installed Claude Code and Codex
-clients. It scaffolds and indexes the project, installs workflows, enables the
-profile and uses `--mining task`. The current agent proposes preference drafts,
-saved locally after complete capture without a separate model request.
-Use `--client none` for local indexing only.
-Choices are saved in `.mastermind/setup.json`.
+`init` sets up the clients it finds, indexes the repository and saves its
+choices in `.mastermind/setup.json`. Restart the client afterwards and review
+the hook definitions in `/hooks`.
+[Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md)
+covers the options and mining modes.
 
 | Command | Purpose |
 |---|---|
-| `mastermind status --json` | Inspect component state and the next task action |
-| `mastermind update` | Update in the existing npm scope and refresh installed workflows |
-| `mastermind update --dry-run` | Preview locally without changes or network calls |
-| `mastermind ui --since main` | Open a read-only review against your Git baseline |
-| `mastermind --help` | Show onboarding and project commands |
-| `mmcg --help` | Show the complete native CLI |
-
-Restart the selected client and review its generated definitions in `/hooks`.
-Registration does not establish client trust or a live connection. Use
-`--mining capture` for collection without semantic analysis or
-`--profile-access off` to disable profile delivery. Added task context and tools
-consume the current client's usage. Drafts require review. Existing npm hooks
-use the package launcher after updates.
+| `mastermind status --json` | Component state and the next task action |
+| `mastermind update` | Updates in the existing npm scope and refreshes the installed workflows |
+| `mastermind update --dry-run` | Local preview, with no changes and no network calls |
+| `mastermind update --move-aside` | Moves edited, linked or unowned workflow entries into `<client root>/.mastermind-preserved/`, then installs the bundled copies |
+| `mastermind ui --since main` | Opens the read-only review UI against a Git baseline |
+| `mastermind --help` | Setup and project commands |
+| `mmcg --help` | The complete native CLI |
 
 | Platform | Support |
 |---|---|
-| macOS arm64 or x64 | Prebuilt native tools, hooks, and managed mining |
-| Linux arm64 or x64, glibc or musl | Prebuilt native tools, hooks, and managed mining |
-| Windows x64 | Local indexing and client setup with `--mining off` |
-| Rust toolchain | Not required for this package |
+| macOS arm64 or x64 | Native tools, hooks and managed mining |
+| Linux arm64 or x64, glibc or musl | Native tools, hooks and managed mining |
+| Windows x64 | Local indexing and client setup with `--mining off`. No native hooks or managed mining |
 
-Native hooks and managed mining are unsupported on Windows. See the
-[package manifest](https://github.com/xcrft/mastermind/blob/main/npm/mastermind/package.json)
-for binary packages.
+The binary packages are listed in the
+[package manifest](https://github.com/xcrft/mastermind/blob/main/npm/mastermind/package.json).
 
 ## Documentation
 
 | Guide | Covers |
 |---|---|
-| [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) | Setup, mining modes, updates and alternative installations |
-| [Personal profile](https://github.com/xcrft/mastermind/blob/main/docs/guides/persona-hooks.md) | Capture, candidate review and optional separate analysis |
+| [Getting started](https://github.com/xcrft/mastermind/blob/main/docs/getting-started.md) | Setup, mining modes, updates and other installation methods |
+| [Persona hooks](https://github.com/xcrft/mastermind/blob/main/docs/guides/persona-hooks.md) | Capture, candidate review and the optional separate miner |
 | [Architecture](https://github.com/xcrft/mastermind/blob/main/docs/architecture.md) | Context layers and evidence boundaries |
-| [Task workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) | Scope, checks, review, and completion |
-| [CLI and MCP reference](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md) | Native commands, tools, and language coverage |
-| [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations) | Advanced setup, scope, and removal |
+| [Workflow](https://github.com/xcrft/mastermind/blob/main/docs/workflow.md) | Scope, checks, review and completion |
+| [CLI and index](https://github.com/xcrft/mastermind/blob/main/docs/reference/mmcg.md) | Native commands and language coverage |
+| [MCP tools](https://github.com/xcrft/mastermind/blob/main/docs/reference/mcp.md) | The MCP server and its tools |
+| [Client integrations](https://github.com/xcrft/mastermind/tree/main/docs/integrations) | Scopes, other MCP clients and removal |
 
 Cargo package: [mmcg](https://crates.io/crates/mmcg).
 License: [MIT](https://github.com/xcrft/mastermind/blob/main/LICENSE).

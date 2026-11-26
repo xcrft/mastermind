@@ -190,14 +190,8 @@ pub fn list() -> Result<(), Box<dyn std::error::Error>> {
     }
     for habit in habits {
         println!(
-            "{}\t{}\tgeneration={}\t{} episode(s)\t{}\t{} → {}",
-            habit.id,
-            habit.status,
-            habit.generation,
-            habit.episodes,
-            habit.scope,
-            habit.when,
-            habit.behavior
+            "{}\t{}\t{} episode(s)\t{}\t{} → {}",
+            habit.id, habit.status, habit.episodes, habit.scope, habit.when, habit.behavior
         );
     }
     Ok(())
@@ -225,13 +219,6 @@ pub fn show(id: i64) -> Result<(), Box<dyn std::error::Error>> {
         id, habit.status, habit.scope, habit.role, habit.workflow
     );
     println!("When: {}", habit.when);
-    println!(
-        "Generation: {} (root {}, renewed from {:?}, renewed as {:?})",
-        habit.generation, habit.generation_root, habit.renewed_from, habit.renewed_as
-    );
-    if let Some(status) = habit.retired_status() {
-        println!("Effective terminal status: {status}");
-    }
     println!("Behavior: {}", habit.behavior);
     println!("Outcome: {}", habit.outcome);
     println!("Review revision: {}", habit.review_revision());
@@ -288,88 +275,6 @@ pub fn show(id: i64) -> Result<(), Box<dyn std::error::Error>> {
         db.candidate_habit_history(None, Some(id))?
     );
     println!("Review history: {}", db.habit_review_history(id)?);
-    println!("Relations: {}", db.habit_relations(id)?);
-    println!("Generations: {}", db.habit_generations(id)?);
-    Ok(())
-}
-
-/// Reconsider a retired description without inheriting its evidence or review.
-pub fn renew(id: i64, revision: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if !std::io::stdin().is_terminal() {
-        return Err("habit renew requires the author's interactive terminal".into());
-    }
-    if id <= 0 || !super::collection::valid_id(revision) {
-        return Err("renewal requires a positive habit ID and full review revision".into());
-    }
-    let path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
-    store::ProfileStore::open_read_only(&path)?;
-    let (receipt, _) = publish_profile(
-        &path,
-        &profile_path()?,
-        false,
-        |db| Ok(db.renew_habit(id, revision)?),
-        |_| None,
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({"renewal":receipt,
-            "note":"A new generation copies only the description. Cite evidence and review it separately. Renewal does not establish a return of the behavior or replace another active habit. Exact retries return the existing child's current stored status."
-        }))?
-    );
-    Ok(())
-}
-
-/// Retire one reviewed description and observe its explicitly selected replacement.
-pub fn supersede(
-    old: i64,
-    new: i64,
-    old_revision: &str,
-    new_revision: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !std::io::stdin().is_terminal() {
-        return Err("habit supersede requires the author's interactive terminal".into());
-    }
-    if old <= 0 || new <= 0 || old == new {
-        return Err("replacement requires two different positive habit IDs".into());
-    }
-    if !super::collection::valid_id(old_revision) || !super::collection::valid_id(new_revision) {
-        return Err("both review revisions must be full 64-character keys".into());
-    }
-    let path = store::ProfileStore::db_path().ok_or("could not resolve home directory")?;
-    store::ProfileStore::open_read_only(&path)?;
-    let (receipt, _) = publish_profile(
-        &path,
-        &profile_path()?,
-        false,
-        |db| {
-            if let Some(receipt) =
-                db.habit_supersession_retry(old, new, old_revision, new_revision)?
-            {
-                return Ok(receipt);
-            }
-            let old_habit = db.habit(old)?.ok_or("old habit missing")?;
-            let new_habit = db.habit(new)?.ok_or("new habit missing")?;
-            if old_habit.review_revision() != old_revision
-                || new_habit.review_revision() != new_revision
-            {
-                return Err("review revision changed; inspect both habits again".into());
-            }
-            super::profile::habit_sources_current(
-                db,
-                &new_habit,
-                &mut feedback::QuoteSourceVerifier::new(),
-            )?;
-            Ok(db.supersede_habit(old, new, old_revision, new_revision)?)
-        },
-        |_| None,
-    )?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "relation":"supersedes","receipt":receipt,
-            "note":"Stored statuses shown. Publication revalidates current sources. A committed retry does not observe the successor again."
-        }))?
-    );
     Ok(())
 }
 

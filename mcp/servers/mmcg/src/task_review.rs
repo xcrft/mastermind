@@ -7,7 +7,7 @@
 use crate::acceptance::Criterion;
 use crate::bounded_fs::{self, AtomicWriteExpectation, ReadControl, RootCapability};
 use crate::history_disposition::{self, Decisions, HistoryStatus};
-use crate::run_task::RunState;
+use crate::task_record::RunState;
 use crate::verification_receipts::Binding;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -244,7 +244,7 @@ fn revision(target: &Target) -> Result<String, String> {
 }
 
 pub fn record_path(root: &Path, spec: &Path) -> PathBuf {
-    let state = crate::run_task::state_file_path(root, spec);
+    let state = crate::task_record::state_file_path(root, spec);
     if state.file_name().is_some_and(|name| name == "state.json") {
         state.with_file_name("semantic-review.json")
     } else {
@@ -267,12 +267,12 @@ fn relative(root: &RootCapability, path: &Path) -> Result<String, String> {
 }
 
 pub(crate) fn state(root: &RootCapability, spec: &Path) -> Result<RunState, String> {
-    let path = crate::run_task::state_file_path(root.requested_root(), spec);
-    let state = crate::run_task::parse_run_state(&read(root, &path, RECORD_LIMIT)?)
+    let path = crate::task_record::state_file_path(root.requested_root(), spec);
+    let state = crate::task_record::parse_run_state(&read(root, &path, RECORD_LIMIT)?)
         .map_err(|_| "semantic_review_state_invalid")?;
     let repository = crate::facts::repository_identity(root.canonical_root())
         .map_err(|_| "semantic_review_repository_unavailable")?;
-    crate::run_task::validate_bound_state_identity(&repository, &relative(root, spec)?, &state)?;
+    crate::task_record::validate_bound_state_identity(&repository, &relative(root, spec)?, &state)?;
     Ok(state)
 }
 
@@ -318,11 +318,11 @@ fn collect_target(
         return Err("semantic_review_requires_held_audit".into());
     }
     let repository = root.requested_root();
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let project_history = history_disposition::capture(root)?;
     let body = read(root, spec_path, SOURCE_LIMIT)?;
     let body = String::from_utf8(body).map_err(|_| "semantic_review_spec_invalid")?;
-    if !crate::run_task::spec_hash_matches(&state.spec_hash, &body) {
+    if !crate::task_record::spec_hash_matches(&state.spec_hash, &body) {
         return Err("semantic_review_spec_changed".into());
     }
     let parsed = crate::spec::parse_str(&relative(root, spec_path)?, &body);
@@ -355,12 +355,12 @@ fn collect_target(
         ("spec", spec_path.to_path_buf()),
         (
             "executor-report",
-            crate::run_task::executor_report_path(spec_path),
+            crate::task_record::executor_report_path(spec_path),
         ),
-        ("audit", crate::run_task::audit_file_path(spec_path)),
+        ("audit", crate::task_record::audit_file_path(spec_path)),
         (
             "release",
-            crate::run_task::release_file_path(repository, spec_path),
+            crate::task_record::release_file_path(repository, spec_path),
         ),
     ] {
         evidence.insert(
@@ -720,7 +720,7 @@ fn follow_up_focus(
 /// critiques must never be issued as current work after their inputs change.
 pub fn follow_up(spec: &Path, repository: &Path) -> Result<FollowUp, String> {
     let root = RootCapability::open(repository).map_err(|_| "semantic_review_root_unavailable")?;
-    let state_path = crate::run_task::state_file_path(repository, spec);
+    let state_path = crate::task_record::state_file_path(repository, spec);
     let state_bytes = read(&root, &state_path, RECORD_LIMIT)?;
     let state = state(&root, spec)?;
     if state.status != "history_review_required" {
@@ -939,10 +939,12 @@ pub fn prepare(spec: &Path, repository: &Path) -> Result<Request, String> {
 
 pub fn submit(spec: &Path, repository: &Path, report_path: &Path) -> Result<Report, String> {
     let root = RootCapability::open(repository).map_err(|_| "semantic_review_root_unavailable")?;
-    let state_path = crate::run_task::state_file_path(repository, spec);
-    let _lock = crate::run_task::controller_lock(repository, &state_path)?;
-    let report: Submission = serde_json::from_slice(&read(&root, report_path, RECORD_LIMIT)?)
+    let _lock = crate::task_record::lock_task_controller(repository, spec)?;
+    let bytes = read(&root, report_path, RECORD_LIMIT)?;
+    // The typed pass locates a wrong field, which a parsed value no longer can.
+    crate::strict_json::parse(&bytes, crate::strict_json::Floats::Reject)
         .map_err(report_parse_error)?;
+    let report: Submission = serde_json::from_slice(&bytes).map_err(report_parse_error)?;
     submit_locked(spec, repository, report, None)
 }
 
@@ -969,7 +971,7 @@ pub(crate) fn submit_locked(
     native_invocation: Option<crate::review_invocation::Evidence>,
 ) -> Result<Report, String> {
     let root = RootCapability::open(repository).map_err(|_| "semantic_review_root_unavailable")?;
-    let state_path = crate::run_task::state_file_path(repository, spec);
+    let state_path = crate::task_record::state_file_path(repository, spec);
     let mut state = state(&root, spec)?;
     if state.status != "history_review_required" {
         return Err("semantic_review_requires_pending_held_audit".into());
@@ -1008,7 +1010,7 @@ pub(crate) fn submit_locked(
     // failure at either publication step leaves no positive completion pin.
     state.semantic_review_required = true;
     state.semantic_review_sha256 = None;
-    crate::run_task::save_state_in_repository(repository, &state_path, &state)
+    crate::task_record::save_state_in_repository(repository, &state_path, &state)
         .map_err(|_| "semantic_review_state_write_failed")?;
     let path = record_path(repository, spec);
     root.ensure_directory(path.parent().ok_or("semantic_review_path_invalid")?)
@@ -1037,7 +1039,7 @@ pub(crate) fn submit_locked(
     }
     let review_revision = crate::hex::sha256(&bytes);
     state.semantic_review_sha256 = Some(review_revision.clone());
-    crate::run_task::save_state_in_repository(repository, &state_path, &state)
+    crate::task_record::save_state_in_repository(repository, &state_path, &state)
         .map_err(|_| "semantic_review_state_write_failed")?;
     Ok(Report::new(
         if accepted {

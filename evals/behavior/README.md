@@ -82,7 +82,7 @@ python3 -m evals.behavior.ablation --with-mastermind
 
 This compares a neutral Git reviewer with the shipped auditor on the same
 fixtures. The columns use different grading rules, so the output is diagnostic
-and cannot establish quality uplift. Do not subtract those scores. The
+and can't show a quality uplift. Do not subtract those scores. The
 [paired research comparison](../benchmark/REVIEW.md#compare-paired-outcomes) uses
 one outcome rubric for all arms. Auditor defect/no-defect quality needs its own
-shared semantic key and adapter; the legacy ablation is not that experiment.
+shared semantic key and adapter, and the legacy ablation is not that experiment.

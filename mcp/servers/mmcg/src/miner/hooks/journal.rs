@@ -34,9 +34,9 @@ const MAX_EPISODES: i64 = 2000;
 const JOURNAL_VERSION: i64 = 1;
 const CAPTURE_VERSION: u32 = 3;
 const INSPECTION_ATTEMPTS: usize = 3;
-// A native hook has 3 s. A delivery that gives up on the writer lock leaves
-// a marker that only recovery clears, so wait most of that budget and keep
-// about 1 s for the delivery itself.
+// The longest single wait for the writer lock. A hook delivery also bounds
+// the sum of its waits with `wait_until`, because each transaction waits on
+// its own and a few waits in a row would pass the 3 s hook budget.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 // Archive writes and fsyncs run under the delivery's writer lock. Other
 // deliveries wait for it, so keep it well inside BUSY_TIMEOUT. A larger
@@ -339,6 +339,17 @@ impl Journal {
         Ok(Self { conn })
     }
 
+    /// Later lock waits on this connection end by `deadline`. Past it, a busy
+    /// journal fails at once instead of waiting.
+    pub fn wait_until(&self, deadline: Instant) -> Result<(), Error> {
+        self.conn.busy_timeout(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(BUSY_TIMEOUT),
+        )?;
+        Ok(())
+    }
+
     pub fn grant(&self, client: &str, root: &Path) -> Result<Option<Grant>, Error> {
         read_grant(&self.conn, client, root)
     }
@@ -384,7 +395,8 @@ impl Journal {
             true,
         )?;
         // A refused listing has removed nothing. Dropping tx keeps the generation.
-        let recovery = super::fence::recovery(client, root)?;
+        // The stored root still names the markers after its directory is gone.
+        let recovery = super::fence::recovery(client, &old.project_root)?;
         if let Some(Err(error)) = recovery.map(super::fence::Recovery::remove) {
             drop(tx);
             // Some markers may be gone while their deliveries still wait for
@@ -856,7 +868,9 @@ impl Journal {
                 [],
                 |r| r.get(0),
             )?;
-            if count >= MAX_EPISODES || archive::used_bytes(&tx)? > MAX_BYTES * 3 / 4 {
+            if count >= MAX_EPISODES
+                || archive::used_bytes(&tx)? > archive::limit_bytes(&tx)? / 4 * 3
+            {
                 archive::compact(&tx, None, 32, Some(Instant::now() + COMPACTION_BUDGET))?;
             }
             let count: i64 = tx.query_row(
@@ -1468,31 +1482,45 @@ impl Journal {
         {
             session.previous_assistant = None;
         }
-        add_gap(&mut session.gaps, "episode_forgotten");
-        save_session(&tx, &session)?;
-        let mut stmt = tx.prepare("SELECT id FROM hook_episode WHERE session=?1 AND id!=?2")?;
-        let retained = stmt
-            .query_map(params![forgotten.session, id], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-        for retained_id in retained {
-            let mut ep = load_episode(&tx, &retained_id)?;
-            ep.events.retain(|e| !event_ids.contains(e.id.as_str()));
-            archive::queued_delete(&tx, &retained_id)?;
-            save_episode(&tx, &ep)?;
-        }
+        // Deletes come first, so a full journal has room for the writes below.
         archive::queued_delete(&tx, id)?;
         // Drafts can quote cross-turn context. Drop this session's derived
         // hypotheses along with every copy of the removed raw event text.
         tx.execute("DELETE FROM hook_draft WHERE episode IN (SELECT id FROM hook_episode WHERE session=?1)",[&forgotten.session])?;
+        tx.execute("DELETE FROM hook_task_mining WHERE episode IN (SELECT id FROM hook_episode WHERE session=?1) OR episode=?2", params![forgotten.session, id])?;
         tx.execute("DELETE FROM hook_episode WHERE id=?1", [id])?;
         tx.execute("DELETE FROM hook_event WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_analysis_receipt WHERE episode=?1", [id])?;
         tx.execute("DELETE FROM hook_intake WHERE episode=?1", [id])?;
-        tx.execute("DELETE FROM hook_task_mining WHERE episode IN (SELECT id FROM hook_episode WHERE session=?1) OR episode=?2", params![forgotten.session, id])?;
         tx.execute("DELETE FROM hook_task_finalization WHERE episode=?1 OR episode NOT IN (SELECT episode FROM hook_task_mining)", [id])?;
         tx.execute("DELETE FROM hook_local_queue WHERE episode=?1", [id])?;
+        add_gap(&mut session.gaps, "episode_forgotten");
+        save_session(&tx, &session)?;
+        let mut stmt = tx.prepare(
+            "SELECT id,json_type(data,'$.archive') IS NOT NULL FROM hook_episode WHERE session=?1",
+        )?;
+        let retained = stmt
+            .query_map([&forgotten.session], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (retained_id, archived) in retained {
+            let mut ep = load_episode(&tx, &retained_id)?;
+            let before = ep.events.len();
+            ep.events.retain(|e| !event_ids.contains(e.id.as_str()));
+            if ep.events.len() == before {
+                continue;
+            }
+            if archived {
+                // Writing the text back inline could overflow the journal.
+                archive::queued_delete(&tx, &retained_id)?;
+                archive::store(&tx, &ep)?;
+            } else {
+                save_episode(&tx, &ep)?;
+            }
+        }
         tx.commit()?;
         archive::drain_deletes(&self.conn)?;
         Ok(())
@@ -2758,5 +2786,193 @@ mod tests {
             .events
             .iter()
             .any(|event| event.origin == "prior_turn_context"));
+    }
+
+    // A 1 MiB limit stands in for MAX_BYTES, so a few hundred prompts fill it.
+    fn small_journal(directory: &Path) -> Journal {
+        let db = Journal::open_target(&directory.join("events.db"), true).unwrap();
+        let page_size: i64 = db
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        db.conn
+            .pragma_update(None, "max_page_count", (1 << 20) / page_size)
+            .unwrap();
+        db
+    }
+
+    fn fill_until_full(db: &Journal) {
+        db.conn
+            .execute_batch("CREATE TABLE pressure(payload BLOB)")
+            .unwrap();
+        for size in [4000, 400, 40] {
+            loop {
+                match db
+                    .conn
+                    .execute("INSERT INTO pressure VALUES(zeroblob(?1))", [size])
+                {
+                    Ok(_) => {}
+                    Err(error)
+                        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) =>
+                    {
+                        break
+                    }
+                    Err(error) => panic!("unexpected pressure fixture failure: {error}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn intake_and_event_rows_of_ended_sessions_cannot_fill_the_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut db = small_journal(directory.path());
+        let grant = db
+            .configure("codex", root.path(), true, None, false)
+            .unwrap();
+        let config = super::super::refiner::Config {
+            processor: Some(std::env::current_exe().unwrap()),
+            provider: None,
+            args: vec![],
+            timeout_secs: 1,
+        };
+        db.configure_refiner("codex", root.path(), Some(&config))
+            .unwrap();
+        // Each session leaves an intake row with the whole prompt. Kept
+        // forever, those rows fill this journal in under 40 sessions.
+        let prompt = "Explain the failing build step. ".repeat(470);
+        let mut first = None;
+        for session in 0..80 {
+            let id = format!("s{session}");
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":id, "hook_event_name":"SessionStart"}),
+            );
+            let captured = deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":id, "turn_id":"t", "hook_event_name":"UserPromptSubmit", "prompt":prompt}),
+            );
+            let episode = captured["episode"].as_str().unwrap().to_owned();
+            let (_, receipt) = db
+                .begin_intake(
+                    &grant,
+                    &episode,
+                    captured["event_id"].as_str().unwrap(),
+                    &prompt,
+                    Instant::now(),
+                )
+                .unwrap()
+                .unwrap();
+            db.finish_intake(
+                &grant,
+                &receipt,
+                Err("processor failed".into()),
+                0,
+                Instant::now(),
+            )
+            .unwrap();
+            first.get_or_insert(episode);
+            for kind in ["Stop", "SessionEnd"] {
+                deliver(
+                    &mut db,
+                    root.path(),
+                    json!({"session_id":id, "turn_id":"t", "hook_event_name":kind}),
+                );
+            }
+        }
+        let grant = db.grant("codex", root.path()).unwrap().unwrap();
+        assert_eq!((grant.gap.as_str(), grant.pending), ("", 0));
+        let first = first.unwrap();
+        let summary = db.intake_for_episode(&first).unwrap().unwrap();
+        assert_eq!(summary["status"], "degraded");
+        let kept: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM hook_intake WHERE episode=?1",
+                [&first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0);
+        assert_eq!(
+            db.task_mining_receipt(&first).unwrap()["status"],
+            "not_offered"
+        );
+    }
+
+    #[test]
+    fn forget_on_a_full_journal_keeps_other_episodes_archived() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut db = small_journal(directory.path());
+        db.configure("codex", root.path(), true, None, false)
+            .unwrap();
+        let response = "The build step failed on a missing fixture. ".repeat(180);
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "hook_event_name":"SessionStart"}),
+        );
+        let forgotten = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"UserPromptSubmit", "prompt":"Explain it"}),
+        );
+        deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"one", "hook_event_name":"Stop", "last_assistant_message":response}),
+        );
+        // The next episode carries the forgotten response as prior context.
+        let retained = deliver(
+            &mut db,
+            root.path(),
+            json!({"session_id":"s", "turn_id":"two", "hook_event_name":"UserPromptSubmit", "prompt":"Fix it"}),
+        );
+        for kind in ["Stop", "SessionEnd"] {
+            deliver(
+                &mut db,
+                root.path(),
+                json!({"session_id":"s", "turn_id":"two", "hook_event_name":kind}),
+            );
+        }
+        assert_eq!(db.compact(None, 64).unwrap(), 2);
+        let (forgotten, retained) = (
+            forgotten["episode"].as_str().unwrap(),
+            retained["episode"].as_str().unwrap(),
+        );
+        let revision = db.snapshot(forgotten).unwrap().revision;
+        fill_until_full(&db);
+        db.forget(forgotten, &revision).unwrap();
+        let archived: bool = db
+            .conn
+            .query_row(
+                "SELECT json_type(data,'$.archive') IS NOT NULL FROM hook_episode WHERE id=?1",
+                [retained],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(archived);
+        let events = db.episode(retained).unwrap().events;
+        assert!(!events.iter().any(|event| event.text == response));
+        assert!(events.iter().any(|event| event.text == "Fix it"));
+    }
+
+    #[test]
+    fn a_delivery_deadline_bounds_every_later_lock_wait() {
+        let db = journal();
+        let timeout = |db: &Journal| -> i64 {
+            db.conn
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap()
+        };
+        db.wait_until(Instant::now() + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(timeout(&db), BUSY_TIMEOUT.as_millis() as i64);
+        db.wait_until(Instant::now()).unwrap();
+        assert_eq!(timeout(&db), 0);
     }
 }

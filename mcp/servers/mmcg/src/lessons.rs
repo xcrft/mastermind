@@ -47,7 +47,7 @@ pub fn append_audit_candidate(
     let id = stable_id(&spec_identity, "audit_contract_failure", "");
     let legacy_id = stable_id(&task_id, "audit_contract_failure", "");
     let spec = markdown_path(&spec_identity);
-    let audit = crate::run_task::audit_file_path(spec_path);
+    let audit = crate::task_record::audit_file_path(spec_path);
     let audit_resolved = if audit.is_absolute() {
         audit.clone()
     } else {
@@ -219,7 +219,7 @@ fn append_candidate(repo_root: &Path, candidate: Candidate) -> std::io::Result<b
 fn merge_candidate(body: &str, candidate: &Candidate) -> Option<String> {
     let heading = format!("## {}", candidate.id);
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
-    let visible = crate::context_doctor::prose_lines(body);
+    let visible = crate::document_sections::prose_lines(body);
     let exact_start = visible
         .iter()
         .find(|line| line.text.trim_end() == heading)

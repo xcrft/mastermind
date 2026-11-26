@@ -85,26 +85,7 @@ impl Journal {
     }
 
     pub fn intake_for_episode(&self, episode: &str) -> Result<Option<Value>, Error> {
-        let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_intake')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Ok(None);
-        }
-        let data: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT data FROM hook_intake WHERE episode=?1",
-                [episode],
-                |r| r.get(0),
-            )
-            .optional()?;
-        data.map(|data| {
-            let receipt = observed(serde_json::from_str(&data)?, unix_now());
-            Ok(json!({"id":receipt.input.id,"status":receipt.status,"reason":receipt.reason,"elapsed_ms":receipt.elapsed_ms}))
-        }).transpose()
+        intake_summary(&self.conn, episode)
     }
 
     pub fn profile_task(&self, episode: &str) -> Result<Option<(String, String, String)>, Error> {
@@ -278,6 +259,33 @@ impl Journal {
         )?;
         tx.commit()?;
         Ok(current)
+    }
+}
+
+pub(super) fn intake_summary(conn: &Connection, episode: &str) -> Result<Option<Value>, Error> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='hook_intake')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let data: Option<String> = conn
+        .query_row(
+            "SELECT data FROM hook_intake WHERE episode=?1",
+            [episode],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match data {
+        Some(data) => {
+            let receipt = observed(serde_json::from_str(&data)?, unix_now());
+            Ok(Some(
+                json!({"id":receipt.input.id,"status":receipt.status,"reason":receipt.reason,"elapsed_ms":receipt.elapsed_ms}),
+            ))
+        }
+        None => archive::retired(conn, episode, "intake"),
     }
 }
 

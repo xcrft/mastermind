@@ -12,81 +12,68 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4f46e5.svg" alt="MIT license"></a>
 </p>
 
-Mastermind gives coding agents local code and documentation search, project
-knowledge, optional personal preferences, and a controller that checks task
-evidence before completion.
+Mastermind indexes your code and documentation locally, gives coding agents
+that context over MCP and prompt hooks, and checks a task's evidence before it
+counts as done. It works with Claude Code and Codex natively, and with any
+stdio MCP client.
 
 ## Quick start
 
-See the [source build](docs/getting-started.md#current-source-build) instructions for local development.
-
-Requires Node.js 24+. The [npm manifest](npm/mastermind/package.json) lists
-prebuilt binaries for macOS, Linux, and Windows. Run these commands inside your repository:
+You need Node.js 24 or later. The [npm package](npm/mastermind/package.json)
+ships prebuilt binaries for macOS, Linux and Windows. Run inside your
+repository:
 
 ```bash
 npm install -g @xcraftmind/mastermind
 mastermind init
 ```
 
-The first run detects the active client, or the installed Claude Code and Codex
-clients. It creates project guidance, indexes code and documentation, connects
-the clients, and enables profile delivery and `--mining task`. Preferences are
-proposed by the current agent and saved locally after complete capture. No
-separate model is launched. Use `--client none` for local indexing only.
-Saved choices survive repeated `init`.
+`init` sets up the clients it finds, indexes the repository and saves its
+choices in `.mastermind/setup.json`. Restart the client afterwards.
+[Getting started](docs/getting-started.md) covers the options, mining, updates,
+Windows and the [source build](docs/getting-started.md#current-source-build).
 
 | Command | Result |
 |---|---|
-| `mastermind init` | Apply saved project choices from `.mastermind/setup.json` |
-| `mastermind status --json` | Inspect the index, client configuration, session observations, and miner |
-| `mastermind update` | Update the package in its existing npm scope and refresh installed workflows |
-| `mastermind ui --since main` | Open the read-only Lens UI against your chosen Git baseline |
-
-Restart the selected client and review the generated definitions in `/hooks`.
-Registration, session
-observations, and client trust are separate states. Keep `.mastermind/` working
-data out of version control. See [Getting started](docs/getting-started.md) for
-mining choices, Windows support, and other installation paths.
+| `mastermind status --json` | The index, client configuration, observed sessions and miner |
+| `mastermind ui --since main` | Opens Lens, the read-only change review UI, against a Git baseline |
+| `mastermind update` | Updates the package in its npm scope and refreshes the installed workflows |
 
 ## What you can do
 
-<a id="the-review-surface-your-diff-is-missing"></a>
-
-| Need | Result |
+| Need | What Mastermind gives you |
 |---|---|
-| Review a change | Changed symbols, callers, boundaries, and candidate tests |
-| Find context | Code search, cited Markdown, decisions, and task history |
-| Apply working preferences | Reviewed habits selected by project, role, and workflow |
-| Delegate a task | Approved scope, observed checks, audit, and semantic review |
-| Share evidence | Lens, offline HTML, SARIF, and audit envelopes |
-| Import analysis | SCIP, scanner reports, coverage, tests, traces, and facts |
+| Review a change | Changed symbols, callers, component boundaries and candidate tests |
+| Find context | Code search, cited Markdown, decisions and task history |
+| Apply working preferences | Reviewed habits, selected by project, role and workflow |
+| Delegate a task | Approved scope, recorded checks, audit and semantic review |
+| Share evidence | Lens, offline HTML, SARIF and signed audit envelopes |
+| Import analysis | SCIP, scanner reports, coverage, tests, traces and facts |
 
 <p align="center">
   <img src="docs/images/lens/mastermind-lens-live-desktop.png" alt="Mastermind Lens showing change impact and supporting evidence" width="1000">
 </p>
 
-## Give an agent useful context
+## Give an agent context
 
-`init --client claude|codex|all` connects Claude Code, Codex, or both.
-Selected clients receive relevant Git observations and reviewed preferences
-through prompt hooks and MCP. Git observations refresh locally at init and task
-boundaries. macOS and Linux support native hooks.
-Other clients use [MCP setup](docs/README.md#start-here).
+Each selected client gets several layers of context through prompt hooks and
+MCP:
 
 | Context | Scope |
 |---|---|
 | Person | Advisory habits and preferences shared across repositories |
-| Project | Repository decisions, constraints, and knowledge |
-| Code and documentation | Indexed structure and cited source material |
+| Project | Repository decisions, constraints and knowledge |
+| Code and documentation | Indexed structure and cited sources |
 | Role | Duties for this invocation |
-| Workflow | Planning, execution, verification, and review |
-| Task evidence | Results, blockers, and the reviewed revision |
+| Workflow | Planning, execution, verification and review |
+| Task evidence | Results, blockers and the reviewed revision |
 
-Profile access is scoped to the selected project and clients. Use
-`--profile-access off` to disable it, or `--mining capture` to collect without
-semantic analysis. Preferences grant no action permissions. Context previews expose revisions
-and omissions, not proof of model use. See [Architecture](docs/architecture.md)
-and [Persona hooks](docs/guides/persona-hooks.md).
+Profile access is limited to the selected project and clients, and preferences
+grant no permissions. `--profile-access off` turns it off, and
+`--mining capture` collects without analysis. [Architecture](docs/architecture.md)
+explains the layers, and [persona hooks](docs/guides/persona-hooks.md) shows how
+to build and review a profile. Other clients connect through
+[MCP setup](docs/integrations/generic-mcp.md).
 
 ## Take a task through review
 
@@ -94,45 +81,40 @@ and [Persona hooks](docs/guides/persona-hooks.md).
 mastermind new-spec "Add account recovery"
 ```
 
-Fill the goal, scope, acceptance criteria, and checks, then follow the
-[Workflow guide](docs/workflow.md):
-
-```text
-criteria → implementation → checks → audit → review → complete or feedback
-```
-
-Any client can implement the spec. Recorded native execution and review use
-Claude Code. Completion requires current evidence and resolved review.
+Fill in the goal, scope, acceptance criteria and checks, then follow the
+[workflow guide](docs/workflow.md). Any client can implement the spec. Native
+execution and review use Claude Code. A task completes only with current
+evidence and a resolved review.
 
 ## Limits
 
 | Boundary | Meaning |
 |---|---|
-| Static codegraph | Dynamic dispatch, reflection, generated code, and cross-language calls may be incomplete |
-| Personal profile | Reviewed preferences remain advisory |
-| Task records | Local evidence does not independently establish correctness |
-| Native process policy | Uses client restrictions, not an OS sandbox |
-| Task mining | Uses the current agent's allowance for added context and tools. Drafts require review |
-| Separate model requests | Background mining, refinement, drafting, execution and review require their own options. See [provider contracts](docs/reference/persona.md#hook-processor-contract) |
+| Static codegraph | Dynamic dispatch, reflection, generated code and cross-language calls can be missing |
+| Personal profile | Reviewed preferences stay advisory |
+| Task records | Local and owner-writable. They show what ran, not that the change is correct |
+| Native process policy | Uses client restrictions. There is no OS sandbox |
+| Task mining | Uses the current agent's allowance for the added context and tool calls. Drafts need review |
+| Separate model requests | Background mining, refinement, drafting, execution and review each need their own option, see [provider contracts](docs/reference/persona.md#hook-processor-contract) |
 
 [Language coverage](docs/reference/mmcg.md#language-coverage) includes Python,
-TypeScript/TSX, JavaScript/JSX, Vue SFC, Rust, C#, Go, Java, PHP, and C/C++.
-Native hooks, managed mining, and supervised execution require macOS or Linux.
-Windows can use local indexing and client setup with `--mining off`. See
-[runtime support](docs/reference/task-runtime.md#process-supervision).
+TypeScript and TSX, JavaScript and JSX, Vue SFC, Rust, C#, Go, Java, PHP and
+C/C++. Native hooks, managed mining and supervised execution need macOS or
+Linux. On Windows you get local indexing and client setup with `--mining off`,
+see [process supervision](docs/reference/task-runtime.md#process-supervision).
 
 ## Documentation
 
 | Start | Reference |
 |---|---|
-| [Getting started](docs/getting-started.md) | [CLI and MCP](docs/reference/mmcg.md) |
-| [Architecture](docs/architecture.md) | [Benchmarks](docs/benchmarks.md) |
+| [Getting started](docs/getting-started.md) | [CLI and index](docs/reference/mmcg.md) |
+| [Architecture](docs/architecture.md) | [MCP tools](docs/reference/mcp.md) |
 | [Workflow](docs/workflow.md) | [Changelog](CHANGELOG.md) |
 | [All guides](docs/README.md) | [Security policy](SECURITY.md) |
 
 ## Build and contribute
 
-Source builds require Rust 1.96+, declared in
+Source builds need Rust 1.96 or later, as declared in
 [Cargo.toml](mcp/servers/mmcg/Cargo.toml).
 
 ```bash
@@ -140,9 +122,9 @@ cargo install --path mcp/servers/mmcg --locked
 just check
 ```
 
-Cargo installs `mmcg`. npm exposes `mastermind` and `mmcg`.
-See [Contributing](CONTRIBUTING.md), [GitHub Issues](https://github.com/xcrft/mastermind/issues),
-and the [security reporting policy](SECURITY.md).
+Cargo installs `mmcg`. The npm package provides `mastermind` and `mmcg`. See
+[Contributing](CONTRIBUTING.md), [GitHub Issues](https://github.com/xcrft/mastermind/issues)
+and the [security policy](SECURITY.md).
 
 ## License
 

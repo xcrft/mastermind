@@ -19,23 +19,41 @@ pub(super) fn age_seconds(modified_millis: Option<i64>) -> Option<u64> {
 /// recover cannot reach those markers.
 pub fn capture_fence_directory() -> Result<Value, Error> {
     let prefixes = fence::directory_summary()?;
-    let known = match open_journal()? {
+    let known: std::collections::BTreeMap<_, _> = match open_journal()? {
         Some(db) => db
             .grant_keys()?
             .into_iter()
-            .filter_map(|(client, root)| fence::grant_prefix(&client, &root).ok())
+            .filter_map(|(client, root)| {
+                fence::grant_prefix(&client, &root)
+                    .ok()
+                    .map(|prefix| (prefix, (client, root)))
+            })
             .collect(),
-        None => std::collections::BTreeSet::new(),
+        None => std::collections::BTreeMap::new(),
     };
     let oldest = prefixes
         .values()
         .filter_map(|summary| summary.oldest_modified_millis)
         .min();
+    // Marker names hold only a digest, so a prefix with no grant cannot name
+    // its project. A known grant names the root that recover accepts.
+    let details = prefixes
+        .iter()
+        .map(|(prefix, summary)| {
+            let grant = known.get(prefix);
+            json!({"prefix":prefix,"markers":summary.count,
+                "oldest_marker_age_seconds":age_seconds(summary.oldest_modified_millis),
+                "client":grant.map(|(client, _)| client),
+                "project_root":grant.map(|(_, root)| root),
+                "project_exists":grant.map(|(_, root)| Path::new(root).is_dir())})
+        })
+        .collect::<Vec<_>>();
     Ok(json!({
         "markers":prefixes.values().map(|summary| summary.count).sum::<usize>(),
         "prefixes":prefixes.len(),
-        "unknown_prefixes":prefixes.keys().filter(|prefix| !known.contains(*prefix)).count(),
+        "unknown_prefixes":prefixes.keys().filter(|prefix| !known.contains_key(*prefix)).count(),
         "oldest_marker_age_seconds":age_seconds(oldest),
+        "prefix_details":details,
     }))
 }
 
@@ -105,6 +123,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
                 "status":if !grant.enabled {"revoked"} else if blocked {"incomplete"} else {"enabled"},
                 "enabled":grant.enabled,"generation":grant.generation,
                 "pending":grant.pending,"gap_present":!grant.gap.is_empty(),
+                "gap":(!grant.gap.is_empty()).then_some(&grant.gap),
                 "filesystem_pending":pending.as_ref().ok(),
                 "scope":"local_native_event_capture","human_authorship":"unverified"
             })
@@ -157,7 +176,7 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
     let mut profile_report = match &grant {
         Ok(Some(grant)) if grant.enabled && grant.profile_client.is_some() => {
             let reader = grant.profile_client.as_deref().unwrap();
-            let allowed = crate::onboarding::profile_access(&root, reader);
+            let allowed = crate::onboarding::profile_access(&root, reader, false);
             json!({"status":match allowed { Ok(true) => "configured", Ok(false) => "access_denied", Err(_) => "unavailable" },
                 "client_id":reader,"trigger":"UserPromptSubmit","role":"planner",
                 "paths":"original_prompt_or_explicit_bound_continuation",
@@ -351,6 +370,10 @@ pub fn report(client: &str, root: &Path) -> Result<Value, Error> {
         if capture["gap_present"] == false && capture["filesystem_pending"] == true {
             next_actions.push(format!(
                 "A capture marker has no journal gap: its event never reached the journal (a busy journal or a killed hook), or the delivery is still running. If the oldest marker age keeps growing, run mastermind miner hooks recover --client {client}. Recovery starts a new capture generation, so earlier evidence counts as old, and it does not restore the missing event."
+            ));
+        } else if capture["gap"] == "journal_full" {
+            next_actions.push(format!(
+                "The hook journal reached its size limit with rows that archiving cannot free. Run mastermind miner hooks archive, then remove episodes you no longer need with mastermind miner hooks forget (list them with mastermind miner hooks episodes), then run mastermind miner hooks recover --client {client}. Recovery starts a new capture generation and does not restore the missing events."
             ));
         } else {
             next_actions.push("Inspect capture delivery gaps before using miner hooks recover; recovery does not restore missing events.".to_owned());

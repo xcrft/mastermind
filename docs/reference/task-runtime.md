@@ -1,140 +1,125 @@
-# Task execution and receipt contracts
+# Task runtime contracts
 
-This reference covers local verification commands, native execution, semantic
-review and automatic repair. For the user sequence, see [Workflow](../workflow.md).
-All receipts below are owner-writable local records. They establish observed
-execution and revision consistency, not independent attestation, test quality or
-semantic correctness.
+This page holds the exact rules `run-task` applies when it approves a task, runs
+its checks, launches the native executor and reviewer, and retries. The
+[workflow guide](../workflow.md) shows the order a person follows, and
+[specs, reports and CI](spec-and-report.md) covers the spec fields and the
+executor report.
+
+Every receipt on this page is a local JSON file the repository owner can edit.
+A receipt shows what ran, with which inputs and which result. It is not signed,
+and it says nothing about test quality or whether the change is correct.
 
 ## Initial worktree ownership
 
-The first successful preflight records the original Git commit and a separate
-`state.json.initial_worktree` manifest of existing local changes. Their bounded
-regular-file preimages are retained under `<task>/preflight-inputs/<sha256>`.
-Keep these artifacts with the task when moving or recovering its checkout.
+You can approve a task in a checkout that already has local changes. The first
+successful preflight records the original Git commit and a manifest of those
+changes in `state.json.initial_worktree`. It also keeps a copy of each changed
+regular file as it was before the task, under `<task>/preflight-inputs/<sha256>`.
+Keep these files with the task when you move or recover the checkout.
 
 | Input or transition | Contract |
 |---|---|
-| Unchanged pre-existing tracked edits, deletions and untracked files | Excluded from the controller's task file set |
-| New change to prior work, including restoration to commit contents | Included; normal scope and report checks apply |
-| Symbol additions/removals in initially dirty source | Compared with its retained preflight bytes |
-| Retry, reset, repair or reapproval | Retains the first manifest and original Git baseline |
-| Missing or changed retained preimage | Blocks evidence; restore the exact retained artifact |
-| Legacy state without a manifest | Keeps whole commit-to-worktree auditing; no retroactive exemption |
-| Manifest with `schema_version` 1, which missed edits behind `assume-unchanged` or `skip-worktree` | Still readable; preflight and postflight fail with `initial_worktree_schema_outdated`, so start a new task |
-| Standalone audit-spec and CI | Preserve their explicit commit-to-worktree scope |
-| Freshness and semantic review | Continue to bind current execution inputs; ownership grants no writes |
+| Pre-existing tracked edits, deletions and untracked files that stay unchanged | Not part of the task's file set |
+| A new change to prior work, including a restore to the commit contents | Part of the task. Normal scope and report checks apply |
+| Symbols added or removed in a file that was already dirty | Compared with the retained copy |
+| Retry, reset, repair or reapproval | Keeps the first manifest and the original Git baseline |
+| Missing or changed retained copy | Blocks evidence. Restore the exact retained file |
+| Standalone `audit-spec` and CI | Keep their commit-to-worktree scope |
+| Freshness and semantic review | Still bind current execution inputs. Ownership grants no writes |
 
-Initial dirty inputs are limited to 1,000 entries, 512 KiB of manifest metadata,
-the indexer's per-file byte limit and a total of retained file bytes. Unsupported
-or incomplete input fails preflight before handoff. This manifest establishes
-local attribution, not authenticated authorship. Release draft statistics use
-the original commit for the selected task files and separately list files
-changed from the initial worktree.
+| Limit | Value |
+|---|---|
+| Entries | 1,000 |
+| Manifest metadata | 512 KiB |
+| One file | The indexer's per-file byte limit |
+| All retained files | `worktree_max_total_bytes`, default 32 MiB, at most 1 GiB |
 
-The total is the project's `worktree_max_total_bytes` (default 32 MiB, at most
-1 GiB; set it with `mastermind init --worktree-max-total-bytes`). The first
-preflight records it in the manifest as `max_total_bytes`, and every later
-preflight of that task keeps the manifest and its budget, so a changed setting
-does not reach an open task. A manifest without `max_total_bytes`, captured
-before this setting, is read against 1 GiB.
+Unsupported or incomplete input fails preflight before handoff. The release
+draft counts the selected task files from the original commit and lists the
+files changed from the initial worktree separately.
 
-Every preflight (`--pre-only`, `--reset`, `--exec` and the native loop) also
-pins the project's `snapshot_max_total_bytes` (default 32 MiB, at most 1 GiB; set
-it with `mastermind init --snapshot-max-total-bytes`) in `state.json` and its
-approval record. The history input and audit snapshots and the strict workflow
-snapshot charge that value in post-flight, review, close, policy evidence and
-resume. The history snapshot also reads the task's prior local files, so the
-snapshot budget must cover the worktree budget plus the task's own changes; a
-project that raises one usually raises both. To apply a new value to an open task, change the
-setting and run `run-task <spec> --pre-only`: it pins the new value as a new
-approval and, like every approval, requires audit and review to run again. State
-without the field uses 32 MiB, and an approval whose value differs from its
-state is rejected with `preflight_approval_binding_mismatch`. A release that
-predates these fields rejects `state.json`, manifests and approval records that
-carry them, so finish or close open tasks before moving to it. `state.json`
-also records its `format_version`. A release that reads the field refuses a
-newer format by its version and asks for the newer binary. State written
-before the field is read as format 1. A budget that
-runs out is reported with its setting, limit, counted bytes, the next file and
-the `init` flag.
+### Byte budgets
+
+Two project settings in `.mastermind/setup.json` bound how much a task reads.
+Set them with `mastermind init`.
+
+| Setting | `init` flag | Default and range | Pinned when |
+|---|---|---|---|
+| `worktree_max_total_bytes` | `--worktree-max-total-bytes N` | 32 MiB, 1 B to 1 GiB | The first preflight, kept for the life of the task |
+| `snapshot_max_total_bytes` | `--snapshot-max-total-bytes N` | 32 MiB, 1 B to 1 GiB | Every preflight (`--pre-only`, `--reset`, `--exec` and the native loop) |
+
+The snapshot budget covers the history input and audit snapshots and the strict
+workflow snapshot, in postflight, review, close, policy evidence and resume.
+The history snapshot also reads the task's prior local files, so the snapshot
+budget has to cover the worktree budget plus the task's own changes. If you
+raise one, you usually raise both.
+
+To apply a new snapshot value to an open task, change the setting and run
+`mastermind run-task <spec> --pre-only`. That pins the value as a new approval,
+so audit and review have to run again. An approval whose value differs from its
+state is rejected with `preflight_approval_binding_mismatch`. A budget that runs
+out is reported with its setting, limit, counted bytes, the next file and the
+`init` flag that raises it.
 
 ## Dependency-cycle risk
 
-Preflight checks cycle membership for normalized `touches`, `creates` and
-`expected_docs` paths. Without declared file scope, it uses legacy file mentions.
-Malformed frontmatter or invalid paths fail the risk check. Body references do
-not expand an explicitly declared scope.
+Preflight checks whether the task's files sit in an import cycle. It reads the
+normalized `touches`, `creates` and `expected_docs` paths. A spec without
+declared file scope falls back to the file names it mentions. Malformed
+frontmatter or an invalid path fails the risk check, and body references never
+widen a declared scope.
 
 For each task file, the search follows indexed imports in both directions until
-it finds a cycle witness or exhausts one direction. Paths may leave the task's
-files and return. Unrelated components do not need to fit the global cycle-query
-limit. An unindexed new file has no indexed import edges.
+it finds a path that leaves the file and comes back to it, or runs out of
+imports in one direction. A path may pass through files outside the task. A new
+file that is not indexed yet has no import edges.
 
 | Boundary | Contract |
 |---|---|
 | Shared search work | 50,000 neighbor visits, raw C++ includes and include resolution steps |
-| Retained paths and C++ lookup strings | 50,001 unique strings and 8 MiB of UTF-8 bytes |
-| Query budget | At most 10 seconds and 250,000 SQLite progress ticks, subject to a tighter caller budget |
-| Incomplete search | Discards partial membership and fails preflight as unknown risk |
-| SQL failure or cancellation | Fails preflight without approving an empty risk report |
+| Retained paths and C++ lookup strings | 50,001 unique strings and 8 MiB of UTF-8 |
+| Query budget | 10 seconds and 250,000 SQLite progress ticks, or a tighter caller budget |
+| Incomplete search | Partial membership is dropped and preflight fails as unknown risk |
+| SQL failure or cancellation | Preflight fails. An empty risk report is never approved |
 
-Reverse C++ lookup visits matching candidates while scanning raw include records.
-A cycle witness stops the scan and discards the partial lookup. Later task roots
-may restart that scan within the shared work budget. A completed lookup is reused
-for subsequent reverse steps, selecting possible exact and suffix basenames before
-applying the same exact-before-suffix resolver as forward traversal. Cached steps
-copy only the candidate being visited. If cache storage reaches the shared string
-or byte limit, cache-only strings are released and the scan continues without
-caching. Traversal paths keep their ownership and limits. An evicted lookup falls
-back to scanning within the remaining work and query budgets. All lookups share
-one SQLite read snapshot. The lookup is discarded with the search.
+The result covers syntactic indexed imports, so a runtime cycle or a stale index
+can still hide. C++ suffix resolution can match several candidate headers when
+include roots are unknown. The whole-graph dependency-cycle query has its own
+50,000-pair limit.
 
-The result describes syntactic indexed imports. It does not establish runtime
-cycles or source freshness. C++ suffix resolution can include multiple candidate
-headers when include roots are unavailable. The global dependency-cycle query
-retains its separate 50,000-pair whole-graph limit.
-
-If the task search is incomplete, inspect the declared paths and their indexed
-dependencies before retrying. Keep the complete task scope. Repair an unreadable
-or stale index through the normal indexing flow, then rerun preflight.
+If the search is incomplete, look at the declared paths and their indexed
+dependencies, keep the complete task scope and rerun preflight. Repair an
+unreadable or stale index with `mastermind index .` first.
 
 ## Revise an approved task
 
-After changing an approved spec, explicitly approve the revised contract:
+After you change an approved spec, approve the revised contract again:
 
 ```bash
 mastermind run-task .mastermind/tasks/001-feature/spec.md --pre-only
 ```
 
-Each successful preflight retains the exact spec and a validation receipt under
+Each successful preflight keeps the exact spec and a validation receipt under
 `<task>/preflight-approvals/`, pinned by `state.json.preflight_approval_sha256`.
-Keep the retained spec, receipts and initial-worktree preimages with the task.
+Keep these files and the initial-worktree copies with the task.
+
+A spec can state conditions that must hold before the edit, such as a literal
+text the file must contain (`FIND`) or a symbol with a given caller count. The
+[spec reference](spec-and-report.md) defines them.
 
 | Reapproval input or transition | Contract |
 |---|---|
-| Unchanged FIND and pre-edit symbol conditions in an amended spec | Retain their prior successful validation; implemented replacements need not restore old text or symbols |
-| Re-run preflight with the same retained spec | Rechecks current preconditions in full; invalid or unreadable targets still block approval |
-| New or changed literal, symbol, signature, caller count, file or language scope | Requires current verification |
-| Approval receipt with `schema_version` 1, from the parser that dropped unreadable lines | Still valid for its own audit, including a spec whose frontmatter block is now `frontmatter_not_at_start`; reapproval fails with `preflight_approval_schema_outdated`, start a new task |
+| Unchanged `FIND` and pre-edit symbol conditions | Keep their earlier successful validation. An implemented replacement does not have to restore the old text or symbol |
+| Preflight again with the same retained spec | Rechecks current conditions in full. Invalid or unreadable targets still block approval |
+| New or changed literal, symbol, signature, caller count, file or language scope | Needs current verification |
 | Current declarations, creates, verification, acceptance and strict requirements | Checked in full against the revised contract |
-| Original Git baseline and initial-worktree manifest | Retained; implementation stays in the task delta |
-| Approval attempt | Consumes the cumulative iteration budget, including failures |
-| Native invocation requirement | Retained; a receipt from an older spec or iteration cannot satisfy the new attempt |
-| Ordinary resume, post-only or restoring old spec bytes | Does not bypass required explicit preflight |
-| Missing or changed retained approval ancestor | Blocks reuse; restore the exact artifact |
-
-Historical conditions are prior local validation, not fresh caller measurements.
-The current risk report covers newly evaluated snapshot claims. Approval chains
-are limited to 128 records and 32 MiB of retained receipt/spec reads per check.
-
-For a legacy state without retained approval artifacts, explicit `--pre-only`
-can retain historical conditions only when the current spec exactly matches its
-saved approved hash and the repository/baseline binding is valid. The new
-receipt labels this basis `legacy_prior_approval`; it does not reconstruct an
-original attempt or native execution. When recovering such a task, restore the
-approved spec first, run explicit preflight, then revise it and reapprove. Changed
-conditions without that prior contract must pass current checks.
+| Original Git baseline and initial-worktree manifest | Kept. Implementation stays in the task delta |
+| Approval attempt | Uses one iteration from the cumulative budget, failures included |
+| Native invocation requirement | Kept. A receipt from an older spec or iteration can't satisfy the new attempt |
+| Ordinary resume, `--post-only` or restoring old spec bytes | Can't skip the required explicit preflight |
+| Missing or changed retained approval | Blocks reuse. Restore the exact file |
+| Approval chain | At most 128 records and 32 MiB of retained receipt and spec reads per check |
 
 ## Observed verification
 
@@ -156,88 +141,85 @@ mastermind verification run .mastermind/tasks/001-feature/spec.md --id unit --js
 
 | Execution input | Contract |
 |---|---|
-| `argv` | Executed directly, with null stdin and inherited environment |
-| Shell syntax | Requires an explicitly declared shell executable |
-| `cmd` | Must equal displayed argv. Simple arguments are unquoted, others use single quotes with embedded apostrophes written as `'\''` |
-| Display mismatch | Preflight reports the required `cmd` |
+| `argv` | Run directly, with null stdin and the inherited environment |
+| Shell syntax | Needs an explicitly declared shell executable |
+| `cmd` | Must equal the displayed argv. Simple arguments are unquoted, others use single quotes, with an embedded apostrophe written as `'\''`. Preflight prints the required `cmd` on a mismatch |
+| Executable lookup | A bare name is looked up in absolute `PATH` entries. Relative and empty entries are skipped |
+| Declaration without `run` | Keeps the weaker reported-result contract |
 
 | Declaration | Limit |
 |---|---|
 | Runs per spec | 32 |
-| Unique run ID | 1–64 ASCII letters, digits, `_` or `-` |
-| Arguments | 64 maximum, 8 KiB each, 32 KiB combined, no NUL bytes |
+| Run ID | Unique, 1-64 ASCII letters, digits, `_` or `-` |
+| Arguments | 64, 8 KiB each, 32 KiB combined, no NUL bytes |
 | `cwd` | `.` or a canonical repository-relative directory |
-| Timeout | 1–3,600 seconds |
-| Captured stream | 1 MiB each for stdout and stderr |
+| Timeout | 1-3,600 seconds |
+| Captured output | 1 MiB each for stdout and stderr |
 
 | Receipt or transition | Contract |
 |---|---|
-| Canonical location | `<task>/verification/<id>.json` |
-| Flat legacy location | `<spec-name>.verification/` beside the run-state file |
-| Recorded inputs | argv, cwd, resolved executable hash and repository/spec/baseline/iteration bindings |
-| Recorded result | Observed exit, duration, stream byte counts and hashes |
-| Excluded data | Raw output and environment values |
-| New attempt | Replaces the previous receipt with `pending` before execution |
-| Concurrent runner for the same task | Refused |
-| Failure, interruption, timeout, output limit or unfinished attempt | Cannot reuse an older success |
-| Postflight | Requires the latest successful current receipt for every observed declaration and the normal executor report |
-| Declaration without `run` | Keeps the weaker reported-result contract |
+| Location | `<task>/verification/<id>.json`. For a spec outside a task folder, a `.verification/` directory beside its run-state file |
+| Recorded inputs | argv, cwd, resolved executable hash and the repository, spec, baseline and iteration |
+| Recorded result | Exit code, duration, stream byte counts and hashes. Raw output and environment values are not stored |
+| New attempt | Replaces the previous receipt with `pending` before it starts |
+| Second runner for the same task | Refused |
+| Failure, interruption, timeout, output limit or unfinished attempt | An older success can't be reused |
+| Postflight | Needs the latest receipt of every observed check to be a current success, plus the normal executor report |
 
-Running a check neither requires nor modifies the executor report.
+Running a check neither needs nor changes the executor report.
 
 ### Snapshot coverage and freshness
+
+A receipt is bound to a snapshot of everything the check could read. The runner
+takes the snapshot twice per pass and compares them, before and after the
+command.
 
 | Snapshot component | Coverage |
 |---|---|
 | Task and Git state | Spec, HEAD, index and baseline |
-| Repository files | Tracked and nonignored untracked files outside `.mastermind/` |
-| Verification kit | Regular files under the current spec's sibling `verify/` directory, including ignored files |
-| Additional check inputs | Explicit `verify[].run.inputs` repository-relative files, including ignored files |
-| Executable | Top-level executable bytes |
-| Tracked symlinks on Unix | Exact relative link text is bound without following the link. Targets must remain lexically inside the repository and exist through no-follow paths. Absolute, escaping, dangling and chained targets are rejected |
-| Link target contents | Bound independently only when tracked, nonignored or an explicit verification input. Ignored target bytes are not read through the link |
-| Dirty or untracked symlinks | Initial-worktree and source readers still reject them before handoff; tracked link support does not grant source or write access through aliases |
-| Unsupported entries | Submodules and conflicts rejected before approval for observed checks |
+| Repository files | Tracked and non-ignored untracked files outside `.mastermind/` |
+| Verification kit | Regular files under the spec's sibling `verify/` directory, ignored ones included |
+| Extra check inputs | Files listed in `verify[].run.inputs`, ignored ones included |
+| Executable | The top-level executable's bytes |
+| Tracked symlinks on Unix | The link text is bound without following the link. The target must stay inside the repository and exist. Absolute, escaping, dangling and chained targets are rejected |
+| Link target contents | Bound only when the target is tracked, non-ignored or an explicit input. Ignored target bytes are not read through the link |
+| Dirty or untracked symlinks | Rejected before handoff. Tracked link support grants no access through aliases |
+| Submodules and conflicts | Rejected before approval for observed checks |
 
 | Input | Limit |
 |---|---|
 | Observed files | 100,000 |
-| Snapshot file bytes per pass | 512 MiB |
-| Retained snapshot file content | One 64 KiB streaming buffer |
-| Verification spec reads | 4 MiB |
+| File bytes per pass | 512 MiB |
+| File content held in memory | One 64 KiB streaming buffer |
+| Preflight file reads | 1 GiB |
+| One verification run, both snapshots | 2 GiB |
+| Spec reads | 4 MiB |
 | Git response | 8 MiB |
 | Executable | 128 MiB |
 | Receipt JSON | 128 KiB |
-| Verification kit entries | 1,024 files and directories per task |
-| Additional inputs | 128 unique files per check |
+| Verification kit | 1,024 files and directories per task |
+| Extra inputs | 128 unique files per check |
 
-Each snapshot compares two complete passes. Preflight reads at most 1 GiB of
-file content, and command verification takes snapshots before and after execution
-for at most 2 GiB. Each regular file also receives a one-byte EOF probe per pass.
-All reads share the operation deadline and cancellation signal. Growth, shrinkage,
-replacement and unreadable inputs fail the snapshot. File content streams into
-the unchanged version-1 digest, so previously admitted inputs keep their digest.
-The caps bound I/O separately from the streaming buffer and do not change parser
-or configuration limits. The separate working-tree diff reader keeps its 5 MiB
-per-file cap. Changing a larger file can still make `audit-spec` fail closed with
-`index_stale`. Larger snapshot coverage does not waive the diff requirement.
+All reads share the operation deadline and cancellation signal. A file that
+grows, shrinks, is replaced or can't be read fails the snapshot, and the error
+names the file. These caps bound I/O only. The separate working-tree diff reader
+keeps its 5 MiB per-file cap, so a change to a larger file can still make
+`audit-spec` fail with `index_stale`.
 
 | Change or limitation | Effect |
 |---|---|
-| Unsupported, over-limit or unreadable snapshot | Preflight rejects observed checks early; direct runner records `unavailable` with a specific reason. A size or read failure names the file. Before spawn there is no command exit; after spawn the observed exit is retained |
-| Changed bound input | `input_changed`; receipt cannot satisfy checks |
-| Dependency edit, staging, commit, executable replacement or new preflight | Can invalidate the receipt |
-| Receipt change during unfinished review | Invalidates that review |
-| Final completion | Rechecks receipt bindings |
+| Unsupported, over-limit or unreadable snapshot | Preflight rejects observed checks early. A direct run records `unavailable` with the reason, and keeps the exit code if the command had started |
+| Changed bound input | `input_changed`, the receipt can't satisfy checks |
+| Dependency edit, staging, commit, executable replacement or new preflight | Can make the receipt stale |
+| Receipt change during an unfinished review | Invalidates that review |
 | Tracked context update | Can require new checks and audit |
-| Ignored lessons update | Can require fresh review without changing verification inputs |
-| Ignored dependencies, external services, full environment | Outside snapshot coverage |
-| Temporary mutation restored before the final snapshot | Not detected by equal before/after snapshots |
-| Pinned interpreter | Does not freeze scripts or establish assertion quality |
+| Ignored lessons update | Can require a fresh review without new checks |
+| Ignored dependencies, external services, the full environment | Not covered |
+| A temporary change restored before the final snapshot | Not detected |
 
-Keep task-specific check scripts in `<task>/verify/`. This directory is bound
-automatically; receipt and controller files elsewhere in the task remain mutable.
-For other ignored check inputs, declare exact repository-relative regular files:
+Keep task-specific check scripts in `<task>/verify/`, which is bound
+automatically. For another ignored input, list the exact repository-relative
+file:
 
 ```yaml
 run:
@@ -248,22 +230,22 @@ run:
   inputs: [.mastermind/checks/lock.sh]
 ```
 
-Input paths resolve from the repository root, independently of `cwd`. Changes to
-the verification kit or declared inputs require fresh checks. Missing declared
-files block verification. This binds named bytes, not arbitrary interpreter
-dependencies, external services, or the semantic quality of assertions.
+Input paths resolve from the repository root, whatever `cwd` is. A missing
+declared file blocks verification. A pinned interpreter still doesn't freeze the
+scripts it loads.
 
 ### Process supervision
 
 | Event or platform | Behavior |
 |---|---|
-| macOS/Linux | Supervise the Unix process group |
-| Completion, timeout or cooperative interruption | Terminate the group |
+| macOS and Linux | The runner supervises the Unix process group |
+| Completion, timeout or interruption | The group is terminated |
+| Ctrl-C, `kill` or a closed terminal | The runner stops the group and records the receipt as `interrupted` |
 | Detached child | Not contained by the group |
-| SIGKILL | Cleanup cannot run. Receipt stays pending |
-| Windows | Execution rejected before spawn |
-| Cancellation | Checked immediately before the atomic final write. A later signal does not revoke that publication decision |
-| Permissions | Normal filesystem and network access. No OS sandbox |
+| SIGKILL of the runner | Cleanup can't run, and the receipt stays `pending` |
+| Windows | Refused before the command starts |
+| Cancellation | Checked right before the final atomic write. A later signal doesn't undo that write |
+| Permissions | Normal file system and network access. There is no OS sandbox |
 
 ## Acceptance mapping
 
@@ -276,74 +258,75 @@ acceptance:
 
 | Declaration | Requirement |
 |---|---|
-| Criteria | 1–64 |
-| Criterion ID | Unique, 1–64 ASCII bytes |
-| Statement | Nonempty, at most 2,048 bytes |
-| Check references | 1–32 unique known observed IDs per criterion. All required, shared IDs reuse one observation |
-| Rejected input | Nulls, control characters, placeholder statements or report-only command references |
+| Criteria | 1-64 |
+| Criterion ID | Unique, 1-64 ASCII bytes |
+| Statement | Not empty, at most 2,048 bytes |
+| Check references | 1-32 unique observed check IDs per criterion. All are required, and a shared ID reuses one observation |
+| Rejected input | Nulls, control characters, placeholder statements and references to report-only checks |
 
-| Read-only `acceptance status SPEC --json` result | Meaning |
+| `acceptance status SPEC --json` result | Meaning |
 |---|---|
 | Check state | `current`, `missing`, `pending`, `failed`, `stale` or `unavailable` |
 | Exit 0 | `requirements_satisfied` |
 | Exit 1 | `blocked` or `not_declared` |
-| Semantic result | Always `semantic_accuracy: unknown` and `overall_task_completion: not_evaluated`. A satisfied mapping does not prove its statements |
+| Semantic fields | Always `semantic_accuracy: unknown` and `overall_task_completion: not_evaluated` |
+
+A satisfied mapping means the mapped checks passed. Whether they test the
+statement is the reviewer's call.
 
 ## Native executor
 
-| `run-task --exec` stage | Contract |
-|---|---|
-| Preflight | Repeated with the original baseline. Consumes one iteration |
-| Controller lock | Nonblocking, covers preflight through postflight. Rejects another controller but allows declared checks inside the executor |
-| Context selection | Executor role, workflow and declared paths. Up to 12 literal title terms select up to 4 document hits |
-| Delivery check | Rechecks selected code/project/document revisions, then scoped profile sources and audience access before native launch |
-| Consistency | Optimistic checks across independent stores. Revocation cannot retract bytes already delivered |
-| Invocation binding | Repository, spec, baseline, iteration, exact context bytes, prompt digest, executable/version and permission policy |
-| Stdin delivery | Records `offered_to_process` and offered byte counts. `model_use` remains `unknown` |
-| `--profile-client ID` | Selects an existing grant. Cannot grant access or change the profile |
-| Receipt | `invocation.json` is pending before execution, then records hashes, policy, byte counts and outcomes |
-| Excluded receipt data | Raw prompts, profiles and process output |
+`run-task --exec` launches Claude Code with a task-bound prompt.
 
-| Default native policy or result | Contract |
+| Stage | Contract |
+|---|---|
+| Preflight | Repeated with the original baseline. Uses one iteration |
+| Controller lock | Nonblocking, held from preflight through postflight. Another controller is refused, declared checks inside the executor are allowed |
+| Context | Executor role, workflow and declared paths. Up to 12 literal title terms select up to 4 document hits |
+| Before launch | Rechecks the selected code, project and document revisions, then the scoped profile sources and audience access |
+| Consistency | Optimistic checks across separate stores. Revoking access can't take back bytes already delivered |
+| Invocation binding | Repository, spec, baseline, iteration, exact context bytes, prompt digest, executable and version, permission policy |
+| Delivery | Records `offered_to_process` and the byte counts on stdin. `model_use` stays `unknown`, because the receipt can't see what the model read |
+| Profile audience | The project's configured profile client. `--profile-client ID` overrides it for one run and still needs an existing read grant |
+| Claude executable | Resolved from absolute `PATH` entries and hashed as a stream, up to 2 GiB |
+| Receipt | `invocation.json` is `pending` before launch, then records hashes, policy, byte counts and outcome. Raw prompts, profiles and process output are not stored |
+
+| Default native policy | Contract |
 |---|---|
 | Requested tools | `Read,Edit,Write,Grep,Glob,Bash` |
-| Permissions | `acceptEdits`, no permission prompts and no blanket Bash grant. Existing native rules decide command access |
-| Session persistence and Chrome | Disabled |
-| Success | Supported version/help flags, matching initialization and one successful terminal result. Exit 0 alone is insufficient |
-| Tool errors | Intermediate errors may be repaired within the run. Final errors and permission denials fail the attempt |
-| Miner origin | Process gets `MMCG_INPUT_ORIGIN=controller`, receipt gets `input_origin: controller_generated`. Mastermind capture skips it before writing state |
-| Other inherited hooks | Unverified |
+| Permissions | `acceptEdits`, no permission prompts, no blanket Bash grant. Existing native rules decide command access |
+| Session persistence and Chrome | Off |
+| Adapter | Claude Code 2.1.267 or later within 2.1, with the required flags in local help |
+| Success | Supported version and flags, matching initialization and one successful terminal result. Exit 0 alone is not enough |
+| Tool errors | The run may repair intermediate errors. A final error or a permission denial fails the attempt |
+| Mining | The process gets `MMCG_INPUT_ORIGIN=controller` and the receipt `input_origin: controller_generated`, so Mastermind capture skips the run |
+| Inherited MCP, hooks, authentication, model and configuration | Used as configured, not verified |
+| File scope | Audited after execution |
+| Completion | Still needs the report, verification, acceptance and review gates |
 
-| Native transport | Limit |
+| Limit | Value |
 |---|---|
-| Executor wall time / turns | 1–7,200 seconds / 1–100, defaults 1,800 / 40. `mastermind init --exec-timeout N` and `--exec-max-turns N` set the project defaults in `.mastermind/setup.json`. An explicit `--exec-timeout` or `--exec-max-turns` wins. The defaults are never written |
+| Wall time | 1-7,200 seconds, default 1,800 |
+| Turns | 1-100, default 40 |
 | Input | 128 KiB |
-| Process output / protocol line | 16 MiB / 1 MiB |
-| Version/help probe output | 64 KiB |
-| Executor receipt | 128 KiB |
+| Process output, one protocol line | 16 MiB, 1 MiB |
+| Version and help probe output | 64 KiB |
+| Receipt | 128 KiB |
 
-Preparation and probes have separate bounded deadlines. Executor and reviewer
-share Unix process-group supervision. Windows is unsupported.
+`mastermind init --exec-timeout N` and `--exec-max-turns N` set project
+defaults in `.mastermind/setup.json`, and an explicit `run-task` flag wins.
+Preparation and probes have their own bounded deadlines.
 
-On Windows, native execution and native review refuse before changing task
-approval, iteration, review pins or execution requirements. Manual preflight
-with `--exec --pre-only` remains available. A failed native probe on a supported
-platform still invalidates the old approval before preparing a new attempt.
+Native execution and native review need macOS or Linux. On Windows they refuse
+before they change approval, iteration, review pins or execution requirements,
+and `--exec --pre-only` still works for a manual preflight. On a supported
+platform, a failed probe still invalidates the old approval before a new attempt
+is prepared. A task that already requires native execution keeps that
+requirement, so continue it on a supported platform. Don't delete task state to
+reset its baseline or iteration budget.
 
-Tasks already recorded as requiring native execution keep that requirement.
-Continue them on a supported platform or restore a known valid task backup.
-Do not delete task state to reset its baseline or iteration budget.
-
-| Boundary | Limit |
-|---|---|
-| Inherited MCP, hooks, authentication, model selection and configuration | Not independently verified |
-| File scope | Checked after execution |
-| Completion | Still requires the ordinary report, verification, acceptance and review gates |
-
-Lens shows delivery metadata from the recorded invocation alongside the current
-context preview. Matching revisions compare declared bytes, not model attention,
-task acceptance or current checkout correctness. The preview itself records no
-delivery. See [Profiles](mmcg.md#private-profiles-and-context-preview).
+[Lens](lens.md) shows the recorded delivery next to the current context preview,
+see [the private Lens view](persona-context.md#private-lens-view).
 
 ### Guarded execution
 
@@ -352,42 +335,46 @@ mastermind run-task .mastermind/tasks/001-feature/spec.md \
   --exec --guarded-exec --auto-review
 ```
 
+Guarded mode puts a private hook in front of each native tool call and allows
+only what the approved task needs.
+
 | Guarded contract | Rule |
 |---|---|
-| Platform and adapter | Unix, supported Claude Code 2.1.267+ within 2.1, required flags in local help |
-| Task | Explicit file scope, observed `verify[].run` declarations |
-| Edit / Write | Exact declared paths and the task's executor report. Protected controller/configuration paths and static symlink/hardlink aliases are rejected |
-| Read / Grep / Glob | Repository-scoped path checks |
-| Bash | Exact controller-generated `verification run` commands only |
+| Platform and adapter | Unix, Claude Code 2.1.267 or later within 2.1, required flags in local help |
+| Task | Explicit file scope and observed `verify[].run` checks |
+| Edit, Write | Exact declared paths and the task's executor report. Controller and configuration paths and static symlink or hardlink aliases are rejected |
+| Read, Grep, Glob | Path checks inside the repository |
+| Bash | Only the exact `verification run` commands the controller generates |
 | Other tools and subagents | Rejected |
-| Native settings | `dontAsk`, restricted mode, isolated settings, private PreToolUse hook, strict empty MCP, disabled slash commands |
+| Native settings | `dontAsk`, restricted mode, isolated settings, private PreToolUse hook, strict empty MCP, slash commands off |
 | Binding | Invocation, session, repository, task revision, intake, policy and expiry |
-| Hook runner | Pins the Mastermind executable; at most 256 MiB, with a bounded identity-checked read |
+| Hook runner | Pins the Mastermind executable, at most 256 MiB, read with an identity check |
 | Decision log | Tool name, input hash and decision. No raw tool arguments |
-| Successful receipt | Every observed tool call matches a durable allow decision, no denied calls, current artifacts |
-| Failed or missing log | Unknown counts stay null, successful publication is blocked |
-| Receipt schema | [v2](../../schemas/invocation-receipt-v2.schema.json). Default executor and reviewer retain schema v1 |
+| Successful receipt | Every observed tool call matches a durable allow decision, no call was denied, artifacts are current |
+| Failed or missing log | Unknown counts stay null and a successful result is blocked |
+| Receipt schema | [v2](../../schemas/invocation-receipt-v2.schema.json). The default executor and reviewer write v1 |
 
-If preparation records `invocation_guard_runner_too_large`, build with
-`cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml` and invoke
-`mcp/servers/mmcg/target/release/mmcg`. The repository's dev/test profile retains
-limited debug information (`debug = 1`) to keep normal debug builds within this bound.
-Runner timeouts, interruption, changed identity and unavailability have separate
-fixed reasons; receipts contain no raw filesystem errors.
+If preparation records `invocation_guard_runner_too_large`, the Mastermind
+binary is over 256 MiB. A release build fits:
 
-| Enforcement boundary | Meaning |
+```bash
+cargo build --release --manifest-path mcp/servers/mmcg/Cargo.toml
+```
+
+Then run `mcp/servers/mmcg/target/release/mmcg`. Timeouts, interruption, a
+changed identity and an unavailable runner each record their own reason, with
+no raw file system errors.
+
+| What guarded mode does not cover | Consequence |
 |---|---|
-| Native command-hook failure | The client can fall back to native permissions. Missing observed mediation blocks success but cannot undo an effect |
-| Allowed verification process | Runs with the user's normal filesystem/network access |
-| Managed native policy | Requested isolation is recorded, managed policy is unverified |
-| Race after a path check | No OS-level containment or atomic file-open guarantee |
-| Coverage | Observed native tool calls, not every process or OS effect |
+| A native hook failure | The client can fall back to its own permissions, see [hook failure behavior](https://code.claude.com/docs/en/hooks#timeouts). Missing mediation blocks success but can't undo an effect |
+| An allowed verification process | Runs with your normal file system and network access |
+| Managed native policy | The requested isolation is recorded, the managed policy is not verified |
+| A race after a path check | No OS containment and no atomic file-open guarantee |
+| Effects outside native tool calls | Not observed |
 
-The adapter follows the native [hook failure behavior](https://code.claude.com/docs/en/hooks#timeouts)
-and [permission rules](https://code.claude.com/docs/en/permissions#read-only-commands).
-Lens reports mediation coverage and the recorded invocation separately from the
-current context preview. Reconciliation does not establish model attention or
-semantic correctness.
+Native [permission rules](https://code.claude.com/docs/en/permissions#read-only-commands)
+still decide what a command may do.
 
 ## Native semantic reviewer
 
@@ -395,76 +382,85 @@ semantic correctness.
 |---|---|
 | `review-task run` | Records one review of a pending held task |
 | `run-task --auto-review` | Also evaluates completion under the controller lock |
-| Without `--exec` | Keeps the iteration. Runs no preflight, executor or checks |
-| With `--exec` | Reviews a Held audit. A qualifying `--auto-follow-up` adds at most one executor retry and one fresh review |
-| Negative result | Stops by default. Only the opt-in [semantic follow-up](#one-semantic-follow-up) can retry |
-| Unknown, failed or unresolved-history result | Stops without an automatic semantic retry |
+| `--auto-review` without `--exec` | Keeps the iteration. Runs no preflight, executor or checks |
+| `--exec --auto-review` | Reviews a held audit. With `--auto-follow-up`, at most one executor retry and one fresh review |
+| Negative result | Stops, unless the [semantic follow-up](#one-semantic-follow-up) applies |
+| Unknown, failed or unresolved-history result | Stops without a semantic retry |
 
 | Reviewer input | Coverage |
 |---|---|
 | Evidence manifest and patch | Actual bytes, including tracked files hidden by Git index flags |
 | Separate staged patch | Index-only and tracking changes |
-| Modes | Included |
-| Reads | Repository fsmonitor and external diff hooks disabled |
-| Binary, inaccessible, unsupported or oversized input | Rejected, not silently omitted |
+| File modes | Included |
+| Git reads | Repository fsmonitor and external diff hooks are off |
+| Binary, inaccessible, unsupported or oversized input | Rejected, never silently left out |
 
-| Reviewer input / transport | Limit |
+| Native reviewer setting | Value |
 |---|---|
-| Source inventory | 10,000 files, 4 MiB/file, 64 MiB per snapshot |
-| Patch / complete prompt | 64 KiB / 128 KiB |
+| Adapter | Claude Code 2.1.290 or later within 2.1, with the required flags in local help |
+| Tools | Read, Grep, Glob, plus StructuredOutput for the final answer. The adapter passes `--json-schema` with the closed reviewer answer schema |
+| Permissions | `dontAsk`, no permission prompts, restricted mode |
+| MCP | Strict empty configuration |
+| Off | Slash commands, session persistence and Chrome |
+| Initialization | Must match the policy. A tool error or denial fails the review. A StructuredOutput answer the schema rejects is not an error if the same run later succeeds. Tool calls need unique non-empty IDs |
+| Personal profile | Not injected |
+| Authentication and model | Native selection |
+| Managed policy, reviewer identity and independence | Not verified |
+
+| Limit | Value |
+|---|---|
+| Source inventory | 10,000 files, 4 MiB per file, 64 MiB per snapshot |
+| Patch, complete prompt | 64 KiB, 128 KiB |
 | Terminal result | 1 MiB |
-| Wall time / turns | 1–7,200 seconds / 1–100, defaults 600 / 30. `mastermind init --review-max-turns N` (1–100) and `--review-timeout N` (1–7,200) set the project default turns and seconds in `.mastermind/setup.json`. An explicit `--max-turns`, `--review-max-turns`, `--timeout` or `--review-timeout` wins. The defaults 30 and 600 are never written |
+| Wall time | 1-7,200 seconds, default 600 |
+| Turns | 1-100, default 30 |
 | Review invocation receipt | 256 KiB |
 
-| Native reviewer setting | Required value or limit |
-|---|---|
-| Adapter | Claude Code 2.1.290 or later within 2.1, with required flags in local help |
-| Tools | Read/Grep/Glob, plus StructuredOutput for the final answer. The adapter passes `--json-schema` with the closed reviewer answer schema |
-| Permissions | `dontAsk`, no permission prompts, safe/restricted mode |
-| MCP | Strict empty configuration |
-| Disabled | Slash commands, session persistence and Chrome |
-| Initialization | Must match policy. Tool errors or denials fail review. A StructuredOutput attempt rejected by the schema is not a tool error when the same run later succeeds. Reviewer tool calls need unique non-empty ids |
-| Mined profile | Not injected |
-| Authentication and model | Native selection |
-| Managed policy, reviewer identity and independence | Unverified |
+`mastermind init --review-timeout N` and `--review-max-turns N` set project
+defaults in `.mastermind/setup.json`. An explicit `--timeout` or `--max-turns`
+on `review-task run`, or `--review-timeout` or `--review-max-turns` on
+`run-task`, wins.
 
-| Review evidence transition | Contract |
+| Review evidence step | Contract |
 |---|---|
-| Before preparation/probes | Revoke prior semantic approval and write pending `review-invocation.json`. Preserve executor receipt |
-| Assessment source | Final native result string only, parsed strictly. Reject extra fields, duplicate keys, code fences or alternative output files. A successful result must also carry a `structured_output` equal to it. Failures record `invocation_native_structured_output_invalid`. A run that stops at its turn or schema-retry limit records `invocation_native_max_turns` or `invocation_native_structured_output_retries` |
-| Reviewer metadata | Controller supplies `reviewer.kind: llm` and observed model name |
-| Binding | Result and normalized-submission digests bind the semantic record to exact receipt bytes |
+| Before preparation and probes | Revokes the earlier semantic approval and writes a pending `review-invocation.json`. The executor receipt stays |
+| Assessment | Read only from the final native result string, parsed strictly. Extra fields, duplicate keys, code fences and other output files are rejected. A successful result must carry an equal `structured_output` |
+| Failure codes | `invocation_native_structured_output_invalid`, and `invocation_native_max_turns` or `invocation_native_structured_output_retries` for a run that hits its turn or schema-retry limit |
+| Reviewer metadata | The controller sets `reviewer.kind: llm` and the observed model name |
+| Binding | Result and submission digests bind the semantic record to the exact receipt bytes |
 | Missing or replaced native evidence | Blocks completion |
-| `passed` receipt | Valid assessment produced. Its judgments may still be `blocked` |
+| `passed` receipt | A valid assessment exists. Its judgments can still block completion |
 | Raw prompts and results | Not stored |
-| Historical completion | Validate pinned schema-v1 receipt against its own contract: review policy v1 (Claude Code 2.1.267+, Read/Grep/Glob) or v2. Runner upgrade alone does not reopen it |
-| New approval | Must satisfy the current contract |
 
 ## Automatic repair
 
-| `--exec --auto-repair` input | Requirement |
+`--exec --auto-repair` retries the executor when a fresh check fails for an
+ordinary reason inside the approved scope.
+
+| Input | Requirement |
 |---|---|
-| Spec | Structured acceptance and observed `run` for every verification entry |
+| Spec | Structured acceptance and an observed `run` for every verification entry |
 | Fixed across attempts | Task lock, original baseline, approved spec, effective policy and profile selection |
-| Fresh each attempt | Preflight iteration, invocation ID and context packet |
-| Receipts | Every check is a current success or fresh normal nonzero exit, with at least one failure |
-| Canonical report | Names the failed command, has `partial` status and classifies defects as `implementation_defect` |
-| Audit findings | Only corresponding verification/criterion failures, partial status or an unchanged expected file |
-| Defect label alone | Insufficient to authorize retry |
+| New each attempt | Preflight iteration, invocation ID and context packet |
+| Receipts | Every check is a current success or a fresh normal nonzero exit, with at least one failure |
+| Executor report | Names the failed command, has `partial` status and classifies defects as `implementation_defect` |
+| Audit findings | Only the matching check or criterion failures, partial status or an unchanged expected file |
+| Defect label alone | Not enough to retry |
 
 | Loop event or boundary | Result |
 |---|---|
-| Missing/stale receipt, incomplete input, conflicting claim, scope/symbol drift, permission failure, timeout or technical failure | Stop |
-| Feedback | Check/criterion IDs and bound input/audit digests from the in-memory audit. No executor excerpts or suggested remediation |
-| Freshness | Recheck full verification inputs, including `assume-unchanged` files |
-| Check executable | Pin the top-level executable before the first native call and around later calls |
-| Iteration budget | Cumulative, including prior preflights. 1–20, default 3. No unlimited budget or `--force-iteration` |
-| Invocation budget | Each attempt retains its time/turn limit |
-| Stopped loop | Records `run_preflight`. Ordinary resume and post-only cannot bypass it |
-| Held audit | Ends repair and proceeds to semantic review |
+| Missing or stale receipt, incomplete input, conflicting claim, scope or symbol drift, permission failure, timeout or technical failure | Stop |
+| Feedback to the executor | Check and criterion IDs and the bound input and audit digests. No executor excerpts and no suggested fix |
+| Freshness | Full verification inputs are checked again, `assume-unchanged` files included |
+| Check executable | Pinned before the first native call and checked around later calls |
+| Iteration budget | Cumulative, prior preflights included. 1-20, default 3. No unlimited budget and no `--force-iteration` |
+| Invocation budget | Each attempt keeps its own time and turn limit |
+| Stopped loop | Records `run_preflight`. Ordinary resume and `--post-only` can't skip it |
+| Held audit | Ends repair and moves to semantic review |
 
-Retry eligibility does not identify a failure's cause or prove tests were not
-weakened. Review still checks scope, assertion quality and useful completion.
+A retry doesn't find the cause of a failure and doesn't prove the tests were
+left intact. The review still checks scope, assertion quality and whether the
+result is useful.
 
 ### One semantic follow-up
 
@@ -475,24 +471,67 @@ mastermind run-task .mastermind/tasks/001-feature/spec.md \
 
 | Admission | Requirement |
 |---|---|
-| Mechanical state | Held audit, successful native executor and current checks |
-| Semantic source | Current pinned native review and unchanged supporting files |
-| Criteria | At least one `unsatisfied` criterion with a reason and evidence. No `unknown` criterion |
-| Other judgments | Verification quality, scope control and proportionality all `satisfied` |
-| Project history | Both context and lessons decisions are `no_change` |
+| Mechanical state | Held audit, successful native executor, current checks |
+| Semantic source | The current pinned native review, with unchanged supporting files |
+| Criteria | At least one `unsatisfied` criterion with a reason and evidence, and no `unknown` criterion |
+| Other judgments | Verification quality, scope control and proportionality are all `satisfied` |
+| Project history | Both the context and the lessons decision are `no_change` |
 | Contract | Same approved spec, scope, baseline, profile selection and executable pins |
-| Budget | At most one semantic retry in this controller invocation, within the cumulative 1–20 iteration limit |
-| Flags | Requires `--exec --auto-review`. Conflicts with `--pre-only`, `--post-only` and `--force-iteration` |
+| Budget | One semantic retry per controller invocation, inside the cumulative 1-20 iteration limit |
+| Flags | Needs `--exec --auto-review`. Refuses `--pre-only`, `--post-only` and `--force-iteration` |
 
 | Follow-up step | Behavior |
 |---|---|
-| Feedback | Cited unmet criteria and source digests, capped at 32 KiB. Reviewer reasons remain unverified data |
-| Execution | New preflight iteration and native invocation. No invented failed-check result |
+| Feedback | The cited unmet criteria and source digests, at most 32 KiB. Reviewer reasons are passed on as unverified data |
+| Execution | A new preflight iteration and native invocation. No failed check is invented |
 | Validation | Fresh checks, audit and a separate review before completion |
-| Second negative review or changed evidence | Stop. No second semantic retry |
-| Combined `--auto-repair` | Mechanical retries remain governed by their own admission rules and the same iteration budget |
-| Knowledge or scope changes | Require explicit follow-up outside this automatic semantic step |
+| Second negative review or changed evidence | Stop. There is no second semantic retry |
+| With `--auto-repair` | Mechanical retries follow their own rules and share the same iteration budget |
+| Knowledge or scope changes | Need an explicit follow-up outside this step |
 
-Limits and eligibility are defined in [auto_repair.rs](../../mcp/servers/mmcg/src/auto_repair.rs)
-and [run_task.rs](../../mcp/servers/mmcg/src/run_task.rs). The deterministic gates
-bind the feedback to its source. They do not verify the reviewer's interpretation.
+The gates bind the feedback to its source, but they don't check the reviewer's
+reading of it. The rules are in
+[auto_repair.rs](../../mcp/servers/mmcg/src/auto_repair.rs) and
+[run_task.rs](../../mcp/servers/mmcg/src/run_task.rs).
+
+## Task records are parsed strictly
+
+Mastermind writes these records itself, so it refuses any copy that a person or
+another tool changed into a shape it never writes. A repeated JSON key or a
+floating-point number makes the record invalid. Every SHA-256 digest, receipt
+ID, invocation ID and review pin in them must be lowercase hex. Records that
+4.0.x wrote still read.
+
+| Record | Error when invalid |
+|---|---|
+| `state.json` | The parse error, and the task stops |
+| Verification receipt `<task>/verification/<id>.json` | `receipt_invalid` |
+| Executor invocation receipt | `invocation_receipt_invalid` |
+| `review-invocation.json` | `review_invocation_receipt_invalid` |
+| Preflight approval | `preflight_approval_invalid` |
+| `review-task submit --report` file | `semantic_review_report_invalid` with the line and column |
+| Guarded execution decision log | `invocation_guard_invalid_json` |
+
+Output that a native client prints, such as stream events and the reviewer
+result, still refuses repeated keys but may contain numbers with a fraction.
+
+## Older task state
+
+A task written by an earlier release keeps working where the table says so.
+Otherwise finish it with the release that started it, or start a new task.
+
+| State | Behavior |
+|---|---|
+| `state.json` without `format_version` | Read as format 1, the current format |
+| `state.json` without `format_version` and an `executor-report.md` or `audit.md` beside a spec not named `spec.md` | Refused, because before 4.0 every spec in a folder shared these two names. The error lists one `mv` or `rm` command per old file. Run the ones for files of this task, move other files out of the folder, then run again. A spec that is itself named `audit.md` is not counted |
+| `state.json` with a newer `format_version` | Refused, with a message to continue with the newer binary |
+| Newer state, manifest or approval read by an older release | Refused. Finish or close open tasks before you downgrade |
+| State without an initial-worktree manifest | Audited from commit to worktree, with no exemption for earlier local changes |
+| Initial-worktree manifest with `schema_version` 1 | Readable, but preflight and postflight fail with `initial_worktree_schema_outdated`. Start a new task |
+| Manifest without `max_total_bytes` | Read against 1 GiB |
+| State without `snapshot_max_total_bytes` | Uses 32 MiB |
+| Approval receipt with `schema_version` 1 | Valid for its own audit. Reapproval fails with `preflight_approval_schema_outdated`. Start a new task |
+| State without retained approval files | `--pre-only` can keep earlier conditions only when the current spec matches the saved approved hash and the repository and baseline binding is valid. The receipt labels this `legacy_prior_approval`. Restore the approved spec first, run preflight, then revise and reapprove |
+| Review receipt with schema v1 | Checked against its own policy, v1 (Claude Code 2.1.267 or later, Read, Grep, Glob) or v2. A runner upgrade doesn't reopen it. A new approval needs the current contract |
+| `mode: lite` or `mode: standard` | Still accepted. New specs use `verified` or `strict` |
+| Task without a structured review | Completes from a bound audit snapshot and `history-review.md` decisions marked `updated` or `not applicable`, with a reason |

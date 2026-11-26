@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `style.db` is now format 2. The first writable open converts format 1
+  replacement records: a replaced preference or habit becomes `rejected`, and a
+  habit created by renewal goes back to `candidate` for a new review. Each
+  change gets a review event. Mastermind 4.0.x refuses a format 2 store.
+- The automatic profile refresh after a task, the task-boundary drain and
+  every command that writes the profile convert a format 1 store. A read-only
+  command, such as `habit show` or a profile read, does not convert it. While
+  the store still holds replacement records, it fails and says that the next
+  automatic refresh or any writing command converts them.
+- Task records refuse a repeated JSON key or a floating-point number:
+  `state.json`, verification, invocation and review invocation receipts,
+  preflight approvals, `review-task submit` reports and the guarded execution
+  decision log. Records written by 4.0.x still read.
+- Digests, receipt IDs, invocation IDs and review pins in those records must be
+  lowercase hex.
+
+### Changed
+
+- An index written with a newer extractor or concept contract is refused by
+  every open, the same as a newer schema version, and is never rebuilt.
+- A symlink or other non-regular source no longer makes the index stale for MCP
+  queries, `status` and `doctor`. It is still listed in `unindexable_sources`,
+  and `index` and `ci` still exit 1 for it. The `index` error now lists such
+  sources apart from retryable failures, which keep the index stale.
+- When `index` skips more submodules than it lists, it prints the total.
+- `enrich` takes the index writer lock for fact and SCIP imports.
+- Project history, workflow status and history review use one rule for task
+  folders, so a loose `*.md` file in `.mastermind/tasks` is never a task.
+- `mastermind update` checks every selected client before it writes anything
+  and lists each edited, linked or unowned workflow entry with a `Next:` step.
+  `--move-aside` moves them to `<client root>/.mastermind-preserved/<time>/`
+  and installs the bundled copies.
+- Updating from 4.0.x: the first `mastermind update` still runs the 4.0.x
+  updater, which has no `--move-aside` and stops at the first edited, linked or
+  unowned entry. Move those entries out of `~/.claude/skills`, `~/.claude/agents` and
+  `~/.codex/skills`, then run `mastermind update` again.
+
+### Fixed
+
+- A 4.0 task is no longer refused because an `executor-report.md` or
+  `audit.md` sits beside its spec. Only a task started before 4.0 gets the
+  old-name refusal, and a spec named `audit.md` never counts as its own old
+  audit.
+- `review-task` with a missing spec or a `_draft` folder no longer leaves a
+  controller lock or run-state directory behind.
+- Closing the terminal stops a running verification check, and its receipt is
+  `interrupted`.
+- Terminal control characters from the executor report are escaped in its
+  parse errors.
+- `audit verify` and workflow status fail at once on a FIFO in place of a file,
+  instead of hanging.
+- An audit bundle `snapshot_changed` error names its reason, such as
+  `snapshot_changed: worktree_not_clean`.
+- `run-task` says why it stopped when the task state disappears or cannot be
+  read after a review.
+- `serve` no longer fails with `database is locked` when it opens the index
+  right after an incremental `index`.
+- `watch` waits for another index writer with full refreshes that never use up
+  its three retries. It checks a removed path again under the writer lock and
+  parses under the lock, so it never commits content older than another
+  writer's.
+- Outside Git, a directory the walk may not read is skipped when the index
+  holds no source under it. Before, it failed the run.
+- `mmcg_context` and `mastermind context preview` return
+  `context_index_unavailable` for an index that exists but does not open, for
+  example one a newer mmcg wrote. Before, they built the packet without it.
+- `mmcg_unreferenced` hides only names that start with a literal `test_` in
+  test files. `_` was a wildcard, so names such as `testing` were hidden too.
+- `serve` prints a warning when it cannot remove its index snapshot on exit.
+  On Windows a snapshot that SQLite still holds open stays behind.
+- The hook journal no longer fills up with rows from ended sessions. Archiving
+  drops their event receipts and shrinks intake and task-mining rows to a
+  summary that `hooks show` still reads.
+- A full hook journal records the `journal_full` gap, `hooks status` lists the
+  steps to free space, and `hooks forget` works on a full journal.
+- One hook delivery spends at most 2.5 s in total waiting for the journal
+  lock, so a busy journal still leaves time to record the gap.
+- `hooks recover --project-root PATH` works after the project folder was
+  deleted or moved, and `doctor` prints that command for each such project.
+- `doctor` shows why hook readiness is unavailable, such as a journal from a
+  newer version.
+- `.DS_Store`, `__pycache__` and `*.pyc` files in installed workflow folders no
+  longer count as edits.
+- `init` and `status` print the reason and the `Next:` steps when a workflow
+  update fails, and `doctor --workflow` reports a linked or misplaced client
+  folder as a layout error with a recovery step.
+
+### Removed
+
+- The `mmcg_scratchpad_append` and `mmcg_scratchpad_read` MCP tools. An
+  existing index keeps the old table, and nothing reads it.
+- `miner feedback supersede`, `miner habit supersede` and `miner habit renew`.
+  To replace a claim, reject it and review a new one.
+- The generation column in `habit list`, and the relation and generation lines
+  in `habit show` and `feedback show`.
+
+### Development
+
+- Every workflow installs Rust from `rust-toolchain.toml`, and the validator
+  checks that the Docker Action builds with the same channel.
+- `just release-tags` dispatches the npm and crates.io publish dry runs and
+  waits for them and push CI. The publish verify job no longer repeats the
+  tests in release mode.
+- New `just release-check` and `just test-linux`. `just index`, `just outline`
+  and `just recent` are gone.
+- Dependencies: notify 9, cargo-deny-action 2.1.4 with `unmaintained = "all"`,
+  PyYAML 6.0.4 and a lockfile refresh.
+
 ## [4.0.1] - 2026-11-26
 
 ### Fixed

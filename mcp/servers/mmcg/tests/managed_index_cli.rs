@@ -211,7 +211,7 @@ fn default_source_review_commands_refresh_the_repository_index() {
 
 #[cfg(unix)]
 #[test]
-fn source_symlink_is_named_by_index_and_index_stale() {
+fn source_symlink_fails_index_but_leaves_structural_queries_fresh() {
     let fixture = Fixture::new();
     std::os::unix::fs::symlink("probe.py", fixture.root.join("alias.py")).unwrap();
 
@@ -220,15 +220,9 @@ fn source_symlink_is_named_by_index_and_index_stale() {
     let stderr = String::from_utf8_lossy(&index.stderr);
     assert!(stderr.contains("failed source: \"alias.py\""), "{stderr}");
 
-    let result = fixture.search(None);
-    assert_eq!(result["isError"], true, "{result}");
-    let payload = &result["structuredContent"];
-    assert_eq!(payload["code"], "index_stale", "{result}");
-    assert_eq!(
-        payload["unindexable_sources"],
-        json!(["alias.py"]),
-        "{result}"
-    );
+    let result = fixture.search_name(None, "original_refresh");
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(result["structuredContent"]["count"], 1, "{result}");
 
     let query = fixture
         .command()
@@ -237,7 +231,7 @@ fn source_symlink_is_named_by_index_and_index_stale() {
         .unwrap();
     assert_success(&query);
     let stderr = String::from_utf8_lossy(&query.stderr);
-    assert!(stderr.contains("never index: alias.py"), "{stderr}");
+    assert!(!stderr.contains("not current"), "{stderr}");
 }
 
 #[cfg(unix)]

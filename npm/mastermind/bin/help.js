@@ -48,11 +48,14 @@ Options:
   --profile core|frontend|security|full     Preserve each installed profile by default
   --dry-run                              Show a local plan without changes or network calls
   --workflow-only                        Refresh workflows from the current package
+  --move-aside                           Move edited, linked or unowned workflow entries
+                                         into <client root>/.mastermind-preserved/ first
   --json                                 Print structured results
   -h, --help                              Show this help
 
 Workflow-only mode leaves the npm package and native binary unchanged.
-Locally modified workflow files block overwrite.
+Locally modified workflow files are never overwritten. Without --move-aside
+they stop the update, and each one is listed with a Next: step.
 `;
 
 const LIST = `Usage: mastermind list [options]

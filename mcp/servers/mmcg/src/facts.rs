@@ -608,7 +608,7 @@ pub(crate) fn repository_identity(root: &Path) -> Result<String, FactError> {
 
 #[derive(Debug)]
 pub(crate) enum RepositoryIdentityError {
-    Git(crate::diff::WorkingTreeDiffError),
+    Git(crate::git::WorkingTreeDiffError),
     #[cfg(not(windows))]
     InvalidPath,
     Root(crate::bounded_fs::BoundedReadError),
@@ -650,7 +650,7 @@ pub(crate) fn repository_identity_until(
     root: &Path,
     deadline: Option<Instant>,
 ) -> Result<String, RepositoryIdentityError> {
-    let output = crate::diff::run_bounded_git_controlled(
+    let output = crate::git::run_bounded_git_controlled(
         root,
         &["config", "--get", "remote.origin.url"],
         None,
@@ -704,7 +704,7 @@ fn repository_contract(store: &Store) -> Result<FactRepository, FactError> {
         .map_err(|error| FactError::Store(format!("resolve index root: {error}")))?;
     crate::indexer::validate_index_root(store, &root).map_err(FactError::Store)?;
     let revision =
-        crate::diff::current_head_oid(&root).map_err(|error| FactError::Git(error.to_string()))?;
+        crate::git::current_head_oid(&root).map_err(|error| FactError::Git(error.to_string()))?;
     Ok(FactRepository {
         identity: repository_identity(&root)?,
         revision,
@@ -1189,14 +1189,6 @@ fn revalidate_batch_snapshot(
     Ok(())
 }
 
-pub fn import(store: &Store, manifest_path: &Path) -> Result<FactImportSummary, FactError> {
-    import_with_trust(
-        store,
-        manifest_path,
-        &crate::fact_signature::FactTrustPolicy::default(),
-    )
-}
-
 pub fn import_with_trust(
     store: &Store,
     manifest_path: &Path,
@@ -1205,6 +1197,9 @@ pub fn import_with_trust(
     let bytes = read_regular(manifest_path, MAX_MANIFEST_BYTES, "fact manifest")?;
     let trust = crate::fact_signature::verify_bytes(&bytes, policy)
         .map_err(|error| FactError::Signature(error.to_string()))?;
+    let _writer = store
+        .lock_writer()
+        .map_err(|error| FactError::Store(error.to_string()))?;
     let (mut batch, contract) = build_batch_from_bytes(store, &bytes)?;
     batch.source.signature_status = trust.signature_status.into();
     batch.source.signing_key_id = trust.signing_key_id;
@@ -1869,7 +1864,12 @@ mod tests {
     fn imports_and_queries_revision_bound_normalized_facts() {
         let fixture = fixture();
         let path = write_manifest(&fixture, &manifest(&fixture), "facts.json");
-        let summary = import(&fixture.store, &path).unwrap();
+        let summary = import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         assert!(!summary.replaced_previous_dataset);
         assert_eq!(summary.contract.api_version, API_VERSION);
         assert_eq!(summary.source.producer, "com.example.arch-lint");
@@ -1936,7 +1936,12 @@ mod tests {
             annotation("z.error", 2, "error"),
         ]);
         for (value, name) in [(&small, "small.json"), (&bulk, "bulk.json")] {
-            import(&fixture.store, &write_manifest(&fixture, value, name)).unwrap();
+            import_with_trust(
+                &fixture.store,
+                &write_manifest(&fixture, value, name),
+                &crate::fact_signature::FactTrustPolicy::default(),
+            )
+            .unwrap();
         }
 
         let snapshot = snapshot(&fixture.store, ".", 2).unwrap();
@@ -1972,7 +1977,12 @@ mod tests {
     fn path_scoped_snapshot_marks_facts_incomplete_when_impact_scope_is_partial() {
         let fixture = fixture();
         let path = write_manifest(&fixture, &manifest(&fixture), "facts.json");
-        import(&fixture.store, &path).unwrap();
+        import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         let paths = BTreeSet::from(["src/lib.rs".to_string()]);
 
         let snapshot = snapshot_for_paths(&fixture.store, &paths, 100, None, true).unwrap();
@@ -2000,15 +2010,24 @@ mod tests {
         let fixture = fixture();
         let valid = manifest(&fixture);
         let valid_path = write_manifest(&fixture, &valid, "facts.json");
-        import(&fixture.store, &valid_path).unwrap();
+        import_with_trust(
+            &fixture.store,
+            &valid_path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
 
         let mut invalid = valid;
         invalid["facts"][0]["path"] = json!("../src/lib.rs");
         let invalid_path = write_manifest(&fixture, &invalid, "invalid-facts.json");
-        assert!(import(&fixture.store, &invalid_path)
-            .unwrap_err()
-            .to_string()
-            .contains("fact paths"));
+        assert!(import_with_trust(
+            &fixture.store,
+            &invalid_path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("fact paths"));
 
         let snapshot = snapshot(&fixture.store, ".", 100).unwrap();
         assert_eq!(snapshot.annotations.items.len(), 1);
@@ -2025,31 +2044,49 @@ mod tests {
         let mut unknown = value.clone();
         unknown["command"] = json!("./plugin");
         let path = write_manifest(&fixture, &unknown, "unknown.json");
-        assert!(import(&fixture.store, &path).is_err());
+        assert!(import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .is_err());
 
         let raw = serde_json::to_string(&value).unwrap();
         let duplicate = raw.replacen("{", "{\"api_version\":\"mastermind-facts/v1\",", 1);
         let duplicate_path = fixture.root.path().join("duplicate.json");
         fs::write(&duplicate_path, duplicate).unwrap();
-        assert!(import(&fixture.store, &duplicate_path)
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate"));
+        assert!(import_with_trust(
+            &fixture.store,
+            &duplicate_path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate"));
 
         let mut unsupported = value;
         unsupported["capabilities"] = json!(["native-code"]);
         let path = write_manifest(&fixture, &unsupported, "unsupported.json");
-        assert!(import(&fixture.store, &path)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported capability"));
+        assert!(import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported capability"));
 
         for noncanonical in ["./src/lib.rs", "src/./lib.rs", "src/lib.rs/"] {
             let mut invalid_path = manifest(&fixture);
             invalid_path["files"][0]["path"] = json!(noncanonical);
             let path = write_manifest(&fixture, &invalid_path, "noncanonical.json");
             assert!(
-                import(&fixture.store, &path).is_err(),
+                import_with_trust(
+                    &fixture.store,
+                    &path,
+                    &crate::fact_signature::FactTrustPolicy::default()
+                )
+                .is_err(),
                 "accepted {noncanonical}"
             );
         }
@@ -2062,13 +2099,22 @@ mod tests {
         wrong_revision["repository"]["revision"] =
             json!("0000000000000000000000000000000000000000");
         let path = write_manifest(&fixture, &wrong_revision, "wrong-revision.json");
-        assert!(import(&fixture.store, &path)
-            .unwrap_err()
-            .to_string()
-            .contains("revision"));
+        assert!(import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("revision"));
 
         let path = write_manifest(&fixture, &manifest(&fixture), "facts.json");
-        import(&fixture.store, &path).unwrap();
+        import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         fs::write(
             fixture.root.path().join("src/lib.rs"),
             "pub fn charge() { changed(); }\nfn changed() {}\n",
@@ -2086,7 +2132,12 @@ mod tests {
     fn provenance_drift_suppresses_normalized_facts() {
         let fixture = fixture();
         let path = write_manifest(&fixture, &manifest(&fixture), "facts.json");
-        import(&fixture.store, &path).unwrap();
+        import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default(),
+        )
+        .unwrap();
         fs::write(
             fixture.root.path().join("reports/analyzer.json"),
             b"{\"changed\":true}\n",
@@ -2118,10 +2169,14 @@ mod tests {
         let mut value = manifest(&fixture);
         value["artifacts"][0]["path"] = json!("linked-reports/analyzer.json");
         let path = write_manifest(&fixture, &value, "symlinked-artifact.json");
-        assert!(import(&fixture.store, &path)
-            .unwrap_err()
-            .to_string()
-            .contains("symlink"));
+        assert!(import_with_trust(
+            &fixture.store,
+            &path,
+            &crate::fact_signature::FactTrustPolicy::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("symlink"));
     }
 
     #[test]

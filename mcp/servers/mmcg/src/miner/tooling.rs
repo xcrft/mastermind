@@ -8,7 +8,7 @@
 //! current configuration is applied to older commits as well, which errs toward
 //! withholding a personal claim rather than inventing one.
 
-use crate::diff::{run_bounded_git_controlled, WorkingTreeDiffError};
+use crate::git::{run_bounded_git_controlled, WorkingTreeDiffError};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 

@@ -2,7 +2,9 @@
 
 Portable task capabilities included in the npm workflow bundle. Use the skill
 that matches the work. Claude Code-specific roles are listed in
-[agents](../agents/). Install with the [client setup guides](../docs/integrations/generic-mcp.md).
+[agents](../agents/). `mastermind init` installs them, and
+`mastermind update --workflow-only` refreshes them, see
+[getting started](../docs/getting-started.md).
 
 `just validate` checks this catalogue and bundle staging against the shipped
 `SKILL.md` files.

@@ -1,8 +1,8 @@
 //! Retained successful preconditions allow explicit reapproval after implementation.
 
 use crate::bounded_fs::{self, BoundedReadError, ReadControl};
-use crate::run_task::RunState;
 use crate::spec::{self, ParsedSpec, SymbolSpec, TouchEntry};
+use crate::task_record::RunState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ fn valid_hash(value: &str) -> bool {
 }
 
 fn directory(root: &Path, spec: &Path) -> PathBuf {
-    crate::run_task::state_file_path(root, spec).with_file_name("preflight-approvals")
+    crate::task_record::state_file_path(root, spec).with_file_name("preflight-approvals")
 }
 
 fn initial_revision(state: &RunState) -> Result<Option<String>, String> {
@@ -101,20 +101,21 @@ fn load(
             RECEIPT_LIMIT.min(remaining),
         )?;
         remaining -= bytes.len() as u64;
-        if crate::run_task::hash_text(
+        if crate::task_record::hash_text(
             std::str::from_utf8(&bytes).map_err(|_| "preflight_approval_invalid")?,
         ) != pin
         {
             return Err("preflight_approval_changed".into());
         }
         let record: Approval =
-            serde_json::from_slice(&bytes).map_err(|_| "preflight_approval_invalid")?;
+            crate::strict_json::from_slice(&bytes, crate::strict_json::Floats::Reject)
+                .map_err(|_| "preflight_approval_invalid")?;
         if !(1..=SCHEMA_VERSION).contains(&record.schema_version)
             || state.repository_identity.as_deref() != Some(record.repository_identity.as_str())
             || record.spec_path != state.spec_path
             || !valid_hash(&record.spec_sha256)
             || record.baseline_oid != state.baseline_ref
-            || !crate::diff::is_full_git_oid(&record.baseline_oid)
+            || !crate::git::is_full_git_oid(&record.baseline_oid)
             || record.initial_worktree_revision != initial
             || record.iteration == 0
             || record.iteration > state.iteration
@@ -141,7 +142,7 @@ fn load(
         )?;
         remaining -= body.len() as u64;
         let body = String::from_utf8(body).map_err(|_| "preflight_approval_spec_invalid")?;
-        if crate::run_task::hash_text(&body) != record.spec_sha256 {
+        if crate::task_record::hash_text(&body) != record.spec_sha256 {
             return Err("preflight_approval_spec_changed".into());
         }
         let parsed = spec::parse_str(&record.spec_path, &body);
@@ -221,7 +222,7 @@ pub(crate) fn prepare(
         return Ok(validation);
     };
     let historical = match load(root, spec_path, previous)? {
-        Some(_) if crate::run_task::spec_hash_matches(&previous.spec_hash, body) => {
+        Some(_) if crate::task_record::spec_hash_matches(&previous.spec_hash, body) => {
             // An unchanged contract requests fresh validation, not amendment recovery.
             return Ok(validation);
         }
@@ -237,8 +238,8 @@ pub(crate) fn prepare(
             && previous.repository_identity.is_some()
             && previous.iteration > 0
             && previous.started_at > 0
-            && crate::diff::is_full_git_oid(&previous.baseline_ref)
-            && crate::run_task::spec_hash_matches(&previous.spec_hash, body) =>
+            && crate::git::is_full_git_oid(&previous.baseline_ref)
+            && crate::task_record::spec_hash_matches(&previous.spec_hash, body) =>
         {
             // A failed retry may have advanced the counter. This preserves
             // prior contract approval, not an invented original attempt.
@@ -324,7 +325,7 @@ pub(crate) fn retain(
             .clone()
             .ok_or("preflight_approval_repository_missing")?,
         spec_path: state.spec_path.clone(),
-        spec_sha256: crate::run_task::hash_text(body),
+        spec_sha256: crate::task_record::hash_text(body),
         baseline_oid: state.baseline_ref.clone(),
         initial_worktree_revision: initial_revision(state)?,
         iteration: state.iteration,
@@ -338,7 +339,7 @@ pub(crate) fn retain(
     if bytes.len() as u64 > RECEIPT_LIMIT || body.len() as u64 > SPEC_LIMIT {
         return Err("preflight_approval_limit".into());
     }
-    let pin = crate::run_task::hash_text(std::str::from_utf8(&bytes).expect("JSON is UTF-8"));
+    let pin = crate::task_record::hash_text(std::str::from_utf8(&bytes).expect("JSON is UTF-8"));
     let directory = directory(root, spec);
     write_immutable(
         root,
@@ -363,7 +364,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "spec_path": ".mastermind/tasks/001-reapproval/spec.md",
             "repository_identity": format!("git-worktree:sha256:{}", "a".repeat(64)),
-            "spec_hash": crate::run_task::hash_text(body),
+            "spec_hash": crate::task_record::hash_text(body),
             "baseline_ref": "b".repeat(40), "started_at": 123, "iteration": 1
         }))
         .unwrap()
@@ -422,7 +423,7 @@ mod tests {
         let current = std::fs::read_to_string(directory.join(format!("{pin}.json"))).unwrap();
         let older = current.replace("\"schema_version\":2", "\"schema_version\":1");
         assert_ne!(older, current);
-        let older_pin = crate::run_task::hash_text(&older);
+        let older_pin = crate::task_record::hash_text(&older);
         std::fs::write(directory.join(format!("{older_pin}.json")), older).unwrap();
         let revised = BODY.replace("Phase 1", "Phase renamed");
         let parsed = spec::parse_str(&previous.spec_path, &revised);
@@ -452,7 +453,7 @@ mod tests {
         let directory = directory(root.path(), &path);
         let current = std::fs::read_to_string(directory.join(format!("{pin}.json"))).unwrap();
         let older = current.replace("\"schema_version\":2", "\"schema_version\":1");
-        let older_pin = crate::run_task::hash_text(&older);
+        let older_pin = crate::task_record::hash_text(&older);
         std::fs::write(directory.join(format!("{older_pin}.json")), older).unwrap();
 
         previous.preflight_approval_sha256 = Some(pin);
@@ -530,7 +531,7 @@ mod tests {
                 prepare(root.path(), &path, &parsed, &revised, Some(&previous), true).unwrap();
             previous.iteration = 2;
             previous.started_at = 124;
-            previous.spec_hash = crate::run_task::hash_text(&revised);
+            previous.spec_hash = crate::task_record::hash_text(&revised);
             previous.preflight_approval_sha256 =
                 Some(retain(root.path(), &path, &previous, &revised, &validation, true).unwrap());
             assert!(validate(root.path(), &path, &previous).is_ok());
@@ -596,7 +597,7 @@ mod tests {
             prepare(root.path(), &path, &parsed, &revised, Some(&previous), true).unwrap();
         let mut child = previous.clone();
         child.iteration = 2;
-        child.spec_hash = crate::run_task::hash_text(&revised);
+        child.spec_hash = crate::task_record::hash_text(&revised);
         child.snapshot_max_total_bytes = Some(67_108_864);
         child.preflight_approval_sha256 =
             Some(retain(root.path(), &path, &child, &revised, &validation, true).unwrap());

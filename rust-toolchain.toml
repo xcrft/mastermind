@@ -1,3 +1,7 @@
+# The only place that names the Rust version. CI installs it with
+# `rustup toolchain install`, and scripts/validate.py checks that
+# Dockerfile.audit-action builds with the same channel.
 [toolchain]
 channel = "1.100.0"
+profile = "minimal"
 components = ["clippy", "rustfmt"]

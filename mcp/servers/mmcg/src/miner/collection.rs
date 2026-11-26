@@ -56,11 +56,11 @@ fn detect_text(text: &str, expanded: bool) -> Option<(String, &'static str, &'st
         return None;
     }
     // Never combine visible fragments across quoted/code/HTML material.
-    let visible: HashSet<usize> = crate::context_doctor::prose_lines(text)
+    let visible: HashSet<usize> = crate::document_sections::prose_lines(text)
         .into_iter()
         .map(|line| line.index)
         .collect();
-    if crate::context_doctor::source_lines(text)
+    if crate::document_sections::source_lines(text)
         .iter()
         .any(|line| !line.text.trim().is_empty() && !visible.contains(&line.index))
     {

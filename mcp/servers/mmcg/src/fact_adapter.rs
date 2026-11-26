@@ -405,7 +405,7 @@ pub fn adapt(store: &Store, options: &AdaptOptions<'_>) -> Result<AdaptSummary, 
     // A ref or abbreviated OID would be resolved against the same HEAD it is
     // compared with, so it could never fail. Only the producer's full OID is a
     // claim about which code the report describes.
-    if !crate::diff::is_full_git_oid(options.report_revision) {
+    if !crate::git::is_full_git_oid(options.report_revision) {
         return Err(contract_error(
             "--report-revision must be the full lowercase commit OID the report was produced from",
         ));

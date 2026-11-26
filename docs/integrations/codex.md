@@ -1,6 +1,8 @@
 # Codex integration
 
-Install portable skills and connect the local graph through user-scope MCP.
+`mastermind init --client codex` connects Codex to the local graph through
+user-scope MCP and installs the portable skills and the workflow block in
+`AGENTS.md`. Codex uses skills, not the Claude subagent files.
 
 ## Install
 
@@ -12,17 +14,20 @@ mastermind status
 mastermind doctor --workflow --client codex
 ```
 
-| Setting | Behavior |
-|---|---|
-| Fresh install | `core` skills |
-| `mastermind update --workflow-only --client codex --profile frontend` | Select frontend skills. Other profiles are `security` and `full` |
-| Update without `--profile` | Keep the selected profile |
-| Agent runtime | Codex uses portable skills, not Claude-native subagent files |
+`doctor --workflow` comes from the npm package. What else `init` does on the
+first run is in [getting started](../getting-started.md).
 
-First init indexes the project, enables profile delivery and configures task
-mining in the current Codex agent. Restart Codex, trust the project and inspect
-`/hooks`. On Windows use `--mining off`, since native hooks require Unix.
-See [onboarding](../getting-started.md) for mode choices.
+Restart Codex, trust the project and look at `/hooks`. Native hooks need macOS
+or Linux, so on Windows run `init` with `--mining off`.
+
+A fresh install selects the `core` skills. To switch the bundle:
+
+```bash
+mastermind update --workflow-only --client codex --profile frontend
+```
+
+The other profiles are `security` and `full`, and an update without `--profile`
+keeps the installed one.
 
 ## Register MCP only
 
@@ -31,58 +36,38 @@ mastermind setup codex --scope user
 mastermind setup codex --scope user --write
 ```
 
-Setup previews first, uses `codex mcp` to apply, then checks the enabled `mmcg`
-entry. Project-scope setup is unsupported. Restart Codex afterward.
+The first command previews. The second applies the change through `codex mcp`
+and then checks the enabled `mmcg` entry. Codex has no project-scope setup, so
+`--scope project` is refused. Restart Codex afterwards.
 
 ## Use the task workflow
 
-| Step | Owner |
+| Step | Who does it |
 |---|---|
-| Approve spec and run preflight | Planner and controller |
-| Implement and write executor report | Codex |
-| Run declared checks and postflight | Runner and controller |
-| Assess evidence and resolve history | Reviewer |
+| Approve the spec and run preflight | Planner and controller |
+| Implement and write the executor report | Codex |
+| Run the declared checks and postflight | Check runner and controller |
+| Assess the evidence and decide on project knowledge | Reviewer |
 | Complete | Controller |
 
-See [Workflow](../workflow.md) for commands.
-`run-task --exec` and `review-task run` launch Claude Code, even when the
-implementation was done in Codex.
+The [workflow guide](../workflow.md) has the commands. `run-task --exec` and
+`review-task run` launch Claude Code, even when Codex did the implementation.
 
 ## Route reasoning effort
 
-The core workflow includes `mastermind-agent-handoff`. Planning, research and
-delegated execution use it before each new agent:
+The core workflow includes the `mastermind-agent-handoff` skill. Planning,
+research and delegated execution use it before each new agent:
 
-1. Declare the receiving agent's duty, family, source scope and risk to `mmcg_effort_route` or `mastermind effort-route`.
-2. Merge returned `codex_spawn_args` into the ordinary `spawn_agent` call; carry the bounded role/task packet into the fresh child.
-3. Retain the decision and child ID, then check that child's own `turn_context.effort`.
+1. Send the receiving agent's duty, family, source scope and risk to `mmcg_effort_route` or `mastermind effort-route`.
+2. Merge the returned `codex_spawn_args` into the normal `spawn_agent` call, and pass the bounded role and task packet to the new child.
+3. Keep the decision and the child ID, then check the child's own `turn_context.effort`.
 
-See [effort routing](../guides/effort-routing.md) for inputs, launch commands,
-fallbacks and evidence. Preserve the selected model and permissions. A
-full-history fork retains parent effort and is recorded as `not_applied`.
+A full-history fork keeps the parent's effort and is recorded as `not_applied`.
+The selected model and permissions stay as they are.
+[Effort routing](../guides/effort-routing.md) has the inputs, launch commands
+and fallbacks.
 
-### Resolve a competing dispatcher
-
-TokenX assignment routing rejects explicit `reasoning_effort` fields. When it
-is active, stop the handoff before spawn and let the user select one effort
-authority.
-
-To select Mastermind globally while keeping TokenX installed:
-
-1. Open `/hooks` in the Codex CLI and locate the TokenX hooks.
-2. Disable its non-managed `PreToolUse`, `SessionStart`, `SessionEnd` and `UserPromptSubmit` hooks. Preserve other hooks and their trust records.
-3. Start a new session. Verify those hooks are disabled and no TokenX assignment instruction is active before applying a route.
-
-| Configuration | Verification or recovery |
-|---|---|
-| Non-managed TokenX hooks | Must be disabled in the native hook inventory |
-| Managed hook | Cannot be disabled in user controls; resolve with its administrator |
-| Local `plugins.enabled = false` | Remote registries can retain enabled catalog state; the written setting alone is insufficient |
-| Restore TokenX routing | Select it as effort authority and re-enable only its hooks, preserving previous trust hashes |
-
-See [Codex hook controls](https://developers.openai.com/codex/hooks#review-and-trust-hooks).
-
-## Verify or remove
+## Check or remove
 
 ```bash
 mastermind doctor
@@ -90,13 +75,13 @@ mastermind setup codex --scope user --remove
 mastermind setup codex --scope user --remove --write
 ```
 
-| Condition | Behavior |
+| Condition | What to do |
 |---|---|
-| Matching enabled entry | No change |
-| Customized or disabled entry | Requires `--force` and `--write` |
-| Native registration changed | Setup checks the resulting entry |
-| Doctor | Reads `[mcp_servers.mmcg]` in `~/.codex/config.toml` |
+| Entry matches and is enabled | Nothing |
+| Customized or disabled entry | Add `--force` with `--write` |
+| `doctor` reports a problem | It reads `[mcp_servers.mmcg]` in `~/.codex/config.toml`. A registered entry still needs a working server handshake |
+| Another dispatcher such as TokenX rejects explicit `reasoning_effort` | Pick one effort authority. The handoff skill stops before spawn until you do. To use Mastermind, disable that dispatcher's non-managed hooks in `/hooks` and start a new session, see [Codex hook controls](https://developers.openai.com/codex/hooks#review-and-trust-hooks) |
 
-Registration checks and server handshake are distinct.
-Init configures capture and profile read grants for this client and project.
-[Persona hooks](../guides/persona-hooks.md) covers source inspection and review.
+`init` also sets up capture and profile read grants for this client and
+project. [Persona hooks](../guides/persona-hooks.md) covers source inspection
+and review.

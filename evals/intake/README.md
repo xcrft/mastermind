@@ -1,7 +1,7 @@
 # Refiner evaluation
 
 Run the 40-case multilingual corpus through the production refiner parser.
-Select an installed processor explicitly; the harness does not choose a provider
+Select an installed processor explicitly, because the harness never chooses a provider
 or credentials. Ordinary Python tests use disposable processors without model calls.
 
 ```sh
@@ -13,14 +13,14 @@ python3 -m evals.intake --binary /absolute/path/to/mmcg \
 | Setting | Contract |
 |---|---|
 | Processor | Must implement the native refiner JSON protocol |
-| Arguments | Repeat `--processor-arg=VALUE`; do not pass credentials as arguments |
+| Arguments | Repeat `--processor-arg=VALUE`. Never pass credentials as arguments |
 | Corpus | `cases.jsonl`, synthetic intent and active-task scenarios |
-| Repetitions | 1–5, all attempts retained |
-| Native timeout | 1–20 seconds; processor budget is 0.25 seconds shorter for recorder finalization |
+| Repetitions | 1-5, all attempts kept |
+| Native timeout | 1-20 seconds. The processor budget is 0.25 seconds shorter so the recorder can finish |
 | Output | New private directory, bounded request/response streams, status and digests |
-| Publication | `admission: false`; no chat capture or task publication |
+| Publication | `admission: false`, no chat capture or task publication |
 | Labels | Hidden from the processor, supplied by the implementation author |
-| Unknowns | Independent label review and real-world semantic quality remain unestablished |
+| Unknowns | Independent label review and real-world semantic quality are unmeasured |
 
 Protocol admission and label agreement describe this corpus. They do not show
 that a refined prompt improves a task. For that comparison, freeze the original

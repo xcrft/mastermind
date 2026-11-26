@@ -291,7 +291,7 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
         return Err("invalid_spec_frontmatter".into());
     }
     validate_declarations(&spec)?;
-    let state_path = crate::run_task::state_file_path(
+    let state_path = crate::task_record::state_file_path(
         root.requested_root(),
         &root.requested_root().join(&spec_path),
     );
@@ -307,16 +307,16 @@ fn context(spec_path: &Path, repo_root: &Path, deadline: Instant) -> Result<Cont
     )
     .map_err(|e| format!("preflight_state_unavailable: {e}"))?
     .bytes;
-    let state = crate::run_task::parse_run_state(&state_body)?;
+    let state = crate::task_record::parse_run_state(&state_body)?;
     let repository = crate::facts::repository_identity_until(root.canonical_root(), Some(deadline))
         .map_err(|e| format!("repository_identity_unavailable: {e}"))?;
     if interrupted() {
         return Err("verification_interrupted".into());
     }
-    crate::run_task::validate_bound_state_identity(&repository, &spec_path, &state)?;
-    if !crate::run_task::spec_hash_matches(&state.spec_hash, &body)
+    crate::task_record::validate_bound_state_identity(&repository, &spec_path, &state)?;
+    if !crate::task_record::spec_hash_matches(&state.spec_hash, &body)
         || state.next_step.as_deref() == Some("run_preflight")
-        || !crate::diff::is_full_git_oid(&state.baseline_ref)
+        || !crate::git::is_full_git_oid(&state.baseline_ref)
         || state.iteration == 0
     {
         return Err("current_explicit_preflight_required".into());
@@ -389,7 +389,9 @@ fn read_receipt_bytes(
 }
 
 fn decode_receipt(bytes: &[u8]) -> Result<Receipt, String> {
-    let receipt: Receipt = serde_json::from_slice(bytes).map_err(|_| "receipt_invalid")?;
+    let receipt: Receipt =
+        crate::strict_json::from_slice(bytes, crate::strict_json::Floats::Reject)
+            .map_err(|_| "receipt_invalid")?;
     if receipt.schema_version != 1
         || receipt.snapshot_version != SNAPSHOT_VERSION
         || receipt.attempt == 0
@@ -437,7 +439,7 @@ pub(crate) fn history_paths(
     spec_path: &Path,
 ) -> Result<Vec<PathBuf>, String> {
     validate_declarations(spec)?;
-    let state = crate::run_task::state_file_path(root, spec_path);
+    let state = crate::task_record::state_file_path(root, spec_path);
     let directory = if state.file_name().is_some_and(|name| name == "state.json") {
         state.with_file_name("verification")
     } else {
@@ -476,7 +478,7 @@ pub(crate) fn current_digests(checks: &[CheckEvidence]) -> Result<Vec<String>, S
             check
                 .receipt_revision
                 .as_ref()
-                .filter(|revision| valid_hex(revision, 64))
+                .filter(|revision| crate::hex::is_lower(revision, 64))
                 .cloned()
                 .ok_or_else(|| format!("{}: receipt_revision_unavailable", check.id))
         })
@@ -678,10 +680,6 @@ fn inspect_checks_with_mode(
     Ok(evidence)
 }
 
-fn valid_hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 fn inspect_receipt(
     context: &Context,
     command: &str,
@@ -709,7 +707,7 @@ fn inspect_receipt(
             return Ok(evidence);
         }
     };
-    evidence.run_id = valid_hex(&receipt.run_id, 32).then(|| receipt.run_id.clone());
+    evidence.run_id = crate::hex::is_lower(&receipt.run_id, 32).then(|| receipt.run_id.clone());
     let classification = if receipt.provenance != "local_runner_unsigned" {
         Some((CheckEvidenceStatus::Unavailable, "receipt_source_unknown"))
     } else if evidence.run_id.is_none() {
@@ -781,7 +779,7 @@ fn inspect_receipt(
             .iter()
             .any(|stream| {
                 stream.is_none_or(|stream| {
-                    stream.bytes > 1024 * 1024 || !valid_hex(&stream.sha256, 64)
+                    stream.bytes > 1024 * 1024 || !crate::hex::is_lower(&stream.sha256, 64)
                 })
             })
     {
@@ -903,7 +901,7 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Snapsho
         "diff.external=",
     ];
     controlled.extend_from_slice(args);
-    let result = crate::diff::run_bounded_git_controlled(
+    let result = crate::git::run_bounded_git_controlled(
         root,
         &controlled,
         None,
@@ -914,8 +912,8 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, Snapsho
     .map_err(|error| {
         SnapshotFailure::new(
             match error {
-                crate::diff::WorkingTreeDiffError::SnapshotChanged => Status::InputChanged,
-                crate::diff::WorkingTreeDiffError::GitTimeout => Status::Timeout,
+                crate::git::WorkingTreeDiffError::SnapshotChanged => Status::InputChanged,
+                crate::git::WorkingTreeDiffError::GitTimeout => Status::Timeout,
                 _ => Status::Unavailable,
             },
             format!("verification_snapshot_{}", error.code()),
@@ -1298,7 +1296,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, check_id: &str) -> Result<Receipt
     static RUNNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _process_lock = RUNNING.try_lock().map_err(|_| "verification_busy")?;
     let _cancellation = Cancellation::install()?;
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let context = context(spec_path, repo_root, deadline)?;
     let (command, declaration) = declarations(&context.spec)
         .into_iter()
@@ -1384,7 +1382,7 @@ pub fn run(spec_path: &Path, repo_root: &Path, check_id: &str) -> Result<Receipt
     receipt.duration_ms = observation.duration_ms;
     receipt.stdout = observation.stdout;
     receipt.stderr = observation.stderr;
-    let deadline = Instant::now() + crate::diff::git_timeout();
+    let deadline = Instant::now() + crate::git::git_timeout();
     let after = snapshot(
         &context.root,
         &context.binding.baseline_oid,
@@ -1616,28 +1614,36 @@ extern "C" fn interrupt(_signal: libc::c_int) {
     INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Ctrl-C, `kill` and a closed terminal each call `handler` instead of
+/// killing the runner, so the runner can stop its child group and record the
+/// interruption. Drop restores the handlers it replaced.
 #[cfg(unix)]
-struct Cancellation {
-    previous: [libc::sigaction; 2],
+pub(crate) struct CancelSignals {
+    previous: [libc::sigaction; 3],
 }
 
 #[cfg(unix)]
-impl Cancellation {
-    fn install() -> Result<Self, String> {
-        // SAFETY: libc initializes the saved handlers; the new handler only
-        // updates an atomic flag. The run mutex serializes this registration.
+impl CancelSignals {
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// The caller serializes installation and passes a handler that only
+    /// stores to an atomic.
+    pub(crate) fn install(handler: extern "C" fn(libc::c_int)) -> std::io::Result<Self> {
+        // SAFETY: libc initializes the saved handlers, and each one is
+        // restored before an error returns.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            let mut previous: [libc::sigaction; 2] = std::mem::zeroed();
-            action.sa_sigaction = interrupt as *const () as usize;
+            let mut previous: [libc::sigaction; 3] = std::mem::zeroed();
+            action.sa_sigaction = handler as *const () as usize;
             libc::sigemptyset(&mut action.sa_mask);
-            INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
-            if libc::sigaction(libc::SIGINT, &action, &mut previous[0]) != 0 {
-                return Err("verification_signal_setup_failed".into());
-            }
-            if libc::sigaction(libc::SIGTERM, &action, &mut previous[1]) != 0 {
-                libc::sigaction(libc::SIGINT, &previous[0], std::ptr::null_mut());
-                return Err("verification_signal_setup_failed".into());
+            for (index, signal) in Self::SIGNALS.into_iter().enumerate() {
+                if libc::sigaction(signal, &action, &mut previous[index]) != 0 {
+                    let error = std::io::Error::last_os_error();
+                    for (installed, saved) in Self::SIGNALS.iter().zip(&previous).take(index) {
+                        libc::sigaction(*installed, saved, std::ptr::null_mut());
+                    }
+                    return Err(error);
+                }
             }
             Ok(Self { previous })
         }
@@ -1645,13 +1651,35 @@ impl Cancellation {
 }
 
 #[cfg(unix)]
+impl Drop for CancelSignals {
+    fn drop(&mut self) {
+        // SAFETY: restore exactly the handlers saved by `install`.
+        unsafe {
+            for (signal, saved) in Self::SIGNALS.iter().zip(&self.previous) {
+                libc::sigaction(*signal, saved, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct Cancellation {
+    _signals: CancelSignals,
+}
+
+#[cfg(unix)]
+impl Cancellation {
+    fn install() -> Result<Self, String> {
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        CancelSignals::install(interrupt)
+            .map(|signals| Self { _signals: signals })
+            .map_err(|_| "verification_signal_setup_failed".into())
+    }
+}
+
+#[cfg(unix)]
 impl Drop for Cancellation {
     fn drop(&mut self) {
-        // SAFETY: restore exactly the handlers saved for this invocation.
-        unsafe {
-            libc::sigaction(libc::SIGINT, &self.previous[0], std::ptr::null_mut());
-            libc::sigaction(libc::SIGTERM, &self.previous[1], std::ptr::null_mut());
-        }
         INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -2127,7 +2155,7 @@ mod tests {
             "baseline_ref":baseline, "started_at":1, "iteration":1,
         });
         std::fs::write(
-            crate::run_task::state_file_path(root, &spec_path),
+            crate::task_record::state_file_path(root, &spec_path),
             serde_json::to_vec(&state).unwrap(),
         )
         .unwrap();
@@ -2241,7 +2269,7 @@ mod tests {
             revisions["test"],
             crate::hex::sha256(serde_json::to_vec(receipt.executable.as_ref().unwrap()).unwrap())
         );
-        assert!(valid_hex(&revisions["test"], 64));
+        assert!(crate::hex::is_lower(&revisions["test"], 64));
         let check = inspect_repair_checks(&spec, root, baseline, deadline)
             .unwrap()
             .remove(0);
@@ -2329,7 +2357,7 @@ mod tests {
 
         // Re-approval metadata does not alter the input digest. The baseline
         // argument stays pinned independently of this mutable state file.
-        let state_path = crate::run_task::state_file_path(root, &root.join(&spec.path));
+        let state_path = crate::task_record::state_file_path(root, &root.join(&spec.path));
         let mut state: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
         state["iteration"] = serde_json::json!(2);

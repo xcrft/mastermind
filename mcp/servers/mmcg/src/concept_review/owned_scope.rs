@@ -97,7 +97,7 @@ pub(super) fn expand(
 
 #[cfg(test)]
 mod tests {
-    use super::super::prepare;
+    use super::super::prepare_with_contract;
     use super::{expand, OWNER_LIMIT, PER_OWNER_LIMIT};
     use crate::indexer::Indexer;
     use crate::store::Store;
@@ -204,12 +204,14 @@ mod tests {
         Indexer::new(dir.path())
             .index_all(&mut store, true)
             .unwrap();
-        let packet = prepare(
+        let packet = prepare_with_contract(
             &store,
             dir.path(),
             "blank current evidence review packet held task",
             5,
             false,
+            &[],
+            None,
         )
         .unwrap();
         let owner = packet

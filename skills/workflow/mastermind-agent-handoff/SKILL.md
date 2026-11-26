@@ -1,8 +1,8 @@
 ---
 name: mastermind-agent-handoff
-description: Route effort and carry bounded context before every new agent in a Mastermind workflow. Use for ordinary in-session research, implementation and review handoffs.
+description: Use for ordinary in-session research, implementation and review handoffs. Not for rewriting the request itself (use mastermind-prompt-refiner). Routes effort and carries bounded context before every new agent in a Mastermind workflow.
 metadata:
-  version: 0.1.2
+  version: 0.1.3
   authors: [mastermind]
   tags: [workflow, delegation, effort]
 ---

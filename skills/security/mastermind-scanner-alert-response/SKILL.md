@@ -1,8 +1,8 @@
 ---
 name: mastermind-scanner-alert-response
-description: Work one security scanner alert — a vulnerable dependency, a code-scanning (SAST or SARIF) result, or a secret-scanning hit — through to a verified fix or a proposed disposition, using alert metadata only and never a secret's value. Use when asked to look into, fix, assess or explain a Dependabot, CodeQL, secret-scanning or similar alert, or to check that one is resolved. Not a general security review.
+description: Use to look into, fix, assess or close a Dependabot, CodeQL or secret-scanning alert. Not for a general security review (use mastermind-agent-security-review). Works one alert to a verified fix or disposition without reading a secret's value.
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors:
     - mastermind
   tags:

@@ -1,8 +1,8 @@
 ---
 name: mastermind-project-history
-description: Retrieve and reason from durable project decisions, failed approaches, audits, reports, and lessons without treating provenance, search rank, or user approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes an older decision, what prior evidence should constrain a new plan, or how to record and check explicit document-to-code evidence links.
+description: Use when asking why a design exists, whether an approach was tried or what supersedes a decision. Not for current code structure (use mastermind-codegraph-research). Reasons from recorded decisions and lessons without treating rank as proof.
 metadata:
-  version: 0.4.2
+  version: 0.4.3
   authors: [mastermind]
   tags: [workflow, history, decisions, provenance, evidence]
 ---

@@ -1,8 +1,8 @@
 ---
 name: mastermind-test-audit
-description: Read-only review of whether the tests in a finished change actually prove its behaviour — changed code no test reaches, a test exercising a different path than the one that changed, an assertion edited to match the new output, and a suite that ran nothing. Use after implementation, and whenever a change claims to be covered.
+description: "Use after implementation or when a change claims test coverage. Not for choosing which tests to run (use mastermind-test-impact). Read-only check that tests prove the change: unreached code, wrong path, moved assertions, empty tests, likely surviving bugs."
 metadata:
-  version: 0.1.4
+  version: 0.2.1
   authors:
     - mastermind
   tags:
@@ -52,7 +52,7 @@ If `audit.md` is absent, say so and continue on the diff and the graph. Do not
 present the controller's findings as your own, and do not contradict them
 without new evidence.
 
-## The four checks
+## The five checks
 
 ### 1. Changed behaviour no test reaches
 
@@ -97,6 +97,23 @@ A test body that calls the code and never asserts on the result passes as long
 as nothing throws. It is a smoke test wearing a behaviour test's name. Flag it
 when the change added or edited it, and quote the body.
 
+### 5. A likely bug no assertion would catch
+
+Tests that reach the changed line can still pass when that line is wrong. For
+each changed line that makes a decision (a comparison or boundary, a branch, an
+error path, a returned or stored value) pick the one small slip most likely
+there: `<` for `<=`, a dropped branch, an off-by-one, a skipped call, the
+wrong field. Then find the assertion in a reaching test that would fail on it.
+If none would, the slip would ship green.
+
+Skip lines where a slip would not change behaviour anyone checks: logging,
+messages, formatting, plumbing. Report at most one slip per changed symbol,
+name the line, the slip and the assertions you checked, and call it likely, not
+proven. A survivor is advisory: it goes under `Likely surviving bugs` and in
+`advisories`, never in `findings`, so it does not change `flagged` or the
+verdict. Proving it means undoing the line in a scratch copy and running the
+test, which [[mastermind-verify-change]] does when running is allowed.
+
 ## Evidence rule
 
 **A finding names the symbol, the test, and the query result behind it.**
@@ -139,6 +156,9 @@ wants one more test is one nobody reads.
 ### Non-asserting tests
 - `<test>:<line>` — `<body>`
 
+### Likely surviving bugs (advisory)
+- `<file>:<line>` — slip `<mutation>`; checked `<test assertions>`; none would fail
+
 ### Kept
 - <coverage the change added or preserved that genuinely proves behaviour>
 
@@ -156,12 +176,17 @@ findings:
   - symbol: <name>
     test: <path or none>
     kind: uncovered | wrong_path | assertion_moved | non_asserting | could_not_verify
+advisories:
+  - file: <path>
+    line: <N>
+    kind: survivor
 ```
 <!-- mastermind:test-audit-end -->
 ````
 
 `flagged` counts every `findings` entry. `verdict` is `findings` when `flagged`
-is above zero and `clean` otherwise. `incomplete` means the review stopped
+is above zero and `clean` otherwise. `advisories` does not count, so a report
+with only survivors is `clean`. `incomplete` means the review stopped
 before it covered the diff, for example with no baseline; a stopped review is
 never `clean`. Keep every heading even when empty, and never omit the sentinel
 block.

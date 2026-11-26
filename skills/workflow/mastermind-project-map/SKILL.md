@@ -1,8 +1,8 @@
 ---
 name: mastermind-project-map
-description: Build an evidence-backed architecture briefing with `mastermind map` or `mmcg_map`. Use when exploring an unfamiliar repository, identifying components and entry points, choosing a reading order, inspecting dependency cycles or hotspots, or explaining codegraph precision and truncation limits.
+description: "Use when exploring an unfamiliar repository. Not for one symbol's callers or impact (use mastermind-codegraph-research). Briefing from `mastermind map`: components, entry points, reading order, cycles, hotspots and precision limits."
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors: [mastermind]
   tags: [workflow, mmcg, architecture]
 ---

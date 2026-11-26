@@ -1,8 +1,8 @@
 ---
 name: mastermind-audit-attestation
-description: Generate, verify, sign, or explain Mastermind audit envelopes and GitHub attestations. Use when checking audit-bundle tampering, validating exact repository/baseline/head policy, working with detached Ed25519 signatures, reviewing CI provenance, or distinguishing content integrity from signer authenticity and policy acceptance.
+description: Use to generate, verify, sign or explain Mastermind audit envelopes and GitHub attestations. Not for reviewing the audited code (use mastermind-diff-review). Tampering checks, Ed25519 signatures, CI provenance, integrity versus signer trust.
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   authors: [mastermind]
   tags: [workflow, security, audit]
 ---

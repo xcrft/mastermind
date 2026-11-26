@@ -255,6 +255,55 @@ class UntrustedContentBlockTests(unittest.TestCase):
             self.assertTrue((validate.REPO_ROOT / relative).is_file(), relative)
 
 
+class SkillDescriptionTests(unittest.TestCase):
+    """A skill description names its trigger early and the sibling that wins instead."""
+
+    PATH = validate.REPO_ROOT / "skills/code-review/mastermind-diff-review/SKILL.md"
+    GOOD = (
+        "Use when asked to review a PR. "
+        "Not for a design with no code yet (use mastermind-critical-review). "
+        "Read-only defect review of a diff."
+    )
+
+    def codes(self, description):
+        return [
+            issue.msg.split("]")[0] + "]"
+            for issue in validate._skill_description_issues(self.PATH, description)
+        ]
+
+    def test_trigger_and_boundary_pass(self):
+        self.assertEqual(self.codes(self.GOOD), [])
+
+    def test_missing_boundary_is_reported(self):
+        self.assertEqual(
+            self.codes(self.GOOD.split(" Not for")[0]), ["[skill_boundary_missing]"]
+        )
+
+    def test_late_or_missing_trigger_is_reported(self):
+        late = "x" * validate.SKILL_TRIGGER_WINDOW_CHARS + " " + self.GOOD
+        self.assertIn("[skill_trigger_missing]", self.codes(late))
+        self.assertIn("[skill_trigger_missing]", self.codes("Reviews diffs. Not for designs."))
+
+    def test_late_boundary_is_reported(self):
+        late = (
+            "Use when asked to review a PR. "
+            + "x" * validate.SKILL_TRIGGER_WINDOW_CHARS
+            + " Not for designs (use mastermind-critical-review)."
+        )
+        self.assertIn("[skill_boundary_missing]", self.codes(late))
+
+    def test_long_description_is_reported(self):
+        padded = self.GOOD + " " + "y" * validate.SKILL_DESCRIPTION_MAX_CHARS
+        self.assertIn("[skill_description_too_long]", self.codes(padded))
+
+    def test_every_shipped_skill_passes(self):
+        for path in sorted(validate.REPO_ROOT.glob("skills/*/*/SKILL.md")):
+            artifact = validate._load_artifact(path, slug=path.parent.name, domain=path.parent.parent.name)
+            self.assertEqual(
+                validate._skill_description_issues(path, artifact.frontmatter["description"]), [], path
+            )
+
+
 class MainTests(unittest.TestCase):
     def test_exit_status_counts_errors_but_not_warnings(self):
         with redirect_stdout(io.StringIO()):

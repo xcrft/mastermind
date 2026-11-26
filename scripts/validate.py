@@ -165,6 +165,34 @@ def _load_artifact(path: Path, *, slug: str, domain: str | None) -> Artifact | N
 # ----- per-artifact validation ------------------------------------------
 
 
+# Hosts list every installed skill by its description. When the list outgrows
+# Codex's budget, Codex cuts every description to an equal-length prefix, so
+# the trigger and the boundary both have to start early to survive the cut.
+SKILL_DESCRIPTION_MAX_CHARS = 300
+SKILL_TRIGGER_WINDOW_CHARS = 200
+SKILL_TRIGGER_RE = re.compile(r"\bUse (?:when|before|after|for|whenever|to)\b")
+SKILL_BOUNDARY_RE = re.compile(r"\bNot for\b")
+
+
+def _skill_description_issues(path: Path, desc: str) -> list[Issue]:
+    issues: list[Issue] = []
+    if len(desc) > SKILL_DESCRIPTION_MAX_CHARS:
+        issues.append(
+            Issue(path, "error", f"[skill_description_too_long] description is {len(desc)} chars; keep it within {SKILL_DESCRIPTION_MAX_CHARS}")
+        )
+    trigger = SKILL_TRIGGER_RE.search(desc)
+    if trigger is None or trigger.start() > SKILL_TRIGGER_WINDOW_CHARS:
+        issues.append(
+            Issue(path, "error", f"[skill_trigger_missing] description must say 'Use when/before/after/for/to' within its first {SKILL_TRIGGER_WINDOW_CHARS} chars")
+        )
+    boundary = SKILL_BOUNDARY_RE.search(desc)
+    if boundary is None or boundary.start() > SKILL_TRIGGER_WINDOW_CHARS:
+        issues.append(
+            Issue(path, "error", f"[skill_boundary_missing] description must say 'Not for ...' within its first {SKILL_TRIGGER_WINDOW_CHARS} chars and name what to use instead")
+        )
+    return issues
+
+
 def validate_artifact(a: Artifact) -> list[Issue]:
     issues: list[Issue] = []
 
@@ -189,6 +217,8 @@ def validate_artifact(a: Artifact) -> list[Issue]:
         issues.append(
             Issue(a.path, "warning", f"'description' is very short ({len(desc)} chars); state the action and its trigger.")
         )
+    elif a.path.name == "SKILL.md":
+        issues.extend(_skill_description_issues(a.path, desc))
 
     metadata = a.frontmatter.get("metadata", {})
     if not isinstance(metadata, dict):

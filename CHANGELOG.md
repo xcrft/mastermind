@@ -55,6 +55,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-dependency-upgrade` now does what its description promised for
+  a new package. It checks the name against the registry and the project's
+  documentation, looks for lookalike names, notes package and version age and
+  maintainer changes, respects a release-age cooldown and stops for a person
+  when a check fails. Registry lookups run outside the checkout and name the
+  public registry, so a pull request's `.npmrc`, `pip.conf` or
+  `.cargo/config.toml` cannot answer them, and any change to registry settings
+  is reported. Three workflow eval cases cover a days-old lookalike, an
+  established package that should pass and a registry override in a pull
+  request.
+- `mastermind-diff-review` has a "Hidden text" section. It lists where
+  steering text hides: HTML comments, collapsed blocks, alt text, link titles,
+  reference links, inline HTML or CSS that hides text, very long lines,
+  minified or unrendered diffs, encoded strings, and invisible Unicode,
+  including zero-width and word-joiner characters, the byte-order mark, soft
+  hyphens, bidi controls, tag characters and variation selectors. It gives a
+  command that prints `file:line` for each added line with one of those
+  characters, with hooks, external diff tools and textconv off so nothing from
+  the head runs. The command flags quoted file names and cannot be fooled by
+  an added line that looks like a file header. Lookalike letters get a
+  separate manual check. The skill also checks that the code keeps the promise
+  in the title and description. Five workflow eval cases cover a bidi
+  override, tag and zero-width characters, a hidden HTML comment, a fix
+  applied to two of three templates and the safe search command.
+- `mastermind-agent-security-review` and the security auditor check every
+  agent context for the three legs of data theft: private data, text from
+  others and a way to send data out. All three together is at least P1 even
+  with a prompt guard, and the fix must remove one leg with a control the
+  model cannot override. Two workflow eval cases cover a triage bot with all
+  three legs and a local tool with none of the outbound ones.
+- `mastermind-test-audit` and the test auditor have a fifth check. For each
+  changed line that decides something, they name the most likely small slip,
+  such as `<` for `<=` or a dropped branch, and the assertion that would fail
+  on it. When none would, they report a `survivor`, at most one per symbol and
+  called likely rather than proven. Survivors are advisory: they go in their
+  own section and an `advisories` list in the structured tail, and do not
+  count towards `flagged` or the verdict. Two workflow eval cases cover a surviving boundary slip
+  and the clean case where both sides of the boundary are asserted.
+- `mastermind-investigation-ledger` starts from a failing command and only
+  then writes hypotheses. Every run, the bisect and the red/green proof
+  included, goes through the `mastermind-verify-change` trust gate as written
+  there. A regression with a known good version is bisected over a range that
+  passed the gate, with `git -c core.hooksPath=/dev/null` on every git call,
+  and the skill warns that `git bisect run npm test` runs each old commit's own
+  scripts. An intermittent failure is measured as a rate, and a cause is
+  confirmed only when removing it turns the failing command green. It ends
+  with a fixed report. The investigator subagent gets the same gate and bisect
+  rules and stays within its 3,500-character prompt. Four workflow eval cases
+  cover the fork, bisect, hooks and one-green-run behaviour.
+- Every skill description now opens with when to use the skill, then a
+  `Not for` clause that names the sibling to use instead, for example
+  `mastermind-verify-change` for a red CI run and
+  `mastermind-investigation-ledger` for a cause that is still unknown, then a
+  short line on what it does. Hosts pick skills from these descriptions alone.
+  When Codex's skill list is over budget, Codex cuts every description to the
+  same length from the end, so both clauses now start within the first 200
+  characters. The 32 descriptions total 7,631 characters, down from 10,032,
+  and the 23 in the core profile total 5,471, down from 7,110. `just validate`
+  now fails a skill description that is longer than 300 characters, or has no
+  `Use when`, `before`, `after`, `for` or `to`, or no `Not for` clause, in its
+  first 200 characters. The skills README has a short guide to writing a skill.
 - The covered skills and subagents use the shared untrusted-content paragraph
   in place of their own shorter wording, and each has a new patch version.
   The critic opens with its own short data-not-instructions rule instead. The

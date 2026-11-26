@@ -1,6 +1,6 @@
 ---
 name: mastermind-task-executor
-description: Execute an approved Mastermind task contract within Scope, prove its Acceptance Criteria, and write the canonical file-backed executor report. Use when the user hands off a `.mastermind/tasks/<NNN>-<name>/spec.md` or explicitly asks to execute an approved Mastermind task.
+description: Use when handed a `.mastermind/tasks/<NNN>-<name>/spec.md` or asked to execute an approved task. Not for work without an approved spec (use mastermind-task-planning). Works within Scope, proves the criteria, writes the executor report.
 workflow:
   schema_version: 1
   activation: manual
@@ -12,7 +12,7 @@ workflow:
       runtime: portable
       exclusivity_group: task-executor
 metadata:
-  version: 0.6.5
+  version: 0.6.6
   authors: [mastermind]
   tags: [workflow, execution, delegation, mmcg]
 ---

@@ -1,8 +1,8 @@
 ---
 name: mastermind-agent-security-review
-description: Perform a portable, evidence-based security review of agent workflows, MCP tools, permissions, untrusted-input paths, audit controls, and supply-chain boundaries. Use for explicit security review or security-sensitive scope; add OWASP mapping only when requested.
+description: Use for a security review or a change touching auth, secrets, tool execution, delegation or prompt injection. Not for mapping reach before design (use mastermind-security-research). Evidence-based review of agent tools, permissions, untrusted input, supply chain.
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   authors: [mastermind]
   tags: [security, review, agentic-security, owasp, mcp]
 ---
@@ -48,18 +48,28 @@ chain. Skip ordinary docs, UI, and local refactors without a security surface.
    delegate or expand scope.
 4. Trace untrusted input to sensitive sinks: shell, filesystem writes, network,
    package installation, secrets, policy/state mutation, and external messages.
-5. Verify enforcement is deterministic where policy matters; an LLM statement
+5. Check each agent context for the three legs of data theft: private data it
+   can read (secrets, private repositories, user files), text from others that
+   reaches it (issues, pull requests, web pages, tool output), and a way to
+   send data out (network fetch, posting a comment or message, pushing, a link
+   or image URL it builds). All three in one context is a finding of at least
+   P1, even when the prompt says to ignore injected text, because wording is
+   not a control. The fix removes one leg with something the model cannot
+   override: a narrower or read-only token, no network, a reader with no tools
+   that returns only fixed fields, or a plan fixed before the untrusted text is
+   read.
+6. Verify enforcement is deterministic where policy matters; an LLM statement
    alone is not authorization or validation.
-6. Check least privilege, argument/path validation, fail-closed behavior,
+7. Check least privilege, argument/path validation, fail-closed behavior,
    time/size bounds, secret redaction, and destructive-action controls.
-7. Check supply-chain provenance: immutable pins, package/binary verification,
+8. Check supply-chain provenance: immutable pins, package/binary verification,
    install ownership, and release authorization.
-8. Check audit integrity: who can write evidence, whether claims are verified,
+9. Check audit integrity: who can write evidence, whether claims are verified,
    and whether logs distinguish content integrity from signer authenticity and
    policy acceptance.
-9. Construct a concrete abuse path for each candidate finding. Drop concerns
-   with no plausible path or material impact.
-10. State unreviewed surfaces and evidence that would change the verdict.
+10. Construct a concrete abuse path for each candidate finding. Drop concerns
+    with no plausible path or material impact.
+11. State unreviewed surfaces and evidence that would change the verdict.
 
 ## OWASP mode
 

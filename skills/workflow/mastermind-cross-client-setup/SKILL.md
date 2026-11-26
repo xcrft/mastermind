@@ -1,8 +1,8 @@
 ---
 name: mastermind-cross-client-setup
-description: Install portable Mastermind workflow adapters and configure, inspect, update, or remove MCP registration for Claude Code, Cursor, Codex, Continue, or an explicit generic config. Use when a user asks to install Mastermind in an AI coding client, choose project/user scope, preview a safe config change, troubleshoot setup, or verify workflow/MCP parity with doctor.
+description: Use when installing Mastermind in Claude Code, Cursor, Codex, Continue or another client, or fixing its MCP setup. Not for using Mastermind once installed. Covers project or user scope, previews, updates, removal and doctor checks.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors: [mastermind]
   tags: [workflow, mcp, setup]
 ---

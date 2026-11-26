@@ -27,6 +27,9 @@ just validate
 - subagent model, tool and turn contracts and MCP grants
 - public tool documentation, schemas and report ownership
 - skill adapters and their evaluation cases
+- skill descriptions: each is at most 300 characters, and both `Use when`
+  (or `before`, `after`, `for`, `to`) and a `Not for` clause that names the
+  skill to use instead start within the first 200 characters
 - the untrusted-content block: each file in `UNTRUSTED_CONTENT_COVERED` carries
   [the canonical paragraph](../agents/blocks/untrusted-content.md) exactly once
   and unchanged, as its own paragraph outside code fences and HTML comments,

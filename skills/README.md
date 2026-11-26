@@ -95,3 +95,32 @@ that matches the work. Claude Code-specific roles are listed in
 | Skill | Description |
 |---|---|
 | [`mastermind-prompt-refiner`](prompt-engineering/mastermind-prompt-refiner/SKILL.md) | Rewrites prompts or handoffs while preserving the original request. |
+
+## Write or change a skill
+
+A host loads only the name and description of every installed skill, so the
+description decides whether the body is ever read. The body is read once and
+stays in context, so write rules that hold for the whole task.
+
+1. Write the eval case first. Add a case to
+   [`workflow.jsonl`](../evals/behavior/cases/workflow.jsonl) that fails
+   without the change, and a restraint case where the skill should do nothing
+   extra. See [behaviour evals](../evals/behavior/README.md).
+2. Start the description with `Use when ...`, then
+   `Not for ... (use <sibling>)` for the nearest skill that could be picked by
+   mistake, then a short line on what it does. When the skill list is over
+   budget, Codex cuts every description to the same length from the end, so
+   the trigger and boundary go first. Keep it within 300 characters.
+   `just validate` checks this.
+3. Put the steps in order, with the evidence each step must produce and the
+   condition that stops the work or hands it to another skill. A skill that
+   reads repository or pull request content carries the
+   [untrusted-content paragraph](../agents/blocks/untrusted-content.md).
+4. Give the output a fixed shape, with `incomplete` or `could_not_verify` for
+   work that stopped early.
+5. For a rule the model keeps breaking, name the excuse it gives and the check
+   that catches it. For an output with the wrong shape, describe the right
+   shape rather than listing what not to do. Enforce anything a script can
+   check in the validator instead.
+6. Move long reference material into `references/`, one level below
+   `SKILL.md`, and bump `metadata.version`.

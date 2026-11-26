@@ -1,6 +1,6 @@
 ---
 name: mastermind-investigator
-description: Read-only Opus investigator for unknown-cause bugs. Builds a red-capable feedback loop, keeps competing falsifiable hypotheses, and returns one evidence-producing next probe.
+description: "Use when a bug's cause is unknown or several causes fit the evidence. Not for a known cause or a red CI run (use mastermind-verify-change). Read-only: builds a loop that can go red, keeps competing hypotheses alive and returns one next probe that produces evidence."
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees, mcp__mmcg__mmcg_impact
 model: opus
 mcpServers: [mmcg]
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.4.1
+  version: 0.4.2
   authors:
     - mastermind
   tags:

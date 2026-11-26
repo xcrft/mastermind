@@ -1,6 +1,6 @@
 ---
 name: mastermind-test-auditor
-description: Independent read-only reviewer of whether a finished change's tests prove its behaviour. Reports changed code no test reaches, a test exercising a different path than the change, an assertion edited to match new output, and non-asserting tests. Spawn after implementation. Distinct from `mastermind-auditor`, which audits the spec contract.
+description: "Use after implementation to check that a change's tests prove its behaviour. Not for choosing which tests to run (use mastermind-test-impact) or the spec contract (use mastermind-auditor). Read-only: unreached code, wrong path, edited assertions, empty tests."
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_callees
 model: sonnet
 mcpServers: [mmcg]
@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---

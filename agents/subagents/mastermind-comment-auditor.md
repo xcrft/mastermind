@@ -1,6 +1,6 @@
 ---
 name: mastermind-comment-auditor
-description: Independent read-only reviewer of a non-empty comment delta. Flags narration with quoted evidence, names what it kept, and reports rationale the change deleted. Spawn after implementation only when the pre-gate found added, modified, or deleted comments. Distinct from `mastermind-auditor`, which audits the spec contract.
+description: "Use after implementation when the pre-gate found added, changed or deleted comments. Not for checking the spec contract (use mastermind-auditor). Read-only: flags narration with quoted evidence, names what it kept and reports rationale the change deleted."
 tools: Read, Grep, Glob, Bash
 model: sonnet
 maxTurns: 12
@@ -13,7 +13,7 @@ workflow:
     - id: mastermind-comment-audit
       required: false
 metadata:
-  version: 0.1.4
+  version: 0.1.5
   authors: [mastermind]
   tags: [code-review, comments, audit, workflow]
 ---

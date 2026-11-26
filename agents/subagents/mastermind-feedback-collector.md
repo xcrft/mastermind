@@ -1,6 +1,6 @@
 ---
 name: mastermind-feedback-collector
-description: Collects possible work preferences and self-reported habits from explicitly selected local Claude Code or Codex sessions into a private review inbox. Can repeat collection from previously selected sources for a requested project. Use when asked to collect session feedback or prepare possible persona evidence for review.
+description: "Use only when asked to collect session feedback or possible persona evidence from Claude Code or Codex sessions the person chose. Not for a qualitative style profile (use mastermind-style-deep). Writes candidates to a private review inbox and never accepts or publishes them."
 tools: Read, Bash
 model: sonnet
 maxTurns: 12
@@ -10,7 +10,7 @@ workflow:
   activation: manual
   mutability: writer
 metadata:
-  version: 0.9.1
+  version: 0.9.2
   authors:
     - mastermind
   tags:

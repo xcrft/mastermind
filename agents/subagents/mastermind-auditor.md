@@ -1,6 +1,6 @@
 ---
 name: mastermind-auditor
-description: Independent read-only post-flight auditor for strict tasks or unresolved high-risk uncertainty. Verifies an executor report against git diff, files, commands, and mmcg evidence; does not replace the deterministic controller audit.
+description: "Use after `run-task --post-only` on a strict task, or when a high-risk doubt remains. Not for comment, test or UI checks (use mastermind-comment-auditor, mastermind-test-auditor, mastermind-frontend-auditor). Read-only: checks an executor report against diff, files, commands and codegraph."
 tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history, mcp__mmcg__mmcg_profile, mcp__mmcg__mmcg_docs, mcp__mmcg__mmcg_project_profile
 model: opus
 mcpServers: [mmcg]
@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.8.2
+  version: 0.8.3
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---

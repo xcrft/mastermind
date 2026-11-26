@@ -100,6 +100,14 @@ SUITES = {
         "cases": EVALS_DIR / "behavior/cases/workflow.jsonl",
         "uses_fixture": False,
     },
+    # The system prompt is the generated skill list; the model names the one
+    # skill it would load. See evals/selection/README.md for what this shows.
+    "selection": {
+        "subagent": None,
+        "catalogue": EVALS_DIR / "selection/catalogue.md",
+        "cases": EVALS_DIR / "behavior/cases/selection.jsonl",
+        "uses_fixture": False,
+    },
 }
 
 SUITE_RUNTIME_LIMITS = {
@@ -108,8 +116,10 @@ SUITE_RUNTIME_LIMITS = {
     "auditor": {"max_turns": 20, "max_output_tokens": 8192},
     "intake": {"max_turns": 4, "max_output_tokens": 4096},
     "workflow": {"max_turns": 12, "max_output_tokens": 4096},
+    "selection": {"max_turns": 2, "max_output_tokens": 1024},
 }
-SUITE_DEFAULT_EFFORT = {"workflow": "medium"}
+PROMPT_ONLY_SUITES = frozenset({"critic", "intake", "workflow", "selection"})
+SUITE_DEFAULT_EFFORT = {"workflow": "medium", "selection": "low"}
 CLAUDE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 CLAUDE_CASE_TIMEOUT_SECONDS = 480
 CLAUDE_STDOUT_LIMIT_BYTES = 8 * 1024 * 1024
@@ -1161,6 +1171,7 @@ _CASE_INPUT_FIELDS = {
     "auditor": ({"spec_summary", "executor_report"}, set()),
     "intake": ({"raw_prompt", "target_consumer"}, {"project_context"}),
     "workflow": ({"prompt"}, set()),
+    "selection": ({"prompt"}, set()),
 }
 _COMMON_EXPECTATION_FIELDS = {
     "min_turns",
@@ -1632,7 +1643,7 @@ def validate_case_record(suite_name: str, record: object) -> None:
     if suite_name == "intake" and "action" not in expect:
         raise ValueError("intake case must define expect.action")
     positive_oracles = {"contains", "contains_any", "citations", "code_comments"}
-    if suite_name in {"researcher", "workflow"} and not (
+    if suite_name in {"researcher", "workflow", "selection"} and not (
         positive_oracles & set(expect) or "verdict" in expect
     ):
         raise ValueError(f"{suite_name} case has no positive output oracle")
@@ -4182,7 +4193,7 @@ def isolated_cli_args(
     verification_commands: tuple[str, ...] = (),
 ) -> list[str]:
     """Deny repository tools to suites whose fixtures exist only in prompts."""
-    if suite_name in {"critic", "intake", "workflow"}:
+    if suite_name in PROMPT_ONLY_SUITES:
         return [
             "--safe-mode",
             "--tools",
@@ -4236,7 +4247,7 @@ def expected_stream_tools(
     subagent: Path | None,
     include_mmcg: bool,
 ) -> tuple[str, ...]:
-    if suite_name in {"critic", "intake", "workflow"}:
+    if suite_name in PROMPT_ONLY_SUITES:
         return ()
     if subagent is None:
         raise ValueError(f"suite {suite_name!r} has no subagent definition")
@@ -4349,7 +4360,7 @@ def evaluation_runtime_controls(
 
 def requires_prompt_sandbox(suite_name: str) -> bool:
     """Return whether a prompt-only suite needs a fresh, empty working tree."""
-    return suite_name in {"critic", "intake", "workflow"}
+    return suite_name in PROMPT_ONLY_SUITES
 
 
 def evaluation_cwd(
@@ -4405,6 +4416,16 @@ def evaluation_target_digest(
             }
             for case in selected
         ]
+    elif suite_name == "selection":
+        records = [
+            {
+                "artifact": "catalogue",
+                **_evaluation_definition_file_identity(
+                    Path(suite_cfg["catalogue"]),
+                    "selection catalogue",
+                ),
+            }
+        ]
     else:
         subagent = suite_cfg.get("subagent")
         if not isinstance(subagent, (str, os.PathLike)):
@@ -4450,6 +4471,12 @@ def snapshot_evaluation_targets(
             shutil.copy(source, target)
             copied.add(artifact)
         return dict(suite_cfg), destination
+    if suite_name == "selection":
+        source = Path(suite_cfg["catalogue"])
+        _evaluation_definition_file_identity(source, "selection catalogue")
+        target = destination / "catalogue.md"
+        shutil.copy(source, target)
+        return {**suite_cfg, "catalogue": target}, None
 
     subagent = suite_cfg.get("subagent")
     if not isinstance(subagent, (str, os.PathLike)):
@@ -4789,11 +4816,12 @@ def evaluate_case(
 ) -> Result:
     case_id = case["id"]
     verification_commands = reported_cargo_verification_commands(case)
-    prompt_path = (
-        workflow_prompt_path(case, repository_root=workflow_root)
-        if suite_name == "workflow"
-        else suite_cfg["subagent"]
-    )
+    if suite_name == "workflow":
+        prompt_path = workflow_prompt_path(case, repository_root=workflow_root)
+    elif suite_name == "selection":
+        prompt_path = suite_cfg["catalogue"]
+    else:
+        prompt_path = suite_cfg["subagent"]
     system_prompt = strip_frontmatter(
         _read_evaluation_definition(prompt_path, "evaluation target")
     )
@@ -4869,7 +4897,7 @@ def evaluate_case(
                 extra_cmd += ["--mcp-config", mcp_cfg]
         elif suite_name == "intake":
             user_message = render_intake_input(case["input"])
-        elif suite_name == "workflow":
+        elif suite_name in {"workflow", "selection"}:
             user_message = render_workflow_input(case["input"])
         else:
             user_message = render_critic_input(case["input"])
@@ -4912,7 +4940,7 @@ def evaluate_case(
         else:
             prompt_flag = (
                 "--system-prompt"
-                if suite_name == "workflow"
+                if suite_name in {"workflow", "selection"}
                 else "--append-system-prompt"
             )
             prompt_args = [prompt_flag, system_prompt]

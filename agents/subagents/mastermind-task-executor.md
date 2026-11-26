@@ -1,6 +1,6 @@
 ---
 name: mastermind-task-executor
-description: Executes an approved `.mastermind/tasks/<NNN>-<name>/spec.md` within scope, proves its acceptance criteria, and writes the canonical file-backed executor report.
+description: "Use when an approved `.mastermind/tasks/<NNN>-<name>/spec.md` is ready to run. Not for work with no approved spec (use mastermind-task-planning). Works only within Scope, proves the acceptance criteria and writes the file-backed executor report."
 tools: Read, Edit, Write, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_brief, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_impact, mcp__mmcg__mmcg_test_impact, mcp__mmcg__mmcg_history, mcp__mmcg__mmcg_profile, mcp__mmcg__mmcg_docs, mcp__mmcg__mmcg_project_profile
 model: sonnet
 mcpServers: [mmcg]
@@ -20,7 +20,7 @@ workflow:
       runtime: claude
       exclusivity_group: task-executor
 metadata:
-  version: 0.6.1
+  version: 0.6.2
   authors: [mastermind]
   tags: [workflow, delegation]
 ---

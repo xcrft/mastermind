@@ -112,6 +112,8 @@ stays in context, so write rules that hold for the whole task.
    budget, Codex cuts every description to the same length from the end, so
    the trigger and boundary go first. Keep it within 300 characters.
    `just validate` checks this.
+   Add prompts for and against the skill to the
+   [selection corpus](../evals/selection/README.md).
 3. Put the steps in order, with the evidence each step must produce and the
    condition that stops the work or hands it to another skill. A skill that
    reads repository or pull request content carries the

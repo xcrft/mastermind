@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A skill-selection corpus of 79 prompts in
+  `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill, a
+  declared tie or none, and rejects the near misses. Every core skill is
+  expected by at least two prompts and rejected by at least two. `just check`
+  runs `python -m evals.selection`, which needs no model. It fails when a prompt
+  names a skill that does not exist or the skill it expects, when a core skill
+  lacks prompts, when a `(use X)` names nothing, when three or more skills hand
+  a prompt on in a loop, when a conflict case has no written tie-break and is
+  not declared a tie, or when two skills share trigger wording and nothing
+  separates them. It does not show that a model picks the right skill. The new
+  `selection` behaviour suite runs the same prompts through Claude against a
+  generated list of every skill's name and description. The check found four
+  ties no description settles and three core skills that hand off to a skill
+  core does not install, listed in `evals/selection/README.md`.
+
 - `mastermind doctor` has a `permission rules` check. It reads the Claude Code
   permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
   profile files, and warns about settings that let an agent run code it
@@ -54,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `core` profile now installs 23 skills.
 
 ### Changed
+
+- Every subagent description now opens with when to delegate, says
+  `Not for ... (use X)` within its first 200 characters and stays within 300.
+  Claude Code decides when to delegate from these descriptions, so the two
+  roles that run only on request, the feedback collector and the prompt
+  refiner, start with `Use only when`. `just validate` fails a subagent description that breaks
+  this, says "proactively", or names a skill or subagent that does not exist.
+  Skill descriptions get the same check on what they name. Each subagent has
+  a new patch version.
 
 - `mastermind-dependency-upgrade` now does what its description promised for
   a new package. It checks the name against the registry and the project's

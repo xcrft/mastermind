@@ -193,6 +193,77 @@ def _skill_description_issues(path: Path, desc: str) -> list[Issue]:
     return issues
 
 
+# Claude Code delegates to a subagent when a task matches its description, and
+# every installed description sits in the parent's context. A loose match
+# spawns a costly or writing role nobody asked for, so the description opens
+# with the trigger and says what to use instead before the first 200 chars.
+# Codex gets no Mastermind subagents, but the same budget logic keeps them short.
+SUBAGENT_DESCRIPTION_MAX_CHARS = 300
+SUBAGENT_TRIGGER_RE = re.compile(r"Use (?:only )?(?:when|before|after|for|to)\b")
+SUBAGENT_MANUAL_TRIGGER = "Use only when"
+DESCRIPTION_REFERRAL_RE = re.compile(r"\(use ([^)]*)\)")
+DESCRIPTION_REFERRAL_NAME_RE = re.compile(r"\b(?:mastermind-[a-z0-9-]*[a-z0-9]|no-ai-slop-comments)\b")
+
+
+def description_referrals(desc: str) -> list[str]:
+    """Names a description sends the host to in its `(use ...)` clauses."""
+    names: list[str] = []
+    for clause in DESCRIPTION_REFERRAL_RE.findall(desc):
+        names.extend(DESCRIPTION_REFERRAL_NAME_RE.findall(clause))
+    return names
+
+
+def _subagent_description_issues(path: Path, desc: str, activation: object) -> list[Issue]:
+    issues: list[Issue] = []
+    if len(desc) > SUBAGENT_DESCRIPTION_MAX_CHARS:
+        issues.append(
+            Issue(path, "error", f"[subagent_description_too_long] description is {len(desc)} chars; keep it within {SUBAGENT_DESCRIPTION_MAX_CHARS}")
+        )
+    if SUBAGENT_TRIGGER_RE.match(desc) is None:
+        issues.append(
+            Issue(path, "error", "[subagent_trigger_missing] description must start with 'Use when/before/after/for/to' or 'Use only when'")
+        )
+    elif activation == "manual" and not desc.startswith(SUBAGENT_MANUAL_TRIGGER):
+        issues.append(
+            Issue(path, "error", f"[subagent_manual_trigger] a manual subagent's description must start with '{SUBAGENT_MANUAL_TRIGGER}' so the host does not delegate to it unasked")
+        )
+    if "proactive" in desc.lower():
+        issues.append(
+            Issue(path, "error", "[subagent_proactive] the workflow spawns subagents by name; 'proactively' invites delegation nobody asked for")
+        )
+    boundary = SKILL_BOUNDARY_RE.search(desc)
+    if boundary is None or boundary.start() > SKILL_TRIGGER_WINDOW_CHARS:
+        issues.append(
+            Issue(path, "error", f"[subagent_boundary_missing] description must say 'Not for ...' within its first {SKILL_TRIGGER_WINDOW_CHARS} chars and name what to use instead")
+        )
+    return issues
+
+
+def validate_description_referrals(artifacts: list[Artifact]) -> list[Issue]:
+    """Every `(use X)` in a skill or subagent description names a shipped artifact."""
+    skills = {a.name for a in artifacts if a.path.name == "SKILL.md" and a.name}
+    subagents = {a.name for a in artifacts if a.path.parent.name == "subagents" and a.name}
+    issues: list[Issue] = []
+    for a in artifacts:
+        desc = a.frontmatter.get("description")
+        if not isinstance(desc, str):
+            continue
+        if a.path.name == "SKILL.md":
+            # A skill can only hand the host to another skill: subagents are a
+            # Claude-only install and are not in Codex's skill list.
+            known, kind = skills, "skill"
+        elif a.path.parent.name == "subagents":
+            known, kind = skills | subagents, "skill or subagent"
+        else:
+            continue
+        for name in description_referrals(desc):
+            if name == a.name:
+                issues.append(Issue(a.path, "error", f"[referral_self] description sends the host to itself ({name})"))
+            elif name not in known:
+                issues.append(Issue(a.path, "error", f"[referral_unknown] description says 'use {name}', which is not a shipped {kind}"))
+    return issues
+
+
 def validate_artifact(a: Artifact) -> list[Issue]:
     issues: list[Issue] = []
 
@@ -219,6 +290,10 @@ def validate_artifact(a: Artifact) -> list[Issue]:
         )
     elif a.path.name == "SKILL.md":
         issues.extend(_skill_description_issues(a.path, desc))
+    elif a.path.parent.name == "subagents" and not _has_template_part(a.path):
+        workflow = a.frontmatter.get("workflow")
+        activation = workflow.get("activation") if isinstance(workflow, dict) else None
+        issues.extend(_subagent_description_issues(a.path, desc, activation))
 
     metadata = a.frontmatter.get("metadata", {})
     if not isinstance(metadata, dict):
@@ -2408,6 +2483,7 @@ def main(argv: list[str]) -> int:
     issues.extend(validate_workflow_role_contracts())
     issues.extend(validate_portable_skill_semantics())
     issues.extend(validate_untrusted_content_block())
+    issues.extend(validate_description_referrals(artifacts))
 
     links = collect_wikilinks()
     issues.extend(validate_wikilinks(artifacts, links))

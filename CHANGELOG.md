@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-diff-review` looks for steering text where a person would not:
+  HTML comments, collapsed blocks, alt text, encoded strings and invisible or
+  direction-changing Unicode. It gives a portable command to find those
+  characters in the diff. It also checks that the code keeps the promise in
+  the title and description. Three workflow eval cases cover a bidi override,
+  a hidden HTML comment and a fix applied to two of three templates.
 - `mastermind-agent-security-review` and the security auditor check every
   agent context for the three legs of data theft: private data, text from
   others and a way to send data out. All three together is at least P1 even

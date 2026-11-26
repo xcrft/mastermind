@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import unittest
 
 from evals.behavior import runner
@@ -48,7 +50,7 @@ class SelectionPassRuleTests(unittest.TestCase):
         self.assertEqual(combined.duration_ms, 30)
         failed = runner.combine_selection_runs([run(False, "Skill: b"), run(False, None), run(True, "Skill: a")])
         self.assertFalse(failed.passed)
-        self.assertEqual(failed.reasons, ["passed 1 of 3 runs; picks: Skill: b, no answer, Skill: a"])
+        self.assertEqual(failed.reasons, ["passed 1 of 3 runs; picks: Skill: b, no answer, Skill: a", "miss"])
 
     def test_summary_reports_each_split_and_misses_by_expected_choice(self):
         cases = [
@@ -64,6 +66,17 @@ class SelectionPassRuleTests(unittest.TestCase):
         self.assertEqual(sum(t["cases"] for t in report["splits"].values()), 2)
         self.assertEqual(sum(t["cases_passed"] for t in report["splits"].values()), 1)
         self.assertEqual([m["id"] for m in report["misses"]["Skill: mastermind-b"]], ["sel-b"])
+
+    def test_prompt_sandbox_cwd_is_resolved_like_claude_reports_it(self):
+        with tempfile.TemporaryDirectory() as real, tempfile.TemporaryDirectory() as links:
+            link = Path(links) / "sandbox"
+            link.symlink_to(real)
+
+            class Sandbox:
+                name = str(link)
+
+            cwd = runner.evaluation_cwd("selection", fixture_path=None, prompt_sandbox=Sandbox())
+            self.assertEqual(cwd, Path(real).resolve())
 
     def test_extra_case_fields_never_reach_the_model(self):
         record = {

@@ -4380,8 +4380,11 @@ def evaluation_cwd(
 ) -> Path | None:
     if suite_name in {"auditor", "researcher"}:
         return fixture_path
+    # Claude reports its working directory with symlinks resolved. On macOS
+    # the temp directory is under /var, a link to /private/var, so an
+    # unresolved sandbox path never matches the stream and every case fails.
     if prompt_sandbox is not None:
-        return Path(prompt_sandbox.name)
+        return Path(prompt_sandbox.name).resolve()
     return None
 
 
@@ -5378,6 +5381,7 @@ def combine_selection_runs(runs: list[Result]) -> Result:
     if not combined.passed:
         picks = ", ".join(run.selection_pick or "no answer" for run in runs)
         combined.reasons = [f"passed {passes} of {len(runs)} runs; picks: {picks}"]
+        combined.reasons += list(dict.fromkeys(reason for run in runs for reason in run.reasons))
     return combined
 
 

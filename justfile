@@ -27,7 +27,7 @@ bootstrap:
     python3 -m venv .venv
     {{PY}} -m pip install -q --upgrade pip
     {{PY}} -m pip install -q --require-hashes -r scripts/requirements.txt
-    @echo "Python venv ready at .venv/. Run `just check` to verify everything."
+    @echo "Python venv ready at .venv/. Run 'just check' to verify everything."
 
 # ---- mmcg (Rust) ----
 
@@ -153,7 +153,7 @@ evals *ARGS:
 sync-templates:
     cp agents/claude-md/mastermind-context.md {{MMCG}}/templates/context.md
     cp agents/claude-md/mastermind-workflow.md {{MMCG}}/templates/workflow.md
-    @echo "Templates synced to {{MMCG}}/templates/. Run `just validate` to confirm parity."
+    @echo "Templates synced to {{MMCG}}/templates/. Run 'just validate' to confirm parity."
 
 # Set VERSION in every file that carries it and move [Unreleased] to VERSION.
 bump VERSION:

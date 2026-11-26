@@ -61,12 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maintainer changes, respects a release-age cooldown and stops for a person
   when a check fails. Two workflow eval cases cover a days-old lookalike and an
   established package that should pass.
-- `mastermind-diff-review` looks for steering text where a person would not:
-  HTML comments, collapsed blocks, alt text, encoded strings and invisible or
-  direction-changing Unicode. It gives a portable command to find those
-  characters in the diff. It also checks that the code keeps the promise in
-  the title and description. Three workflow eval cases cover a bidi override,
-  a hidden HTML comment and a fix applied to two of three templates.
+- `mastermind-diff-review` has a "Hidden text" section. It lists where
+  steering text hides: HTML comments, collapsed blocks, alt text, link titles,
+  reference links, inline HTML or CSS that hides text, very long lines,
+  minified or unrendered diffs, encoded strings, and invisible Unicode,
+  including zero-width and word-joiner characters, the byte-order mark, soft
+  hyphens, bidi controls, tag characters and variation selectors. It gives a
+  command that prints `file:line` for each added line with one of those
+  characters, with hooks, external diff tools and textconv off so nothing from
+  the head runs. The command flags quoted file names and cannot be fooled by
+  an added line that looks like a file header. Lookalike letters get a
+  separate manual check. The skill also checks that the code keeps the promise
+  in the title and description. Five workflow eval cases cover a bidi
+  override, tag and zero-width characters, a hidden HTML comment, a fix
+  applied to two of three templates and the safe search command.
 - `mastermind-agent-security-review` and the security auditor check every
   agent context for the three legs of data theft: private data, text from
   others and a way to send data out. All three together is at least P1 even

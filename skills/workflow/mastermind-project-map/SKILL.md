@@ -1,6 +1,6 @@
 ---
 name: mastermind-project-map
-description: Build an architecture briefing with `mastermind map` or `mmcg_map` — components, entry points, reading order, cycles, hotspots, and precision and truncation limits. Use when exploring an unfamiliar repository. Not for one symbol's callers or impact (use mastermind-codegraph-research).
+description: "Use when exploring an unfamiliar repository. Not for one symbol's callers or impact (use mastermind-codegraph-research). Briefing from `mastermind map`: components, entry points, reading order, cycles, hotspots and precision limits."
 metadata:
   version: 0.2.2
   authors: [mastermind]

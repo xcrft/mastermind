@@ -1,6 +1,6 @@
 ---
 name: mastermind-frontend-audit
-description: "Read-only review of a finished React or Vue change against the codegraph — unrendered components, props changed without their callers, reinvented components and raw values where a token exists. Use after UI work, or for \"review this UI change\". Not for checking the page in a browser (use mastermind-browser-verification)."
+description: "Use after a React or Vue change or for \"review this UI change\". Not for checking the page in a browser (use mastermind-browser-verification). Read-only: unrendered components, props changed without callers, reinvented components, raw values over tokens."
 metadata:
   version: 0.1.5
   authors:

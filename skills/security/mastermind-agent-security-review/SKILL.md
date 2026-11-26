@@ -1,6 +1,6 @@
 ---
 name: mastermind-agent-security-review
-description: Portable, evidence-based security review of agent workflows, MCP tools, permissions, untrusted-input paths, audit controls and supply-chain boundaries. Use for an explicit security review or a change touching auth, secrets, tool execution, delegation or prompt injection. Not for listing what a change can reach before design (use mastermind-security-research) or one scanner alert.
+description: Use for a security review or a change touching auth, secrets, tool execution, delegation or prompt injection. Not for mapping reach before design (use mastermind-security-research). Evidence-based review of agent tools, permissions, untrusted input, supply chain.
 metadata:
   version: 0.3.0
   authors: [mastermind]

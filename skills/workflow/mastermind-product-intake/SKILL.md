@@ -1,6 +1,6 @@
 ---
 name: mastermind-product-intake
-description: Convert a PRD, ticket or feature request into a task contract that can fail — behaviour split from outcome, product nouns resolved to real symbols, gaps raised as questions, success metrics kept out of the merge gate. Use when product writing is handed over for implementation. Not for a design file or mockup (use mastermind-design-intake).
+description: "Use when a PRD, ticket or feature request is handed over for implementation. Not for a design file or mockup (use mastermind-design-intake). Writes a task contract that can fail: behaviour over outcome, nouns mapped to symbols, gaps as questions."
 metadata:
   version: 0.1.2
   authors:

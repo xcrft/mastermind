@@ -1,6 +1,6 @@
 ---
 name: mastermind-investigation-ledger
-description: Find the cause of a bug, failing test or regression by reproducing it and testing competing hypotheses before a fix is specified. Use when something is broken with no supported why, a failure has several plausible causes, or behaviour changed between versions. Not for reading a failed CI job first (use mastermind-verify-change) or a cause already known.
+description: Use when something is broken with no supported cause, has several plausible causes or changed between versions. Not for a failed CI job or a known cause (use mastermind-verify-change). Reproduces, bisects and tests competing hypotheses before a fix.
 metadata:
   version: 0.2.1
   authors:

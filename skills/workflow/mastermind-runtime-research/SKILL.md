@@ -1,6 +1,6 @@
 ---
 name: mastermind-runtime-research
-description: Find who already depends on a service, handler or state owner before changing it, and name the runtime links the codegraph cannot span. Use before designing a change to an API, queue consumer, background job, migration or shared state. Not for judging the design (use mastermind-architecture-review, which this feeds).
+description: Use before changing an API, queue consumer, background job, migration or shared state. Not for judging the design (use mastermind-architecture-review). Finds who depends on it and the runtime links the codegraph cannot span.
 metadata:
   version: 0.1.3
   authors:

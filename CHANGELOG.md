@@ -104,15 +104,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a fixed report. The investigator subagent gets the same gate and bisect
   rules and stays within its 3,500-character prompt. Four workflow eval cases
   cover the fork, bisect, hooks and one-green-run behaviour.
-- Every skill description now says when to use the skill early on and ends
-  with a `Not for` clause that names the sibling to use instead, for example
+- Every skill description now opens with when to use the skill, then a
+  `Not for` clause that names the sibling to use instead, for example
   `mastermind-verify-change` for a red CI run and
-  `mastermind-investigation-ledger` for a cause that is still unknown. Hosts
-  pick skills from these descriptions alone, and Codex shortens them when the
-  skill list is long. `just validate` now fails a skill description that is
-  longer than 400 characters, has no `Use when`, `before`, `after` or `for`
-  in its first 250 characters, or has no `Not for` clause. The skills README
-  has a short guide to writing a skill.
+  `mastermind-investigation-ledger` for a cause that is still unknown, then a
+  short line on what it does. Hosts pick skills from these descriptions alone.
+  When Codex's skill list is over budget, Codex cuts every description to the
+  same length from the end, so both clauses now start within the first 200
+  characters. The 32 descriptions total 7,631 characters, down from 10,032,
+  and the 23 in the core profile total 5,471, down from 7,110. `just validate`
+  now fails a skill description that is longer than 300 characters, or has no
+  `Use when`, `before`, `after`, `for` or `to`, or no `Not for` clause, in its
+  first 200 characters. The skills README has a short guide to writing a skill.
 - The covered skills and subagents use the shared untrusted-content paragraph
   in place of their own shorter wording, and each has a new patch version.
   The critic opens with its own short data-not-instructions rule instead. The

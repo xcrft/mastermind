@@ -1,6 +1,6 @@
 ---
 name: mastermind-project-history
-description: Reason from recorded decisions, failed approaches, audits and lessons without treating provenance, search rank or approval as technical proof. Use when asking why a design exists, whether an approach was tried, what supersedes a decision or how to link documents to code. Not for current code structure (use mastermind-codegraph-research).
+description: Use when asking why a design exists, whether an approach was tried or what supersedes a decision. Not for current code structure (use mastermind-codegraph-research). Reasons from recorded decisions and lessons without treating rank as proof.
 metadata:
   version: 0.4.3
   authors: [mastermind]

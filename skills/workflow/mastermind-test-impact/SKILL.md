@@ -1,6 +1,6 @@
 ---
 name: mastermind-test-impact
-description: Build a focused test plan from `mastermind impact` or `mmcg_test_impact` — direct, transitive and heuristic candidates in order, ahead of the required full gate. Use when deciding which tests to run first for a change. Not for judging whether tests prove the change (use mastermind-test-audit).
+description: "Use when deciding which tests to run first for a change. Not for judging whether tests prove it (use mastermind-test-audit). Ordered plan from `mastermind impact`: direct, transitive and heuristic candidates before the full gate."
 metadata:
   version: 0.1.4
   authors: [mastermind]

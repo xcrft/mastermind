@@ -1,6 +1,6 @@
 ---
 name: mastermind-comment-audit
-description: Read-only review of a comment delta — flags narration with evidence, names what it kept and reports removed rationale. Use when asked to check comments or a finished diff's pre-gate found comment changes; skip it when none changed. Not for writing code without comment noise (use no-ai-slop-comments).
+description: "Use when asked to check code comments or when a finished diff changed comments. Not for writing code (use no-ai-slop-comments). Read-only: flags narration with evidence, names what it kept, reports removed rationale."
 metadata:
   version: 0.1.5
   authors:

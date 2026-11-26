@@ -1,6 +1,6 @@
 ---
 name: mastermind-critical-review
-description: Stress-test a design, task spec, plan or executor report for false assumptions, broken contracts, scope creep, missing evidence and risky failure modes. Use before drafting a sensitive spec or approving a plan, or when a critic or auditor needs a rubric. Not for reviewing a code diff line by line (use mastermind-diff-review).
+description: Use before drafting a sensitive spec or approving a plan, or when a critic or auditor needs a rubric. Not for a code diff (use mastermind-diff-review). Stress-tests designs, specs, plans and reports for false assumptions and missing evidence.
 metadata:
   version: 0.3.3
   authors:

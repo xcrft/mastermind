@@ -1,6 +1,6 @@
 ---
 name: no-ai-slop-comments
-description: "Keep only comments that explain a why the code cannot say and delete the ones that restate it. Use when writing or editing code, applying a spec, or when told \"stop adding comments\" or \"too many comments\". Not for auditing the comments of a finished diff (use mastermind-comment-audit)."
+description: "Use when writing or editing code, applying a spec, or when told \"stop adding comments\". Not for auditing a finished diff's comments (use mastermind-comment-audit). Keeps comments that explain why, deletes ones that restate the code."
 metadata:
   version: 0.2.2
   authors:

@@ -1,6 +1,6 @@
 ---
 name: mastermind-task-planning
-description: Choose the lightest Mastermind workflow for the risk and write an evidence-grounded task contract when one is needed. Use when starting or scoping non-trivial repository work. Not for executing an approved spec (use mastermind-task-executor).
+description: Use when starting or scoping non-trivial repository work. Not for executing an approved spec (use mastermind-task-executor). Picks the lightest workflow for the risk and writes a task contract when one is needed.
 metadata:
   version: 0.17.9
   authors: [mastermind]

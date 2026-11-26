@@ -1,6 +1,6 @@
 ---
 name: mastermind-component-research
-description: "Ground a UI change in the codegraph — whether the component exists, who renders it and its props contract. Use before creating or changing a React or Vue component, or for \"add a component\" or \"build this screen\". Not for turning a design handoff into a task contract (use mastermind-design-intake)."
+description: "Use before creating or changing a React or Vue component, or for \"build this screen\". Not for a design handoff (use mastermind-design-intake). Checks in the codegraph whether the component exists, who renders it and its props."
 metadata:
   version: 0.1.3
   authors:

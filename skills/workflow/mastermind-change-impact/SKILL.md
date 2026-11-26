@@ -1,6 +1,6 @@
 ---
 name: mastermind-change-impact
-description: Produce a change-impact brief with `mastermind impact` or `mmcg_change_impact` — changed symbols, callers, API crossings, collision risk and likely consumers since a git ref. Use before editing, while planning or in PR review. Not for choosing tests (use mastermind-test-impact) or a first look at a repository (use mastermind-project-map).
+description: "Use before editing, while planning or in PR review to see what a change touches since a git ref. Not for choosing tests (use mastermind-test-impact). Brief from `mastermind impact`: changed symbols, callers, API crossings, collision risk."
 metadata:
   version: 0.1.3
   authors: [mastermind]

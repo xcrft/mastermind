@@ -1,6 +1,6 @@
 ---
 name: mastermind-diff-review
-description: Read-only defect review of a diff or PR, including one from an untrusted fork — broken callers, unchecked input, lost error handling, races, unsafe data changes and widened CI permissions. Use when asked to review code, a PR, a branch or a follow-up push, or whether a change is safe to merge. Not for a design or plan with no code yet (use mastermind-critical-review).
+description: "Use when asked to review code, a PR, a branch or a follow-up push, or whether it is safe to merge. Not for a design with no code yet (use mastermind-critical-review). Read-only, safe for forks: broken callers, unchecked input, lost errors, races, CI permissions, hidden text."
 metadata:
   version: 0.2.1
   authors:

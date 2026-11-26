@@ -1,6 +1,6 @@
 ---
 name: mastermind-test-audit
-description: Read-only review of whether a change's tests prove its behaviour — unreached changed code, a test on another path, an assertion edited to match new output, a test asserting nothing, a likely bug no assertion catches. Use after implementation or when a change claims to be covered. Not for choosing which tests to run (use mastermind-test-impact).
+description: "Use after implementation or when a change claims test coverage. Not for choosing which tests to run (use mastermind-test-impact). Read-only check that tests prove the change: unreached code, wrong path, moved assertions, empty tests, likely surviving bugs."
 metadata:
   version: 0.2.1
   authors:

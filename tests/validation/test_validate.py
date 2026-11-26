@@ -260,8 +260,9 @@ class SkillDescriptionTests(unittest.TestCase):
 
     PATH = validate.REPO_ROOT / "skills/code-review/mastermind-diff-review/SKILL.md"
     GOOD = (
-        "Read-only defect review of a diff. Use when asked to review a PR. "
-        "Not for a design with no code yet (use mastermind-critical-review)."
+        "Use when asked to review a PR. "
+        "Not for a design with no code yet (use mastermind-critical-review). "
+        "Read-only defect review of a diff."
     )
 
     def codes(self, description):
@@ -282,6 +283,14 @@ class SkillDescriptionTests(unittest.TestCase):
         late = "x" * validate.SKILL_TRIGGER_WINDOW_CHARS + " " + self.GOOD
         self.assertIn("[skill_trigger_missing]", self.codes(late))
         self.assertIn("[skill_trigger_missing]", self.codes("Reviews diffs. Not for designs."))
+
+    def test_late_boundary_is_reported(self):
+        late = (
+            "Use when asked to review a PR. "
+            + "x" * validate.SKILL_TRIGGER_WINDOW_CHARS
+            + " Not for designs (use mastermind-critical-review)."
+        )
+        self.assertIn("[skill_boundary_missing]", self.codes(late))
 
     def test_long_description_is_reported(self):
         padded = self.GOOD + " " + "y" * validate.SKILL_DESCRIPTION_MAX_CHARS

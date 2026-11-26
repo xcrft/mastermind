@@ -1,6 +1,6 @@
 ---
 name: mastermind-verify-change
-description: Decide whether a change is safe to run, run the smallest checks that prove it, read a failed CI job and report what was exercised. Use when asked to verify, test or smoke-test a change or PR, explain a red CI run or show a change is ready. Untrusted changes get a static check. Not for a bug whose cause is still unknown (use mastermind-investigation-ledger).
+description: Use to verify, test or smoke-test a change or PR, explain a red CI run or show it is ready. Not for a bug with an unknown cause (use mastermind-investigation-ledger). Gates untrusted code, then runs the smallest checks that prove the change.
 metadata:
   version: 0.1.2
   authors:

@@ -106,9 +106,12 @@ stays in context, so write rules that hold for the whole task.
    [`workflow.jsonl`](../evals/behavior/cases/workflow.jsonl) that fails
    without the change, and a restraint case where the skill should do nothing
    extra. See [behaviour evals](../evals/behavior/README.md).
-2. Write the description as what it does, then `Use when ...`, then
+2. Start the description with `Use when ...`, then
    `Not for ... (use <sibling>)` for the nearest skill that could be picked by
-   mistake. Keep it within 400 characters. `just validate` checks this.
+   mistake, then a short line on what it does. When the skill list is over
+   budget, Codex cuts every description to the same length from the end, so
+   the trigger and boundary go first. Keep it within 300 characters.
+   `just validate` checks this.
 3. Put the steps in order, with the evidence each step must produce and the
    condition that stops the work or hands it to another skill. A skill that
    reads repository or pull request content carries the

@@ -1,6 +1,6 @@
 ---
 name: mastermind-codegraph-research
-description: Answer structural questions with mmcg before Bash or text search — orientation, symbols from plain-language terms, existence, callers, callees, imports, blast radius and stale indexes. Use whenever a task needs one of these facts. Not for a ready-made architecture briefing (use mastermind-project-map) or a change brief since a ref (use mastermind-change-impact).
+description: "Use whenever a task needs a structural fact, before Bash or text search. Not for an architecture briefing (use mastermind-project-map). Answers with mmcg: symbols from plain terms, existence, callers, callees, imports, blast radius, staleness."
 metadata:
   version: 0.3.8
   authors:

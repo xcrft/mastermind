@@ -59,8 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new package. It checks the name against the registry and the project's
   documentation, looks for lookalike names, notes package and version age and
   maintainer changes, respects a release-age cooldown and stops for a person
-  when a check fails. Two workflow eval cases cover a days-old lookalike and an
-  established package that should pass.
+  when a check fails. Registry lookups run outside the checkout and name the
+  public registry, so a pull request's `.npmrc`, `pip.conf` or
+  `.cargo/config.toml` cannot answer them, and any change to registry settings
+  is reported. Three workflow eval cases cover a days-old lookalike, an
+  established package that should pass and a registry override in a pull
+  request.
 - `mastermind-diff-review` has a "Hidden text" section. It lists where
   steering text hides: HTML comments, collapsed blocks, alt text, link titles,
   reference links, inline HTML or CSS that hides text, very long lines,

@@ -2,7 +2,7 @@
 name: mastermind-dependency-upgrade
 description: Add, upgrade or remove a dependency with the smallest compatible change, confirm a new package is the real and established one, and keep install scripts and release-note commands from running. Use for version bumps, Dependabot or Renovate PRs, lockfile changes, new packages and unused ones. Not for a specific vulnerability alert (use mastermind-scanner-alert-response).
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   authors:
     - mastermind
   tags:
@@ -60,10 +60,13 @@ anyone can register such a name with harmful code. A name from a snippet, a
 chat answer or your own memory is unverified until the registry and the
 project's own documentation agree on it.
 
-- **It is the real one.** Look it up under the exact name, for example
-  `npm view <name> repository time.created maintainers`,
-  `https://pypi.org/pypi/<name>/json` or `cargo info <name>`. Its repository
-  link should match the project the documentation points to.
+- **It is the real one.** Look it up under the exact name on the public
+  registry. Run lookups from a directory outside the checkout, because npm,
+  pip, uv and cargo read registry settings from project files a pull request
+  can change: `cd "$(mktemp -d)" && npm view <name> repository time.created maintainers --registry=https://registry.npmjs.org/`,
+  or the JSON APIs `https://pypi.org/pypi/<name>/json` and
+  `https://crates.io/api/v1/crates/<name>`. Its repository link should match
+  the project the documentation points to.
 - **It is not a lookalike.** Compare it with the name the documentation uses:
   one letter off, `-` swapped for `_`, a missing scope or an extra suffix on a
   popular name are warning signs.
@@ -74,6 +77,14 @@ project's own documentation agree on it.
   suggest one when there is none.
 - **It is needed.** Prefer the standard library or a dependency the project
   already has when it covers the use.
+
+## Registry settings
+
+A change to where packages come from is a supply-chain change. Report any
+added or edited `.npmrc`, `.yarnrc.yml`, `bunfig.toml`, `pip.conf`, `pip.ini`,
+`uv.toml`, index settings in `pyproject.toml`, `.cargo/config.toml` or
+`cargo` registry entries, and lockfile URLs that point at a new host. Do not
+install from such a change until the person has seen it.
 
 ## 1. Understand the change
 

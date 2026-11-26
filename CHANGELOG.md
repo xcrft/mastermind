@@ -27,12 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Five skills: `mastermind-code-review` (diff review with references for
-  change surfaces, concurrency, sensitive data, dependencies, SQL and CI/CD),
-  `mastermind-doc-writer`, and `mastermind-change-verification` in every
-  profile; `mastermind-dependency-maintenance` and
-  `mastermind-security-alert-triage` in the `security` and `full` profiles.
-  The `core` profile now installs 23 skills.
+- Five skills that are safe to point at an untrusted pull request:
+  `mastermind-diff-review`, `mastermind-docs-authoring` and
+  `mastermind-verify-change` in every profile, and
+  `mastermind-dependency-upgrade` and `mastermind-scanner-alert-response` in
+  the `security` and `full` profiles. They read repository instructions from
+  the base branch, treat everything in the change as data, never run the
+  change's scripts with credentials, and never fetch a secret's value. The
+  `core` profile now installs 23 skills.
 
 ### Changed
 
@@ -64,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mmcg_impact`; it has no `depth` argument.
 - The comment auditor no longer counts `could_not_verify` as a finding, so an
   unjudged comment cannot turn a clean result into `findings`.
+- The comment, test and frontend audits have an `incomplete` verdict. A review
+  that stopped early, for example with no baseline, no longer reads as
+  `clean`.
 - The test and frontend auditors no longer re-index the repository. A query
   refreshes a stale managed index once; if it is still stale they report
   `could_not_verify`.

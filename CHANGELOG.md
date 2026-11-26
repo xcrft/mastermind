@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-test-audit` and the test auditor have a fifth check. For each
+  changed line that decides something, they name the most likely small slip,
+  such as `<` for `<=` or a dropped branch, and the assertion that would fail
+  on it. When none would, they report a `survivor`, at most one per symbol and
+  called likely rather than proven. The structured tail accepts
+  `kind: survivor`. Two workflow eval cases cover a surviving boundary slip
+  and the clean case where both sides of the boundary are asserted.
 - `mastermind-investigation-ledger` starts from a failing command and only
   then writes hypotheses. It applies the `mastermind-verify-change` trust gate
   before reproducing code from a fork, bisects a regression that has a known

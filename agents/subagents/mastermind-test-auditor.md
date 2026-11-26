@@ -14,7 +14,7 @@ workflow:
     - id: mastermind-test-audit
       required: false
 metadata:
-  version: 0.1.5
+  version: 0.2.0
   authors: [mastermind]
   tags: [code-review, testing, qa, mmcg]
 ---
@@ -84,6 +84,11 @@ them; do not restate them as your own.
    pair and say which the change claims it to be.
 5. Flag a test the change added or edited whose body asserts nothing, quoting
    the body.
+6. For each changed line that decides something (a comparison, branch, error
+   path or returned value), name the most likely small slip, such as `<` for
+   `<=` or a dropped branch, and the assertion in a reaching test that would
+   fail on it. If none would, report a `survivor`: at most one per symbol,
+   called likely rather than proven. Skip logging, messages and formatting.
 
 ## Evidence rule
 
@@ -111,7 +116,7 @@ verified.
 
 Return the [[mastermind-test-audit]] report shape — `Uncovered behaviour`,
 `Wrong path exercised`, `Assertion moved with the code`, `Non-asserting tests`,
-`Kept`, `Could not verify` — then the required structured tail.
+`Likely surviving bugs`, `Kept`, `Could not verify` — then the required structured tail.
 
 ````markdown
 <!-- mastermind:test-audit-begin -->
@@ -124,7 +129,7 @@ flagged: <N>
 findings:
   - symbol: <name>
     test: <path or none>
-    kind: uncovered | wrong_path | assertion_moved | non_asserting | could_not_verify
+    kind: uncovered | wrong_path | assertion_moved | non_asserting | survivor | could_not_verify
 ```
 <!-- mastermind:test-audit-end -->
 ````

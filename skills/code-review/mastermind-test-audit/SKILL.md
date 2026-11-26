@@ -2,7 +2,7 @@
 name: mastermind-test-audit
 description: Read-only review of whether a change's tests prove its behaviour — unreached changed code, a test on another path, an assertion edited to match new output, a test asserting nothing, a likely bug no assertion catches. Use after implementation or when a change claims to be covered. Not for choosing which tests to run (use mastermind-test-impact).
 metadata:
-  version: 0.1.5
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -52,7 +52,7 @@ If `audit.md` is absent, say so and continue on the diff and the graph. Do not
 present the controller's findings as your own, and do not contradict them
 without new evidence.
 
-## The four checks
+## The five checks
 
 ### 1. Changed behaviour no test reaches
 
@@ -97,6 +97,21 @@ A test body that calls the code and never asserts on the result passes as long
 as nothing throws. It is a smoke test wearing a behaviour test's name. Flag it
 when the change added or edited it, and quote the body.
 
+### 5. A likely bug no assertion would catch
+
+Tests that reach the changed line can still pass when that line is wrong. For
+each changed line that makes a decision (a comparison or boundary, a branch, an
+error path, a returned or stored value) pick the one small slip most likely
+there: `<` for `<=`, a dropped branch, an off-by-one, a skipped call, the
+wrong field. Then find the assertion in a reaching test that would fail on it.
+If none would, the slip would ship green.
+
+Skip lines where a slip would not change behaviour anyone checks: logging,
+messages, formatting, plumbing. Report at most one slip per changed symbol,
+name the line, the slip and the assertions you checked, and call it likely, not
+proven. Proving it means undoing the line in a scratch copy and running the
+test, which [[mastermind-verify-change]] does when running is allowed.
+
 ## Evidence rule
 
 **A finding names the symbol, the test, and the query result behind it.**
@@ -139,6 +154,9 @@ wants one more test is one nobody reads.
 ### Non-asserting tests
 - `<test>:<line>` — `<body>`
 
+### Likely surviving bugs
+- `<file>:<line>` — slip `<mutation>`; checked `<test assertions>`; none would fail
+
 ### Kept
 - <coverage the change added or preserved that genuinely proves behaviour>
 
@@ -155,7 +173,7 @@ flagged: <N>
 findings:
   - symbol: <name>
     test: <path or none>
-    kind: uncovered | wrong_path | assertion_moved | non_asserting | could_not_verify
+    kind: uncovered | wrong_path | assertion_moved | non_asserting | survivor | could_not_verify
 ```
 <!-- mastermind:test-audit-end -->
 ````

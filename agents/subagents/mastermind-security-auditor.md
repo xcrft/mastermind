@@ -11,7 +11,7 @@ workflow:
   activation: conditional
   mutability: read-only
 metadata:
-  version: 0.1.3
+  version: 0.2.0
   authors:
     - mastermind
   tags:
@@ -73,6 +73,10 @@ a freshness warning. Do not replace complete structural answers with shell searc
 2. Identify the tools and permissions available to each actor.
 3. Check whether policy enforcement is deterministic and non-LLM-based.
 4. Check whether untrusted input can reach tool execution.
+   Flag any agent context that holds private data, reads text from others and
+   can send data out (network, comments, pushes, built URLs): at least P1, even
+   with a prompt guard. The fix removes one leg with a control the model cannot
+   override, such as a read-only token, no network or a tool-less reader.
 5. Check whether any agent can expand its own scope or permissions.
 6. Check whether audit logs / reports are sufficient for the risk level.
 7. Check whether supply-chain inputs are pinned or verified.

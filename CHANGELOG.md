@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mastermind-agent-security-review` and the security auditor check every
+  agent context for the three legs of data theft: private data, text from
+  others and a way to send data out. All three together is at least P1 even
+  with a prompt guard, and the fix must remove one leg with a control the
+  model cannot override. Two workflow eval cases cover a triage bot with all
+  three legs and a local tool with none of the outbound ones.
 - `mastermind-test-audit` and the test auditor have a fifth check. For each
   changed line that decides something, they name the most likely small slip,
   such as `<` for `<=` or a dropped branch, and the assertion that would fail

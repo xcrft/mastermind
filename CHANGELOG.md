@@ -26,17 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decision log. Records written by 4.0.x still read.
 - Digests, receipt IDs, invocation IDs and review pins in those records must be
   lowercase hex.
+- `miner feedback supersede`, `miner habit supersede` and `miner habit renew`
+  are gone. To replace a claim, reject it and review a new one.
+- The `mmcg_scratchpad_append` and `mmcg_scratchpad_read` MCP tools are gone.
+  An existing index keeps the old table, and nothing reads it.
 
 ### Added
 
 - `--skip-freshness-check` for `query`, `map`, `repo-map` and `impact` leaves
   out the walk of the source tree that checks if the index is current, and
-  prints `freshness check skipped` on stderr. The walk can take seconds per
-  command on a large repository. For `query` the flag goes before the
-  subcommand. When the index is behind the files, the answer is old and has no
-  warning, so use it only when you index after every change and never on a
-  working tree. An index from an older extractor still warns, and a missing or
-  old-schema index still fails.
+  prints `freshness check skipped` on stderr. The flag only saves the time of
+  that scan, which can take seconds per command on a large repository. The
+  gain is largest for `query` and `repo-map`. For `query` the flag goes before
+  the subcommand. Use it only when you index after every change and never on a
+  working tree. For `query`, `map` and `repo-map`, when the index is behind
+  the files the answer is old and has no warning. `impact` still compares
+  changed and new files with the index and exits 1 with `index_stale` when
+  they differ. The flag does not skip that. An index from an older extractor
+  still warns, and a missing or old-schema index still fails.
 - A skill-selection corpus of 91 prompts in
   `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill or
   subagent, or none, and rejects the near misses. `just check` runs

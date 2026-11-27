@@ -373,30 +373,142 @@ fn skill_files(dir: &Path) -> (Vec<(String, PathBuf)>, usize) {
     (files, dropped)
 }
 
-/// Lint every repository artifact and add it to `summary`.
-pub(super) fn lint_project(root: &Path, summary: &mut super::Summary) {
-    match super::read(&root.join(".mcp.json")).map(|bytes| bytes.map(|bytes| lint_mcp_json(&bytes)))
-    {
-        Ok(None) => {}
-        Ok(Some(Ok((count, servers)))) => {
-            let mut status = format!("mcp-project={count} servers");
-            if !servers.is_empty() {
-                status.push_str(&format!(", {} flagged", servers.len()));
-            }
-            summary.statuses.push(status);
-            for (name, finding) in servers {
-                summary.finding(&format!("mcp-project:{name}"), None, &finding);
-            }
-        }
-        Ok(Some(Err(class))) | Err(class) => summary.unreadable("mcp-project", class),
+/// Add one server map to `summary` as `label=N servers, M flagged` and
+/// return the names of the flagged servers.
+pub(super) fn add_servers(
+    summary: &mut super::Summary,
+    label: &str,
+    servers: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let findings = lint_servers(servers);
+    let mut status = format!("{label}={} servers", servers.len());
+    if !findings.is_empty() {
+        status.push_str(&format!(", {} flagged", findings.len()));
     }
+    summary.statuses.push(status);
+    let mut names = Vec::new();
+    for (name, finding) in findings {
+        summary.finding(&format!("{label}:{name}"), None, &finding);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Read a file with an `mcpServers` map, such as `.mcp.json` or the managed
+/// `managed-mcp.json`, and return the names of the flagged servers.
+pub(super) fn lint_server_file(
+    path: &Path,
+    label: &str,
+    summary: &mut super::Summary,
+) -> Vec<String> {
+    let bytes = match super::read(path) {
+        Ok(None) => return Vec::new(),
+        Ok(Some(bytes)) => bytes,
+        Err(class) => {
+            summary.unreadable(label, class);
+            return Vec::new();
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            summary.unreadable(label, "invalid_json");
+            return Vec::new();
+        }
+    };
+    match value.get("mcpServers") {
+        None => {
+            summary.statuses.push(format!("{label}=0 servers"));
+            Vec::new()
+        }
+        Some(serde_json::Value::Object(servers)) => add_servers(summary, label, servers),
+        Some(_) => {
+            summary.unreadable(label, "invalid_shape");
+            Vec::new()
+        }
+    }
+}
+
+/// Directories the nested skill walk never enters: dependency, build and
+/// version control trees.
+const SKIPPED_DIRECTORIES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+];
+
+/// Skills under `<subdir>/.claude/skills`, which Claude Code loads when it
+/// works on files in that subdirectory:
+/// <https://code.claude.com/docs/en/skills#discovery-from-parent-and-nested-directories>.
+/// The walk stops at a fixed depth and file count.
+fn nested_skill_files(root: &Path) -> (Vec<(String, PathBuf)>, usize) {
+    let mut files = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), String::new(), 0usize)];
+    while let Some((dir, relative, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if SKIPPED_DIRECTORIES.contains(&name.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            if name == ".claude" {
+                if depth > 0 {
+                    for (skill, file) in skill_files(&path.join("skills")).0 {
+                        files.push((format!("claude-nested:{relative}:skill:{skill}"), file));
+                    }
+                }
+                continue;
+            }
+            if name.starts_with('.') || depth >= 4 {
+                continue;
+            }
+            let relative = if relative.is_empty() {
+                safe_name(&name)
+            } else {
+                format!("{relative}/{}", safe_name(&name))
+            };
+            pending.push((path, relative, depth + 1));
+        }
+    }
+    files.sort();
+    let dropped = files.len().saturating_sub(DIRECTORY_FILE_LIMIT);
+    files.truncate(DIRECTORY_FILE_LIMIT);
+    (files, dropped)
+}
+
+/// Lint every repository artifact and add it to `summary`. Returns the
+/// names of the flagged `.mcp.json` servers.
+pub(super) fn lint_project(root: &Path, summary: &mut super::Summary) -> Vec<String> {
+    let flagged = lint_server_file(&root.join(".mcp.json"), "mcp-project", summary);
     let claude = root.join(".claude");
     let (skills, dropped) = skill_files(&claude.join("skills"));
     if dropped > 0 {
         summary.unreadable("claude-project:skills", "over_64_files_not_read");
     }
-    for (name, path) in skills {
-        let label = format!("claude-project:skill:{name}");
+    let (nested, nested_dropped) = nested_skill_files(root);
+    if nested_dropped > 0 {
+        summary.unreadable("claude-nested:skills", "over_64_files_not_read");
+    }
+    let skills = skills
+        .into_iter()
+        .map(|(name, path)| (format!("claude-project:skill:{name}"), path))
+        .chain(nested);
+    for (label, path) in skills {
         match parse_artifact(&path) {
             Ok(None) => {}
             Ok(Some(frontmatter)) => {
@@ -423,6 +535,7 @@ pub(super) fn lint_project(root: &Path, summary: &mut super::Summary) {
             Err(class) => summary.unreadable(&label, class),
         }
     }
+    flagged
 }
 
 #[cfg(test)]

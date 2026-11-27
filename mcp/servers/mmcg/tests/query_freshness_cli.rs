@@ -207,15 +207,17 @@ fn a_missing_or_old_schema_index_still_fails_with_the_flag() {
             "--skip-freshness-check",
         ],
     ];
-    // impact reports an index it cannot open as `index_stale`, the same code
-    // as its own check of the changed files. The other commands name the
-    // problem.
+    // impact prints only a code, so the code names the problem. The other
+    // commands say it in words.
     let missing_text = format!("index `{}` does not exist", missing.display());
     let schema_text = format!(
         "index schema at `{}` is missing or outdated",
         repo.index.display()
     );
-    for (index, said) in [(&missing, &missing_text), (&repo.index, &schema_text)] {
+    for (index, said, code) in [
+        (&missing, &missing_text, "index_missing"),
+        (&repo.index, &schema_text, "schema_incompatible"),
+    ] {
         for args in &commands {
             let output = run(index, args);
             let error = stderr(&output);
@@ -230,7 +232,7 @@ fn a_missing_or_old_schema_index_still_fails_with_the_flag() {
                 "{args:?} failed before the skip: {error}"
             );
             if args[0] == "impact" {
-                assert_eq!(error.trim(), "index_stale", "{args:?} on {index:?}");
+                assert_eq!(error.trim(), code, "{args:?} on {index:?}");
             } else {
                 assert!(
                     error.contains(said.as_str()),
@@ -243,4 +245,149 @@ fn a_missing_or_old_schema_index_still_fails_with_the_flag() {
             }
         }
     }
+}
+
+fn impact_code(repo: &Indexed, since: &str) -> (Option<i32>, String) {
+    let root = repo.source.path().to_str().unwrap();
+    let output = run(
+        &repo.index,
+        &[
+            "impact",
+            "--since",
+            since,
+            "--root",
+            root,
+            "--format",
+            "json",
+            "--skip-freshness-check",
+        ],
+    );
+    let error = stderr(&output);
+    let code = error
+        .lines()
+        .filter(|line| *line != SKIPPED && !line.starts_with("warning:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (output.status.code(), code)
+}
+
+fn head(root: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn assert_stale(repo: &Indexed, since: &str, case: &str) {
+    assert_eq!(
+        impact_code(repo, since),
+        (Some(1), "index_stale".to_string()),
+        "{case}"
+    );
+}
+
+fn assert_current(repo: &Indexed, since: &str, case: &str) {
+    let (status, error) = impact_code(repo, since);
+    assert_eq!(status, Some(0), "{case}: {error}");
+}
+
+fn reindex(repo: &Indexed) {
+    succeeds(
+        &repo.index,
+        &["index", repo.source.path().to_str().unwrap()],
+    );
+}
+
+#[test]
+fn impact_fails_on_a_deleted_file_even_inside_the_since_diff() {
+    let repo = indexed(|root| std::fs::remove_file(root.join("gone.rs")).unwrap());
+    let base = head(repo.source.path());
+    assert_stale(&repo, &base, "an uncommitted delete");
+    reindex(&repo);
+    assert_current(&repo, &base, "the same delete after index");
+}
+
+#[test]
+fn impact_fails_on_a_file_committed_after_indexing_outside_the_since_diff() {
+    let repo = indexed(|root| {
+        std::fs::write(root.join("lib.rs"), "pub fn changed_after_index() {}\n").unwrap();
+        git(root, &["commit", "-q", "-am", "edit"]);
+    });
+    assert_stale(&repo, "HEAD", "lib.rs is not in the diff from HEAD");
+    reindex(&repo);
+    assert_current(&repo, "HEAD", "the same commit after index");
+}
+
+#[test]
+fn impact_fails_on_a_committed_delete() {
+    let repo = indexed(|root| {
+        git(root, &["rm", "-q", "gone.rs"]);
+        git(root, &["commit", "-q", "-m", "delete"]);
+    });
+    assert_stale(&repo, "HEAD", "gone.rs was deleted and committed");
+    reindex(&repo);
+    assert_current(&repo, "HEAD", "the same delete after index");
+}
+
+#[test]
+fn impact_fails_when_a_file_dirty_at_index_time_goes_back_to_the_commit() {
+    let repo = indexed(|_| {});
+    let root = repo.source.path();
+    std::fs::write(root.join("lib.rs"), "pub fn only_in_the_index() {}\n").unwrap();
+    reindex(&repo);
+    assert_current(&repo, "HEAD", "the index holds the edit");
+    git(root, &["checkout", "-q", "--", "lib.rs"]);
+    assert_stale(&repo, "HEAD", "lib.rs matches HEAD but not the index");
+}
+
+#[test]
+fn impact_ignores_files_the_index_never_holds() {
+    let repo = indexed(|root| {
+        std::fs::write(root.join("notes.txt"), "not code\n").unwrap();
+        std::fs::write(root.join("blob.rs"), b"pub fn x() {}\0binary").unwrap();
+    });
+    assert_current(&repo, "HEAD", "a new text file and a binary source");
+    git(repo.source.path(), &["add", "."]);
+    git(repo.source.path(), &["commit", "-q", "-m", "more"]);
+    assert_current(&repo, "HEAD", "the same files committed");
+}
+
+#[test]
+fn impact_on_an_index_with_no_recorded_commit_falls_back_to_the_full_scan() {
+    let repo = indexed(|_| {});
+    let connection = rusqlite::Connection::open(&repo.index).unwrap();
+    let removed = connection
+        .execute(
+            "DELETE FROM meta WHERE key IN ('indexed_commit', 'indexed_changed_paths')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(removed, 2, "the index recorded its commit");
+    drop(connection);
+    assert_current(&repo, "HEAD", "an index current with the files");
+    let root = repo.source.path();
+    std::fs::write(root.join("lib.rs"), "pub fn changed_after_index() {}\n").unwrap();
+    later_mtime(&root.join("lib.rs"));
+    git(root, &["commit", "-q", "-am", "edit"]);
+    assert_stale(&repo, "HEAD", "lib.rs committed after indexing");
+}
+
+#[test]
+fn impact_names_a_newer_or_damaged_index() {
+    let repo = indexed(|_| {});
+    set_meta(&repo.index, "schema_version", "999");
+    assert_eq!(
+        impact_code(&repo, "HEAD"),
+        (Some(1), "schema_incompatible".to_string())
+    );
+    std::fs::write(&repo.index, b"this is not a database, only text").unwrap();
+    for sidecar in ["graph.db-wal", "graph.db-shm"] {
+        let _ = std::fs::remove_file(repo.index.with_file_name(sidecar));
+    }
+    assert_eq!(
+        impact_code(&repo, "HEAD"),
+        (Some(1), "index_unavailable".to_string())
+    );
 }

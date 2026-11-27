@@ -1266,6 +1266,9 @@ fn history_composition_error(error: ChangeImpactError) -> HistoryDocumentGraphEr
         }
         ChangeImpactError::InvalidRef
         | ChangeImpactError::RootMismatch
+        | ChangeImpactError::IndexMissing
+        | ChangeImpactError::IndexUnavailable
+        | ChangeImpactError::SchemaIncompatible
         | ChangeImpactError::IndexStale => HistoryDocumentGraphError::HistorySnapshotUnavailable,
     }
 }
@@ -1881,6 +1884,13 @@ pub type ImpactEngine<'a> =
 pub enum ChangeImpactError {
     InvalidRef,
     RootMismatch,
+    /// No index file, or one that never indexed a repository.
+    IndexMissing,
+    /// The index file exists but does not open, such as a damaged database.
+    IndexUnavailable,
+    /// The index has an older or newer schema than this binary reads.
+    SchemaIncompatible,
+    /// An indexable file differs from what the index holds.
     IndexStale,
     SnapshotChanged,
     GitTimeout,
@@ -1976,6 +1986,9 @@ impl ChangeImpactError {
         match self {
             Self::InvalidRef => "invalid_ref",
             Self::RootMismatch => "root_mismatch",
+            Self::IndexMissing => "index_missing",
+            Self::IndexUnavailable => "index_unavailable",
+            Self::SchemaIncompatible => "schema_incompatible",
             Self::IndexStale => "index_stale",
             Self::SnapshotChanged => "snapshot_changed",
             Self::GitTimeout => "git_timeout",
@@ -2435,7 +2448,12 @@ impl From<ChangeImpactError> for BriefError {
         match error {
             ChangeImpactError::InvalidRef => Self::InvalidRef,
             ChangeImpactError::RootMismatch => Self::RootMismatch,
-            ChangeImpactError::IndexStale => Self::IndexStale,
+            ChangeImpactError::SchemaIncompatible => Self::SchemaIncompatible,
+            // The brief opens or builds its own index first, so these only
+            // mean that its index lost its repository binding.
+            ChangeImpactError::IndexMissing
+            | ChangeImpactError::IndexUnavailable
+            | ChangeImpactError::IndexStale => Self::IndexStale,
             ChangeImpactError::SnapshotChanged => Self::SnapshotChanged,
             ChangeImpactError::GitTimeout | ChangeImpactError::GitOutputLimit => {
                 Self::WorkLimitExceeded
@@ -2845,6 +2863,143 @@ pub(crate) fn validate_change_impact_snapshot_ignoring_path(
         .map_err(|_| ChangeImpactError::SnapshotChanged)
 }
 
+/// `impact` answers from the whole graph, so any indexable file that differs
+/// from the index can make the answer old, not only the files in the `--since`
+/// diff. With the commit the last complete index recorded, the paths compared
+/// are the `--since` diff, every path that differs from that commit now, and
+/// the paths whose rows could differ from it. Without that commit the full
+/// source scan decides. A path with no extractor is never in the index, so a
+/// change to it cannot make the graph old and it is not compared.
+fn ensure_index_matches_worktree(
+    store: &Store,
+    repository_root: &Path,
+    root_capability: &crate::bounded_fs::RootCapability,
+    since_paths: impl IntoIterator<Item = String>,
+) -> Result<(), ChangeImpactError> {
+    let interrupted = || store.work_interrupted();
+    let control = crate::bounded_fs::ReadControl {
+        deadline: store.request_deadline(),
+        interrupted: Some(&interrupted),
+    };
+    let mut paths: BTreeSet<String> = since_paths.into_iter().collect();
+    match changed_since_indexed_commit(store, repository_root, control)? {
+        Some(changed) => paths.extend(changed),
+        None => ensure_full_scan_current(store, repository_root, control)?,
+    }
+    for path in &paths {
+        if crate::indexer::extractor_for_path(Path::new(path)).is_none() {
+            continue;
+        }
+        if !indexed_path_current(store, root_capability, path, control)? {
+            return Err(ChangeImpactError::IndexStale);
+        }
+    }
+    Ok(())
+}
+
+/// Paths that can differ from the index, or `None` when the index recorded
+/// no commit, the commit is gone, or the list is incomplete.
+fn changed_since_indexed_commit(
+    store: &Store,
+    repository_root: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<Option<BTreeSet<String>>, ChangeImpactError> {
+    let Some(bound) = store
+        .indexed_commit()
+        .map_err(|_| ChangeImpactError::IndexUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let files = match crate::git::complete_worktree_paths_controlled(
+        repository_root,
+        &bound.commit,
+        None,
+        control.deadline,
+        control.interrupted,
+    ) {
+        Ok(Some(files)) => files,
+        Ok(None)
+        | Err(
+            crate::git::WorkingTreeDiffError::InvalidRef
+            | crate::git::WorkingTreeDiffError::GitUnavailable,
+        ) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = bound.changed_paths;
+    paths.extend(files.into_iter().map(|file| file.path));
+    Ok(Some(paths))
+}
+
+fn ensure_full_scan_current(
+    store: &Store,
+    repository_root: &Path,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<(), ChangeImpactError> {
+    let (source_cap, source_bytes_cap) = crate::indexer::IndexLimits::MANUAL.source_caps();
+    match crate::indexer::stale_paths_controlled(
+        store,
+        repository_root,
+        1,
+        source_cap,
+        source_bytes_cap,
+        control,
+    ) {
+        Ok(scan) if scan.paths.is_empty() => Ok(()),
+        Ok(_) => Err(ChangeImpactError::IndexStale),
+        Err(
+            crate::indexer::IndexError::Cancelled | crate::indexer::IndexError::DeadlineExceeded,
+        ) => Err(ChangeImpactError::GitTimeout),
+        Err(crate::indexer::IndexError::SnapshotChanged) => Err(ChangeImpactError::SnapshotChanged),
+        Err(_) => Err(ChangeImpactError::IndexStale),
+    }
+}
+
+/// Whether the index holds what a full index of this path would hold now:
+/// the same bytes for an indexed path, and no row for a path the indexer
+/// skips, such as a deleted, binary, too large or non-regular file.
+fn indexed_path_current(
+    store: &Store,
+    root_capability: &crate::bounded_fs::RootCapability,
+    path: &str,
+    control: crate::bounded_fs::ReadControl<'_>,
+) -> Result<bool, ChangeImpactError> {
+    let stored = store
+        .file_content_sha256(path)
+        .map_err(|_| ChangeImpactError::IndexUnavailable)?;
+    let indexed = stored.is_some();
+    if !indexed && crate::indexer::has_skipped_component(Path::new(path)) {
+        return Ok(true);
+    }
+    let read = crate::bounded_fs::read_regular_file_with_capability(
+        root_capability,
+        Path::new(path),
+        crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+        crate::indexer::MAX_INDEXABLE_FILE_SIZE,
+        control,
+    );
+    match read {
+        Ok(file) => Ok(match stored.as_deref().filter(|value| !value.is_empty()) {
+            Some(digest) => crate::hex::sha256(file.bytes) == digest,
+            None => !indexed && crate::indexer::is_binary_content(&file.bytes),
+        }),
+        Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => Ok(!indexed),
+        Err(crate::bounded_fs::BoundedReadError::NotRegular) => Ok(!indexed),
+        Err(crate::bounded_fs::BoundedReadError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(!indexed)
+        }
+        Err(
+            crate::bounded_fs::BoundedReadError::Interrupted
+            | crate::bounded_fs::BoundedReadError::DeadlineExceeded,
+        ) => Err(ChangeImpactError::GitTimeout),
+        Err(_) => Err(ChangeImpactError::SnapshotChanged),
+    }
+}
+
 impl From<crate::git::WorkingTreeDiffError> for ChangeImpactError {
     fn from(error: crate::git::WorkingTreeDiffError) -> Self {
         match error {
@@ -3131,8 +3286,8 @@ pub fn change_impact(
         StoreReadSnapshot::begin(store).map_err(|_| ChangeImpactError::SnapshotChanged)?;
     let stored_root = store
         .meta_value("index_root")
-        .map_err(|_| ChangeImpactError::IndexStale)?
-        .ok_or(ChangeImpactError::IndexStale)?;
+        .map_err(|_| ChangeImpactError::IndexUnavailable)?
+        .ok_or(ChangeImpactError::IndexMissing)?;
     let stored_root = PathBuf::from(stored_root)
         .canonicalize()
         .map_err(|_| ChangeImpactError::RootMismatch)?;
@@ -3160,39 +3315,12 @@ pub fn change_impact(
         store.request_deadline(),
         Some(&interrupted),
     )?;
-    for file in &working.files {
-        if file.status == "deleted"
-            || crate::indexer::extractor_for_path(Path::new(&file.path)).is_none()
-        {
-            continue;
-        }
-        let bytes = crate::bounded_fs::read_regular_file_with_capability(
-            &root_capability,
-            Path::new(&file.path),
-            crate::indexer::MAX_INDEXABLE_FILE_SIZE,
-            crate::indexer::MAX_INDEXABLE_FILE_SIZE,
-            crate::bounded_fs::ReadControl {
-                deadline: store.request_deadline(),
-                interrupted: Some(&interrupted),
-            },
-        )
-        .map_err(|error| match error {
-            crate::bounded_fs::BoundedReadError::TooLarge { .. } => ChangeImpactError::IndexStale,
-            crate::bounded_fs::BoundedReadError::Interrupted
-            | crate::bounded_fs::BoundedReadError::DeadlineExceeded => {
-                ChangeImpactError::GitTimeout
-            }
-            _ => ChangeImpactError::SnapshotChanged,
-        })?
-        .bytes;
-        let digest = crate::hex::sha256(bytes);
-        let stored = store
-            .file_content_sha256(&file.path)
-            .map_err(|_| ChangeImpactError::IndexStale)?;
-        if stored.as_deref().filter(|value| !value.is_empty()) != Some(digest.as_str()) {
-            return Err(ChangeImpactError::IndexStale);
-        }
-    }
+    ensure_index_matches_worktree(
+        store,
+        &repository_root,
+        &root_capability,
+        working.files.iter().map(|file| file.path.clone()),
+    )?;
 
     let mut changed_symbols = Vec::new();
     changed_symbols.extend(working.diff.added.iter().map(|symbol| ChangedSymbol {
@@ -11107,11 +11235,15 @@ fn checks_value() { assert_eq!(value(), 1); }
         let root = impact_repo(name, &[("src/app.py", "def target():\n    return 1\n")]);
         write_impact_file(&root, "src/app.py", "def target():\n    return 2\n");
         let store = index_impact(&root, name);
+        // These rows have no files behind them. Restoring the recorded commit
+        // keeps them out of the source check, so the test measures the caps.
+        let bound = store.indexed_commit().unwrap().expect("a recorded commit");
         for index in 0..49_999 {
             store
                 .upsert_file(&format!("src/tests/a{index:05}.py"), 1, 0)
                 .unwrap();
         }
+        store.set_indexed_commit(&bound).unwrap();
         for index in 0..501 {
             store
                 .insert_symbol(
@@ -11149,7 +11281,9 @@ fn checks_value() { assert_eq!(value(), 1); }
         assert_eq!(exact.tests.items[0].symbol.name, "test_survives");
         assert_eq!(exact.tests.items[0].classification, "heuristic");
 
+        let bound = store.indexed_commit().unwrap().expect("a recorded commit");
         store.upsert_file("src/tests/overflow.py", 1, 0).unwrap();
+        store.set_indexed_commit(&bound).unwrap();
         let overflow = change_impact(&store, &root, "HEAD", 3, 100).unwrap();
         assert_eq!(overflow.tests.total, None);
         assert_eq!(overflow.tests.returned, 0);

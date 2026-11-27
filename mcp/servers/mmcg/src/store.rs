@@ -222,6 +222,15 @@ const READ_ONLY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Sibling of the database file. It persists: removing a lock file lets two
 /// writers lock two different files.
 pub(crate) const WRITER_LOCK_SUFFIX: &str = "-writer.lock";
+/// The commit `HEAD` named while the last complete index ran.
+pub const INDEXED_COMMIT_META_KEY: &str = "indexed_commit";
+/// A JSON array of the indexable paths whose index rows can differ from that
+/// commit: the ones that differed from it while the index ran, and every path
+/// written later by anything other than a complete index.
+pub const INDEXED_CHANGED_PATHS_META_KEY: &str = "indexed_changed_paths";
+/// Past this many listed paths the commit is dropped, and `impact` falls back
+/// to the full source scan.
+pub const INDEXED_CHANGED_PATH_LIMIT: usize = 1_000;
 const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITER_LOCK_POLL: Duration = Duration::from_millis(25);
 
@@ -566,12 +575,22 @@ fn contract_number(label: &str, current: &str) -> Option<u64> {
     label.strip_prefix(family)?.strip_prefix("-v")?.parse().ok()
 }
 
+const NEWER_INDEX_GUIDANCE: &str = "use a newer mmcg binary";
+
 fn newer_index_error(what: &str, stored: &str, current: &str) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
         Some(format!(
-            "the index has {what} {stored}, newer than {what} {current} that this mmcg supports; use a newer mmcg binary"
+            "the index has {what} {stored}, newer than {what} {current} that this mmcg supports; {NEWER_INDEX_GUIDANCE}"
         )),
+    )
+}
+
+/// The open failed because a newer binary wrote the index.
+pub fn is_newer_index_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message)) if message.ends_with(NEWER_INDEX_GUIDANCE)
     )
 }
 
@@ -2756,6 +2775,78 @@ fn concept_documentation_stats_on(connection: &Connection) -> SqlResult<ConceptD
             })
         },
     )
+}
+
+/// The source state a complete index was built from: a commit, plus the
+/// indexable paths whose rows can differ from it. Every other indexable path
+/// in the index matches its blob in that commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedCommit {
+    pub commit: String,
+    pub changed_paths: BTreeSet<String>,
+}
+
+fn meta_value_on(connection: &Connection, key: &str) -> SqlResult<Option<String>> {
+    connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+fn indexed_commit_on(connection: &Connection) -> SqlResult<Option<IndexedCommit>> {
+    let Some(commit) = meta_value_on(connection, INDEXED_COMMIT_META_KEY)? else {
+        return Ok(None);
+    };
+    let Some(paths) = meta_value_on(connection, INDEXED_CHANGED_PATHS_META_KEY)? else {
+        return Ok(None);
+    };
+    if !crate::git::is_full_git_oid(&commit) {
+        return Ok(None);
+    }
+    let Ok(changed_paths) = serde_json::from_str::<BTreeSet<String>>(&paths) else {
+        return Ok(None);
+    };
+    if changed_paths.len() > INDEXED_CHANGED_PATH_LIMIT {
+        return Ok(None);
+    }
+    Ok(Some(IndexedCommit {
+        commit,
+        changed_paths,
+    }))
+}
+
+fn write_indexed_commit_on(connection: &Connection, bound: &IndexedCommit) -> SqlResult<()> {
+    if bound.changed_paths.len() > INDEXED_CHANGED_PATH_LIMIT {
+        return clear_indexed_commit_on(connection);
+    }
+    let paths = serde_json::to_string(&bound.changed_paths)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    set_meta_on(connection, INDEXED_COMMIT_META_KEY, &bound.commit)?;
+    set_meta_on(connection, INDEXED_CHANGED_PATHS_META_KEY, &paths)
+}
+
+fn clear_indexed_commit_on(connection: &Connection) -> SqlResult<()> {
+    connection.execute(
+        "DELETE FROM meta WHERE key IN (?1, ?2)",
+        params![INDEXED_COMMIT_META_KEY, INDEXED_CHANGED_PATHS_META_KEY],
+    )?;
+    Ok(())
+}
+
+/// A file row written outside a complete index no longer matches the recorded
+/// commit, so its path joins the list `impact` compares. A complete index
+/// clears the commit before its first write, so its own writes skip this.
+fn note_file_row_write_on(connection: &Connection, path: &str) -> SqlResult<()> {
+    let Some(mut bound) = indexed_commit_on(connection)? else {
+        return Ok(());
+    };
+    if bound.changed_paths.insert(path.to_string()) {
+        write_indexed_commit_on(connection, &bound)?;
+    }
+    Ok(())
 }
 
 fn set_meta_on(connection: &Connection, key: &str, value: &str) -> SqlResult<()> {
@@ -5510,6 +5601,7 @@ impl Store {
                 params![file_path],
             )?;
             tx.execute("DELETE FROM files WHERE path = ?1", params![file_path])?;
+            note_file_row_write_on(&tx, file_path)?;
             if restore_contract && Self::concept_schema_objects_current_on(&tx)? {
                 update_concept_documentation_meta_on(&tx)?;
             }
@@ -5591,6 +5683,7 @@ impl Store {
             params![&pending.path],
         )?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![&pending.path])?;
+        note_file_row_write_on(&tx, &pending.path)?;
 
         // Insert symbols, remembering each rowid.
         let language = if pending.language.is_empty() {
@@ -5797,7 +5890,7 @@ impl Store {
              ON CONFLICT(path) DO UPDATE SET indexed_at=?2, symbol_count=?3, production=?4",
             params![path, mtime, symbol_count, is_production_path(path)],
         )?;
-        Ok(())
+        note_file_row_write_on(&self.conn, path)
     }
 
     pub fn file_mtime(&self, path: &str) -> SqlResult<Option<i64>> {
@@ -5855,13 +5948,25 @@ impl Store {
     }
 
     pub fn meta_value(&self, key: &str) -> SqlResult<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()
+        meta_value_on(&self.conn, key)
+    }
+
+    /// The commit the last complete index recorded, or `None` for an index
+    /// built before the key existed, outside a Git repository, by a run that
+    /// did not finish, or with more than [`INDEXED_CHANGED_PATH_LIMIT`]
+    /// listed paths.
+    pub fn indexed_commit(&self) -> SqlResult<Option<IndexedCommit>> {
+        indexed_commit_on(&self.conn)
+    }
+
+    pub(crate) fn set_indexed_commit(&self, bound: &IndexedCommit) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        write_indexed_commit_on(&tx, bound)?;
+        tx.commit()
+    }
+
+    pub(crate) fn clear_indexed_commit(&self) -> SqlResult<()> {
+        clear_indexed_commit_on(&self.conn)
     }
 
     pub fn extractor_contract_current(&self) -> SqlResult<bool> {

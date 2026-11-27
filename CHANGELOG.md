@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `impact` no longer reports every index it cannot use as `index_stale`. A
+  missing or empty index, or one that never indexed a repository, is
+  `index_missing`. An older or newer schema is `schema_incompatible`, the code
+  MCP already uses. A file that does not open as an index is
+  `index_unavailable`. `index_stale` now means only that a source file differs
+  from the index. The `error` of `mmcg_change_impact` and `mmcg_test_impact`
+  uses the same codes. A script that matches `index_stale` to catch a missing
+  index needs the new codes. `ChangeImpactError` in the `mmcg` crate has the
+  three new variants.
+
+### Changed
+
+- `impact` exits 1 with `index_stale` when any source file was changed, added
+  or deleted after `index`, committed or not, with or without
+  `--skip-freshness-check`. It used to compare only the changed and new files
+  in the `--since` diff, so a deleted file, a file committed after indexing and
+  outside that diff, or a stale file elsewhere in the graph gave an old answer
+  with exit 0. A complete `index` now records the `HEAD` commit and the source
+  files that differ from it in the index metadata, and `impact` asks Git what
+  differs from that commit. An index with no recorded commit falls back to the
+  full source scan until the next complete `index`. The schema version does not
+  change.
+- A changed source that the indexer skips, such as a binary file or one larger
+  than 5 MiB, no longer makes `impact` fail with `index_stale` when the index
+  has no row for it.
+
 ## [5.0.0] - 2026-11-27
 
 ### Breaking

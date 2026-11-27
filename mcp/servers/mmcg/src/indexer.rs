@@ -10,8 +10,8 @@ use crate::bounded_fs::{
     BoundedPathKind, BoundedReadError, ReadControl, RootCapability, StableFileIdentity,
 };
 use crate::store::{
-    normalize_concept_documentation, PendingConceptCorpus, PendingConceptDocumentation,
-    PendingFile, PendingSymbol, Store,
+    normalize_concept_documentation, IndexedCommit, PendingConceptCorpus,
+    PendingConceptDocumentation, PendingFile, PendingSymbol, Store,
 };
 use ignore::{IncrementalIgnore, WalkBuilder};
 use rayon::prelude::*;
@@ -720,6 +720,12 @@ impl Indexer {
             }
         };
 
+        // Until this run completes, the index is not the state of one commit.
+        // Read the commit before the walk, so a file that changes during the
+        // run still differs from it.
+        store.clear_indexed_commit().map_err(store_error)?;
+        let commit_before = self.worktree_commit(store)?;
+
         // Phase 1: walk filesystem
         let inventory = {
             let interrupted = || store.work_interrupted();
@@ -1008,6 +1014,16 @@ impl Indexer {
         stats.concept_documentation_unsupported_language_files =
             documentation.unsupported_language_files;
 
+        if stats.complete() {
+            if let (Some(mut before), Some(after)) = (commit_before, self.worktree_commit(store)?) {
+                // A commit made during the run leaves no single commit to
+                // compare with, so nothing is recorded.
+                if before.commit == after.commit {
+                    before.changed_paths.extend(after.changed_paths);
+                    store.set_indexed_commit(&before).map_err(store_error)?;
+                }
+            }
+        }
         stats.duration_ms = start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
         Ok(stats)
     }
@@ -1249,6 +1265,58 @@ impl Indexer {
             stats,
             inventory_token: crate::hex::encode(&digest.finalize()),
         })
+    }
+
+    /// `HEAD` and the indexable paths that differ from it now, staged,
+    /// unstaged or untracked. `None` when the root is not the top of a Git
+    /// worktree, `HEAD` has no commit, or the list is incomplete. `impact`
+    /// only accepts an index bound to the repository top.
+    fn worktree_commit(&self, store: &Store) -> Result<Option<IndexedCommit>, IndexError> {
+        let Ok(root) = self.root.canonicalize() else {
+            return Ok(None);
+        };
+        if root.join(".git").symlink_metadata().is_err() {
+            return Ok(None);
+        }
+        let interrupted = || store.work_interrupted();
+        let control = ReadControl {
+            deadline: store.request_deadline(),
+            interrupted: Some(&interrupted),
+        };
+        let commit =
+            match crate::git::resolve_head_controlled(&root, control.deadline, control.interrupted)
+            {
+                Ok(commit) => commit,
+                Err(error @ crate::git::WorkingTreeDiffError::GitTimeout) => {
+                    return Err(git_inventory_error(error, control))
+                }
+                Err(_) => return Ok(None),
+            };
+        let files = match crate::git::complete_worktree_paths_controlled(
+            &root,
+            &commit,
+            None,
+            control.deadline,
+            control.interrupted,
+        ) {
+            Ok(Some(files)) => files,
+            Err(error @ crate::git::WorkingTreeDiffError::GitTimeout) => {
+                return Err(git_inventory_error(error, control))
+            }
+            Ok(None) | Err(_) => return Ok(None),
+        };
+        let changed_paths: BTreeSet<String> = files
+            .into_iter()
+            .map(|file| file.path)
+            .filter(|path| extractor_for_path(Path::new(path)).is_some())
+            .collect();
+        if changed_paths.len() > crate::store::INDEXED_CHANGED_PATH_LIMIT {
+            return Ok(None);
+        }
+        Ok(Some(IndexedCommit {
+            commit,
+            changed_paths,
+        }))
     }
 
     /// Re-index a single file. Used by the watcher.
@@ -2747,6 +2815,106 @@ mod incremental_tests {
             "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn commit_all(dir: &Path) {
+        git(dir, &["add", "-A"]);
+        git(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "change",
+            ],
+        );
+    }
+
+    fn head(dir: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn a_complete_index_records_head_and_the_sources_that_differ_from_it() {
+        let (dir, db) = setup("indexed_commit");
+        fs::write(dir.join("clean.rs"), "pub fn clean() {}\n").unwrap();
+        fs::write(dir.join("dirty.rs"), "pub fn dirty() {}\n").unwrap();
+        git(&dir, &["init", "-q"]);
+        commit_all(&dir);
+        fs::write(dir.join("dirty.rs"), "pub fn edited() {}\n").unwrap();
+        fs::write(dir.join("new.rs"), "pub fn new() {}\n").unwrap();
+        fs::write(dir.join("notes.txt"), "not a source\n").unwrap();
+
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+
+        let bound = store.indexed_commit().unwrap().expect("a recorded commit");
+        assert_eq!(bound.commit, head(&dir));
+        assert_eq!(
+            bound.changed_paths.into_iter().collect::<Vec<_>>(),
+            vec!["dirty.rs", "new.rs"]
+        );
+
+        fs::write(dir.join("clean.rs"), "pub fn clean_edit() {}\n").unwrap();
+        Indexer::new(&dir)
+            .index_one(&mut store, &dir.join("clean.rs"))
+            .unwrap();
+        store.purge_file("gone.rs").unwrap();
+        let bound = store.indexed_commit().unwrap().expect("still recorded");
+        assert_eq!(
+            bound.changed_paths.into_iter().collect::<Vec<_>>(),
+            vec!["clean.rs", "dirty.rs", "gone.rs", "new.rs"],
+            "a write outside a complete index lists its path"
+        );
+
+        commit_all(&dir);
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        let bound = store.indexed_commit().unwrap().expect("a recorded commit");
+        assert_eq!(bound.commit, head(&dir));
+        assert!(bound.changed_paths.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_index_outside_a_git_worktree_records_no_commit() {
+        let (dir, db) = setup("no_indexed_commit");
+        fs::write(dir.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, false).unwrap();
+        assert_eq!(store.indexed_commit().unwrap(), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn listing_past_the_limit_drops_the_recorded_commit() {
+        let (dir, db) = setup("indexed_commit_limit");
+        let store = Store::open(&db).unwrap();
+        let listed: BTreeSet<String> = (0..crate::store::INDEXED_CHANGED_PATH_LIMIT)
+            .map(|index| format!("src/file_{index}.rs"))
+            .collect();
+        store
+            .set_indexed_commit(&IndexedCommit {
+                commit: "a".repeat(40),
+                changed_paths: listed,
+            })
+            .unwrap();
+        store.upsert_file("src/file_0.rs", 1, 1).unwrap();
+        assert!(store.indexed_commit().unwrap().is_some(), "already listed");
+        store.upsert_file("src/one_more.rs", 1, 1).unwrap();
+        assert_eq!(store.indexed_commit().unwrap(), None);
+        assert_eq!(store.meta_value("indexed_commit").unwrap(), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     fn documentation_matches(store: &Store, term: &str) -> Vec<String> {

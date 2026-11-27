@@ -6830,6 +6830,15 @@ mod checks {
         for (error, code) in [
             (queries::ChangeImpactError::InvalidRef, "invalid_ref"),
             (queries::ChangeImpactError::RootMismatch, "root_mismatch"),
+            (queries::ChangeImpactError::IndexMissing, "index_missing"),
+            (
+                queries::ChangeImpactError::IndexUnavailable,
+                "index_unavailable",
+            ),
+            (
+                queries::ChangeImpactError::SchemaIncompatible,
+                "schema_incompatible",
+            ),
             (queries::ChangeImpactError::IndexStale, "index_stale"),
             (
                 queries::ChangeImpactError::SnapshotChanged,

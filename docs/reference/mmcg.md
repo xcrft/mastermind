@@ -77,17 +77,15 @@ after the command name.
 | Index | Answer with the flag |
 |---|---|
 | Current with the files | The same answer as without it |
-| Behind the files: a file was changed, added or deleted after `index` | The old answer, with no warning |
+| Behind the files: a file was changed, added or deleted after `index` | `query`, `map` and `repo-map` give the old answer, with no warning. `impact` exits 1 with `index_stale` |
 | Built by an older extractor | The answer, and the stale-index warning, because that check is one metadata read |
 | Missing or with an old schema | The same error and exit 1 as without it |
 
 The flag saves only the time of the scan. The gain is largest for `query` and
 `repo-map`. `map` and `impact` do more work of their own, so they gain less.
 
-`impact` keeps its own check of the changed files against the index, and the
-flag does not skip it. When a changed file differs from what the index holds,
-`impact` exits 1 with `index_stale`, with or without the flag. It reports a
-missing index or one with an old schema as `index_stale` too.
+`impact` keeps its own check of the source files against the index, and the
+flag does not skip it. See [change impact freshness](#change-impact-freshness).
 
 Use the flag only when the index is built after every change, such as a mirror
 that runs `index` after each fetch. Never use it on a working tree.
@@ -173,6 +171,36 @@ mastermind temporal --since HEAD~5 --path services/payment --format json
 changes, graph precision, returned and total counts and the reasons a result is
 partial. Map caps are in [map scope and caps](mcp.md#map-scope-and-caps), and
 SARIF rules in [SARIF export](lens.md#sarif-export).
+
+### Change impact freshness
+
+`impact` answers from the whole graph, so it refuses an index that is behind
+any source file, not only the files in the `--since` diff. A complete `index`
+run records the commit `HEAD` names and the source files that differ from it,
+staged, unstaged or untracked. `impact` asks Git which paths differ from that
+commit now, adds the recorded paths and the `--since` diff, and compares each
+source file among them with the index by SHA-256. This runs with or without
+`--skip-freshness-check`.
+
+| Case | Result |
+|---|---|
+| A source file changed, added or deleted after `index`, committed or not | Exit 1, `index_stale` |
+| A file with no extractor, such as `notes.txt` | Not compared. The index never holds it, so it cannot make the graph old |
+| A source the indexer skips: binary, larger than 5 MiB, not a regular file, or under a skipped directory | Not stale while the index has no row for it |
+| `watch` or another single-file write after `index` | Its path joins the recorded list, so it is still compared |
+| No recorded commit: an index from an older mastermind, an `index` run that did not finish or ran outside a Git worktree, a commit made during the run, a recorded commit Git no longer has, more than 1,000 recorded paths, or more than 10,000 changed paths | The full source scan decides, with the mtime rule of the freshness check. The next complete `index` records a commit |
+
+`impact` prints only an error code on stderr and exits 1. The
+[MCP tools](mcp.md#managed-index-refresh) `mmcg_change_impact` and
+`mmcg_test_impact` return the same codes in `error`.
+
+| Code | Meaning | Fix |
+|---|---|---|
+| `index_missing` | No index file, an empty one, or one that never indexed a repository | `mastermind index .` |
+| `schema_incompatible` | The index has an older or newer schema than this binary | `mastermind index .` for an older one, a newer mastermind for a newer one |
+| `index_unavailable` | The file exists but does not open as an index | Move it away and run `mastermind index .` |
+| `index_stale` | A source file differs from the index | `mastermind index .` |
+| `root_mismatch` | The index belongs to another repository root | Pass the right `--index` or `--root` |
 
 ### Question-specific shortlist (`repo-map`)
 

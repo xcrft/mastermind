@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Pre-edit Snapshot item that starts with a file span, such as
+  `` - `foo.vue` and `Widget` — 2 callers ``, claims `Widget`. It used to claim
+  the file name. An item whose only span is a file, such as
+  `` - `src/a.rs:12` — 5 callers ``, is `snapshot_line_unparsed`.
+
 - A spec that names an indexed source file in backticks lists it as a
   mentioned file for every indexed extension. `.pyi`, `.vue`, `.phtml`, `.hh`,
   `.hxx`, `.inl`, `.ipp` and `.tpp` were missing. A `.clang-format` scope now

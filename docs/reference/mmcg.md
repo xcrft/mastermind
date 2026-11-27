@@ -59,6 +59,17 @@ indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0)
 `index` and `ci` exit 1 when any source fails, after they print the failed
 paths. The rest of the run is still committed.
 
+Every `query` first compares the source tree with the index and warns on stderr
+when the index is not current. The check walks the whole source inventory, so
+on a large repository it can take seconds per query. A caller that indexes
+after every change, such as a mirror that indexes after each fetch, can skip it:
+
+```bash
+mastermind query --skip-freshness-check callers commit_file
+```
+
+The answer is the same either way. Only the check and its warning are left out.
+
 ### Which files get indexed
 
 Manual indexing, automatic refresh and the freshness check use one source

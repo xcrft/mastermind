@@ -42,13 +42,22 @@ pub(crate) fn warn_if_stale(store: &Store) {
     }
 }
 
-pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// `check_freshness` is false only for `query --skip-freshness-check`, whose
+/// caller keeps the index current. The scan walks the whole source inventory,
+/// which costs seconds on a large repository and never changes the answer.
+pub fn dispatch(
+    q: QueryCmd,
+    index_path: &Path,
+    check_freshness: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_query_store(index_path)?;
     store.push_work_budget(WorkBudget::from_millis(query_budget_ms_from_env(
         DEFAULT_CLI_BUDGET_MS,
     )));
     let budget_scope = WorkBudgetScope(&store);
-    warn_if_stale(&store);
+    if check_freshness {
+        warn_if_stale(&store);
+    }
     let is_explain = matches!(q, QueryCmd::Explain { .. });
     let result = execute(&store, q)?;
     drop(budget_scope);

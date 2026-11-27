@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mastermind query --skip-freshness-check` answers without first walking the
+  source tree to see if the index is current. The answer does not change, and
+  the stale-index warning is left out. It is for a caller that indexes after
+  every change, where the walk can take seconds per query on a large
+  repository.
 - A skill-selection corpus of 91 prompts in
   `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill or
   subagent, or none, and rejects the near misses. `just check` runs

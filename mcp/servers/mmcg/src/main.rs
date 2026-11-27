@@ -309,8 +309,7 @@ enum Cmd {
     /// re-run". Pass `--exec` for a recorded native Claude invocation between phases.
     RunTask(RunTaskArgs),
     /// One-shot query — handy for CLI debugging without going through MCP.
-    #[command(subcommand)]
-    Query(QueryCmd),
+    Query(QueryArgs),
     /// Self-contained demo: builds a temp repo, indexes it, runs mmcg queries,
     /// and prints the mechanical auditor verdict. Zero setup — no Claude API key needed.
     Demo(DemoArgs),
@@ -1751,6 +1750,18 @@ enum HabitCmd {
     },
 }
 
+#[derive(clap::Args)]
+struct QueryArgs {
+    /// Answer without first scanning the source tree for files that changed
+    /// since the last index. For a caller that keeps the index current itself,
+    /// such as a mirror that indexes after every fetch. The answer comes from
+    /// the index either way, and only the staleness warning on stderr is left out.
+    #[arg(long)]
+    skip_freshness_check: bool,
+    #[command(subcommand)]
+    cmd: QueryCmd,
+}
+
 #[derive(Subcommand)]
 #[command(defer = true)]
 enum QueryCmd {
@@ -3125,7 +3136,10 @@ fn run_cli_inner(
                 std::process::exit(1);
             }
         }
-        Cmd::Query(q) => commands::dispatch_query(q, &index_path)?,
+        Cmd::Query(QueryArgs {
+            cmd,
+            skip_freshness_check,
+        }) => commands::dispatch_query(cmd, &index_path, !skip_freshness_check)?,
         Cmd::Context(ContextCmd::Doctor { root, json }) => {
             let root = root
                 .canonicalize()
@@ -3766,7 +3780,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Query(QueryCmd::Callees { name, file: Some(file), line: Some(5), .. })
+            Cmd::Query(QueryArgs { cmd: QueryCmd::Callees { name, file: Some(file), line: Some(5), .. }, .. })
                 if name == "process" && file == "second.rs"
         ));
         assert!(
@@ -3837,7 +3851,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             query.cmd,
-            Cmd::Query(QueryCmd::Semantic { symbol, top })
+            Cmd::Query(QueryArgs { cmd: QueryCmd::Semantic { symbol, top }, .. })
                 if symbol == "scip-clang . demo . target()." && top == 25
         ));
     }
@@ -3881,7 +3895,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             query.cmd,
-            Cmd::Query(QueryCmd::Facts { path, top }) if path == "src" && top == 250
+            Cmd::Query(QueryArgs { cmd: QueryCmd::Facts { path, top }, .. }) if path == "src" && top == 250
         ));
         assert!(Cli::try_parse_from(["mastermind", "query", "facts", "--top", "401",]).is_err());
     }
@@ -4182,8 +4196,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             query_history_with_graph.cmd,
-            Cmd::Query(QueryCmd::History {
-                document_graph: Some(path),
+            Cmd::Query(QueryArgs {
+                cmd: QueryCmd::History {
+                    document_graph: Some(path),
+                    ..
+                },
                 ..
             }) if path == std::path::Path::new(".mastermind/research/graph.json")
         ));

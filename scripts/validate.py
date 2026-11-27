@@ -66,12 +66,21 @@ WORKFLOW_MUTABILITIES = {"read-only", "writer"}
 # declares. Each declared capability needs a reason, and every tool that needs
 # a capability must have it declared.
 WORKFLOW_CAPABILITY_TOOLS = {
-    # BashOutput and KillShell read and stop shells the role started, so
-    # they are shell tools too.
-    "shell": {"Bash", "PowerShell", "BashOutput", "KillShell"},
+    # Every tool that runs a command or code: Monitor runs a command in the
+    # background and REPL runs JavaScript in Code Mode. BashOutput, KillShell
+    # and TaskStop read and stop what the role started, so they are shell
+    # tools too. From <https://code.claude.com/docs/en/tools-reference>.
+    "shell": {"Bash", "PowerShell", "Monitor", "REPL", "BashOutput", "KillShell", "TaskStop"},
     "web": {"WebFetch", "WebSearch"},
-    # Agent and Task start another subagent with its own tools.
-    "delegate": {"Agent", "Task"},
+    # Tools that hand work to another agent or a later prompt with its own
+    # tools: subagents, workflows, messages and scheduled prompts.
+    "delegate": {"Agent", "Task", "Workflow", "SendMessage", "CronCreate", "RemoteTrigger"},
+    # Skill runs a skill in the conversation, and a skill can bring its own
+    # allowed tools and hooks.
+    "skills": {"Skill"},
+    # Hooks in the subagent's own frontmatter. Checked from `hooks:` below,
+    # not from its tools.
+    "hooks": set(),
     # MCP tools of any server other than mmcg. Matched by prefix below.
     "mcp": set(),
 }
@@ -991,6 +1000,71 @@ def _reason_problem(reason: object) -> str | None:
     return None
 
 
+# A small Python version of the `mastermind doctor` hook rules, so this check
+# runs without building mmcg. It covers the patterns a shipped subagent could
+# plausibly carry; doctor reads the full set at run time.
+HOOK_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "busybox", "pwsh", "powershell", "cmd"}
+HOOK_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php", "lua", "osascript"}
+HOOK_FETCHERS = {"curl", "wget", "http", "https", "xh", "nc", "ncat", "socat", "ssh", "scp", "rsync", "aria2c", "iwr", "irm", "invoke-webrequest", "invoke-restmethod", "git"}
+HOOK_DECODERS = {"base64", "xxd", "openssl", "gunzip", "zcat"}
+
+
+def _command_name(word: str) -> str:
+    """A program's base name, without `.exe` or a version such as `3.12`."""
+    name = word.strip("'\"").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = name.removesuffix(".exe")
+    return name if name in HOOK_DECODERS else re.sub(r"[0-9.]+$", "", name) or name
+
+
+def _fetch_and_exec(command: str) -> str | None:
+    """Why a hook command runs code it fetched or decoded, if it does."""
+    stages = re.split(r"\|(?!\|)", command)
+    names = [_command_name(stage.split()[0]) if stage.split() else "" for stage in stages]
+    words = {_command_name(word) for word in re.split(r"[\s;&|()`$<>]+", command) if word}
+    for index, name in enumerate(names[1:], start=1):
+        if name in HOOK_SHELLS | HOOK_INTERPRETERS:
+            return f"pipes {names[index - 1] or 'output'} into {name}"
+    if re.search(r"<\(|<<<", command) and words & (HOOK_SHELLS | HOOK_INTERPRETERS | {"source", "."}):
+        return "runs a process substitution or here-string as code"
+    if words & {"eval", "iex", "invoke-expression"} and words & (HOOK_FETCHERS | HOOK_DECODERS):
+        return "evaluates fetched or decoded text"
+    if re.search(r"(-c|-e|--eval)\s+\S*\$\(", command) and words & HOOK_FETCHERS:
+        return "runs a command substitution as code"
+    if re.search(r"(exec|eval|Function)\s*\(", command) and re.search(r"b64decode|base64|atob\(|frombase64string|urlopen|fetch\(", command, re.I):
+        return "runs decoded or downloaded code inline"
+    return None
+
+
+def _frontmatter_hook_commands(hooks: object) -> tuple[list[str], int]:
+    """Command texts in a frontmatter `hooks:` mapping and the malformed entry count."""
+    if not isinstance(hooks, dict):
+        return [], 1
+    commands: list[str] = []
+    malformed = 0
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            malformed += 1
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                malformed += 1
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict) or handler.get("type") not in {"command", "http", "prompt", "agent"}:
+                    malformed += 1
+                    continue
+                if handler.get("type") != "command":
+                    continue
+                command = handler.get("command")
+                args = handler.get("args", [])
+                if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                    malformed += 1
+                    continue
+                commands.append(" ".join([command, *args]))
+    return commands, malformed
+
+
 def _capability_messages(
     workflow: dict, runtime_tools: list[str], frontmatter: dict | None = None
 ) -> list[str]:
@@ -1047,6 +1121,16 @@ def _capability_messages(
         capability = _tool_capability(tool)
         if capability:
             granted_by_capability.setdefault(capability, []).append(tool)
+    if "hooks" in frontmatter:
+        hook_commands, malformed = _frontmatter_hook_commands(frontmatter.get("hooks"))
+        granted_by_capability["hooks"] = ["frontmatter hooks"]
+        if malformed:
+            messages.append(
+                f"[subagent_hook_invalid] {malformed} frontmatter hook entries are not command or http handlers"
+            )
+        for command in hook_commands:
+            if reason := _fetch_and_exec(command):
+                messages.append(f"[subagent_hook_fetch_exec] frontmatter hook {reason}")
     for capability in sorted(WORKFLOW_CAPABILITY_TOOLS):
         granted = granted_by_capability.get(capability, [])
         if granted and capability not in capabilities:

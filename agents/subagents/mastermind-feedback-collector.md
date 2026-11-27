@@ -1,6 +1,6 @@
 ---
 name: mastermind-feedback-collector
-description: "Use only when asked to collect session feedback or possible persona evidence from Claude Code or Codex sessions the person chose. Not for a qualitative style profile (use mastermind-style-deep). Writes candidates to a private review inbox and never accepts or publishes them."
+description: "Use only when asked to collect session feedback or possible persona evidence from Claude Code or Codex sessions the person chose. Not for a qualitative style profile (use mastermind-style-deep). Records candidates in a private inbox through mastermind miner commands, never accepting or publishing."
 tools: Read, Bash
 model: sonnet
 maxTurns: 12

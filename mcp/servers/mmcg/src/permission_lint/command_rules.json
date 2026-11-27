@@ -319,5 +319,47 @@
       ],
       "skip": 0
     }
+  ],
+  "lookups": [
+    "command",
+    "echo",
+    "printf",
+    "readlink",
+    "realpath",
+    "type",
+    "whence",
+    "whereis",
+    "which"
+  ],
+  "shell_variables": [
+    "0",
+    "bash",
+    "shell",
+    "zsh_argzero",
+    "zsh_name"
+  ],
+  "remote_shells": [
+    "bwrap",
+    "chroot",
+    "firejail",
+    "incus",
+    "lxc",
+    "lxc-attach",
+    "lxc-execute",
+    "machinectl",
+    "nsenter",
+    "proot",
+    "ssh",
+    "systemd-nspawn",
+    "unshare"
+  ],
+  "temporary_directories": [
+    "/tmp",
+    "/var/tmp",
+    "/dev/shm",
+    "/private/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders"
   ]
 }

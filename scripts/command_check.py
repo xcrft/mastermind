@@ -37,20 +37,10 @@ HOLE = "\u0001"
 CLONED = "\u0002clone"
 INSTALLED = "\u0002install"
 EXTRACTED = "\u0002extract"
-TEMPORARY_DIRECTORIES = (
-    "/tmp",
-    "/var/tmp",
-    "/dev/shm",
-    "/private/tmp",
-    "/private/var/tmp",
-    "/var/folders",
-    "/private/var/folders",
-)
-LOOKUPS = {"which", "command", "type", "whereis", "realpath", "readlink", "echo", "printf"}
-REMOTE_SHELLS = {
-    "ssh", "chroot", "nsenter", "unshare", "lxc", "lxc-attach", "lxc-execute",
-    "incus", "systemd-nspawn", "machinectl", "firejail", "bwrap", "proot",
-}
+TEMPORARY_DIRECTORIES = tuple(RULES["temporary_directories"])
+LOOKUPS = set(RULES["lookups"])
+SHELL_VARIABLES = set(RULES["shell_variables"])
+REMOTE_SHELLS = set(RULES["remote_shells"])
 
 
 def _ascii_lower(text: str) -> str:
@@ -88,7 +78,7 @@ def variable_shell(word: str) -> bool:
     rest = word[1:].rstrip("}")
     end = next((index for index, c in enumerate(rest) if not _ident(c)), len(rest))
     name, tail = rest[:end], rest[end:]
-    if name in {"shell", "bash", "0"}:
+    if name in SHELL_VARIABLES:
         return True
     for prefix in (":-", ":=", "-", "="):
         if tail.startswith(prefix):
@@ -380,7 +370,13 @@ def is_stdin(arg: str) -> bool:
         return True
     if not arg.startswith("/"):
         return False
-    parts = [part for part in arg.split("/") if part and part != "."]
+    parts: list[str] = []
+    for part in arg.split("/"):
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part and part != ".":
+            parts.append(part)
     zero = lambda fd: bool(fd) and set(fd) == {"0"}  # noqa: E731
     if parts == ["dev", "stdin"]:
         return True

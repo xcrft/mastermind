@@ -2587,6 +2587,39 @@ pub fn check(locations: &Locations) -> crate::doctor::Check {
             }
             Err(class) => summary.unreadable(&label, class),
         }
+        let label = format!("claude-plugin:{name}:lsp");
+        match hooks::plugin_lsp_servers(&dir) {
+            Ok(servers) if servers.is_empty() => {}
+            Ok(servers) => {
+                project::add_servers(&mut summary, &label, &servers);
+            }
+            Err(class) => summary.unreadable(&label, class),
+        }
+        let label = format!("claude-plugin:{name}:monitors");
+        match hooks::plugin_monitors(&dir) {
+            Ok(monitors) if monitors.is_empty() => {}
+            Ok(monitors) => {
+                let findings = monitors
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, command)| {
+                        let command = command.as_deref()?;
+                        launch::classify_shell_text(command)
+                            .map(|finding| (Some(index + 1), finding))
+                    })
+                    .collect();
+                summary.add(
+                    &label,
+                    FileLint::Read {
+                        rules: monitors.len(),
+                        invalid: monitors.iter().filter(|command| command.is_none()).count(),
+                        covered: 0,
+                        findings,
+                    },
+                );
+            }
+            Err(class) => summary.unreadable(&label, class),
+        }
     }
 
     let mut rule_files = Vec::new();

@@ -237,8 +237,8 @@ entry's position, a program or key name, the reason and its severity.
 | Repository skills | `.claude/skills/*/SKILL.md`, and `<subdir>/.claude/skills/*/SKILL.md` up to four folders deep, skipping `.git`, `node_modules`, `target`, `vendor`, `dist`, `build` and virtual environments | `allowed-tools` and `hooks`. Claude Code applies a project skill's `allowed-tools` even in a `-p` run in a folder nobody trusted, and loads a nested skill when it works on files in that folder, see [skills](https://code.claude.com/docs/en/skills#pre-approve-tools-for-a-skill) |
 | Repository subagents | `.claude/agents/**/*.md`, three levels deep | `permissionMode`, `hooks` and inline `mcpServers`, see [subagents](https://code.claude.com/docs/en/sub-agents) |
 | Codex rules | `$CODEX_HOME/rules/*.rules` (default `~/.codex/rules`), `.codex/rules/*.rules` | `prefix_rule` calls and their `decision`, see [Codex rules](https://developers.openai.com/codex/rules) |
-| Codex config | `$CODEX_HOME/config.toml`, `.codex/config.toml`, profile files `$CODEX_HOME/<name>.config.toml` | `approval_policy`, `sandbox_mode`, `default_permissions`, `sandbox_workspace_write.network_access`, `shell_environment_policy`, `mcp_servers` (also `http_headers_helper`, `http_headers`, `default_tools_approval_mode` and `tools.<tool>.approval_mode`), `apps._default` and `apps.<id>` approval modes and `destructive_enabled`, `plugins.<plugin>.mcp_servers` approval modes, and in the user file and profile files `notify` and `model_providers.<id>.auth.command`, which Codex ignores in a project file, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
-| Claude Code plugins | `.mcp.json` and the files or inline maps that `mcpServers` names in `.claude-plugin/plugin.json`, for each enabled plugin that `installed_plugins.json` places for the user or this project | every server, as for `.mcp.json`. A manifest path must start with `./` and stay in the plugin. MCP bundles and bundle URLs are not read and the line says so |
+| Codex config | `$CODEX_HOME/config.toml`, `.codex/config.toml`, profile files `$CODEX_HOME/<name>.config.toml` | `approval_policy`, `sandbox_mode`, `default_permissions`, `sandbox_workspace_write.network_access`, `shell_environment_policy`, `mcp_servers` (also `http_headers_helper`, `http_headers`, `default_tools_approval_mode` and `tools.<tool>.approval_mode`), `apps._default` and `apps.<id>` approval modes, `destructive_enabled`, `open_world_enabled` and `approvals_reviewer` (also per tool), the top-level `approvals_reviewer`, `plugins.<plugin>.mcp_servers` approval modes, and in the user file and profile files `notify` and `model_providers.<id>.auth.command`, which Codex ignores in a project file, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+| Claude Code plugins | `.mcp.json` and the files or inline maps that `mcpServers` names in `.claude-plugin/plugin.json`, `.lsp.json` and the files, inline maps or lists that `lspServers` names, and the monitors in `experimental.monitors` (a file or an inline list), the older top-level `monitors` or, when neither is set, `monitors/monitors.json`, for each enabled plugin that `installed_plugins.json` places for the user or this project | every MCP and LSP server, as for `.mcp.json`, and every monitor `command`, which runs through a shell in the background with no prompt, see the [plugins reference](https://code.claude.com/docs/en/plugins-reference#lspservers). A manifest path must start with `./` and stay in the plugin. MCP bundles and bundle URLs are not read and the line says so |
 
 A shell rule is broad when its open part can choose what runs. Quotes do not
 close it: `Bash(bash -c "*")` is as open as `Bash(bash -c *)`.
@@ -260,8 +260,8 @@ Other entries:
 | Web access to any host | warn | `WebFetch`, `WebFetch(domain:*)`, `WebSearch` | `WebFetch(domain:docs.rs)` |
 | Every MCP server | warn | `mcp__*`, `mcp__*__read`. Claude Code skips such an allow rule, so it approves nothing, but it states an intent to approve every server | |
 | Every tool of one MCP server | warn | `mcp__github__*`, `mcp__github` | `mcp__mmcg__*`, `mcp__github__get_issue` |
-| Lets the agent rewrite Codex settings, instructions or skills | error | a rule aimed at them: `Edit(.codex/**)`, `Edit(.cod*/**)`, `Edit(.*/**)`, `Write(.codex/config.toml)`, `Edit(~/.codex/hooks.json)`, `Edit(AGENTS.md)`, `Edit(.agents/skills/**)`. Claude Code does not protect them | |
-| Can edit `.codex`, `AGENTS.md` and the other trust files | warn | a bare or broad rule that reaches them and ordinary files alike: `Edit`, `Write`, `Edit(**)`, `Write(*)`, `Edit(./**)`, `Edit(~/**)`, `Edit(**/*.md)` | `Edit(src/**)`, `Edit(docs/*.md)` |
+| Lets the agent rewrite Codex settings, instructions or skills | error | a rule aimed at them: `Edit(.codex/**)`, `Edit(.cod*/**)`, `Edit(.*/**)`, `Edit(.[c]odex/**)`, `Edit({.codex,src}/**)`, `Write(.codex/config.toml)`, `Edit(~/.codex/hooks.json)`, `Edit(AGENTS.md)`, `Edit(.agents/skills/**)`. Claude Code does not protect them | |
+| Can edit `.codex`, `AGENTS.md` and other trust files without a prompt in default mode | warn | a bare or broad rule that reaches them and ordinary files alike: `Edit`, `Write`, `Edit(**)`, `Write(*)`, `Edit(./**)`, `Edit(~/**)`, `Edit(**/*.md)`, `Edit(**/*.json)`, and a pattern with syntax doctor does not read, such as a `\` escape or a leading `!` | `Edit(src/**)`, `Edit(docs/*.md)`, `Edit(**/*.ts)`, `Edit(**/test/**)`, `Edit(src/**/*.ts)` |
 | Asks to let the agent rewrite its trust settings | warn | `Edit(.claude/**)`, `Write(.claude/settings.local.json)`, `Edit(.mcp.json)`, `Edit(~/.claude.json)`. These are [protected paths](https://code.claude.com/docs/en/permission-modes#protected-paths), so Claude Code still prompts, but the rule states the intent | `Edit(.claude/worktrees/**)`, which Claude Code does not protect either |
 | Writes Mastermind state | warn | `Edit(.mastermind/**)`, `Edit(~/.mastermind/**)`, `Write(/.mastermind/tasks/**)`. Claude Code's protected paths do not cover `.mastermind` | `Edit(src/**)` |
 | Reads a secret store | error | `Read(~/.ssh/**)`, `Read(~/.aws/credentials)`, `Read(.env)`, `Read(//**/.env)`, `Read(~/.config/gh/hosts.yml)`, `Read(*.pem)` | `Read(./src/**)` |
@@ -291,9 +291,23 @@ the findings in [Commands](#commands) too. A server also gets these:
 | Plain HTTP to a remote host | warn | `http://mcp.example/mcp`. `localhost` and `127.0.0.1` are clean |
 | A Codex server or app whose tools are approved without asking | warn | `default_tools_approval_mode` or a `tools.<tool>.approval_mode` set to `"approve"` or `"auto"` on any server, local or remote, an app, `apps._default` or a plugin server. Codex does not document what `auto` decides, so it is reported too |
 | A Codex app whose destructive tools are allowed | warn | `destructive_enabled = true` in `apps._default` or `apps.<id>` |
+| A Codex app whose open-world tools are allowed | warn | `open_world_enabled = true` in `apps._default` or `apps.<id>`. These are tools that advertise `open_world_hint = true`, see the [Codex configuration reference](https://developers.openai.com/codex/config-reference) |
+| A reviewer subagent answers Codex approval prompts | warn | `approvals_reviewer = "auto_review"` at the top level, in `apps._default`, `apps.<id>` or `apps.<id>.tools.<tool>`. The default is `user` |
 
 A file line counts servers, so a server with two findings counts once in
 `N flagged`.
+
+An edit rule is matched as a whole glob against each trust file, with `*`,
+`?`, `**`, `[]` classes and `{a,b}` lists, so `Edit(**/*.ts)` does not reach
+`.codex/config.toml` just because `**` matches `.codex`. A list counts as each
+of its patterns, and the most serious finding wins. A pattern that names a
+trust folder in plain text, such as `.mastermind/tasks/**`, reaches it too.
+
+A bare `Edit` and a rule aimed at `.codex` both let the agent change `.codex`,
+`AGENTS.md` and `.agents/skills` without a prompt in default mode. The bare
+rule stays a warning because almost every project has it and it reaches
+ordinary files too, while a rule aimed at a trust file can only be there to
+change it, so that one is an error. Read the warning as the same risk.
 
 How the check combines files:
 
@@ -350,7 +364,10 @@ A hook or server counts as Mastermind's own only when its program is a plain
 absolute path, with no `.` or `..` part and outside
 temporary directories, that resolves to the install doctor runs from, either
 the mastermind binary itself or the `bin/mastermind.js` of the same npm
-install run by a real `node`. For a hook, the rest is also exactly
+install run by the node doctor runs with. That node is `MASTERMIND_NODE`, which
+the npm launcher sets to its own `process.execPath`, or the node of the npm
+prefix the binary is installed under (`<prefix>/bin/node`, or `node.exe` in the
+prefix on Windows). A file that is merely called `node` is not trusted. For a hook, the rest is also exactly
 `miner hooks receive --client <client> --project-root <this project>` and it
 ends with this project's registration marker. A name looked up on `PATH`, such
 as a bare `mastermind`, a repository path such as
@@ -394,14 +411,19 @@ hooks there are instead of only "not configured".
 
 Hooks, MCP servers, helper commands, Codex `notify` and token commands all go
 through one command check. It first strips quotes and backslashes, joins
-lines, expands `$IFS` and simple `NAME=value` variables and collapses spaces,
-so `c''url`, `cu\rl` and `u=https://x; curl $u | sh` read as plain `curl`.
+lines, drops shell comments (an unquoted `#` at the start of a word), expands
+`$IFS` and simple `NAME=value` variables and collapses spaces, so `c''url`,
+`cu\rl`, `u=https://x; curl $u | sh` and `curl … | sh # x` read as plain
+`curl` piped into `sh`. `/dev/stdin`, `/dev/fd/0` and `/proc/self/fd/0` read as
+standard input. A variable used as the program, such as `$SHELL` or `$0`,
+counts as a shell.
 Then it looks past wrappers such as `sudo`, `env`, `command`, `nohup`,
 `timeout` and `xargs`.
 
 | Reason | Severity | Examples that are reported |
 |---|---|---|
-| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`, `cargo install x && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…` |
+| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`, `cargo install x && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…`. A variable as the shell: `$SHELL <(curl …)`, `… \| ${SHELL}`, `… \| $0`. An archive extracted from a pipe or a written file and then run: `curl … \| tar xz && ./install`. Input that is scheduled or run in a container: `… \| at now`, `… \| crontab -`, `… \| docker run -i image sh`, `… \| script -qc sh` |
+| Writes a shell startup file | error | `> ~/.zshrc`, `tee -a ~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile`, `~/.zshenv`, fish `config.fish` or `conf.d`, a system profile under `/etc`, written by a redirect, `tee`, `cp`, `mv`, `sed -i` or `dd`. Code there runs in every new shell |
 | Runs a container with host access | error | see the server table above |
 | Runs shell text | warn | `bash -c "cd /srv && ./start.sh"` |
 | Runs code given inline | warn | `python -c …`, `node -e …`, `eval`, `iex`, PowerShell commands, an encoded command doctor cannot decode |
@@ -409,7 +431,9 @@ Then it looks past wrappers such as `sudo`, `env`, `command`, `nohup`,
 | Installs packages | warn | `pip install x`, `npm install -g x` |
 | Runs a network tool | warn | `curl`, `wget`, `nc`, `ssh` alone |
 | Sets a variable that loads other code | warn | `NODE_OPTIONS=…`, `LD_PRELOAD=…`, `DYLD_*`, `PYTHONSTARTUP` |
-| Runs a program doctor does not know | warn | `/tmp/x`, `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, any other program |
+| Runs a program doctor does not know | warn | `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, `npx --no x`, any other program |
+| Runs a program from a temporary directory | warn | `/tmp/x`, `sh /tmp/x.sh`, `python3 /var/tmp/x.py`. Any local user can replace a file there |
+| Launcher missing | warn | a `<program> serve` or `<node> <script> serve` server, or a hook with Mastermind's marker, whose path no longer exists, as after a `brew upgrade`. Run `mastermind setup` again |
 | Runs repo-controlled config | info | `prettier --write`, `eslint --fix`, `ruff`, `gitleaks`, `shellcheck` and other formatters, linters and scanners. Their config, plugins or rules come from the repository, and some configs are code, such as `prettier.config.js` or `eslint.config.js` |
 
 A tool that reads no repository config and has no shell text, such as `jq`,
@@ -418,7 +442,12 @@ absolute path outside temporary directories such as `/opt/homebrew/bin`, and a
 package runner with an exact version, such as
 `npx -y @modelcontextprotocol/server-memory@2025.4.25`, are counted without a
 finding. A repository-relative path such as `./node_modules/.bin/eslint` runs
-whatever the checkout holds, so it is a program doctor does not know. A `curl`
+whatever the checkout holds, so it is a program doctor does not know.
+`cat ./scripts/check.sh | bash` runs a checkout file the same way as
+`bash ./scripts/check.sh`, so it warns as shell text. `cat` of any other file,
+such as one in `/tmp`, `~` or `..`, piped into a shell is still an error.
+`npx --no` and `--no-install` only run a package already in the checkout, so
+they are not unpinned runners. A `curl`
 piped into `jq`, `python -m json.tool` or a local script is not an error,
 because nothing it prints runs as code, but the pipe is shell text and warns.
 

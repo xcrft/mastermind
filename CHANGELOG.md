@@ -118,6 +118,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin servers, plus `destructive_enabled`. A file's `N flagged` now counts
   servers, not findings. `client hooks` reads hooks files a plugin manifest
   names and reports each wrong-typed hook entry on its own.
+- The command check drops shell comments, so `curl … | sh # x` is an error
+  again, and reads `/dev/fd/0` and `/proc/self/fd/0` as standard input. A
+  variable used as the shell (`$SHELL <(curl …)`, `| $0`), an archive
+  extracted from a pipe and then run (`| tar xz && ./install`), input piped
+  into `at`, `crontab -`, `docker run -i … sh` or `script -qc sh`, and a write
+  to a shell startup file such as `~/.zshrc` or `~/.bashrc` are errors.
+  `cat ./scripts/check.sh | bash` warns like `bash ./scripts/check.sh`.
+  `npx --no` is no longer called unpinned. A program in a temporary directory
+  and a launcher whose path an upgrade removed each get their own message.
+- Only the node doctor runs with, or the node of the npm prefix it is
+  installed under, can start Mastermind's launcher script. A file that is
+  merely called `node` is checked like any other program.
+- Edit rules are matched as whole globs with `[]` classes and `{a,b}` lists,
+  so `Edit(**/*.ts)` and `Edit(**/test/**)` are no longer errors, while
+  `Edit(.[c]odex/**)` and `Edit({.codex,src}/**)` are. Syntax doctor does not
+  read is treated as broad. The bare `Edit` warning now says it can edit
+  `.codex` and other trust files without a prompt in default mode.
+- `permission rules` reads the monitors and LSP servers of enabled plugins,
+  and warns on Codex `open_world_enabled = true` and
+  `approvals_reviewer = "auto_review"`.
 - Static detection cannot be complete: a command can build what it runs in
   ways no reader of its text can follow. A passing check is not proof that
   nothing runs without asking, and a guard hook that checks each command when
@@ -132,7 +152,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Monitor`, `REPL` and `TaskStop` count as shell. `Workflow`,
   `SendMessage`, `CronCreate` and `RemoteTrigger` need `delegate`, `Skill`
   needs `skills`, and a subagent with frontmatter `hooks` must declare
-  `hooks`, and each hook command is checked for fetched or decoded code. A read-only role cannot ask for `bypassPermissions` or
+  `hooks`, and each hook command is checked for fetched, written or decoded
+  code, read the way doctor reads it, so `curl -so a URL && sh a` and
+  `| sudo bash` fail. `mcp_tool` hooks are valid, and one on a server other
+  than mmcg needs `mcp`. Tools that publish, send or change the session, such
+  as `Artifact`, `PushNotification`, `SendUserFile` and `EnterWorktree`, need
+  the new `outbound` or `session` capability, which a read-only role can never
+  hold. The MCP resource tools need `mcp` and `ScheduleWakeup` needs
+  `delegate`. A read-only role may only hold known read tools, so a new tool
+  fails until it is classified. A read-only role cannot ask for `bypassPermissions` or
   `acceptEdits`, a fixed deny list keeps the shell from the researcher and
   four other roles, and the comment and frontend auditors no longer get
   `Bash`. Six subagents that run commands declare `shell` with a reason.

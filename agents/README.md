@@ -49,7 +49,8 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
 
 Each subagent's `workflow` metadata names what it may do. `mutability` is
 `read-only` or `writer`, and `capabilities` adds `shell`, `web`, `delegate`,
-`mcp`, `skills` or `hooks`, each with a reason that says what the role runs. Together they form the
+`mcp`, `skills`, `hooks`, `outbound` or `session`, each with a reason that says
+what the role runs. Together they form the
 role's class, such as `read-only-with-shell`.
 
 ```yaml
@@ -69,17 +70,29 @@ workflow:
 | `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | `mutability: writer` |
 | `Bash`, `PowerShell`, `Monitor`, `REPL`, `BashOutput`, `KillShell`, `TaskStop` | `capabilities.shell` |
 | `WebFetch`, `WebSearch` | `capabilities.web` |
-| `Agent`, `Task`, `Workflow`, `SendMessage`, `CronCreate`, `RemoteTrigger` | `capabilities.delegate` |
-| `mcp__<server>__...` for any server other than mmcg | `capabilities.mcp` |
+| `Agent`, `Task`, `Workflow`, `SendMessage`, `CronCreate`, `RemoteTrigger`, `ScheduleWakeup` | `capabilities.delegate` |
+| `mcp__<server>__...` for any server other than mmcg, `ListMcpResourcesTool`, `ReadMcpResourceTool`, and an `mcp_tool` hook on a server other than mmcg | `capabilities.mcp` |
+| `Artifact`, `PushNotification`, `SendUserFile`, `SendFeedback`, `ShareOnboardingGuide`, `SuggestPluginInstall`, `SuggestSkills`, `propose_skills` | `capabilities.outbound`, writers only |
+| `EnterWorktree`, `ExitWorktree`, `EnterPlanMode`, `ExitPlanMode`, `EndConversation`, `TaskCreate`, `TaskUpdate`, `TodoWrite`, `CronDelete` | `capabilities.session`, writers only |
 | `Skill`, which runs a skill with its own tools and hooks | `capabilities.skills` |
 | a `hooks:` block in the frontmatter | `capabilities.hooks` |
 
-Each frontmatter hook command is also checked for fetched or decoded code
-that runs, such as `curl … | sh`, `bash <(…)`, `eval "$(…)"` or
-`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The check
-is a small Python copy of the `mastermind doctor` command rules, so it runs
-without building mmcg. Doctor applies the full rules when the subagent is
-installed.
+A read-only role may only hold the tools above with their capability, the
+edit tools never, and the read tools in `WORKFLOW_READ_TOOLS`, such as `Read`,
+`Grep`, `Glob`, `LSP` and `TaskList`. Any other tool fails, so a tool Claude
+Code adds later is denied until it is classified in
+[`scripts/validate.py`](../scripts/validate.py). The lists follow the
+[tools reference](https://code.claude.com/docs/en/tools-reference).
+
+Each frontmatter hook command is also checked for fetched, written or decoded
+code that runs, such as `curl … | sh`, `curl -so a URL && sh a`,
+`… | sudo bash`, `bash <(…)`, `eval "$(…)"` or
+`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The text
+is read the way doctor reads it: comments, quotes and backslashes go, simple
+variables are filled in and wrappers such as `sudo` and `env` are looked past.
+The check is a small Python copy of the `mastermind doctor` command rules, so
+it runs without building mmcg. Doctor applies the full rules when the subagent
+is installed. `mcp_tool` hooks are valid.
 
 It also fails when:
 

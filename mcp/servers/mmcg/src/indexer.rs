@@ -446,7 +446,7 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         // C / C++ share one tree-sitter-cpp grammar — OK since C is mostly a C++
         // subset; rare C-only keyword identifiers (e.g. `new` as a var) may
         // mis-parse — see cpp.rs precision disclaimer.
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp" => {
             Some(Box::new(CppExtractor))
         }
         _ => None,
@@ -2332,7 +2332,7 @@ pub(crate) fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("php")
     } else if matches!(
         extension.as_str(),
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp"
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp"
     ) {
         Some("cpp")
     } else {

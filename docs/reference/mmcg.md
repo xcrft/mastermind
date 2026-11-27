@@ -145,7 +145,7 @@ imports and statements. Call targets keep their literal spelling, so
 | Go | function, method, struct, interface, type | Calls, `Foo{}`, `pkg.Fn()` | `import f "fmt"` is `f` / `fmt::*` | Goroutine launches, closures |
 | Java | class, interface, enum, record, method, constructor | Calls, `new Foo()` | `import java.util.List` is `List` / `java.util.List`. Wildcard `java.util::*` | Anonymous inner classes, lambdas |
 | PHP | namespace, class, interface, trait, enum, method, function | Calls, `new Foo`, `Foo::bar()`, `$this->method()` | `use App\Foo as Bar` is `Bar` / `App\Foo`. Groups expand per item | Magic method targets |
-| C/C++ | Function and method definitions and declarations, class, struct, union, enum | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows |
+| C/C++ | Function and method definitions and declarations, class, struct, union, enum, namespace, type alias (`using X = ...` and `typedef`, kind `type`). `.h` and `.inl` parse as C++ | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files. `namespace fs = std::filesystem;` is `fs` / `std::filesystem::*` | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows. An anonymous namespace adds no symbol. C++20 modules |
 
 ### Explain a symbol query
 

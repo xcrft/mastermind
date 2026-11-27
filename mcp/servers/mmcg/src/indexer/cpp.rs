@@ -21,6 +21,8 @@
 //! - **ADL / overload resolution** isn't done. `swap(a, b)` records a call to
 //!   `swap`; resolving it to `std::swap`, a member, or a namespace-qualified
 //!   version needs semantic analysis we don't do.
+//! - **Namespaces** are symbols that own their members, so a qualified name
+//!   such as `billing::tax::rate` resolves. An anonymous namespace is not.
 //! - **`#include`** is captured as an `imports` edge with the header name, but
 //!   the *contents* it brings in are NOT followed.
 //!
@@ -67,11 +69,60 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            // Transparent — `namespace foo { ... }`.
+            // `namespace billing { }` and `namespace billing::tax { }` own
+            // their members. An anonymous namespace only limits linkage, so
+            // its members keep the enclosing parent.
             "namespace_definition" => {
-                if let Some(body) = child.child_by_field_name("body") {
-                    walk(body, source, pending, parent_index, module_index);
+                let body = child.child_by_field_name("body");
+                match child
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(&name, source))
+                {
+                    Some(name) => {
+                        let name = name.to_string();
+                        let idx = push_def_with_decorators(
+                            pending,
+                            name.clone(),
+                            "namespace",
+                            &child,
+                            Some(format!("namespace {name}")),
+                            parent_index,
+                            None,
+                        );
+                        if let Some(body) = body {
+                            walk(body, source, pending, Some(idx), module_index);
+                        }
+                    }
+                    None => {
+                        if let Some(body) = body {
+                            walk(body, source, pending, parent_index, module_index);
+                        }
+                    }
                 }
+            }
+            // `namespace fs = std::filesystem;` brings a namespace in under a
+            // local name, like `using namespace`.
+            "namespace_alias_definition" => {
+                emit_namespace_alias(&child, source, pending, module_index);
+            }
+            // `using Id = std::uint64_t;` and `typedef struct Node *NodeRef;`
+            "alias_declaration" => {
+                if let Some(name) = name_field(&child, source) {
+                    push_def_with_decorators(
+                        pending,
+                        name.to_string(),
+                        "type",
+                        &child,
+                        declaration_signature(&child, source),
+                        parent_index,
+                        None,
+                    );
+                }
+            }
+            "type_definition" => {
+                push_typedef_names(&child, source, pending, parent_index);
+                // `typedef struct Node { ... } Node;` also defines the struct.
+                walk(child, source, pending, parent_index, module_index);
             }
             // Templates wrap a single declaration — walk through with same
             // parent. The wrapped declaration captures its own symbol; no
@@ -161,7 +212,10 @@ fn walk(
                     .and_then(|index| pending.symbols.get(index))
                     .map(|symbol| symbol.kind.as_str());
                 if parent_index != Some(module_index)
-                    && !matches!(declaration_scope, Some("class" | "struct" | "union"))
+                    && !matches!(
+                        declaration_scope,
+                        Some("class" | "struct" | "union" | "namespace")
+                    )
                 {
                     // A direct initializer such as `Iterator end, it(path)`
                     // can look like a function declarator without semantic
@@ -382,6 +436,94 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
     }
 }
 
+/// One `type` symbol per typedef name. `typedef struct Node { } Node;` names
+/// the struct it defines, which is already a symbol, so that name is skipped.
+fn push_typedef_names(
+    definition: &Node,
+    source: &[u8],
+    pending: &mut PendingFile,
+    parent_index: Option<usize>,
+) {
+    let tag = definition
+        .child_by_field_name("type")
+        .and_then(|tag| tag.child_by_field_name("body").and(Some(tag)))
+        .and_then(|tag| name_field(&tag, source));
+    let mut cursor = definition.walk();
+    let declarators: Vec<_> = definition
+        .children_by_field_name("declarator", &mut cursor)
+        .collect();
+    for declarator in declarators {
+        let Some(name) = typedef_name(declarator, source) else {
+            continue;
+        };
+        if Some(name) == tag {
+            continue;
+        }
+        push_def_with_decorators(
+            pending,
+            name.to_string(),
+            "type",
+            definition,
+            declaration_signature(definition, source),
+            parent_index,
+            None,
+        );
+    }
+}
+
+/// The declared name inside a typedef declarator: `NodeRef` in `*NodeRef`,
+/// `Handler` in `(*Handler)(int)`, `Row` in `Row[4]`.
+fn typedef_name<'a>(declarator: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    if declarator.kind() == "type_identifier" {
+        return node_text(&declarator, source);
+    }
+    if let Some(inner) = declarator.child_by_field_name("declarator") {
+        return typedef_name(inner, source);
+    }
+    let mut cursor = declarator.walk();
+    let found = declarator
+        .named_children(&mut cursor)
+        .find_map(|child| typedef_name(child, source));
+    found
+}
+
+fn emit_namespace_alias(
+    decl: &Node,
+    source: &[u8],
+    pending: &mut PendingFile,
+    module_index: usize,
+) {
+    let Some(alias) = name_field(decl, source) else {
+        return;
+    };
+    let mut cursor = decl.walk();
+    let target = decl
+        .named_children(&mut cursor)
+        .filter(|child| {
+            matches!(
+                child.kind(),
+                "namespace_identifier" | "nested_namespace_specifier"
+            )
+        })
+        .last()
+        .filter(|target| {
+            target.start_byte()
+                > decl
+                    .child_by_field_name("name")
+                    .map_or(0, |n| n.start_byte())
+        })
+        .and_then(|target| node_text(&target, source));
+    if let Some(target) = target {
+        push_import(
+            pending,
+            module_index,
+            alias.to_string(),
+            Some(format!("{target}::*")),
+            line_of(decl),
+        );
+    }
+}
+
 /// `#include "foo.h"` / `#include <vector>` → import edge with the header name.
 fn emit_include(decl: &Node, source: &[u8], pending: &mut PendingFile, module_index: usize) {
     let line = line_of(decl);
@@ -566,6 +708,87 @@ mod tests {
         assert_eq!(by_name["Point"], "struct");
         assert_eq!(by_name["Value"], "union");
         assert_eq!(by_name["Color"], "enum");
+    }
+
+    #[test]
+    fn namespaces_own_their_members_and_aliases_become_types() {
+        let path = common::write_tmp(
+            "cpp",
+            "ledger.hpp",
+            "#pragma once\n\
+             #include <cstdint>\n\
+             namespace fs = std::filesystem;\n\
+             namespace billing {\n\
+             using Cents = std::int64_t;\n\
+             typedef struct Entry { Cents amount; } Entry;\n\
+             typedef void (*Listener)(const Entry&);\n\
+             namespace tax {\n\
+             Cents rate(const char* region);\n\
+             }\n\
+             class Ledger {\n\
+             public:\n\
+             \x20 using Row = Entry;\n\
+             \x20 void post(const Entry& entry);\n\
+             };\n\
+             namespace {\n\
+             Cents round(Cents value) { return value; }\n\
+             }\n\
+             }\n\
+             namespace billing::export_ {\n\
+             void write(const fs::path& target);\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let find = |name: &str, kind: &str| {
+            pending
+                .symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == kind)
+                .unwrap_or_else(|| panic!("no {kind} {name} in {:#?}", pending.symbols))
+        };
+        let parent = |symbol: &crate::store::PendingSymbol| {
+            pending.symbols[symbol.parent_index.unwrap()].name.as_str()
+        };
+
+        let billing = find("billing", "namespace");
+        assert_eq!((billing.line_start, billing.line_end), (4, 19));
+        assert_eq!(parent(find("tax", "namespace")), "billing");
+        assert_eq!(parent(find("rate", "function")), "tax");
+        assert_eq!(parent(find("Ledger", "class")), "billing");
+        assert_eq!(parent(find("post", "method")), "Ledger");
+        assert_eq!(parent(find("round", "function")), "billing");
+        assert_eq!(parent(find("write", "function")), "billing::export_");
+        assert_eq!(
+            pending
+                .symbols
+                .iter()
+                .filter(|s| s.kind == "namespace")
+                .count(),
+            3,
+            "the anonymous namespace is not a symbol"
+        );
+
+        let cents = find("Cents", "type");
+        assert_eq!(
+            cents.signature.as_deref(),
+            Some("using Cents = std::int64_t")
+        );
+        assert_eq!(parent(cents), "billing");
+        assert_eq!(parent(find("Listener", "type")), "billing");
+        assert_eq!(parent(find("Row", "type")), "Ledger");
+        find("Entry", "struct");
+        assert!(
+            !pending
+                .symbols
+                .iter()
+                .any(|s| s.name == "Entry" && s.kind == "type"),
+            "a typedef of the struct it defines adds no second row"
+        );
+
+        assert!(pending.edges.iter().any(|e| e.kind == "imports"
+            && e.to_name == "fs"
+            && e.to_path.as_deref() == Some("std::filesystem::*")));
     }
 
     #[test]

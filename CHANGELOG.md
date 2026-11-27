@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `export { foo } from './a'` is `foo` / `./a::foo`, `export * from './a'` is
   `*` / `./a::*` and `export * as ns from './a'` is `ns` / `./a::*`.
   `import fs = require('fs')` is `fs` / `fs::*`.
+- C/C++ namespaces are symbols that own their members, so a spec can name
+  `billing::tax::rate`. An anonymous namespace adds no symbol. Declarations
+  inside a namespace in a header are recorded as before.
+- C/C++ `using X = ...` and `typedef` names are `type` symbols. A typedef that
+  repeats the name of the struct it defines adds no second row.
+  `namespace fs = std::filesystem;` is an `imports` edge `fs` /
+  `std::filesystem::*`.
+- `.inl` files are indexed as C++.
 
 ### Changed
 

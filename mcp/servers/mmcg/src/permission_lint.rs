@@ -120,6 +120,8 @@ pub enum Kind {
     /// A bare or broad `Edit` or `Write` rule whose paths include trust
     /// files such as `.codex` and `AGENTS.md`.
     BroadEditCoversTrustFiles,
+    /// A command that writes a shell startup file such as `~/.zshrc`.
+    WritesShellStartup,
 }
 
 impl Kind {
@@ -174,6 +176,9 @@ impl Kind {
             Kind::BroadEditCoversTrustFiles => {
                 "can edit .codex, AGENTS.md and other trust files without a prompt in default mode"
             }
+            Kind::WritesShellStartup => {
+                "writes a shell startup file, so its code runs in every new shell"
+            }
             Kind::AsksToWriteTrustSettings => {
                 "asks to let the agent rewrite its trust settings, which Claude Code still prompts for"
             }
@@ -192,6 +197,7 @@ impl Kind {
             | Kind::ContainerHostAccess
             | Kind::ApprovedFlaggedServer
             | Kind::WritesTrustSettings
+            | Kind::WritesShellStartup
             | Kind::ShellPrefix => Severity::Error,
             Kind::RepoConfigTool => Severity::Info,
             _ => Severity::Warn,

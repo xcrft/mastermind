@@ -1796,9 +1796,80 @@ pub(crate) struct Installs {
     /// `bin/mastermind.js` of the npm package that started doctor.
     pub(crate) scripts: Vec<std::path::PathBuf>,
     /// The node that started doctor through npm (`MASTERMIND_NODE`, which
-    /// the npm launcher sets to its `process.execPath`), and the node of the
-    /// npm prefix doctor's own binary is installed under.
+    /// the npm launcher sets to its `process.execPath`), the node of the
+    /// global npm prefix doctor's own binary is installed under, and the
+    /// system nodes in [`SYSTEM_NODES`].
     pub(crate) nodes: Vec<std::path::PathBuf>,
+}
+
+/// Node binaries a system package manager installs, which a global npm
+/// install with a system node runs as. Only their canonical paths are
+/// trusted, and nothing is run to find them.
+const SYSTEM_NODES: &[&str] = &[
+    "/usr/bin/node",
+    "/usr/local/bin/node",
+    "/opt/homebrew/bin/node",
+    "C:\\Program Files\\nodejs\\node.exe",
+];
+
+/// Whether a canonical path is the launcher script of an npm install:
+/// `node_modules/@xcraftmind/mastermind/bin/mastermind.js`.
+fn is_launcher_script(path: &std::path::Path) -> bool {
+    let parts: Vec<_> = path.components().rev().take(5).collect();
+    let names: Vec<&std::ffi::OsStr> = parts.iter().map(|part| part.as_os_str()).collect();
+    names
+        == [
+            "mastermind.js",
+            "bin",
+            "mastermind",
+            "@xcraftmind",
+            "node_modules",
+        ]
+        .map(std::ffi::OsStr::new)
+}
+
+/// Whether an npm prefix is a global one, not a project: it has no
+/// `package.json`, sits under no other `node_modules`, is not a temporary
+/// directory and does not hold the folder doctor runs in.
+fn global_prefix(prefix: &std::path::Path, cwd: Option<&std::path::Path>) -> bool {
+    !prefix.join("package.json").exists()
+        && !prefix
+            .ancestors()
+            .any(|dir| dir.file_name().is_some_and(|name| name == "node_modules"))
+        && !in_temporary_directory(prefix)
+        && !cwd.is_some_and(|cwd| cwd.starts_with(prefix))
+}
+
+/// The node of the global npm install whose packages live in `modules`.
+/// npm puts global packages in `<prefix>/lib/node_modules` with node in
+/// `<prefix>/bin`, or on Windows in `<prefix>\node_modules` with `node.exe`
+/// in `<prefix>`: <https://docs.npmjs.com/cli/v11/configuring-npm/folders>.
+/// A project's `node_modules` gives none, since the project chooses what
+/// sits beside it.
+fn install_nodes(
+    modules: &std::path::Path,
+    windows: bool,
+    cwd: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let canonical = |path: std::path::PathBuf| std::fs::canonicalize(path).ok();
+    let Some(prefix) = modules.parent() else {
+        return Vec::new();
+    };
+    if windows {
+        return if global_prefix(prefix, cwd) {
+            canonical(prefix.join("node.exe")).into_iter().collect()
+        } else {
+            Vec::new()
+        };
+    }
+    match prefix.parent() {
+        Some(root)
+            if prefix.file_name().is_some_and(|name| name == "lib") && global_prefix(root, cwd) =>
+        {
+            canonical(root.join("bin/node")).into_iter().collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl Installs {
@@ -1814,6 +1885,12 @@ impl Installs {
         let mut scripts: Vec<std::path::PathBuf> =
             from_env("MASTERMIND_LAUNCHER_JS").into_iter().collect();
         let mut nodes: Vec<std::path::PathBuf> = from_env("MASTERMIND_NODE").into_iter().collect();
+        nodes.extend(
+            SYSTEM_NODES
+                .iter()
+                .filter_map(|path| canonical(std::path::PathBuf::from(path))),
+        );
+        let cwd = std::env::current_dir().ok().and_then(canonical);
         // The native binary of an npm install sits in a platform package next
         // to the launcher package, under the same `node_modules`.
         if let Some(modules) = exe.as_ref().and_then(|exe| {
@@ -1823,21 +1900,11 @@ impl Installs {
             scripts.extend(canonical(
                 modules.join("@xcraftmind/mastermind/bin/mastermind.js"),
             ));
-            // npm puts global packages in `<prefix>/lib/node_modules` with
-            // node in `<prefix>/bin`, or in `<prefix>\node_modules` with
-            // `node.exe` in `<prefix>` on Windows:
-            // <https://docs.npmjs.com/cli/v11/configuring-npm/folders>.
-            if let Some(prefix) = modules.parent() {
-                if prefix.file_name().is_some_and(|name| name == "lib") {
-                    nodes.extend(
-                        prefix
-                            .parent()
-                            .and_then(|root| canonical(root.join("bin/node"))),
-                    );
-                }
-                nodes.extend(canonical(prefix.join("node.exe")));
-            }
+            nodes.extend(install_nodes(modules, cfg!(windows), cwd.as_deref()));
         }
+        // Only a script inside an `@xcraftmind/mastermind` install counts,
+        // whatever `MASTERMIND_LAUNCHER_JS` says.
+        scripts.retain(|script| is_launcher_script(script));
         let mut programs: Vec<std::path::PathBuf> = exe.into_iter().collect();
         programs.extend(scripts.iter().cloned());
         Self {
@@ -1902,7 +1969,9 @@ pub(crate) fn is_mastermind_launcher_in(installs: &Installs, command: &str, args
             // Only the node doctor knows started it. A file merely named
             // `node` runs whatever it holds.
             installs.nodes.contains(&node)
-                && plain_canonical(script).is_some_and(|script| installs.scripts.contains(&script))
+                && plain_canonical(script).is_some_and(|script| {
+                    is_launcher_script(&script) && installs.scripts.contains(&script)
+                })
         }
         _ => false,
     }
@@ -2366,6 +2435,89 @@ mod tests {
             let args = vec![script.clone(), "serve".to_string()];
             assert!(classify_argv(fake, &args).is_some(), "{fake}");
         }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn node_exe_counts_only_beside_a_global_windows_prefix() {
+        let (root, _) = fake_install("prefix");
+        let write = |path: &std::path::Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        };
+        let canonical = |path: std::path::PathBuf| std::fs::canonicalize(path).unwrap();
+        // A global Windows prefix: `<prefix>\node_modules` and `node.exe`.
+        let global = root.join("npm");
+        write(&global.join("node.exe"));
+        write(&global.join("node_modules/@xcraftmind/mastermind/bin/mastermind.js"));
+        let modules = global.join("node_modules");
+        assert_eq!(
+            install_nodes(&modules, true, None),
+            vec![canonical(global.join("node.exe"))]
+        );
+        // Reviewer counter-examples: `node.exe` off Windows, and beside a
+        // project's `node_modules`.
+        assert!(install_nodes(&modules, false, None).is_empty());
+        let project = root.join("project");
+        write(&project.join("package.json"));
+        write(&project.join("node.exe"));
+        write(&project.join("node_modules/@xcraftmind/mastermind/bin/mastermind.js"));
+        assert!(install_nodes(&project.join("node_modules"), true, None).is_empty());
+        // A prefix nested in another package's `node_modules`.
+        let nested = project.join("node_modules/tool");
+        write(&nested.join("node.exe"));
+        assert!(install_nodes(&nested.join("node_modules"), true, None).is_empty());
+        // A prefix that holds the folder doctor runs in.
+        assert!(install_nodes(&modules, true, Some(&global.join("work"))).is_empty());
+        // The Unix layout keeps working for a global prefix only.
+        let lib = root.join("lib/node_modules");
+        assert_eq!(
+            install_nodes(&lib, false, None),
+            vec![canonical(root.join("bin/node"))]
+        );
+        write(&root.join("package.json"));
+        assert!(install_nodes(&lib, false, None).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_system_node_starts_the_launcher_only_from_an_install() {
+        let (root, mut installs) = fake_install("system");
+        let r = root.to_str().unwrap();
+        let script = format!("{r}/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js");
+        // A real registration that names a system node, such as
+        // `/usr/bin/node`, stays Mastermind's.
+        let system = root.join("usr/bin/node");
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        std::fs::write(&system, "x").unwrap();
+        installs.nodes.push(std::fs::canonicalize(&system).unwrap());
+        assert!(is_mastermind_launcher_in(
+            &installs,
+            system.to_str().unwrap(),
+            &[&script, "serve"]
+        ));
+        // The system node list is canonicalised, never run.
+        for path in SYSTEM_NODES {
+            if let Ok(node) = std::fs::canonicalize(path) {
+                assert!(Installs::current().nodes.contains(&node), "{path}");
+            }
+        }
+        // Reviewer counter-example: a script outside an
+        // `@xcraftmind/mastermind/bin` install, even one doctor was told to
+        // trust, is not the launcher.
+        let other = root.join("evil/bin/mastermind.js");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "x").unwrap();
+        installs
+            .scripts
+            .push(std::fs::canonicalize(&other).unwrap());
+        assert!(!is_mastermind_launcher_in(
+            &installs,
+            system.to_str().unwrap(),
+            &[other.to_str().unwrap(), "serve"]
+        ));
+        assert!(is_launcher_script(std::path::Path::new(&script)));
+        assert!(!is_launcher_script(&other));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

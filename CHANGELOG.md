@@ -63,18 +63,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers is not reported. It never edits the files and never prints rule
   text, commands or addresses.
 - `mastermind doctor` has a `client hooks` check. It reads the hooks in Claude
-  Code user, project and local settings and in Codex `hooks.json`, counts the
-  ones Mastermind installed and reports the rest: a hook that downloads and
-  runs code fails the check, and any other command hook or an `http` hook
-  warns. The hook readiness checks now say how many other hooks exist instead
-  of only "not configured".
+  Code managed, user, project and local settings and in enabled plugins, and
+  in Codex system, user and project `hooks.json` and inline `[hooks]`. It
+  counts the ones Mastermind installed and reports the rest. A hook counts as
+  Mastermind's only when the program is the real mastermind launcher and the
+  command names this project, so a copied marker does not hide a hook. A hook
+  that downloads and runs code fails the check, and shell text, inline code,
+  unpinned package runners, network tools and unknown programs warn. A
+  malformed hook group is reported and the valid groups beside it are still
+  read. Hooks turned off with `disableAllHooks` are still listed as warnings.
+  The hook readiness checks now say how many other hooks exist instead of only
+  "not configured".
+- One bad hook in `~/.claude/settings.json` or `~/.codex/hooks.json` now fails
+  `doctor` in every project, because a user hook runs in every project. The
+  same holds for user MCP servers in `~/.claude.json`.
+- The `permission rules` check also reads managed settings and
+  `managed-mcp.json`, `~/.claude.json` servers and approvals, nested
+  `.claude/skills`, credential and header helpers, the status line and file
+  suggestion commands, `env` variables that load code or redirect model
+  traffic, plugin marketplaces, third-party plugins, and Codex `notify` and
+  provider token commands. Approving a flagged `.mcp.json` server is an error,
+  and so is an allow rule that lets the agent edit `.codex`. It still does not
+  read server-managed settings, files passed with `--settings`, `--mcp-config`
+  or `--agents`, user-level skills and subagents, plugin skills, subagents and
+  servers, mods, or Codex skills; the reference lists them.
 - Every shipped subagent declares its capability class in its workflow
   metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
   a reason. `just validate` fails when a role's `tools` do not match: `Edit`,
   `Write`, `NotebookEdit` or `MultiEdit` in a read-only role, `Bash` or
   `PowerShell` without `shell`, `WebFetch` or `WebSearch` without `web`, or a
-  declared capability no tool needs. Eight subagents that run commands now
-  declare `shell` with a reason.
+  declared capability no tool needs. `Agent` and `Task` need `delegate`, tools
+  of MCP servers other than mmcg need `mcp`, and `BashOutput` and `KillShell`
+  count as shell. A read-only role cannot ask for `bypassPermissions` or
+  `acceptEdits`, a fixed deny list keeps the shell from the researcher and
+  four other roles, and the comment and frontend auditors no longer get
+  `Bash`. Six subagents that run commands declare `shell` with a reason.
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
   Ten subagents and 28 skills that read repository, pull request, report,
   transcript or tool content carry it verbatim. It names the person or the

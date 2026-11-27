@@ -180,7 +180,11 @@ run records the commit `HEAD` names and the source files that differ from it,
 staged, unstaged or untracked. `impact` asks Git which paths differ from that
 commit now, adds the recorded paths and the `--since` diff, and compares each
 source file among them with the index by SHA-256. This runs with or without
-`--skip-freshness-check`.
+`--skip-freshness-check`. The index also records a fingerprint of its file rows
+outside the recorded list. Every write by this version keeps the list and the
+fingerprint current. A row changed by mastermind 5.0.0 or older no longer
+matches the fingerprint, so `impact` treats the index as having no recorded
+commit.
 
 | Case | Result |
 |---|---|
@@ -188,11 +192,15 @@ source file among them with the index by SHA-256. This runs with or without
 | A file with no extractor, such as `notes.txt` | Not compared. The index never holds it, so it cannot make the graph old |
 | A source the indexer skips: binary, larger than 5 MiB, not a regular file, or under a skipped directory | Not stale while the index has no row for it |
 | `watch` or another single-file write after `index` | Its path joins the recorded list, so it is still compared |
-| No recorded commit: an index from an older mastermind, an `index` run that did not finish or ran outside a Git worktree, a commit made during the run, a recorded commit Git no longer has, more than 1,000 recorded paths, or more than 10,000 changed paths | The full source scan decides, with the mtime rule of the freshness check. The next complete `index` records a commit |
+| No recorded commit: an index from an older mastermind, a file row an older mastermind changed after the commit was recorded, an `index` run that did not finish or ran outside a Git worktree, a commit made during the run, a recorded commit Git no longer has, more than 1,000 recorded paths, or more than 10,000 changed paths | The full source scan decides, with the mtime rule of the freshness check. The next complete `index` records a commit |
 
-`impact` prints only an error code on stderr and exits 1. The
-[MCP tools](mcp.md#managed-index-refresh) `mmcg_change_impact` and
-`mmcg_test_impact` return the same codes in `error`.
+`impact` prints only an error code on stderr and exits 1. Over
+[MCP](mcp.md#managed-index-refresh), `mmcg_change_impact` and
+`mmcg_test_impact` run the refresh check first. It answers an old or newer
+schema with `{"code": "schema_incompatible"}` and a stale file it finds with
+`{"code": "index_stale"}`. After it, the tools return `{"error": "index_stale"}`
+for a source that differs from the recorded commit and
+`{"error": "index_missing"}` for an index that never indexed a repository.
 
 | Code | Meaning | Fix |
 |---|---|---|

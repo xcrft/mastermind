@@ -46,7 +46,7 @@ against the stored index identity.
 | Failed or unavailable refresh | `index_stale` with coverage fields and `stale_reason` (`structural`, `concept` or `history`). History-only drift also sets `history_freshness: stale` |
 | Listed source that is not a regular file | Never indexes and does not make the index stale. Up to 20 such paths are listed in `unindexable_sources` |
 | Missing, non-regular or non-UTF-8 tracked path | Makes the inventory incomplete, so the index is stale |
-| `mmcg_change_impact` and `mmcg_test_impact` after this check | Also compare every source that differs from the commit the index recorded, as [CLI `impact`](mmcg.md#change-impact-freshness) does. A failure is `{"error": CODE}` with the same codes |
+| `mmcg_change_impact` and `mmcg_test_impact` after this check | Also compare every source that differs from the commit the index recorded, as [CLI `impact`](mmcg.md#change-impact-freshness) does. A failure is `{"error": "index_stale"}`, or `{"error": "index_missing"}` for an index that never indexed a repository |
 
 A custom `--index` opens read-only, and the server never creates, migrates or
 writes it. Refresh it with `mastermind --index PATH index ROOT`. `serve` reads a

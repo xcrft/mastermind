@@ -14,10 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `index_missing`. An older or newer schema is `schema_incompatible`, the code
   MCP already uses. A file that does not open as an index is
   `index_unavailable`. `index_stale` now means only that a source file differs
-  from the index. The `error` of `mmcg_change_impact` and `mmcg_test_impact`
-  uses the same codes. A script that matches `index_stale` to catch a missing
-  index needs the new codes. `ChangeImpactError` in the `mmcg` crate has the
-  three new variants.
+  from the index. A script that matches `index_stale` to catch a missing index
+  needs the new codes. `ChangeImpactError` in the `mmcg` crate has the three
+  new variants.
+- Over MCP, `mmcg_change_impact`, `mmcg_test_impact`,
+  `mmcg_symbols_changed_since`, `mmcg_change_class` and `mmcg_temporal` return
+  `{"error": "index_missing"}` for an index that never indexed a repository.
+  They used to return `index_stale`. `mmcg_temporal` returns
+  `index_unavailable` when its index does not open. An old schema over MCP is
+  still the `schema_incompatible` code of the refresh check.
 
 ### Changed
 
@@ -34,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A changed source that the indexer skips, such as a binary file or one larger
   than 5 MiB, no longer makes `impact` fail with `index_stale` when the index
   has no row for it.
+- `impact` no longer trusts the recorded commit after mastermind 5.0.0 or
+  older writes to the index. The index also records a fingerprint of its file
+  rows, and every write by this version keeps it current. A row an older
+  version changes no longer matches, so `impact` falls back to the full source
+  scan until the next complete `index`.
 
 ## [5.0.0] - 2026-11-27
 

@@ -159,12 +159,21 @@ fn walk(
             }
             "enum_specifier" => {
                 let name = name_field(&child, source).map(String::from);
-                // `enum Color;` and `typedef enum Color Color;` only refer to
-                // the enum, like a class forward declaration.
-                if name.is_none() || child.child_by_field_name("body").is_none() {
+                let has_body = child.child_by_field_name("body").is_some();
+                // An opaque enum, `enum class Tone : int;`, `enum Level : char;`
+                // or `enum struct Mode;`, is a complete type without a body. A
+                // plain `enum Color` with neither body nor base only refers to
+                // an enum, as in `typedef enum Color Color;` or a parameter.
+                let opaque = !has_body
+                    && (child.child_by_field_name("base").is_some() || is_scoped_enum(&child));
+                if name.is_none() || !(has_body || opaque) {
                     continue;
                 }
-                let signature = signature_until_body(&child, source);
+                let signature = if has_body {
+                    signature_until_body(&child, source)
+                } else {
+                    node_text(&child, source).map(|text| text.trim().to_string())
+                };
                 push_def_with_decorators(
                     pending,
                     name.unwrap(),
@@ -436,6 +445,15 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
         }
         _ => None,
     }
+}
+
+/// `enum class` or `enum struct`.
+fn is_scoped_enum(node: &Node) -> bool {
+    let mut cursor = node.walk();
+    let scoped = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "class" | "struct"));
+    scoped
 }
 
 /// One `type` symbol per typedef name. A typedef that repeats its struct,
@@ -831,6 +849,42 @@ mod tests {
                 ("<anon>", "struct"),
             ]
         );
+    }
+
+    #[test]
+    fn opaque_enums_are_rows_and_enum_references_are_not() {
+        let path = common::write_tmp(
+            "cpp",
+            "tone.hpp",
+            "enum class Tone : int;\n\
+             enum Level : unsigned char;\n\
+             enum struct Mode;\n\
+             enum Color;\n\
+             typedef enum Color Color;\n\
+             enum Color paint(enum Color base);\n\
+             enum Color { Red, Green };\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let enums: Vec<(&str, u32, Option<&str>)> = pending
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "enum")
+            .map(|s| (s.name.as_str(), s.line_start, s.signature.as_deref()))
+            .collect();
+        assert_eq!(
+            enums,
+            vec![
+                ("Tone", 1, Some("enum class Tone : int")),
+                ("Level", 2, Some("enum Level : unsigned char")),
+                ("Mode", 3, Some("enum struct Mode")),
+                ("Color", 7, Some("enum Color")),
+            ]
+        );
+        assert!(!pending
+            .symbols
+            .iter()
+            .any(|s| s.name == "Color" && s.kind == "type"));
     }
 
     #[test]

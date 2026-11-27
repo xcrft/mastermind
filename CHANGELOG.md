@@ -29,8 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - C/C++ `using X = ...` and `typedef` names are `type` symbols. A typedef that
   repeats its struct, union, enum or class tag adds no row, so
   `typedef struct Node Node;` and `typedef struct Node { } Node;` both leave
-  only the struct. A forward `enum Color;` adds no enum row, the same as a
-  class forward declaration.
+  only the struct. An opaque enum, `enum class Tone : int;`,
+  `enum Level : char;` or `enum struct Mode;`, is an enum row. A plain
+  `enum Color` with no body and no underlying type only refers to an enum and
+  adds no row, as in `typedef enum Color Color;`.
   `namespace fs = std::filesystem;` is an `imports` edge `fs` /
   `std::filesystem::*`.
 - `.inl` files are indexed as C++.

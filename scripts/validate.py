@@ -73,17 +73,73 @@ WORKFLOW_CAPABILITY_TOOLS = {
     "shell": {"Bash", "PowerShell", "Monitor", "REPL", "BashOutput", "KillShell", "TaskStop"},
     "web": {"WebFetch", "WebSearch"},
     # Tools that hand work to another agent or a later prompt with its own
-    # tools: subagents, workflows, messages and scheduled prompts.
-    "delegate": {"Agent", "Task", "Workflow", "SendMessage", "CronCreate", "RemoteTrigger"},
+    # tools: subagents, workflows, messages and scheduled prompts, including
+    # the next `/loop` iteration ScheduleWakeup sets up.
+    "delegate": {"Agent", "Task", "Workflow", "SendMessage", "CronCreate", "RemoteTrigger", "ScheduleWakeup"},
     # Skill runs a skill in the conversation, and a skill can bring its own
     # allowed tools and hooks.
     "skills": {"Skill"},
     # Hooks in the subagent's own frontmatter. Checked from `hooks:` below,
     # not from its tools.
     "hooks": set(),
-    # MCP tools of any server other than mmcg. Matched by prefix below.
-    "mcp": set(),
+    # MCP tools of any server other than mmcg, matched by prefix below, and
+    # the resource tools, which read from every connected server.
+    "mcp": {"ListMcpResourcesTool", "ReadMcpResourceTool"},
+    # Tools that send or publish something outside the session: a claude.ai
+    # artifact or share link, a notification, a file sent to the user, a
+    # feedback report or a suggestion card.
+    "outbound": {
+        "Artifact",
+        "PushNotification",
+        "SendFeedback",
+        "SendUserFile",
+        "ShareOnboardingGuide",
+        "SuggestPluginInstall",
+        "SuggestSkills",
+        "propose_skills",
+    },
+    # Tools that change the session: its working directory, its mode, its
+    # task list or its scheduled tasks.
+    "session": {
+        "CronDelete",
+        "EndConversation",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "TaskCreate",
+        "TaskUpdate",
+        "TodoWrite",
+    },
 }
+# Tools a read-only role may hold with no capability: they read files, code,
+# lists or the user's answers and change nothing. Any other tool in a
+# read-only role is an error, so a tool Claude Code adds later is denied
+# until it is classified here. From
+# <https://code.claude.com/docs/en/tools-reference>.
+WORKFLOW_READ_TOOLS = {
+    "AskUserQuestion",
+    "CronList",
+    "Glob",
+    "Grep",
+    "LSP",
+    "ListAgents",
+    "ListPlugins",
+    "ListSkills",
+    "Read",
+    "ReportFindings",
+    "SearchPlugins",
+    "SearchSkills",
+    "SubagentHandback",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "ToolSearch",
+    "WaitForMcpServers",
+}
+# Capabilities a read-only role can never declare, since each changes
+# something outside the files it reads.
+WORKFLOW_READ_ONLY_DENIED_CAPABILITIES = {"outbound", "session"}
 WORKFLOW_MUTATION_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 WORKFLOW_CAPABILITY_REASON_MIN = 20
 WORKFLOW_CAPABILITY_REASON_WORDS = 4
@@ -1016,30 +1072,189 @@ def _command_name(word: str) -> str:
     return name if name in HOOK_DECODERS else re.sub(r"[0-9.]+$", "", name) or name
 
 
+# Wrappers that run the command after them, with the options that take a
+# value and the leading words that are not the command, as in doctor.
+HOOK_WRAPPERS = {
+    "builtin": (set(), 0),
+    "busybox": (set(), 0),
+    "caffeinate": ({"-w"}, 0),
+    "chrt": (set(), 1),
+    "command": (set(), 0),
+    "doas": ({"-u", "-c"}, 0),
+    "env": ({"-u", "-c", "-s", "--unset", "--chdir"}, 0),
+    "exec": ({"-a"}, 0),
+    "flock": ({"-w", "-e", "-s", "-x", "-n", "-c"}, 1),
+    "ionice": ({"-c", "-n", "-p"}, 0),
+    "nice": ({"-n"}, 0),
+    "nohup": (set(), 0),
+    "setsid": (set(), 0),
+    "stdbuf": ({"-i", "-o", "-e"}, 0),
+    "sudo": ({"-u", "-g", "-h", "-p", "-r", "-t", "-c", "-d"}, 0),
+    "time": ({"-f", "-o"}, 0),
+    "timeout": ({"-s", "-k", "--signal", "--kill-after"}, 1),
+    "unbuffer": (set(), 0),
+    "xargs": ({"-a", "-d", "-e", "-l", "-n", "-p", "-s", "-i"}, 0),
+}
+
+
+def _strip_comments(text: str) -> str:
+    """Drop shell comments: an unquoted `#` at the start of a word, to the end of the line."""
+    out: list[str] = []
+    quote = None
+    start = True
+    index = 0
+    while index < len(text):
+        c = text[index]
+        if quote is None and c == "#" and start:
+            end = text.find("\n", index)
+            if end < 0:
+                break
+            index = end
+            continue
+        if c == "\\" and quote != "'":
+            out.append(text[index : index + 2])
+            index += 2
+            start = False
+            continue
+        if quote is None and c in "'\"":
+            quote = c
+        elif quote == c:
+            quote = None
+        out.append(c)
+        start = quote is None and (c.isspace() or c in ";&|()")
+        index += 1
+    return "".join(out)
+
+
+def _normalise_hook(text: str) -> str:
+    """Hook text as doctor reads it: no comments, quotes, backslashes or `$IFS`,
+    simple `NAME=value` variables substituted, lower case."""
+    text = _strip_comments(text).replace("\\\n", "")
+    text = re.sub(r"[\\'\"]", "", text).replace("\n", ";").replace("\r", ";")
+    text = text.replace("${IFS}", " ").replace("$IFS", " ")
+    values: dict[str, str] = {}
+    for name, value in re.findall(r"(?:^|[\s;&|()`])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|()`]+)", text):
+        values.setdefault(name, value)
+    for _ in range(2):
+        for name, value in values.items():
+            text = text.replace("${" + name + "}", value)
+            text = re.sub(r"\$" + name + r"(?![A-Za-z0-9_])", lambda _match, value=value: value, text)
+    return " ".join(text.split()).lower()
+
+
+def _hook_script(text: str) -> list[list[list[str]]]:
+    """Commands, each a pipeline of stages, each stage its words."""
+    text = text.replace("${", "$")
+    for old, new in ((">&", " > "), ("&>", " > "), ("<&", " < "), ("|&", "|"), ("&&", ";"), ("||", ";")):
+        text = text.replace(old, new)
+    text = text.replace("&", ";").replace(">", " > ").replace("<", " < ")
+    script = []
+    for command in text.split(";"):
+        stages = [[word for word in re.split(r"[\s(){}]+", stage) if word] for stage in command.split("|")]
+        stages = [stage for stage in stages if stage]
+        if stages:
+            script.append(stages)
+    return script
+
+
+def _hook_call(words: list[str]) -> tuple[str, str, list[str]] | None:
+    """The program word, its name and its arguments after wrappers and assignments."""
+    assignment = re.compile(r"[a-z0-9_]+=.*")
+    index = 0
+    for _ in range(8):
+        while index < len(words) and assignment.fullmatch(words[index]):
+            index += 1
+        if index >= len(words):
+            return None
+        name = _command_name(words[index])
+        if name not in HOOK_WRAPPERS:
+            return words[index], name, words[index + 1 :]
+        values, skip = HOOK_WRAPPERS[name]
+        index += 1
+        skipped = 0
+        while index < len(words):
+            arg = words[index]
+            if assignment.fullmatch(arg):
+                index += 1
+            elif arg.startswith("-") and len(arg) > 1:
+                index += 2 if arg in values else 1
+            elif skipped < skip:
+                skipped += 1
+                index += 1
+            else:
+                break
+    return None
+
+
+def _base(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _written_files(name: str, args: list[str]) -> set[str]:
+    """Files a call writes: `>` targets, `-o` and `--output` values, `tee` files,
+    the `scp` and `rsync` target, and the file plain `wget` saves."""
+    files: set[str] = set()
+    explicit = False
+    for index, arg in enumerate(args):
+        following = args[index + 1] if index + 1 < len(args) else None
+        short_output = name in {"curl", "wget"} and re.fullmatch(r"-[a-z]*o", arg)
+        if following and (arg in {">", "--output", "--output-document"} or short_output):
+            files.add(_base(following))
+            explicit = True
+        elif arg.startswith(("--output=", "--output-document=")):
+            files.add(_base(arg.split("=", 1)[1]))
+            explicit = True
+    positional = [arg for arg in args if not arg.startswith("-")]
+    if name == "tee":
+        files.update(_base(arg) for arg in positional)
+    if name in {"scp", "rsync"} and positional:
+        files.add(_base(positional[-1]))
+    if name == "wget" and not explicit:
+        files.update(_base(arg.split("?", 1)[0]) for arg in positional if "://" in arg)
+    return {file for file in files if file and file not in {"-", ".", "/dev/null"}}
+
+
+def _runs_written_file(word: str, name: str, args: list[str], files: set[str]) -> bool:
+    if _base(word) in files:
+        return True
+    if name not in HOOK_SHELLS | HOOK_INTERPRETERS | {"source", "."}:
+        return False
+    positional = [arg for arg in args if not arg.startswith("-")]
+    redirected = any(args[index] == "<" and _base(args[index + 1]) in files for index in range(len(args) - 1))
+    return bool(positional and _base(positional[0]) in files) or redirected
+
+
 def _fetch_and_exec(command: str) -> str | None:
-    """Why a hook command runs code it fetched or decoded, if it does."""
-    stages = re.split(r"\|(?!\|)", command)
-    names = [_command_name(stage.split()[0]) if stage.split() else "" for stage in stages]
+    """Why a hook command runs code it fetched, wrote or decoded, if it does."""
+    command = _normalise_hook(command)
     words = {_command_name(word) for word in re.split(r"[\s;&|()`$<>]+", command) if word}
-    for index, name in enumerate(names[1:], start=1):
-        if name in HOOK_SHELLS | HOOK_INTERPRETERS:
-            return f"pipes {names[index - 1] or 'output'} into {name}"
+    written: set[str] = set()
+    for pipeline in _hook_script(command):
+        calls = [call for call in (_hook_call(stage) for stage in pipeline) if call]
+        for index, (word, name, args) in enumerate(calls):
+            if index > 0 and name in HOOK_SHELLS | HOOK_INTERPRETERS:
+                return f"pipes {calls[index - 1][1]} into {name}"
+            if written and _runs_written_file(word, name, args, written):
+                return f"runs {name}, which a command before it wrote"
+            written |= _written_files(name, args)
     if re.search(r"<\(|<<<", command) and words & (HOOK_SHELLS | HOOK_INTERPRETERS | {"source", "."}):
         return "runs a process substitution or here-string as code"
     if words & {"eval", "iex", "invoke-expression"} and words & (HOOK_FETCHERS | HOOK_DECODERS):
         return "evaluates fetched or decoded text"
     if re.search(r"(-c|-e|--eval)\s+\S*\$\(", command) and words & HOOK_FETCHERS:
         return "runs a command substitution as code"
-    if re.search(r"(exec|eval|Function)\s*\(", command) and re.search(r"b64decode|base64|atob\(|frombase64string|urlopen|fetch\(", command, re.I):
+    if re.search(r"(exec|eval|function)\s*\(", command) and re.search(r"b64decode|base64|atob\(|frombase64string|urlopen|fetch\(", command, re.I):
         return "runs decoded or downloaded code inline"
     return None
 
 
-def _frontmatter_hook_commands(hooks: object) -> tuple[list[str], int]:
-    """Command texts in a frontmatter `hooks:` mapping and the malformed entry count."""
+def _frontmatter_hooks(hooks: object) -> tuple[list[str], list[str], int]:
+    """Command texts in a frontmatter `hooks:` mapping, the MCP servers other
+    than mmcg its `mcp_tool` hooks call, and the malformed entry count."""
     if not isinstance(hooks, dict):
-        return [], 1
+        return [], [], 1
     commands: list[str] = []
+    servers: list[str] = []
     malformed = 0
     for groups in hooks.values():
         if not isinstance(groups, list):
@@ -1051,8 +1266,17 @@ def _frontmatter_hook_commands(hooks: object) -> tuple[list[str], int]:
                 malformed += 1
                 continue
             for handler in handlers:
-                if not isinstance(handler, dict) or handler.get("type") not in {"command", "http", "prompt", "agent"}:
+                if not isinstance(handler, dict) or handler.get("type") not in {"command", "http", "mcp_tool", "prompt", "agent"}:
                     malformed += 1
+                    continue
+                if handler.get("type") == "mcp_tool":
+                    # An MCP tool hook names a server and a tool:
+                    # <https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields>.
+                    server, tool = handler.get("server"), handler.get("tool")
+                    if not isinstance(server, str) or not isinstance(tool, str):
+                        malformed += 1
+                    elif server != "mmcg":
+                        servers.append(server)
                     continue
                 if handler.get("type") != "command":
                     continue
@@ -1062,7 +1286,7 @@ def _frontmatter_hook_commands(hooks: object) -> tuple[list[str], int]:
                     malformed += 1
                     continue
                 commands.append(" ".join([command, *args]))
-    return commands, malformed
+    return commands, servers, malformed
 
 
 def _capability_messages(
@@ -1105,6 +1329,34 @@ def _capability_messages(
             messages.append(
                 f"[readonly_mutation_capability] {role} role grants {', '.join(mutation)}"
             )
+        side_effects = sorted(
+            base
+            for base in bases
+            if _tool_capability(base) in WORKFLOW_READ_ONLY_DENIED_CAPABILITIES
+        )
+        if side_effects:
+            messages.append(
+                f"[readonly_side_effect_tool] {role} role grants {', '.join(side_effects)}, "
+                "which publish, send or change the session"
+            )
+        unknown = sorted(
+            base
+            for base in bases
+            if base not in WORKFLOW_READ_TOOLS
+            and base not in WORKFLOW_MUTATION_TOOLS
+            and _tool_capability(base) is None
+            and not base.startswith("mcp__mmcg__")
+        )
+        if unknown:
+            messages.append(
+                f"[readonly_unknown_tool] {role} role grants {', '.join(unknown)}, "
+                "which is not a known read tool; classify it in scripts/validate.py first"
+            )
+        for capability in sorted(WORKFLOW_READ_ONLY_DENIED_CAPABILITIES & set(capabilities)):
+            messages.append(
+                f"[readonly_side_effect_tool] {role} role declares {capability!r}, "
+                "which a read-only role can never hold"
+            )
         mode = frontmatter.get("permissionMode")
         if mode in WORKFLOW_READ_ONLY_FORBIDDEN_MODES:
             messages.append(
@@ -1122,8 +1374,10 @@ def _capability_messages(
         if capability:
             granted_by_capability.setdefault(capability, []).append(tool)
     if "hooks" in frontmatter:
-        hook_commands, malformed = _frontmatter_hook_commands(frontmatter.get("hooks"))
+        hook_commands, hook_servers, malformed = _frontmatter_hooks(frontmatter.get("hooks"))
         granted_by_capability["hooks"] = ["frontmatter hooks"]
+        for server in hook_servers:
+            granted_by_capability.setdefault("mcp", []).append(f"an mcp_tool hook on {server}")
         if malformed:
             messages.append(
                 f"[subagent_hook_invalid] {malformed} frontmatter hook entries are not command or http handlers"

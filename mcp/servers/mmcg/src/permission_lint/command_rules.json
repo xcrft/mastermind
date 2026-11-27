@@ -1,0 +1,323 @@
+{
+  "_comment": "Command tables shared by mastermind doctor (permission_lint/launch.rs) and scripts/validate.py. A Rust test checks that they match the Rust constants, and both sides test fetch_exec_corpus.json.",
+  "shells": [
+    "ash",
+    "bash",
+    "cmd",
+    "csh",
+    "dash",
+    "fish",
+    "ksh",
+    "sh",
+    "tcsh",
+    "zsh"
+  ],
+  "interpreters": [
+    "awk",
+    "bun",
+    "deno",
+    "gawk",
+    "groovy",
+    "irb",
+    "jshell",
+    "julia",
+    "lua",
+    "luajit",
+    "node",
+    "osascript",
+    "perl",
+    "php",
+    "powershell",
+    "pwsh",
+    "py",
+    "python",
+    "r",
+    "rscript",
+    "ruby",
+    "tclsh",
+    "ts-node",
+    "tsx"
+  ],
+  "network_tools": [
+    "aria2c",
+    "curl",
+    "fetch",
+    "http",
+    "https",
+    "invoke-restmethod",
+    "invoke-webrequest",
+    "irm",
+    "iwr",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "telnet",
+    "wget",
+    "xh"
+  ],
+  "evaluators": [
+    ".",
+    "eval",
+    "iex",
+    "invoke-expression",
+    "source"
+  ],
+  "code_options": [
+    "-c",
+    "-e",
+    "-p",
+    "-r",
+    "--eval",
+    "--print",
+    "-command",
+    "--command",
+    "/c",
+    "/k"
+  ],
+  "encoded_options": [
+    "-e",
+    "-ec",
+    "-en",
+    "-enc",
+    "-encodedcommand",
+    "--encodedcommand"
+  ],
+  "decode_code": [
+    "atob(",
+    "b64decode",
+    "base64",
+    "buffer.from",
+    "codecs.decode",
+    "decompress",
+    "frombase64string",
+    "fromhex",
+    "marshal.loads",
+    "pack(",
+    "pickle.loads",
+    "unhexlify",
+    "zlib"
+  ],
+  "network_code": [
+    "axios",
+    "curl",
+    "downloaddata",
+    "downloadfile",
+    "downloadstring",
+    "fetch(",
+    "http.client",
+    "http.get",
+    "http.request",
+    "http::tiny",
+    "https.get",
+    "https.request",
+    "httpx",
+    "invoke-restmethod",
+    "invoke-webrequest",
+    "io::socket",
+    "irm ",
+    "iwr ",
+    "lwp",
+    "net.webclient",
+    "net::http",
+    "open-uri",
+    "requests.",
+    "socket",
+    "start-bitstransfer",
+    "uri.open",
+    "urllib",
+    "urlopen",
+    "wget"
+  ],
+  "eval_code": [
+    "child_process",
+    "compile(",
+    "eval",
+    "exec(",
+    "execsync",
+    "function(",
+    "iex",
+    "instance_eval",
+    "invoke-expression",
+    "load(",
+    "os.system",
+    "popen",
+    "runinthiscontext",
+    "scriptblock]::create",
+    "spawn(",
+    "subprocess",
+    "system(",
+    "vm.run"
+  ],
+  "wrappers": [
+    {
+      "name": "builtin",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "busybox",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "caffeinate",
+      "values": [
+        "-w"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "chrt",
+      "values": [],
+      "skip": 1
+    },
+    {
+      "name": "command",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "doas",
+      "values": [
+        "-u",
+        "-c"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "env",
+      "values": [
+        "-u",
+        "-c",
+        "-s",
+        "--unset",
+        "--chdir"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "exec",
+      "values": [
+        "-a"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "flock",
+      "values": [
+        "-w",
+        "-e",
+        "-s",
+        "-x",
+        "-n",
+        "-c"
+      ],
+      "skip": 1
+    },
+    {
+      "name": "ionice",
+      "values": [
+        "-c",
+        "-n",
+        "-p"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "nice",
+      "values": [
+        "-n"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "nohup",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "noglob",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "setsid",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "stdbuf",
+      "values": [
+        "-i",
+        "-o",
+        "-e"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "sudo",
+      "values": [
+        "-u",
+        "-g",
+        "-h",
+        "-p",
+        "-r",
+        "-t",
+        "-c",
+        "-d",
+        "-u",
+        "-c",
+        "-t",
+        "-D",
+        "-C",
+        "-U"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "time",
+      "values": [
+        "-f",
+        "-o"
+      ],
+      "skip": 0
+    },
+    {
+      "name": "timeout",
+      "values": [
+        "-s",
+        "-k",
+        "--signal",
+        "--kill-after"
+      ],
+      "skip": 1
+    },
+    {
+      "name": "unbuffer",
+      "values": [],
+      "skip": 0
+    },
+    {
+      "name": "xargs",
+      "values": [
+        "-a",
+        "-d",
+        "-e",
+        "-l",
+        "-n",
+        "-p",
+        "-s",
+        "--arg-file",
+        "--delimiter",
+        "--max-args",
+        "--max-procs",
+        "--replace",
+        "-E",
+        "-L",
+        "-P"
+      ],
+      "skip": 0
+    }
+  ]
+}

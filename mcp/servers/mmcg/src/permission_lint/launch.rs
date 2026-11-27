@@ -2844,6 +2844,85 @@ mod tests {
         assert_eq!(argv("jq", &["#", "."]), None);
     }
 
+    /// The tables `scripts/command_check.py` loads, which must equal the
+    /// constants here.
+    const SHARED_RULES: &str = include_str!("command_rules.json");
+    /// Commands and doctor's verdicts, which `scripts/validate.py` must give
+    /// too.
+    const SHARED_CORPUS: &str = include_str!("fetch_exec_corpus.json");
+
+    #[test]
+    fn the_shared_rule_table_matches_the_constants() {
+        let rules: serde_json::Value = serde_json::from_str(SHARED_RULES).unwrap();
+        let list = |key: &str| -> Vec<String> {
+            rules[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key}"))
+                .iter()
+                .map(|value| value.as_str().unwrap().to_string())
+                .collect()
+        };
+        for (key, constant) in [
+            ("shells", SHELLS),
+            ("interpreters", INTERPRETERS),
+            ("network_tools", NETWORK_TOOLS),
+            ("evaluators", EVALUATORS),
+            ("code_options", CODE_OPTIONS),
+            ("encoded_options", ENCODED_OPTIONS),
+            ("decode_code", DECODE_CODE),
+            ("network_code", NETWORK_CODE),
+            ("eval_code", EVAL_CODE),
+        ] {
+            assert_eq!(list(key), constant, "{key} in command_rules.json");
+        }
+        let wrappers: Vec<(String, Vec<String>, usize)> = rules["wrappers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["name"].as_str().unwrap().to_string(),
+                    entry["values"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.as_str().unwrap().to_string())
+                        .collect(),
+                    entry["skip"].as_u64().unwrap() as usize,
+                )
+            })
+            .collect();
+        let constant: Vec<(String, Vec<String>, usize)> = WRAPPERS
+            .iter()
+            .map(|(name, values, skip)| {
+                (
+                    name.to_string(),
+                    values.iter().map(|value| value.to_string()).collect(),
+                    *skip,
+                )
+            })
+            .collect();
+        assert_eq!(wrappers, constant, "wrappers in command_rules.json");
+    }
+
+    #[test]
+    fn the_shared_corpus_gives_doctors_verdicts() {
+        // Reviewer request: doctor and scripts/validate.py drifted, so both
+        // now check one corpus of counter-examples and their verdicts.
+        let corpus: serde_json::Value = serde_json::from_str(SHARED_CORPUS).unwrap();
+        let cases = corpus["cases"].as_array().unwrap();
+        assert!(cases.len() >= 300, "{}", cases.len());
+        let wrong: Vec<&str> = cases
+            .iter()
+            .filter(|case| {
+                fetch_and_exec(case["command"].as_str().unwrap())
+                    != case["runs_code"].as_bool().unwrap()
+            })
+            .map(|case| case["command"].as_str().unwrap())
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     #[test]
     fn hooks_login_items_remote_shells_and_written_crontabs_are_errors() {
         // Decision: writes to files that run later on their own are errors.

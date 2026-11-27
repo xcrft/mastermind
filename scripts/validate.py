@@ -1056,195 +1056,20 @@ def _reason_problem(reason: object) -> str | None:
     return None
 
 
-# A small Python version of the `mastermind doctor` hook rules, so this check
-# runs without building mmcg. It covers the patterns a shipped subagent could
-# plausibly carry; doctor reads the full set at run time.
-HOOK_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "busybox", "pwsh", "powershell", "cmd"}
-HOOK_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php", "lua", "osascript"}
-HOOK_FETCHERS = {"curl", "wget", "http", "https", "xh", "nc", "ncat", "socat", "ssh", "scp", "rsync", "aria2c", "iwr", "irm", "invoke-webrequest", "invoke-restmethod", "git"}
-HOOK_DECODERS = {"base64", "xxd", "openssl", "gunzip", "zcat"}
-
-
-def _command_name(word: str) -> str:
-    """A program's base name, without `.exe` or a version such as `3.12`."""
-    name = word.strip("'\"").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    name = name.removesuffix(".exe")
-    return name if name in HOOK_DECODERS else re.sub(r"[0-9.]+$", "", name) or name
-
-
-# Wrappers that run the command after them, with the options that take a
-# value and the leading words that are not the command, as in doctor.
-HOOK_WRAPPERS = {
-    "builtin": (set(), 0),
-    "busybox": (set(), 0),
-    "caffeinate": ({"-w"}, 0),
-    "chrt": (set(), 1),
-    "command": (set(), 0),
-    "doas": ({"-u", "-c"}, 0),
-    "env": ({"-u", "-c", "-s", "--unset", "--chdir"}, 0),
-    "exec": ({"-a"}, 0),
-    "flock": ({"-w", "-e", "-s", "-x", "-n", "-c"}, 1),
-    "ionice": ({"-c", "-n", "-p"}, 0),
-    "nice": ({"-n"}, 0),
-    "nohup": (set(), 0),
-    "setsid": (set(), 0),
-    "stdbuf": ({"-i", "-o", "-e"}, 0),
-    "sudo": ({"-u", "-g", "-h", "-p", "-r", "-t", "-c", "-d"}, 0),
-    "time": ({"-f", "-o"}, 0),
-    "timeout": ({"-s", "-k", "--signal", "--kill-after"}, 1),
-    "unbuffer": (set(), 0),
-    "xargs": ({"-a", "-d", "-e", "-l", "-n", "-p", "-s", "-i"}, 0),
-}
-
-
-def _strip_comments(text: str) -> str:
-    """Drop shell comments: an unquoted `#` at the start of a word, to the end of the line."""
-    out: list[str] = []
-    quote = None
-    start = True
-    index = 0
-    while index < len(text):
-        c = text[index]
-        if quote is None and c == "#" and start:
-            end = text.find("\n", index)
-            if end < 0:
-                break
-            index = end
-            continue
-        if c == "\\" and quote != "'":
-            out.append(text[index : index + 2])
-            index += 2
-            start = False
-            continue
-        if quote is None and c in "'\"":
-            quote = c
-        elif quote == c:
-            quote = None
-        out.append(c)
-        start = quote is None and (c.isspace() or c in ";&|()")
-        index += 1
-    return "".join(out)
-
-
-def _normalise_hook(text: str) -> str:
-    """Hook text as doctor reads it: no comments, quotes, backslashes or `$IFS`,
-    simple `NAME=value` variables substituted, lower case."""
-    text = _strip_comments(text).replace("\\\n", "")
-    text = re.sub(r"[\\'\"]", "", text).replace("\n", ";").replace("\r", ";")
-    text = text.replace("${IFS}", " ").replace("$IFS", " ")
-    values: dict[str, str] = {}
-    for name, value in re.findall(r"(?:^|[\s;&|()`])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|()`]+)", text):
-        values.setdefault(name, value)
-    for _ in range(2):
-        for name, value in values.items():
-            text = text.replace("${" + name + "}", value)
-            text = re.sub(r"\$" + name + r"(?![A-Za-z0-9_])", lambda _match, value=value: value, text)
-    return " ".join(text.split()).lower()
-
-
-def _hook_script(text: str) -> list[list[list[str]]]:
-    """Commands, each a pipeline of stages, each stage its words."""
-    text = text.replace("${", "$")
-    for old, new in ((">&", " > "), ("&>", " > "), ("<&", " < "), ("|&", "|"), ("&&", ";"), ("||", ";")):
-        text = text.replace(old, new)
-    text = text.replace("&", ";").replace(">", " > ").replace("<", " < ")
-    script = []
-    for command in text.split(";"):
-        stages = [[word for word in re.split(r"[\s(){}]+", stage) if word] for stage in command.split("|")]
-        stages = [stage for stage in stages if stage]
-        if stages:
-            script.append(stages)
-    return script
-
-
-def _hook_call(words: list[str]) -> tuple[str, str, list[str]] | None:
-    """The program word, its name and its arguments after wrappers and assignments."""
-    assignment = re.compile(r"[a-z0-9_]+=.*")
-    index = 0
-    for _ in range(8):
-        while index < len(words) and assignment.fullmatch(words[index]):
-            index += 1
-        if index >= len(words):
-            return None
-        name = _command_name(words[index])
-        if name not in HOOK_WRAPPERS:
-            return words[index], name, words[index + 1 :]
-        values, skip = HOOK_WRAPPERS[name]
-        index += 1
-        skipped = 0
-        while index < len(words):
-            arg = words[index]
-            if assignment.fullmatch(arg):
-                index += 1
-            elif arg.startswith("-") and len(arg) > 1:
-                index += 2 if arg in values else 1
-            elif skipped < skip:
-                skipped += 1
-                index += 1
-            else:
-                break
-    return None
-
-
-def _base(path: str) -> str:
-    return path.rstrip("/").rsplit("/", 1)[-1]
-
-
-def _written_files(name: str, args: list[str]) -> set[str]:
-    """Files a call writes: `>` targets, `-o` and `--output` values, `tee` files,
-    the `scp` and `rsync` target, and the file plain `wget` saves."""
-    files: set[str] = set()
-    explicit = False
-    for index, arg in enumerate(args):
-        following = args[index + 1] if index + 1 < len(args) else None
-        short_output = name in {"curl", "wget"} and re.fullmatch(r"-[a-z]*o", arg)
-        if following and (arg in {">", "--output", "--output-document"} or short_output):
-            files.add(_base(following))
-            explicit = True
-        elif arg.startswith(("--output=", "--output-document=")):
-            files.add(_base(arg.split("=", 1)[1]))
-            explicit = True
-    positional = [arg for arg in args if not arg.startswith("-")]
-    if name == "tee":
-        files.update(_base(arg) for arg in positional)
-    if name in {"scp", "rsync"} and positional:
-        files.add(_base(positional[-1]))
-    if name == "wget" and not explicit:
-        files.update(_base(arg.split("?", 1)[0]) for arg in positional if "://" in arg)
-    return {file for file in files if file and file not in {"-", ".", "/dev/null"}}
-
-
-def _runs_written_file(word: str, name: str, args: list[str], files: set[str]) -> bool:
-    if _base(word) in files:
-        return True
-    if name not in HOOK_SHELLS | HOOK_INTERPRETERS | {"source", "."}:
-        return False
-    positional = [arg for arg in args if not arg.startswith("-")]
-    redirected = any(args[index] == "<" and _base(args[index + 1]) in files for index in range(len(args) - 1))
-    return bool(positional and _base(positional[0]) in files) or redirected
+# The `mastermind doctor` rules for fetched, written or decoded code that a
+# command runs. scripts/command_check.py is a line-by-line copy of doctor's
+# check, so this runs without building mmcg. It shares doctor's word tables and
+# its test corpus, so the two cannot drift.
+try:
+    from scripts import command_check
+except ImportError:  # run as `python scripts/validate.py`
+    import command_check  # type: ignore[no-redef]
 
 
 def _fetch_and_exec(command: str) -> str | None:
     """Why a hook command runs code it fetched, wrote or decoded, if it does."""
-    command = _normalise_hook(command)
-    words = {_command_name(word) for word in re.split(r"[\s;&|()`$<>]+", command) if word}
-    written: set[str] = set()
-    for pipeline in _hook_script(command):
-        calls = [call for call in (_hook_call(stage) for stage in pipeline) if call]
-        for index, (word, name, args) in enumerate(calls):
-            if index > 0 and name in HOOK_SHELLS | HOOK_INTERPRETERS:
-                return f"pipes {calls[index - 1][1]} into {name}"
-            if written and _runs_written_file(word, name, args, written):
-                return f"runs {name}, which a command before it wrote"
-            written |= _written_files(name, args)
-    if re.search(r"<\(|<<<", command) and words & (HOOK_SHELLS | HOOK_INTERPRETERS | {"source", "."}):
-        return "runs a process substitution or here-string as code"
-    if words & {"eval", "iex", "invoke-expression"} and words & (HOOK_FETCHERS | HOOK_DECODERS):
-        return "evaluates fetched or decoded text"
-    if re.search(r"(-c|-e|--eval)\s+\S*\$\(", command) and words & HOOK_FETCHERS:
-        return "runs a command substitution as code"
-    if re.search(r"(exec|eval|function)\s*\(", command) and re.search(r"b64decode|base64|atob\(|frombase64string|urlopen|fetch\(", command, re.I):
-        return "runs decoded or downloaded code inline"
+    if command_check.fetch_and_exec(command):
+        return "runs downloaded or generated code"
     return None
 
 

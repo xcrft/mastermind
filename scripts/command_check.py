@@ -35,6 +35,7 @@ WRAPPERS = {entry["name"]: (set(entry["values"]), entry["skip"]) for entry in RU
 
 HOLE = "\u0001"
 CLONED = "\u0002clone"
+INSTALLED = "\u0002install"
 EXTRACTED = "\u0002extract"
 TEMPORARY_DIRECTORIES = (
     "/tmp",
@@ -538,8 +539,11 @@ def written_files(call: Call) -> list[str]:
         if file and file not in {HOLE, "-", "."}:
             files.append(file)
 
+    builds_local = call.name == "go" and bool(positional) and positional[0] in {"build", "test"}
     for index, arg in enumerate(call.args):
         following = call.args[index + 1] if index + 1 < len(call.args) else None
+        if builds_local and arg != ">":
+            continue
         if arg in {">", "-o", "--output", "--out"}:
             if following is not None:
                 push(following)
@@ -567,17 +571,88 @@ def written_files(call: Call) -> list[str]:
                 url = url[: -len(".git")]
             push(url)
         files.append(CLONED)
-    elif (
-        (name in {"cargo", "go", "gem", "brew", "pip", "pipx", "uv"} and sub == "install")
-        or (name in {"npm", "pnpm", "bun"} and sub in {"i", "install", "add"})
-        or (name == "yarn" and sub in {"global", "add"})
-    ):
-        for spec in positional[1:]:
-            if spec not in {"tool", "add", "install", "global"}:
-                files.append(package(spec))
-    elif name == "uv" and sub == "tool":
-        files.extend(package(spec) for spec in positional[2:])
+    elif name == "brew" and sub == "install":
+        files.extend(package(spec) for spec in positional[1:])
+    else:
+        specs = installed_specs(call)
+        if any(not pinned(spec) for spec in specs):
+            files.extend(package(spec) for spec in specs)
+            files.append(INSTALLED)
     return files
+
+
+PACKAGE_INSTALLERS = {
+    "bun": {"add", "i", "install"},
+    "cargo": {"binstall", "install"},
+    "gem": {"install"},
+    "go": {"install"},
+    "npm": {"add", "i", "install"},
+    "pip": {"install"},
+    "pipx": {"install"},
+    "pnpm": {"add", "i", "install"},
+    "uv": {"tool"},
+    "yarn": {"add", "global"},
+}
+
+INSTALL_VALUE_OPTIONS = {
+    "-c", "-e", "-i", "-r", "-t", "--bin", "--branch", "--constraint", "--editable",
+    "--extra-index-url", "--features", "--index", "--index-url", "--manifest-path",
+    "--path", "--prefix", "--profile", "--python", "--registry", "--requirement",
+    "--rev", "--root", "--tag", "--target", "--target-dir", "--vers", "--version",
+}
+
+
+def installed_specs(call: Call) -> list[str]:
+    positional = call.positional()
+    if not positional or positional[0] not in PACKAGE_INSTALLERS.get(call.name, set()):
+        return []
+    second = positional[1] if len(positional) > 1 else None
+    if (call.name, second) in {("uv", "install"), ("yarn", "add")}:
+        skip = 2
+    elif call.name == "uv":
+        return []
+    else:
+        skip = 1
+    version = next(
+        (call.args[i + 1] for i in range(len(call.args) - 1) if call.args[i] in {"--version", "--vers"}),
+        None,
+    )
+    specs: list[str] = []
+    words = 0
+    index = 0
+    while index < len(call.args):
+        arg = call.args[index]
+        index += 1
+        if is_option(arg):
+            if arg in INSTALL_VALUE_OPTIONS:
+                index += 1
+            continue
+        words += 1
+        if words <= skip:
+            continue
+        if arg.startswith((".", "/", "~", "$")) or HOLE in arg or arg in {"tool", "add", "install", "global"}:
+            continue
+        specs.append(f"{arg}@{version}" if version is not None and "@" not in arg and "=" not in arg else arg)
+    return specs
+
+
+def pinned(spec: str) -> bool:
+    for prefix in ("npm:", "jsr:"):
+        if spec.startswith(prefix):
+            spec = spec[len(prefix) :]
+            break
+    if "==" in spec:
+        version = spec.split("==", 1)[1]
+    else:
+        at = spec.rfind("@")
+        if at <= 0:
+            return False
+        version = spec[at + 1 :]
+    if version.startswith("v"):
+        version = version[1:]
+    core = version.replace("+", "-").split("-", 1)[0]
+    parts = core.split(".")
+    return len(parts) >= 2 and all(part and all(c in "0123456789" for c in part) for part in parts)
 
 
 def extracted_archive(call: Call) -> str | None:
@@ -757,6 +832,8 @@ def detect(text: str, depth: int = 0, shell: bool = True) -> bool:
         return True
     written: list[str] = []
     for command in split_script(outer):
+        if INSTALLED in written:
+            return True
         if any(xargs_runs_code(stage) for stage in command[1:]):
             return True
         calls = [call for call in (resolve(stage) for stage in command) if call]

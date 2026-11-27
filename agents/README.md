@@ -87,12 +87,16 @@ Code adds later is denied until it is classified in
 Each frontmatter hook command is also checked for fetched, written or decoded
 code that runs, such as `curl … | sh`, `curl -so a URL && sh a`,
 `… | sudo bash`, `bash <(…)`, `eval "$(…)"` or
-`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The text
-is read the way doctor reads it: comments, quotes and backslashes go, simple
-variables are filled in and wrappers such as `sudo` and `env` are looked past.
-The check is a small Python copy of the `mastermind doctor` command rules, so
-it runs without building mmcg. Doctor applies the full rules when the subagent
-is installed. `mcp_tool` hooks are valid.
+`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The check
+is [`scripts/command_check.py`](../scripts/command_check.py), a line-by-line
+copy of the `mastermind doctor` command check, so it runs without building
+mmcg. It loads doctor's word tables from
+[`command_rules.json`](../mcp/servers/mmcg/src/permission_lint/command_rules.json),
+which a Rust test keeps equal to the Rust constants. Both copies must give the
+verdicts in
+[`fetch_exec_corpus.json`](../mcp/servers/mmcg/src/permission_lint/fetch_exec_corpus.json),
+so a change to one that the other does not follow fails `just check`. Add each
+new counter-example to the corpus. `mcp_tool` hooks are valid.
 
 It also fails when:
 

@@ -138,10 +138,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `permission rules` reads the monitors and LSP servers of enabled plugins,
   and warns on Codex `open_world_enabled = true` and
   `approvals_reviewer = "auto_review"`.
+- Only `$SHELL`, `$BASH`, `$0`, a default that names a shell, a variable
+  given a shell in the same command and a lookup such as `$(which sh)` count
+  as a shell in a pipe. `| $PAGER`, `| ${PAGER:-less}`, `| $EDITOR -` and
+  `| "$VAR"` warn again instead of failing.
+- Standard input paths are normalised, so `/dev//stdin`, `/dev/fd/00` and
+  `/proc/<any>/fd/0` count, and a newline after `|# c` still joins the pipe.
+- A `node.exe` beside the npm prefix is trusted only on Windows and only for a
+  global prefix, never beside a project's `node_modules`. The system nodes in
+  `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin` and
+  `C:\Program Files\nodejs` are trusted after their links are resolved, so a
+  real registration with a system node stays ok. The launcher script must sit
+  in an `@xcraftmind/mastermind/bin` install.
+- A `MASTERMIND_*` variable in Claude Code `env` or Codex
+  `shell_environment_policy.set` is an error.
+- Writes to `.git/hooks`, `.husky`, `~/Library/LaunchAgents`,
+  `~/.config/systemd/user` and `~/.config/autostart`, a crontab written and
+  then installed, and a pipe into a shell over `ssh`, `chroot`, `nsenter`,
+  `unshare` or `lxc exec` are errors. A `.envrc` and an extract into
+  `~/.local/bin` warn.
+- An escaped glob character in an edit rule is literal, so
+  `Edit(src/\[id\].tsx)` and `Edit(docs/\*.md)` are not reported.
+- `scripts/validate.py` now runs a line-by-line copy of doctor's command check
+  in `scripts/command_check.py`. It loads doctor's word tables from
+  `command_rules.json`, which a Rust test keeps equal to the Rust constants,
+  and both copies must give the verdicts in `fetch_exec_corpus.json`, a corpus
+  of every counter-example so far.
 - Static detection cannot be complete: a command can build what it runs in
   ways no reader of its text can follow. A passing check is not proof that
-  nothing runs without asking, and a guard hook that checks each command when
-  it runs is the planned follow-up.
+  nothing runs without asking. Known gaps, such as a variable set outside the
+  command or `| ssh host` with no remote command, are listed in the reference.
+  A per-role `PreToolUse` guard hook that checks each command when it runs is
+  the follow-up, in its own pull request.
 - Every shipped subagent declares its capability class in its workflow
   metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
   a reason. `just validate` fails when a role's `tools` do not match: `Edit`,

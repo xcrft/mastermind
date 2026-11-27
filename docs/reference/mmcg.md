@@ -273,6 +273,7 @@ Other entries:
 | A helper, status line or file suggestion command | the command's severity | `apiKeyHelper: "curl … \| sh"` is an error, `statusLine.command: "~/bin/line.sh"` warns | `statusLine.command: "jq -r .model"` |
 | A variable that loads code or sends model traffic elsewhere | warn | `env` with `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `PYTHONSTARTUP`, `ANTHROPIC_BASE_URL` or another `*_BASE_URL`, or a proxy. Only the name is read | `env: {EDITOR: vim}` |
 | A prefix that wraps every shell command | error | `env` with `CLAUDE_CODE_SHELL_PREFIX`. Its value also goes through the [command check](#commands) and is never printed | |
+| A Mastermind launcher override | error | `env` with any `MASTERMIND_*` name, such as `MASTERMIND_NODE` or `MASTERMIND_LAUNCHER_JS`, and the same names in Codex `shell_environment_policy.set`. The npm launcher sets these for the process it starts, so a value from config could change which launcher is trusted | `env: {MMCG_PROFILE_CLIENT: claude}` |
 | A plugin marketplace or third-party plugin | warn | an `extraKnownMarketplaces` entry, an `enabledPlugins` entry outside `claude-plugins-official` | `commit-commands@claude-plugins-official` |
 | A repository skill runs chosen code | error | `allowed-tools: Bash(*)` or any other broad shell rule in `.claude/skills/*/SKILL.md` | `allowed-tools: Read Grep Bash(git diff *)` |
 | A repository subagent asks to bypass prompts | warn | `permissionMode: bypassPermissions` in `.claude/agents`. Current Claude Code honours it only when the session already bypasses prompts | `permissionMode: plan` |
@@ -302,6 +303,11 @@ An edit rule is matched as a whole glob against each trust file, with `*`,
 `.codex/config.toml` just because `**` matches `.codex`. A list counts as each
 of its patterns, and the most serious finding wins. A pattern that names a
 trust folder in plain text, such as `.mastermind/tasks/**`, reaches it too.
+A `\` escape is read as in gitignore, so `Edit(src/\[id\].tsx)` and
+`Edit(docs/\*.md)` are plain paths and are not reported, and `Edit(\.codex/**)`
+is `.codex`. A leading `!`, braces that do not pair up or a lone trailing `\`
+is read as broad. A Windows path written with backslashes does not work in
+Claude Code rules either, so use `/`.
 
 A bare `Edit` and a rule aimed at `.codex` both let the agent change `.codex`,
 `AGENTS.md` and `.agents/skills` without a prompt in default mode. The bare
@@ -346,8 +352,20 @@ no reader of its text can follow, such as a script the repository ships, a
 variable set somewhere doctor does not read, or code fetched by a program
 doctor does not know. Doctor reports what it can prove from the files and
 stays quiet about the rest, so a passing check is not proof that nothing runs
-without asking. A guard hook that checks each command when it runs is the
-planned follow-up.
+without asking. Some forms are known and left as they are:
+
+- a pipe into a variable set outside the text, such as `| $PAGER`, warns as an
+  unknown program even if the variable holds a shell
+- `… | ssh host` with no remote command runs the input in the login shell
+  there, and doctor does not report it
+- a known tool found on `PATH` by name, such as `jq`, runs whatever comes
+  first on `PATH`, and doctor does not report it
+- a file the repository ships, such as `./scripts/setup.sh`, warns but its
+  contents are not read
+
+Closing these needs a check at run time, not a better reader of text. The
+follow-up is a per-role `PreToolUse` guard hook that checks each command as it
+runs, in its own pull request.
 
 ### Client hooks
 
@@ -364,10 +382,19 @@ A hook or server counts as Mastermind's own only when its program is a plain
 absolute path, with no `.` or `..` part and outside
 temporary directories, that resolves to the install doctor runs from, either
 the mastermind binary itself or the `bin/mastermind.js` of the same npm
-install run by the node doctor runs with. That node is `MASTERMIND_NODE`, which
-the npm launcher sets to its own `process.execPath`, or the node of the npm
-prefix the binary is installed under (`<prefix>/bin/node`, or `node.exe` in the
-prefix on Windows). A file that is merely called `node` is not trusted. For a hook, the rest is also exactly
+install run by a node doctor trusts. Those nodes are `MASTERMIND_NODE`, which
+the npm launcher sets to its own `process.execPath`, the node of the global npm
+prefix the binary is installed under (`<prefix>/bin/node`, or on Windows only
+`<prefix>\node.exe`), and the system nodes `/usr/bin/node`,
+`/usr/local/bin/node`, `/opt/homebrew/bin/node` and
+`C:\Program Files\nodejs\node.exe`. Each is resolved through its links and
+nothing is run to find it. A prefix with a `package.json`, inside another
+`node_modules`, in a temporary directory or holding the folder doctor runs in is
+a project, not a global prefix, so a `node.exe` beside a project's
+`node_modules` is not trusted. The script must resolve to
+`node_modules/@xcraftmind/mastermind/bin/mastermind.js`, whatever
+`MASTERMIND_LAUNCHER_JS` says. A file that is merely called `node` is not
+trusted. For a hook, the rest is also exactly
 `miner hooks receive --client <client> --project-root <this project>` and it
 ends with this project's registration marker. A name looked up on `PATH`, such
 as a bare `mastermind`, a repository path such as
@@ -414,16 +441,24 @@ through one command check. It first strips quotes and backslashes, joins
 lines, drops shell comments (an unquoted `#` at the start of a word), expands
 `$IFS` and simple `NAME=value` variables and collapses spaces, so `c''url`,
 `cu\rl`, `u=https://x; curl $u | sh` and `curl … | sh # x` read as plain
-`curl` piped into `sh`. `/dev/stdin`, `/dev/fd/0` and `/proc/self/fd/0` read as
-standard input. A variable used as the program, such as `$SHELL` or `$0`,
-counts as a shell.
+`curl` piped into `sh`. A newline after `|`, `&&` or `||`, also after a
+comment such as `|# c`, continues the pipe. `/dev/stdin`, `/dev/fd/0` and
+`/proc/<any>/fd/0` read as standard input after `//` and `/./` are collapsed
+and leading zeros are dropped, so `/dev//stdin` and `/dev/fd/00` count too.
+`$SHELL`, `$BASH`, `$0`, a default that names a shell such as
+`${PAGER:-sh}`, a variable given a shell earlier in the same text, and a lookup
+such as `$(which sh)`, `` `which bash` `` or `$(command -v sh)` count as a
+shell. Any other variable used as the program, such as `$PAGER`, `$EDITOR` or
+`"$VAR"`, is a program doctor does not know.
 Then it looks past wrappers such as `sudo`, `env`, `command`, `nohup`,
 `timeout` and `xargs`.
 
 | Reason | Severity | Examples that are reported |
 |---|---|---|
-| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`, `cargo install x && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…`. A variable as the shell: `$SHELL <(curl …)`, `… \| ${SHELL}`, `… \| $0`. An archive extracted from a pipe or a written file and then run: `curl … \| tar xz && ./install`. Input that is scheduled or run in a container: `… \| at now`, `… \| crontab -`, `… \| docker run -i image sh`, `… \| script -qc sh` |
+| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`, `cargo install x && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…`. A shell variable or lookup as the shell: `$SHELL <(curl …)`, `… \| ${SHELL}`, `… \| $0`, `… \| $(which sh)`, `X=sh; … \| $X`. A shell on another host or in another root or namespace: `… \| ssh host sh`, `… \| chroot /srv sh`, `… \| nsenter -t 1 sh`, `… \| lxc exec box -- sh`. A crontab written and then installed: `curl -so c … && crontab c`. An archive extracted from a pipe or a written file and then run: `curl … \| tar xz && ./install`. Input that is scheduled or run in a container: `… \| at now`, `… \| crontab -`, `… \| docker run -i image sh`, `… \| script -qc sh` |
 | Writes a shell startup file | error | `> ~/.zshrc`, `tee -a ~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile`, `~/.zshenv`, fish `config.fish` or `conf.d`, a system profile under `/etc`, written by a redirect, `tee`, `cp`, `mv`, `sed -i` or `dd`. Code there runs in every new shell |
+| Writes a git hook, login item or user service | error | a write to `.git/hooks/*`, `.husky/*`, `~/Library/LaunchAgents`, `~/.config/systemd/user` or `~/.config/autostart`. Code there runs later on its own |
+| Writes a `.envrc` or a program in `~/.local/bin` | warn | `> .envrc`, `cp tool ~/.local/bin/`, `tar xzf t.tgz -C ~/.local/bin`, `unzip t.zip -d ~/.local/bin`. direnv loads a `.envrc` when you enter the folder, and `~/.local/bin` is usually on `PATH` |
 | Runs a container with host access | error | see the server table above |
 | Runs shell text | warn | `bash -c "cd /srv && ./start.sh"` |
 | Runs code given inline | warn | `python -c …`, `node -e …`, `eval`, `iex`, PowerShell commands, an encoded command doctor cannot decode |
@@ -431,7 +466,7 @@ Then it looks past wrappers such as `sudo`, `env`, `command`, `nohup`,
 | Installs packages | warn | `pip install x`, `npm install -g x` |
 | Runs a network tool | warn | `curl`, `wget`, `nc`, `ssh` alone |
 | Sets a variable that loads other code | warn | `NODE_OPTIONS=…`, `LD_PRELOAD=…`, `DYLD_*`, `PYTHONSTARTUP` |
-| Runs a program doctor does not know | warn | `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, `npx --no x`, any other program |
+| Runs a program doctor does not know | warn | `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, `npx --no x`, `… \| $PAGER`, any other program |
 | Runs a program from a temporary directory | warn | `/tmp/x`, `sh /tmp/x.sh`, `python3 /var/tmp/x.py`. Any local user can replace a file there |
 | Launcher missing | warn | a `<program> serve` or `<node> <script> serve` server, or a hook with Mastermind's marker, whose path no longer exists, as after a `brew upgrade`. Run `mastermind setup` again |
 | Runs repo-controlled config | info | `prettier --write`, `eslint --fix`, `ruff`, `gitleaks`, `shellcheck` and other formatters, linters and scanners. Their config, plugins or rules come from the repository, and some configs are code, such as `prettier.config.js` or `eslint.config.js` |

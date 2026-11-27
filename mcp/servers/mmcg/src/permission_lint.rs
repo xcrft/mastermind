@@ -172,7 +172,7 @@ impl Kind {
             Kind::ApprovesServerTools => "approves an MCP server's or app's tools without asking",
             Kind::AllowsDestructiveTools => "allows an app's destructive tools",
             Kind::BroadEditCoversTrustFiles => {
-                "can edit .codex, AGENTS.md and the other files that set what the agent trusts"
+                "can edit .codex, AGENTS.md and other trust files without a prompt in default mode"
             }
             Kind::AsksToWriteTrustSettings => {
                 "asks to let the agent rewrite its trust settings, which Claude Code still prompts for"
@@ -944,6 +944,9 @@ fn classify_read(spec: Option<&str>) -> Option<Kind> {
 /// protect. Claude Code still prompts for `.claude`, `.mcp.json` and
 /// `.claude.json` itself, except `.claude/worktrees`:
 /// <https://code.claude.com/docs/en/permission-modes#protected-paths>.
+///
+/// A skill or subagent name is [`ANY_NAME`], which only a wildcard matches,
+/// so `**/x/**` does not count as naming a skill called `x`.
 const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
     ("cwd", ".codex/config.toml", Kind::WritesTrustSettings),
     ("cwd", ".codex/hooks.json", Kind::WritesTrustSettings),
@@ -956,7 +959,7 @@ const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
     ("cwd", "AGENTS.override.md", Kind::WritesTrustSettings),
     (
         "cwd",
-        ".agents/skills/x/SKILL.md",
+        ".agents/skills/\u{1}/SKILL.md",
         Kind::WritesTrustSettings,
     ),
     (
@@ -969,10 +972,14 @@ const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
         ".claude/settings.local.json",
         Kind::AsksToWriteTrustSettings,
     ),
-    ("cwd", ".claude/agents/x.md", Kind::AsksToWriteTrustSettings),
     (
         "cwd",
-        ".claude/skills/x/SKILL.md",
+        ".claude/agents/\u{1}.md",
+        Kind::AsksToWriteTrustSettings,
+    ),
+    (
+        "cwd",
+        ".claude/skills/\u{1}/SKILL.md",
         Kind::AsksToWriteTrustSettings,
     ),
     ("cwd", ".mcp.json", Kind::AsksToWriteTrustSettings),
@@ -981,7 +988,7 @@ const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
     ("home", ".codex/AGENTS.md", Kind::WritesTrustSettings),
     (
         "home",
-        ".agents/skills/x/SKILL.md",
+        ".agents/skills/\u{1}/SKILL.md",
         Kind::WritesTrustSettings,
     ),
     (
@@ -998,13 +1005,52 @@ const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
 const ORDINARY_TARGETS: &[(&str, &str)] = &[
     ("cwd", "src/main.rs"),
     ("cwd", "README.md"),
+    ("cwd", "package.json"),
+    ("cwd", "Cargo.toml"),
     ("cwd", "docs/guide/setup.md"),
     ("home", "notes/todo.txt"),
 ];
 
-/// Whether one path segment matches a glob segment with `*` and `?`. Case
-/// is ignored, as on the default macOS and Windows file systems, and `*`
-/// matches a leading dot.
+/// The placeholder for a name in [`TRUST_TARGETS`], such as a skill's.
+const ANY_NAME: char = '\u{1}';
+
+/// The index of the `]` that closes a `[` class at the start of `pattern`.
+/// A `]` right after `[` or `[!` belongs to the class.
+fn class_end(pattern: &[char]) -> Option<usize> {
+    let first = match pattern.get(1) {
+        Some('!' | '^') => 2,
+        _ => 1,
+    };
+    (first + 1..pattern.len()).find(|&index| pattern[index] == ']')
+}
+
+/// Whether a character is in a class such as `c`, `a-z` or `!.`, ignoring
+/// case. [`ANY_NAME`] is in no class except a negated one.
+fn class_matches(class: &[char], c: char) -> bool {
+    let (negated, class) = match class.first() {
+        Some('!' | '^') => (true, &class[1..]),
+        _ => (false, class),
+    };
+    let c = c.to_ascii_lowercase();
+    let mut index = 0;
+    let mut found = false;
+    while index < class.len() {
+        let low = class[index].to_ascii_lowercase();
+        if class.get(index + 1) == Some(&'-') && index + 2 < class.len() {
+            let high = class[index + 2].to_ascii_lowercase();
+            found |= low <= c && c <= high && c != ANY_NAME;
+            index += 3;
+        } else {
+            found |= low == c;
+            index += 1;
+        }
+    }
+    found != negated
+}
+
+/// Whether one path segment matches a glob segment with `*`, `?` and `[]`
+/// classes. Case is ignored, as on the default macOS and Windows file
+/// systems, and `*` matches a leading dot.
 fn segment_matches(pattern: &[char], name: &[char]) -> bool {
     match (pattern.first(), name.first()) {
         (None, None) => true,
@@ -1013,6 +1059,10 @@ fn segment_matches(pattern: &[char], name: &[char]) -> bool {
                 || (!name.is_empty() && segment_matches(pattern, &name[1..]))
         }
         (Some('?'), Some(_)) => segment_matches(&pattern[1..], &name[1..]),
+        (Some('['), Some(&c)) if class_end(pattern).is_some() => {
+            let end = class_end(pattern).unwrap_or_default();
+            class_matches(&pattern[1..end], c) && segment_matches(&pattern[end + 1..], &name[1..])
+        }
         (Some(p), Some(n)) if p.eq_ignore_ascii_case(n) => {
             segment_matches(&pattern[1..], &name[1..])
         }
@@ -1061,10 +1111,78 @@ fn pattern_reaches(anchor: &str, segments: &[&str], anywhere: bool, target: (&st
         .any(|start| (start + 1..=path.len()).any(|end| glob_matches(segments, &path[start..end])))
 }
 
+/// The patterns a `{a,b}` brace list stands for, outer braces first. `None`
+/// when the braces do not pair up or the list grows past 64 patterns.
+fn expand_braces(pattern: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let Some(open) = chars.iter().position(|c| *c == '{') else {
+        return (!pattern.contains('}')).then(|| vec![pattern.to_string()]);
+    };
+    let mut depth = 0;
+    let mut parts = vec![String::new()];
+    let mut close = None;
+    for (index, c) in chars.iter().enumerate().skip(open + 1) {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => {
+                close = Some(index);
+                break;
+            }
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        parts.last_mut()?.push(*c);
+    }
+    let close = close?;
+    let head: String = chars[..open].iter().collect();
+    let tail: String = chars[close + 1..].iter().collect();
+    let mut out = Vec::new();
+    for part in parts {
+        for expanded in expand_braces(&format!("{head}{part}{tail}"))? {
+            out.push(expanded);
+            if out.len() > 64 {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The finding for an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` rule:
 /// the trust files its pattern reaches, judged by glob matching rather than
-/// by the text of the pattern.
+/// by the text of the pattern. A `{a,b}` list is read as each of its
+/// patterns, and the most serious finding of any of them counts. Syntax
+/// doctor does not read, such as a `\\` escape, a leading `!` or braces that
+/// do not pair up, is treated as broad.
 fn edit_finding(spec: Option<&str>) -> Option<Kind> {
+    let Some(spec) = spec.filter(|spec| !spec.is_empty()) else {
+        return edit_pattern_finding(None);
+    };
+    let unknown = |pattern: &str| {
+        pattern.contains('\\') || pattern.split('/').any(|segment| segment.starts_with('!'))
+    };
+    let patterns = match expand_braces(spec) {
+        Some(patterns) if !patterns.iter().any(|pattern| unknown(pattern)) => patterns,
+        _ => return Some(Kind::BroadEditCoversTrustFiles),
+    };
+    let rank = |kind: &Kind| match kind {
+        Kind::WritesTrustSettings => 3,
+        Kind::AsksToWriteTrustSettings => 2,
+        Kind::WritesMastermindState => 1,
+        _ => 0,
+    };
+    patterns
+        .iter()
+        .filter_map(|pattern| edit_pattern_finding(Some(pattern)))
+        .max_by_key(rank)
+}
+
+/// [`edit_finding`] for one pattern with no braces.
+fn edit_pattern_finding(spec: Option<&str>) -> Option<Kind> {
     let (anchor, segments, anywhere) = match spec {
         None | Some("") => ("cwd", vec!["**"], false),
         Some(spec) => {
@@ -1081,7 +1199,8 @@ fn edit_finding(spec: Option<&str>) -> Option<Kind> {
     // path, so each tail after plain directory names is tried as well. A
     // dropped segment is never a dot directory such as `.codex`, which is
     // what the rule names.
-    let literal = |segment: &&str| !segment.contains(['*', '?']) && !segment.starts_with('.');
+    let plain = |segment: &str| !segment.contains(['*', '?', '[']);
+    let literal = |segment: &&str| plain(segment) && !segment.starts_with('.');
     let tails: Vec<&[&str]> = if anchor == "root" {
         (0..segments.len())
             .take_while(|&index| segments[..index].iter().all(literal))
@@ -1095,8 +1214,10 @@ fn edit_finding(spec: Option<&str>) -> Option<Kind> {
             .iter()
             .any(|tail| pattern_reaches(anchor, tail, anywhere, target))
     };
-    // A literal pattern inside a trust directory, such as
-    // `.mastermind/tasks/**`, reaches it too.
+    // A pattern that names a trust directory in plain text, such as
+    // `.mastermind/tasks/**`, reaches it too. Only plain segments count: a
+    // wildcard prefix such as `**/*.ts` is matched as a whole above, so it
+    // does not reach `.codex` just because `**` matches the directory.
     let inside = |target_anchor: &str, path: &str| {
         let dir: Vec<&str> = path.split('/').collect();
         let dir = &dir[..dir.len() - 1];
@@ -1109,7 +1230,12 @@ fn edit_finding(spec: Option<&str>) -> Option<Kind> {
             && !dir.is_empty()
             && tails.iter().any(|tail| {
                 let worktrees = dir == [".claude"] && tail.get(1) == Some(&"worktrees");
-                !worktrees && tail.len() > dir.len() && glob_matches(&tail[..dir.len()], dir)
+                !worktrees
+                    && tail.len() > dir.len()
+                    && tail[..dir.len()].iter().zip(dir).all(|(segment, name)| {
+                        plain(segment)
+                            && (name.starts_with(ANY_NAME) || segment.eq_ignore_ascii_case(name))
+                    })
             })
     };
     let hits: Vec<Kind> = TRUST_TARGETS
@@ -3446,6 +3572,122 @@ prefix_rule(pattern = ["npx"])
             "Edit(./tests/**)",
         ] {
             assert_eq!(claude(rule), None, "{rule}");
+        }
+    }
+
+    #[test]
+    fn edit_globs_are_matched_whole_with_classes_and_braces() {
+        // Reviewer counter-examples: a `**/` prefix matched `.codex` as a
+        // directory, so every extension rule was an error.
+        for rule in [
+            "Edit(**/*.ts)",
+            "Edit(**/*.py)",
+            "Edit(**/*.go)",
+            "Edit(**/*.yml)",
+            "Edit(**/test/**)",
+            "Edit(**/x/**)",
+            "Edit(src/**/*.ts)",
+        ] {
+            assert_eq!(claude(rule), None, "{rule}");
+        }
+        // Reviewer counter-examples: `[]` and `{}` hid `.codex`.
+        for rule in [
+            "Edit(.[c]odex/**)",
+            "Edit({.codex,src}/**)",
+            "Edit(.[a-z]odex/config.toml)",
+            "Edit({src,{.codex,.agents}}/**)",
+            "Edit(.codex/**)",
+            "Edit(AGENTS.md)",
+            "Edit(.agents/skills/**)",
+            "Write(.agents/skills/deploy/SKILL.md)",
+        ] {
+            assert_eq!(claude(rule), Some(Kind::WritesTrustSettings), "{rule}");
+        }
+        for rule in [
+            "Edit(.[!c]odex/**)",
+            "Edit({src,docs}/**)",
+            "Edit([s]rc/**)",
+        ] {
+            assert_eq!(claude(rule), None, "{rule}");
+        }
+        // Syntax doctor does not read is broad, not silent.
+        for rule in ["Edit(\\.codex/**)", "Edit({.codex/**)", "Edit(!src/**)"] {
+            assert_eq!(
+                claude(rule),
+                Some(Kind::BroadEditCoversTrustFiles),
+                "{rule}"
+            );
+        }
+        // Property: common globs that name no trust file never error, and
+        // the `**/*.md`-style ones that do reach a trust file are broad.
+        for glob in [
+            "*.ts",
+            "*.tsx",
+            "*.js",
+            "*.jsx",
+            "*.mjs",
+            "*.py",
+            "*.go",
+            "*.rs",
+            "*.java",
+            "*.kt",
+            "*.rb",
+            "*.php",
+            "*.c",
+            "*.h",
+            "*.cpp",
+            "*.css",
+            "*.scss",
+            "*.html",
+            "*.yml",
+            "*.yaml",
+            "*.txt",
+            "*.lock",
+            "*.sql",
+            "*.sh",
+            "*.svg",
+            "*.png",
+            "test/**",
+            "tests/**",
+            "x/**",
+            "src/**",
+            "lib/**",
+            "app/**",
+            "docs/**",
+            "pkg/**",
+            "cmd/**",
+            "scripts/**",
+            "__tests__/**",
+            "*.test.ts",
+            "*.spec.js",
+            "*_test.go",
+            "fixtures/**",
+            "build/**",
+            "dist/**",
+            "target/**",
+            "node_modules/**",
+            "vendor/**",
+            "migrations/**",
+        ] {
+            for rule in [
+                format!("Edit({glob})"),
+                format!("Edit(**/{glob})"),
+                format!("Edit(src/**/{glob})"),
+                format!("Write(./{glob})"),
+            ] {
+                assert_ne!(
+                    claude(&rule).map(Kind::severity),
+                    Some(Severity::Error),
+                    "{rule}"
+                );
+            }
+        }
+        for glob in ["*.md", "*.json", "*.toml", "*", "**"] {
+            assert_eq!(
+                claude(&format!("Edit(**/{glob})")).map(Kind::severity),
+                Some(Severity::Warn),
+                "{glob}"
+            );
         }
     }
 

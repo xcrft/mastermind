@@ -82,7 +82,7 @@ mod tests {
             imports,
             vec![
                 ("parse", Some("./dates.mjs::parse")),
-                ("format", Some("./dates.mjs::format")),
+                ("formatDate", Some("./dates.mjs::format")),
                 ("*", Some("./errors.mjs::*")),
             ]
         );

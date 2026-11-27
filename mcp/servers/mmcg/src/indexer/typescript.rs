@@ -498,9 +498,9 @@ fn collect_import_names(
 }
 
 /// `export { a, b as c } from './m'`, `export * from './m'` and
-/// `export * as ns from './m'`. A re-export binds no local name, so the edge
-/// names the exported declaration in the source module: `a` / `./m::a`, `*` /
-/// `./m::*`, or `ns` / `./m::*`.
+/// `export * as ns from './m'`. Like an aliased import, the edge name is the
+/// binding this module exports and the path keeps the original name:
+/// `a` / `./m::a`, `c` / `./m::b`, `*` / `./m::*`, or `ns` / `./m::*`.
 fn collect_reexport_names(
     export_stmt: &Node,
     source: &[u8],
@@ -526,15 +526,17 @@ fn collect_reexport_names(
                     if spec.kind() != "export_specifier" {
                         continue;
                     }
-                    if let Some(orig) = spec
-                        .child_by_field_name("name")
-                        .and_then(|n| node_text(&n, source))
-                    {
-                        let orig = orig.trim_matches(|c| c == '"' || c == '\'');
+                    let unquote = |n: Node| {
+                        node_text(&n, source).map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+                    };
+                    let orig = spec.child_by_field_name("name").and_then(unquote);
+                    let alias = spec.child_by_field_name("alias").and_then(unquote);
+                    if let Some(orig) = orig {
+                        let binding = alias.unwrap_or(orig);
                         push_import(
                             pending,
                             module_index,
-                            orig.to_string(),
+                            binding.to_string(),
                             Some(format!("{module_source}::{orig}")),
                             line,
                         );
@@ -956,7 +958,7 @@ mod tests {
                 ("fs", Some("node:fs::*")),
                 ("Config", Some("./config::Config")),
                 ("createServer", Some("./server::createServer")),
-                ("Router", Some("./server::Router")),
+                ("AppRouter", Some("./server::Router")),
                 ("Session", Some("./session::Session")),
                 ("*", Some("./errors::*")),
                 ("metrics", Some("./metrics::*")),

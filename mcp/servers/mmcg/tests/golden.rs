@@ -633,7 +633,7 @@ fn golden_typescript_module_flavours_and_declarations() {
     .unwrap();
     fs::write(
         root.join("src/index.ts"),
-        "export { totalOf, InvoiceState } from './billing/invoice.mjs';\n\
+        "export { totalOf, InvoiceState as State } from './billing/invoice.mjs';\n\
          export * from './money.cjs';\n",
     )
     .unwrap();
@@ -668,6 +668,17 @@ fn golden_typescript_module_flavours_and_declarations() {
     assert!(has_import(&store, "src/billing/invoice.mts", "formatMoney"));
     assert!(has_import(&store, "src/money.cts", "assert"));
     assert!(has_import(&store, "src/index.ts", "totalOf"));
-    assert!(has_import(&store, "src/index.ts", "InvoiceState"));
+    assert_eq!(
+        store.imported_by_name("State", None).unwrap(),
+        vec!["src/index.ts"],
+        "an aliased re-export is found by its exported name"
+    );
+    assert_eq!(
+        store
+            .imported_by_path("./billing/invoice.mjs::InvoiceState", None)
+            .unwrap(),
+        vec!["src/index.ts"],
+        "and by the original name in the module path"
+    );
     assert!(has_import(&store, "src/index.ts", "*"));
 }

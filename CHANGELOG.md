@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signatures are methods and functions. An overload signature is left out
   when its implementation is in the same scope.
 - TypeScript and JavaScript re-exports are `imports` edges of the module:
-  `export { foo } from './a'` is `foo` / `./a::foo`, `export * from './a'` is
+  `export { foo } from './a'` is `foo` / `./a::foo`. As with an aliased
+  import, `export { foo as bar } from './a'` is `bar` / `./a::foo`, so
+  `query imported-by bar` finds it. `export * from './a'` is
   `*` / `./a::*` and `export * as ns from './a'` is `ns` / `./a::*`.
   `import fs = require('fs')` is `fs` / `fs::*`.
 - C/C++ namespaces are symbols that own their members, so a spec can name

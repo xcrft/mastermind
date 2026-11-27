@@ -230,7 +230,7 @@ fn every_risky_project_server_is_reported_and_pinned_ones_are_not() {
         "mcp-project:gitpip command (runs downloaded or generated code, error)",
         "mcp-project:rootfs command (runs a container with host access, error)",
         "mcp-project:privileged command (runs a container with host access, error)",
-        "mcp-project:tmp command (runs a program doctor does not know, warn)",
+        "mcp-project:tmp command (runs a program from a temporary directory, which any local user can replace, warn)",
         "mcp-project:inline command (runs code given inline, warn)",
         "mcp-project:preload env (sets a variable that loads other code, warn)",
         "mcp-project:token url (holds a secret in the URL or headers, warn)",
@@ -301,7 +301,7 @@ fn forged_and_malformed_hooks_are_reported() {
     for expected in [
         "claude-project=603 hooks (0 Mastermind, 603 other)",
         "claude-project PreToolUse #1 (malformed hook group, which the client skips, warn)",
-        "claude-project PreToolUse #1 (runs a program doctor does not know, warn)",
+        "claude-project PreToolUse #1 (runs a program from a temporary directory, which any local user can replace, warn)",
         "claude-project PreToolUse #2 (runs code given inline, warn)",
         "claude-project PreToolUse #603 (runs downloaded or generated code, error)",
     ] {

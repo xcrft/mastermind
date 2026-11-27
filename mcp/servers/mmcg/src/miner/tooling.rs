@@ -49,7 +49,9 @@ const RUST: &[&str] = &["rs"];
 const SCRIPT: &[&str] = &["ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs"];
 const PYTHON: &[&str] = &["py"];
 const GO: &[&str] = &["go"];
-const C_FAMILY: &[&str] = &["c", "h", "cc", "cpp", "cxx", "hpp", "hh"];
+const C_FAMILY: &[&str] = &[
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "inl", "ipp", "tpp",
+];
 const CSHARP: &[&str] = &["cs"];
 /// Every source extension.
 const ANY: &[&str] = &[];
@@ -373,6 +375,7 @@ mod tests {
                 "steps:\n  - run: cargo fmt --check\n",
             ),
             ("api/.eslintrc.json", "{}\n"),
+            ("engine/.clang-format", "BasedOnStyle: LLVM\n"),
         ] {
             let file = root.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -413,6 +416,14 @@ mod tests {
         assert_eq!(names(&scopes, "api/handler.ts"), ["eslint"]);
         assert_eq!(governed(&scopes, "api/handler.ts").features, DECLARATION);
         assert_eq!(names(&scopes, "svc/main.go"), ["gofmt"]);
+        for header in [
+            "engine/math.inl",
+            "engine/math.hxx",
+            "engine/math.ipp",
+            "engine/math.tpp",
+        ] {
+            assert_eq!(names(&scopes, header), ["clang-format"], "{header}");
+        }
 
         let mut changed = scopes.clone();
         changed.push(scope("", BIOME, SCRIPT, FORMATTED));

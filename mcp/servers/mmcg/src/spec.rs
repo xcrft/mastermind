@@ -1172,13 +1172,14 @@ fn extract_mentioned_files_from_line(
 
 fn looks_like_path(s: &str) -> bool {
     let has_slash = s.contains('/');
-    let has_known_ext = [
-        ".rs", ".py", ".ts", ".mts", ".cts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".go",
-        ".java", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".md", ".toml", ".json",
-        ".yml", ".yaml", ".sql", ".sh", ".html", ".css", ".scss",
-    ]
-    .iter()
-    .any(|ext| s.ends_with(ext));
+    // Every indexed source extension, so this list cannot fall behind the
+    // indexer, plus the non-source files a spec often names.
+    let has_known_ext = crate::indexer::guess_language_for(s).is_some()
+        || [
+            ".md", ".toml", ".json", ".yml", ".yaml", ".sql", ".sh", ".html", ".css", ".scss",
+        ]
+        .iter()
+        .any(|ext| s.ends_with(ext));
     has_slash || has_known_ext
 }
 
@@ -1386,6 +1387,26 @@ fn parse_backticked(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_indexed_extension_is_a_mentioned_file() {
+        for ext in [
+            "py", "pyi", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs",
+            "go", "java", "php", "phtml", "c", "cc", "cpp", "cxx", "h", "hpp", "hh", "hxx", "inl",
+            "ipp", "tpp",
+        ] {
+            let name = format!("widget.{ext}");
+            assert!(
+                crate::indexer::extractor_for_path(std::path::Path::new(&name)).is_some(),
+                "{ext} is not indexed, drop it from this list"
+            );
+            assert_eq!(
+                extract_mentioned_files(&format!("Touch `{name}` only.")),
+                vec![name.clone()],
+                "{ext}"
+            );
+        }
+    }
 
     #[test]
     fn parse_file_rejects_specs_over_the_bundle_limit() {

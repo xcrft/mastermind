@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A spec that names an indexed source file in backticks lists it as a
+  mentioned file for every indexed extension. `.pyi`, `.vue`, `.phtml`, `.hh`,
+  `.hxx`, `.inl`, `.ipp` and `.tpp` were missing. A `.clang-format` scope now
+  covers `.hxx`, `.inl`, `.ipp` and `.tpp` files too.
+
 - A C# `global using System.Text.Json;` is the import `Json` /
   `System.Text.Json::*`. The path used to start with `global using`, so it
   never matched the namespace.

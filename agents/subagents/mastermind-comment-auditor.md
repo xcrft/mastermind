@@ -1,7 +1,7 @@
 ---
 name: mastermind-comment-auditor
 description: "Use after implementation when the pre-gate found added, changed or deleted comments. Not for checking the spec contract (use mastermind-auditor). Read-only: flags narration with quoted evidence, names what it kept and reports rationale the change deleted."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob
 model: sonnet
 maxTurns: 12
 effort: medium
@@ -13,7 +13,7 @@ workflow:
     - id: mastermind-comment-audit
       required: false
 metadata:
-  version: 0.1.5
+  version: 0.1.7
   authors: [mastermind]
   tags: [code-review, comments, audit, workflow]
 ---
@@ -46,24 +46,23 @@ authoritative source for what this change did to them.
 
 - baseline ref (from task state for a verified/strict task, or the branch point
   for Direct work);
+- the comment delta from the caller: the `git diff -U0 <baseline>` output and
+  the list of untracked files. The caller already ran both to decide whether to
+  spawn you, and you have no shell to run them yourself;
 - optionally the canonical `spec.md`, when one exists, to know what the change
   was allowed to touch.
 
-If the baseline is missing, return `verdict: incomplete`, say why, and stop. Do
-not guess a ref, and do not fall back to reviewing the whole repository.
+If the baseline or the delta is missing, return `verdict: incomplete`, say
+why, and stop. Do not guess a ref, rebuild the diff from memory, or fall back
+to reviewing the whole repository.
 
 ## Method
 
-1. Collect the delta mechanically — never from memory of the implementation:
-
-   ```bash
-   git diff -U0 <baseline>     # tracked
-   git status --porcelain      # untracked
-   ```
-
-   `git diff <ref>` compares the baseline against the working tree, which is the
-   correct scope — this review runs before the commit step. Read untracked files
-   in full; every comment in a new file is an added comment.
+1. Work from the delta the caller passed, never from memory of the
+   implementation. The caller's `git diff -U0 <baseline>` compares the baseline
+   against the working tree, which is the correct scope, because this review
+   runs before the commit step. Read untracked files in full; every comment in
+   a new file is an added comment.
 
 2. Open each changed file at the reported lines. A diff line alone does not show
    whether a comment restates its neighbour.

@@ -44,14 +44,177 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limits are in `evals/selection/README.md`.
 
 - `mastermind doctor` has a `permission rules` check. It reads the Claude Code
-  permission lists and modes, Codex `.rules` files, and Codex `config.toml` and
-  profile files, and warns about settings that let an agent run code it
-  chooses without asking: any command, interpreters and shells, commands that
-  run other commands, package managers, task runners and installs, `git` and
-  `gh` without a fixed subcommand, network fetches without a fixed host,
-  `bypassPermissions`, and Codex running unsandboxed without approval. A rule
-  that a deny, ask or stricter rule covers does not warn. It never edits the
-  files and never prints rule text.
+  permission lists and modes, Codex `.rules` files, Codex `config.toml` and
+  profile files, and what a repository ships for its clients: `.mcp.json`
+  servers, `.claude/skills/*/SKILL.md` and `.claude/agents/**/*.md`. Each
+  finding has a severity. An error fails the check and makes `doctor` exit 1:
+  a `Read` rule for a secret store such as `~/.ssh` or `.env`, an MCP server
+  or hook that downloads and runs code, a repository skill whose
+  `allowed-tools` grants a broad shell rule, `defaultMode: bypassPermissions`,
+  and Codex never asking while it has no sandbox or has network access. A
+  warning covers any command, interpreters and shells, commands that run other
+  commands, package managers, task runners and installs, `git` and `gh`
+  without a fixed subcommand, `git push`, `gh api` and other publishing
+  subcommands, network fetches without a fixed host, `WebFetch` and
+  `WebSearch` for any host, `mcp__*`, writes to `.mastermind`, reads of the
+  whole home directory, `enableAllProjectMcpServers`, a repository subagent
+  with `permissionMode: bypassPermissions`, and Codex commands that inherit
+  KEY, SECRET and TOKEN variables. A rule that a deny, ask or stricter rule
+  covers is not reported. It never edits the files and never prints rule
+  text, commands or addresses.
+- `mastermind doctor` has a `client hooks` check. It reads the hooks in Claude
+  Code managed, user, project and local settings and in enabled plugins, and
+  in Codex system, user and project `hooks.json` and inline `[hooks]`. It
+  counts the ones Mastermind installed and reports the rest. A hook counts as
+  Mastermind's only when the program is the real mastermind launcher and the
+  command names this project, so a copied marker does not hide a hook. A hook
+  that downloads and runs code fails the check, and shell text, inline code,
+  unpinned package runners, network tools and unknown programs warn. A
+  malformed hook group is reported and the valid groups beside it are still
+  read. Hooks turned off with `disableAllHooks` are still listed as warnings.
+  The hook readiness checks now say how many other hooks exist instead of only
+  "not configured".
+- One bad hook in `~/.claude/settings.json` or `~/.codex/hooks.json` now fails
+  `doctor` in every project, because a user hook runs in every project. The
+  same holds for user MCP servers in `~/.claude.json`.
+- The `permission rules` check also reads managed settings and
+  `managed-mcp.json`, `~/.claude.json` servers and approvals, nested
+  `.claude/skills`, credential and header helpers, the status line and file
+  suggestion commands, `env` variables that load code or redirect model
+  traffic, plugin marketplaces, third-party plugins, and Codex `notify` and
+  provider token commands. Approving a flagged `.mcp.json` server is an error,
+  and so is an allow rule that lets the agent edit `.codex`. It still does not
+  read server-managed settings, files passed with `--settings`, `--mcp-config`
+  or `--agents`, user-level skills and subagents, plugin skills and subagents,
+  mods, or Codex skills. The reference lists them.
+- The command check that `permission rules` and `client hooks` share is now
+  structural. Any command piped into a shell or an interpreter that reads
+  standard input is an error whatever produces it, so `http`, `ssh`, `nc` or
+  `cat` of a temp file count as much as `curl`. So are a substitution or
+  here-string run as program text, a file written by a redirect, `tee`, `-o`,
+  `scp` or `rsync` that a later command runs, a build
+  after `git clone`, awk `system()`, `find -exec sh`, `xargs` into a shell,
+  and inline code that decodes and evaluates. The finding now reads "runs
+  downloaded or generated code". `go run module@latest` joins the unpinned
+  runner warning. Formatters and linters that read repository config, such as
+  `prettier` and `eslint`, get a new info note that keeps the check ok, and a
+  repository-relative `./node_modules/.bin` tool is no longer a known tool.
+- A hook or MCP server counts as Mastermind's own only when its plain absolute
+  path resolves to the install doctor runs from, or to that install's
+  `bin/mastermind.js` run by a real `node`. A bare `mastermind`,
+  `./node_modules/.bin/mastermind`, `npx`, a copy in a temp directory or
+  `/bin/sh x/mastermind.js` is checked like any other command. Global npm
+  setup now writes the node and launcher npm ran.
+- `Edit` and `Write` rules are matched as globs against the files that set
+  what an agent trusts. A rule aimed at `.codex`, `AGENTS.md` or
+  `.agents/skills`, such as `Edit(.cod*/**)` or `Edit(.*/**)`, is an error.
+  A bare or broad rule such as `Edit`, `Write(*)` or `Edit(~/**)` warns that
+  it can edit them. `Edit(.claude/worktrees/**)` is not reported.
+- `permission rules` also reads `gcpAuthRefresh`, treats
+  `CLAUDE_CODE_SHELL_PREFIX` as an error and checks its value, reads
+  commands, servers and environment policy in Codex profile files, reads the
+  MCP servers of enabled plugins, and reads Codex approval modes on every
+  server, local or remote, per tool, for apps and `apps._default`, and for
+  plugin servers, plus `destructive_enabled`. A file's `N flagged` now counts
+  servers, not findings. `client hooks` reads hooks files a plugin manifest
+  names and reports each wrong-typed hook entry on its own.
+- The command check drops shell comments, so `curl … | sh # x` is an error
+  again, and reads `/dev/fd/0` and `/proc/self/fd/0` as standard input. A
+  variable used as the shell (`$SHELL <(curl …)`, `| $0`), an archive
+  extracted from a pipe and then run (`| tar xz && ./install`), input piped
+  into `at`, `crontab -`, `docker run -i … sh` or `script -qc sh`, and a write
+  to a shell startup file such as `~/.zshrc` or `~/.bashrc` are errors.
+  `cat ./scripts/check.sh | bash` warns like `bash ./scripts/check.sh`.
+  `npx --no` is no longer called unpinned. A program in a temporary directory
+  and a launcher whose path an upgrade removed each get their own message.
+- Only the node doctor runs with, or the node of the npm prefix it is
+  installed under, can start Mastermind's launcher script. A file that is
+  merely called `node` is checked like any other program.
+- Edit rules are matched as whole globs with `[]` classes and `{a,b}` lists,
+  so `Edit(**/*.ts)` and `Edit(**/test/**)` are no longer errors, while
+  `Edit(.[c]odex/**)` and `Edit({.codex,src}/**)` are. Syntax doctor does not
+  read is treated as broad. The bare `Edit` warning now says it can edit
+  `.codex` and other trust files without a prompt in default mode.
+- `permission rules` reads the monitors and LSP servers of enabled plugins,
+  and warns on Codex `open_world_enabled = true` and
+  `approvals_reviewer = "auto_review"`.
+- Only `$SHELL`, `$BASH`, `$0`, a default that names a shell, a variable
+  given a shell in the same command and a lookup such as `$(which sh)` count
+  as a shell in a pipe. `| $PAGER`, `| ${PAGER:-less}`, `| $EDITOR -` and
+  `| "$VAR"` warn again instead of failing.
+- Standard input paths are normalised, so `/dev//stdin`, `/dev/fd/00` and
+  `/proc/<any>/fd/0` count, and a newline after `|# c` still joins the pipe.
+- A `node.exe` beside the npm prefix is trusted only on Windows and only for a
+  global prefix, never beside a project's `node_modules`. The system nodes in
+  `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin` and
+  `C:\Program Files\nodejs` are trusted after their links are resolved, so a
+  real registration with a system node stays ok. The launcher script must sit
+  in an `@xcraftmind/mastermind/bin` install.
+- A `MASTERMIND_*` variable in Claude Code `env` or Codex
+  `shell_environment_policy.set` is an error.
+- Writes to `.git/hooks`, `.husky`, `~/Library/LaunchAgents`,
+  `~/.config/systemd/user` and `~/.config/autostart`, a crontab written and
+  then installed, and a pipe into a shell over `ssh`, `chroot`, `nsenter`,
+  `unshare` or `lxc exec` are errors. A `.envrc` and an extract into
+  `~/.local/bin` warn.
+- An escaped glob character in an edit rule is literal, so
+  `Edit(src/\[id\].tsx)` and `Edit(docs/\*.md)` are not reported.
+- `scripts/validate.py` now runs a line-by-line copy of doctor's command check
+  in `scripts/command_check.py`. It loads doctor's word tables from
+  `command_rules.json`, which a Rust test keeps equal to the Rust constants,
+  and both copies must give the verdicts in `fetch_exec_corpus.json`, a corpus
+  of every counter-example so far.
+- Static detection cannot be complete: a command can build what it runs in
+  ways no reader of its text can follow. A passing check is not proof that
+  nothing runs without asking. Known gaps, such as a variable set outside the
+  command or `| ssh host` with no remote command, are listed in the reference.
+  A per-role `PreToolUse` guard hook that checks each command when it runs is
+  the follow-up, in its own pull request.
+- A package installed from a registry without an exact version, followed by
+  any command, warns that it runs a package without an exact version, the
+  same as `npx -y`, since its programs need not share its name:
+  `npm i -D eslint && npx eslint .`, `pip install pytest && pytest`,
+  `cargo install evil-crate && evil`. A pipe into a shell, a file written and
+  then run, and decoded code run after the install are still errors. With an
+  exact version, as in `npm i -g prettier@3.3.3 && prettier --check .`, it
+  warns as shell text. A repository Go build such as `go build -o bin/tool ./cmd/tool && ./bin/tool` or
+  `go install ./cmd/tool` warns like `cargo build` and `make`.
+- `/proc/self/fd/../fd/0` reads as standard input, and `$(whence sh)`,
+  `$ZSH_NAME` and `$ZSH_ARGZERO` count as a shell in a pipe.
+- A hook copied or linked from the checkout into `.git/hooks` warns.
+  Downloaded content written into a hook or into `.claude/settings*.json`,
+  `.mcp.json`, `~/.claude.json` or `.codex/config.toml` is an error, and so is
+  any write to `$GIT_DIR/hooks`, `/Library/LaunchDaemons`, `/etc/cron.d`, a
+  crontab spool or `~/.local/share/systemd/user`. `.vscode/tasks.json`,
+  `~/.ssh/rc`, `.git/config` and `core.hooksPath` are listed as known gaps.
+- `scripts/validate.py` also runs doctor's persistence check, and fails a
+  frontmatter hook that writes a shell startup file or a file that runs later
+  on its own. The lookups, shell variables, remote shells, temporary folders,
+  package managers, startup files and persistence paths now live in
+  `command_rules.json`, and the corpus has a persistence section. The copy is
+  kept by hand, so only corpus commands are sure to agree.
+- Every shipped subagent declares its capability class in its workflow
+  metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
+  a reason. `just validate` fails when a role's `tools` do not match: `Edit`,
+  `Write`, `NotebookEdit` or `MultiEdit` in a read-only role, `Bash` or
+  `PowerShell` without `shell`, `WebFetch` or `WebSearch` without `web`, or a
+  declared capability no tool needs. `Agent` and `Task` need `delegate`, tools
+  of MCP servers other than mmcg need `mcp`, and `BashOutput`, `KillShell`,
+  `Monitor`, `REPL` and `TaskStop` count as shell. `Workflow`,
+  `SendMessage`, `CronCreate` and `RemoteTrigger` need `delegate`, `Skill`
+  needs `skills`, and a subagent with frontmatter `hooks` must declare
+  `hooks`, and each hook command is checked for fetched, written or decoded
+  code, read the way doctor reads it, so `curl -so a URL && sh a` and
+  `| sudo bash` fail. `mcp_tool` hooks are valid, and one on a server other
+  than mmcg needs `mcp`. Tools that publish, send or change the session, such
+  as `Artifact`, `PushNotification`, `SendUserFile` and `EnterWorktree`, need
+  the new `outbound` or `session` capability, which a read-only role can never
+  hold. The MCP resource tools need `mcp` and `ScheduleWakeup` needs
+  `delegate`. A read-only role may only hold known read tools, so a new tool
+  fails until it is classified. A read-only role cannot ask for `bypassPermissions` or
+  `acceptEdits`, a fixed deny list keeps the shell from the researcher and
+  four other roles, and the comment and frontend auditors no longer get
+  `Bash`. Six subagents that run commands declare `shell` with a reason.
 - One untrusted-content paragraph in `agents/blocks/untrusted-content.md`.
   Ten subagents and 28 skills that read repository, pull request, report,
   transcript or tool content carry it verbatim. It names the person or the

@@ -2,7 +2,7 @@
 name: mastermind-workflow
 description: Compact project router for the Mastermind Direct, Verified, and Strict workflows.
 metadata:
-  version: 2.2.2
+  version: 2.2.3
   authors: [mastermind]
   tags: [claude-md, workflow, delegation, audit]
 ---
@@ -42,7 +42,7 @@ Do not create a spec for Direct work.
 
 Direct work has no controller or post-flight. After finishing, inspect
 `git diff -U0 <baseline>` and untracked files for comment additions, edits or
-deletions. Spawn `mastermind-comment-auditor` only for a non-empty comment delta.
+deletions. Spawn `mastermind-comment-auditor` with the delta only if it is non-empty.
 
 ### Grounding
 
@@ -109,7 +109,7 @@ and truncation caveats; source reads and tests remain authoritative for runtime 
    ```
 
 7. Inspect the post-flight baseline diff and untracked files for a comment
-   delta. Spawn `mastermind-comment-auditor` only when at least one comment was
+   delta. Spawn `mastermind-comment-auditor` with it only when a comment was
    added, modified, or deleted. Its findings are input to your semantic review,
    not a verdict.
 8. Perform semantic review. Strict work additionally requires the read-only

@@ -1,0 +1,7 @@
+---
+name: reviewer
+description: Use for reviews.
+permissionMode: bypassPermissions
+tools: Read, Bash
+---
+Review.

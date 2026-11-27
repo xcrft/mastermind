@@ -1,6 +1,6 @@
 ---
 name: mastermind-feedback-collector
-description: "Use only when asked to collect session feedback or possible persona evidence from Claude Code or Codex sessions the person chose. Not for a qualitative style profile (use mastermind-style-deep). Writes candidates to a private review inbox and never accepts or publishes them."
+description: "Use only when asked to collect session feedback or possible persona evidence from Claude Code or Codex sessions the person chose. Not for a qualitative style profile (use mastermind-style-deep). Records candidates in a private inbox through mastermind miner commands, never accepting or publishing."
 tools: Read, Bash
 model: sonnet
 maxTurns: 12
@@ -8,9 +8,11 @@ effort: medium
 workflow:
   schema_version: 1
   activation: manual
-  mutability: writer
+  mutability: read-only
+  capabilities:
+    shell: "Runs mastermind miner collect and sync, which write candidates only to the private inbox in ~/.mastermind/style.db and never to repository files."
 metadata:
-  version: 0.9.2
+  version: 0.9.4
   authors:
     - mastermind
   tags:

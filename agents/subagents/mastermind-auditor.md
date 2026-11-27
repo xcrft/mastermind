@@ -10,8 +10,10 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
+  capabilities:
+    shell: "Runs git diff and git status against the baseline and re-runs the declared VERIFY commands."
 metadata:
-  version: 0.8.3
+  version: 0.8.4
   authors: [mastermind]
   tags: [workflow, audit, mmcg, canons]
 ---

@@ -45,6 +45,81 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
 5. Hand off only with a lowercase `(use <full-name>)`. A name outside that
    form, a capitalised `(Use ...)` or a short name fails validation.
 
+## Declare capabilities
+
+Each subagent's `workflow` metadata names what it may do. `mutability` is
+`read-only` or `writer`, and `capabilities` adds `shell`, `web`, `delegate`,
+`mcp`, `skills`, `hooks`, `outbound` or `session`, each with a reason that says
+what the role runs. Together they form the
+role's class, such as `read-only-with-shell`.
+
+```yaml
+workflow:
+  schema_version: 1
+  activation: conditional
+  mutability: read-only
+  capabilities:
+    shell: "Runs git diff and the declared VERIFY commands."
+```
+
+`just validate` checks the class against `tools`, after it removes anything in
+`disallowedTools`:
+
+| Tool | Needs |
+|---|---|
+| `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | `mutability: writer` |
+| `Bash`, `PowerShell`, `Monitor`, `REPL`, `BashOutput`, `KillShell`, `TaskStop` | `capabilities.shell` |
+| `WebFetch`, `WebSearch` | `capabilities.web` |
+| `Agent`, `Task`, `Workflow`, `SendMessage`, `CronCreate`, `RemoteTrigger`, `ScheduleWakeup` | `capabilities.delegate` |
+| `mcp__<server>__...` for any server other than mmcg, `ListMcpResourcesTool`, `ReadMcpResourceTool`, and an `mcp_tool` hook on a server other than mmcg | `capabilities.mcp` |
+| `Artifact`, `PushNotification`, `SendUserFile`, `SendFeedback`, `ShareOnboardingGuide`, `SuggestPluginInstall`, `SuggestSkills`, `propose_skills` | `capabilities.outbound`, writers only |
+| `EnterWorktree`, `ExitWorktree`, `EnterPlanMode`, `ExitPlanMode`, `EndConversation`, `TaskCreate`, `TaskUpdate`, `TodoWrite`, `CronDelete` | `capabilities.session`, writers only |
+| `Skill`, which runs a skill with its own tools and hooks | `capabilities.skills` |
+| a `hooks:` block in the frontmatter | `capabilities.hooks` |
+
+A read-only role may only hold the tools above with their capability, the
+edit tools never, and the read tools in `WORKFLOW_READ_TOOLS`, such as `Read`,
+`Grep`, `Glob`, `LSP` and `TaskList`. Any other tool fails, so a tool Claude
+Code adds later is denied until it is classified in
+[`scripts/validate.py`](../scripts/validate.py). The lists follow the
+[tools reference](https://code.claude.com/docs/en/tools-reference).
+
+Each frontmatter hook command is also checked for fetched, written or decoded
+code that runs, such as `curl … | sh`, `curl -so a URL && sh a`,
+`… | sudo bash`, `bash <(…)`, `eval "$(…)"` or
+`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The check
+is [`scripts/command_check.py`](../scripts/command_check.py), a line-by-line
+copy of the `mastermind doctor` command check, so it runs without building
+mmcg. It loads doctor's word tables from
+[`command_rules.json`](../mcp/servers/mmcg/src/permission_lint/command_rules.json),
+which a Rust test keeps equal to the Rust constants. A hook that doctor would
+fail for writing a file that runs later, such as a shell startup file, a cron
+job or downloaded agent settings, fails too. Both copies must give the
+verdicts and persistence findings in
+[`fetch_exec_corpus.json`](../mcp/servers/mmcg/src/permission_lint/fetch_exec_corpus.json).
+The logic is copied by hand, so only the commands in the corpus are sure to
+get the same answer. Add each new counter-example to the corpus. `mcp_tool`
+hooks are valid.
+
+It also fails when:
+
+- a reason is shorter than 20 characters, has fewer than 4 different words,
+  is one repeated character, or is copied across two capabilities;
+- a declared capability no tool needs;
+- a read-only role asks for `permissionMode: bypassPermissions` or
+  `acceptEdits`;
+- a writer grants no edit tool. A role that only writes through its own
+  commands is read-only, and its shell reason says what those commands write;
+- a role gets a capability on the fixed deny list in
+  `WORKFLOW_DENIED_CAPABILITIES` in [`scripts/validate.py`](../scripts/validate.py).
+  No reason unlocks it. `mastermind-researcher` never gets a shell, and the
+  critic, prompt refiner, comment auditor and frontend auditor work without one.
+
+A shell can still write files, so `read-only-with-shell` is a promise in the
+prompt, not a sandbox. Keep `shell` off a role that can work from `Read`,
+`Grep`, `Glob`, mmcg or what the caller hands it. A per-role hook that blocks
+tools at run time is not built yet.
+
 ## Untrusted content
 
 [`blocks/untrusted-content.md`](blocks/untrusted-content.md) is the one source

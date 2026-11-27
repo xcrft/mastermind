@@ -24,6 +24,15 @@ const COMMON_EVENTS: &[&str] = &[
     "SubagentStop",
 ];
 
+/// The comment that ends every handler setup writes for `client` in the
+/// project at `project_text`. Removal and doctor find owned handlers by it.
+pub(crate) fn registration_marker(client: &str, project_text: &str) -> String {
+    format!(
+        "# mastermind-persona-hook-v1:{client}:{}",
+        crate::hex::sha256(project_text.as_bytes())
+    )
+}
+
 struct Snapshot {
     root: RootCapability,
     target: PathBuf,
@@ -78,10 +87,7 @@ pub(super) fn configure(
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
-    let registration = format!(
-        "# mastermind-persona-hook-v1:{client}:{}",
-        crate::hex::sha256(project_text.as_bytes())
-    );
+    let registration = registration_marker(client, project_text);
     let command = format!(
         "{} miner hooks receive --client {} --project-root {} {registration}",
         launcher,

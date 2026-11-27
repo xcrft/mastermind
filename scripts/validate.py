@@ -62,6 +62,99 @@ SUBAGENT_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 SUBAGENT_MAX_TURNS = 100
 WORKFLOW_ACTIVATIONS = {"always", "conditional", "manual"}
 WORKFLOW_MUTABILITIES = {"read-only", "writer"}
+# A subagent's capability class is its mutability plus the capabilities it
+# declares. Each declared capability needs a reason, and every tool that needs
+# a capability must have it declared.
+WORKFLOW_CAPABILITY_TOOLS = {
+    # Every tool that runs a command or code: Monitor runs a command in the
+    # background and REPL runs JavaScript in Code Mode. BashOutput, KillShell
+    # and TaskStop read and stop what the role started, so they are shell
+    # tools too. From <https://code.claude.com/docs/en/tools-reference>.
+    "shell": {"Bash", "PowerShell", "Monitor", "REPL", "BashOutput", "KillShell", "TaskStop"},
+    "web": {"WebFetch", "WebSearch"},
+    # Tools that hand work to another agent or a later prompt with its own
+    # tools: subagents, workflows, messages and scheduled prompts, including
+    # the next `/loop` iteration ScheduleWakeup sets up.
+    "delegate": {"Agent", "Task", "Workflow", "SendMessage", "CronCreate", "RemoteTrigger", "ScheduleWakeup"},
+    # Skill runs a skill in the conversation, and a skill can bring its own
+    # allowed tools and hooks.
+    "skills": {"Skill"},
+    # Hooks in the subagent's own frontmatter. Checked from `hooks:` below,
+    # not from its tools.
+    "hooks": set(),
+    # MCP tools of any server other than mmcg, matched by prefix below, and
+    # the resource tools, which read from every connected server.
+    "mcp": {"ListMcpResourcesTool", "ReadMcpResourceTool"},
+    # Tools that send or publish something outside the session: a claude.ai
+    # artifact or share link, a notification, a file sent to the user, a
+    # feedback report or a suggestion card.
+    "outbound": {
+        "Artifact",
+        "PushNotification",
+        "SendFeedback",
+        "SendUserFile",
+        "ShareOnboardingGuide",
+        "SuggestPluginInstall",
+        "SuggestSkills",
+        "propose_skills",
+    },
+    # Tools that change the session: its working directory, its mode, its
+    # task list or its scheduled tasks.
+    "session": {
+        "CronDelete",
+        "EndConversation",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "TaskCreate",
+        "TaskUpdate",
+        "TodoWrite",
+    },
+}
+# Tools a read-only role may hold with no capability: they read files, code,
+# lists or the user's answers and change nothing. Any other tool in a
+# read-only role is an error, so a tool Claude Code adds later is denied
+# until it is classified here. From
+# <https://code.claude.com/docs/en/tools-reference>.
+WORKFLOW_READ_TOOLS = {
+    "AskUserQuestion",
+    "CronList",
+    "Glob",
+    "Grep",
+    "LSP",
+    "ListAgents",
+    "ListPlugins",
+    "ListSkills",
+    "Read",
+    "ReportFindings",
+    "SearchPlugins",
+    "SearchSkills",
+    "SubagentHandback",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "ToolSearch",
+    "WaitForMcpServers",
+}
+# Capabilities a read-only role can never declare, since each changes
+# something outside the files it reads.
+WORKFLOW_READ_ONLY_DENIED_CAPABILITIES = {"outbound", "session"}
+WORKFLOW_MUTATION_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+WORKFLOW_CAPABILITY_REASON_MIN = 20
+WORKFLOW_CAPABILITY_REASON_WORDS = 4
+# Permission modes that approve edits or every tool. A read-only role must not
+# ask for them.
+WORKFLOW_READ_ONLY_FORBIDDEN_MODES = {"bypassPermissions", "acceptEdits"}
+# Role and capability pairs no declaration can unlock. These roles must work
+# from Read, Grep, Glob and mmcg, or from what the caller hands them.
+WORKFLOW_DENIED_CAPABILITIES = {
+    "mastermind-researcher": {"shell", "delegate", "web", "mcp"},
+    "mastermind-critic": {"shell", "delegate"},
+    "mastermind-prompt-refiner": {"shell", "delegate", "web", "mcp"},
+    "mastermind-comment-auditor": {"shell", "delegate"},
+    "mastermind-frontend-auditor": {"shell", "delegate"},
+}
 WORKFLOW_RUNTIMES = {"claude", "codex", "portable", "controller"}
 WORKFLOW_MAX_RELATIONS = 512
 WORKFLOW_MAX_WRITES = 64
@@ -855,7 +948,7 @@ def _workflow_metadata_messages(
         return ["[workflow_metadata_invalid] workflow metadata must be a mapping"]
 
     messages: list[str] = []
-    allowed = {"schema_version", "activation", "mutability", "skills", "writes"}
+    allowed = {"schema_version", "activation", "mutability", "capabilities", "skills", "writes"}
     unknown = sorted(set(workflow) - allowed)
     if unknown:
         messages.append(
@@ -923,9 +1016,233 @@ def _workflow_metadata_messages(
                 )
                 break
 
-    if mutability == "read-only" and {"Edit", "Write"}.intersection(runtime_tools):
+    messages.extend(_capability_messages(workflow, runtime_tools, frontmatter))
+    return messages
+
+
+def workflow_capability_class(workflow: dict) -> str:
+    """Name a role's capability class, such as `read-only-with-shell`."""
+    capabilities = workflow.get("capabilities")
+    declared = sorted(capabilities) if isinstance(capabilities, dict) else []
+    name = str(workflow.get("mutability"))
+    return name + "".join(f"-with-{capability}" for capability in declared)
+
+
+def _tool_base(tool: str) -> str:
+    """The tool name without a `(specifier)`, such as `Agent` for `Agent(x)`."""
+    return tool.split("(", 1)[0].strip()
+
+
+def _tool_capability(tool: str) -> str | None:
+    base = _tool_base(tool)
+    if base.startswith("mcp__"):
+        return None if base.startswith("mcp__mmcg__") else "mcp"
+    for capability, tools in WORKFLOW_CAPABILITY_TOOLS.items():
+        if base in tools:
+            return capability
+    return None
+
+
+def _reason_problem(reason: object) -> str | None:
+    """Why a capability reason is too weak to explain what the role runs."""
+    if not isinstance(reason, str) or len(reason.strip()) < WORKFLOW_CAPABILITY_REASON_MIN:
+        return f"needs a reason of at least {WORKFLOW_CAPABILITY_REASON_MIN} characters"
+    words = re.findall(r"[A-Za-z][A-Za-z'-]+", reason)
+    if len(set(word.lower() for word in words)) < WORKFLOW_CAPABILITY_REASON_WORDS:
+        return f"needs a reason of at least {WORKFLOW_CAPABILITY_REASON_WORDS} different words"
+    letters = [c.lower() for c in reason if c.isalnum()]
+    if len(set(letters)) < 6:
+        return "needs a reason that is not one repeated character"
+    return None
+
+
+# The `mastermind doctor` rules for fetched, written or decoded code that a
+# command runs, and for writes to files that run later. scripts/command_check.py
+# is a line-by-line copy of doctor's checks, so this runs without building mmcg.
+# A Rust test keeps every word table it loads equal to doctor's, and both sides
+# must give the verdicts in the shared corpus. The logic is copied by hand, so a
+# command outside the corpus can still get a different answer.
+try:
+    from scripts import command_check
+except ImportError:  # run as `python scripts/validate.py`
+    import command_check  # type: ignore[no-redef]
+
+
+def _fetch_and_exec(command: str) -> str | None:
+    """Why a hook command runs code it fetched, wrote or decoded, if it does."""
+    if command_check.fetch_and_exec(command):
+        return "runs downloaded or generated code"
+    return None
+
+
+def _persists(command: str) -> str | None:
+    """Why a hook command writes a file that runs later, when doctor gives
+    that an error. Warnings such as a `.envrc` are left to doctor."""
+    finding = command_check.persistence(command)
+    if finding == "shell_startup":
+        return "writes a shell startup file, so its code runs in every new shell"
+    if finding == "autostart":
+        return "writes a file that runs later on its own"
+    return None
+
+
+def _frontmatter_hooks(hooks: object) -> tuple[list[str], list[str], int]:
+    """Command texts in a frontmatter `hooks:` mapping, the MCP servers other
+    than mmcg its `mcp_tool` hooks call, and the malformed entry count."""
+    if not isinstance(hooks, dict):
+        return [], [], 1
+    commands: list[str] = []
+    servers: list[str] = []
+    malformed = 0
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            malformed += 1
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                malformed += 1
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict) or handler.get("type") not in {"command", "http", "mcp_tool", "prompt", "agent"}:
+                    malformed += 1
+                    continue
+                if handler.get("type") == "mcp_tool":
+                    # An MCP tool hook names a server and a tool:
+                    # <https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields>.
+                    server, tool = handler.get("server"), handler.get("tool")
+                    if not isinstance(server, str) or not isinstance(tool, str):
+                        malformed += 1
+                    elif server != "mmcg":
+                        servers.append(server)
+                    continue
+                if handler.get("type") != "command":
+                    continue
+                command = handler.get("command")
+                args = handler.get("args", [])
+                if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                    malformed += 1
+                    continue
+                commands.append(" ".join([command, *args]))
+    return commands, servers, malformed
+
+
+def _capability_messages(
+    workflow: dict, runtime_tools: list[str], frontmatter: dict | None = None
+) -> list[str]:
+    capabilities = workflow.get("capabilities", {})
+    if not isinstance(capabilities, dict):
+        return ["[workflow_capability_invalid] workflow capabilities must be a mapping of capability to reason"]
+    frontmatter = frontmatter or {}
+    messages: list[str] = []
+    for capability, reason in capabilities.items():
+        if capability not in WORKFLOW_CAPABILITY_TOOLS:
+            messages.append(
+                f"[workflow_capability_invalid] unknown capability {capability!r}, "
+                f"use {', '.join(sorted(WORKFLOW_CAPABILITY_TOOLS))}"
+            )
+        elif problem := _reason_problem(reason):
+            messages.append(
+                f"[workflow_capability_invalid] capability {capability!r} {problem} that says what the role runs"
+            )
+    reasons = [
+        " ".join(reason.lower().split())
+        for reason in capabilities.values()
+        if isinstance(reason, str)
+    ]
+    if len(reasons) != len(set(reasons)):
         messages.append(
-            "[readonly_mutation_capability] read-only workflow role grants Edit or Write"
+            "[workflow_capability_invalid] each capability needs its own reason, not one copied across capabilities"
+        )
+    # Claude Code removes `disallowedTools` from the granted set:
+    # <https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields>.
+    disallowed = {_tool_base(tool) for tool in _runtime_tool_names(frontmatter.get("disallowedTools"))}
+    tools = {tool for tool in runtime_tools if _tool_base(tool) not in disallowed}
+    bases = {_tool_base(tool) for tool in tools}
+    role = workflow_capability_class(workflow)
+    read_only = workflow.get("mutability") == "read-only"
+    if read_only:
+        mutation = sorted(WORKFLOW_MUTATION_TOOLS & bases)
+        if mutation:
+            messages.append(
+                f"[readonly_mutation_capability] {role} role grants {', '.join(mutation)}"
+            )
+        side_effects = sorted(
+            base
+            for base in bases
+            if _tool_capability(base) in WORKFLOW_READ_ONLY_DENIED_CAPABILITIES
+        )
+        if side_effects:
+            messages.append(
+                f"[readonly_side_effect_tool] {role} role grants {', '.join(side_effects)}, "
+                "which publish, send or change the session"
+            )
+        unknown = sorted(
+            base
+            for base in bases
+            if base not in WORKFLOW_READ_TOOLS
+            and base not in WORKFLOW_MUTATION_TOOLS
+            and _tool_capability(base) is None
+            and not base.startswith("mcp__mmcg__")
+        )
+        if unknown:
+            messages.append(
+                f"[readonly_unknown_tool] {role} role grants {', '.join(unknown)}, "
+                "which is not a known read tool; classify it in scripts/validate.py first"
+            )
+        for capability in sorted(WORKFLOW_READ_ONLY_DENIED_CAPABILITIES & set(capabilities)):
+            messages.append(
+                f"[readonly_side_effect_tool] {role} role declares {capability!r}, "
+                "which a read-only role can never hold"
+            )
+        mode = frontmatter.get("permissionMode")
+        if mode in WORKFLOW_READ_ONLY_FORBIDDEN_MODES:
+            messages.append(
+                f"[readonly_permission_mode] {role} role asks for permissionMode {mode!r}, "
+                "which approves edits or every tool"
+            )
+    elif workflow.get("mutability") == "writer" and runtime_tools and not WORKFLOW_MUTATION_TOOLS & bases:
+        messages.append(
+            f"[writer_without_edit_tools] {role} role grants no Edit, Write, NotebookEdit or MultiEdit; "
+            "declare it read-only and say in the shell reason what its commands write"
+        )
+    granted_by_capability: dict[str, list[str]] = {}
+    for tool in sorted(tools):
+        capability = _tool_capability(tool)
+        if capability:
+            granted_by_capability.setdefault(capability, []).append(tool)
+    if "hooks" in frontmatter:
+        hook_commands, hook_servers, malformed = _frontmatter_hooks(frontmatter.get("hooks"))
+        granted_by_capability["hooks"] = ["frontmatter hooks"]
+        for server in hook_servers:
+            granted_by_capability.setdefault("mcp", []).append(f"an mcp_tool hook on {server}")
+        if malformed:
+            messages.append(
+                f"[subagent_hook_invalid] {malformed} frontmatter hook entries are not command or http handlers"
+            )
+        for command in hook_commands:
+            if reason := _fetch_and_exec(command):
+                messages.append(f"[subagent_hook_fetch_exec] frontmatter hook {reason}")
+            elif reason := _persists(command):
+                messages.append(f"[subagent_hook_persistence] frontmatter hook {reason}")
+    for capability in sorted(WORKFLOW_CAPABILITY_TOOLS):
+        granted = granted_by_capability.get(capability, [])
+        if granted and capability not in capabilities:
+            messages.append(
+                f"[undeclared_capability] {role} role grants {', '.join(granted)} without "
+                f"declaring workflow capability {capability!r} and its reason"
+            )
+        # A role that declares a capability it no longer uses keeps a stale
+        # class. Skills pass no runtime tools, so they cannot declare one.
+        if capability in capabilities and not granted:
+            messages.append(
+                f"[unused_capability] workflow capability {capability!r} is declared but no tool needs it"
+            )
+    denied = WORKFLOW_DENIED_CAPABILITIES.get(str(frontmatter.get("name")), set())
+    for capability in sorted(denied & (set(granted_by_capability) | set(capabilities))):
+        messages.append(
+            f"[denied_capability] {frontmatter.get('name')} must never get {capability!r}, "
+            "even with a declared reason"
         )
     return messages
 
@@ -958,6 +1275,39 @@ def validate_workflow_metadata_fixture() -> list[Issue]:
             "readonly_mutation_capability" in message
             for message in _workflow_metadata_messages(
                 valid, required=True, runtime_tools=["Read", "Write"]
+            )
+        ),
+        any(
+            "readonly_mutation_capability" in message
+            for message in _workflow_metadata_messages(
+                valid, required=True, runtime_tools=["Read", "NotebookEdit"]
+            )
+        ),
+        any(
+            "undeclared_capability" in message and "'shell'" in message
+            for message in _workflow_metadata_messages(
+                valid, required=True, runtime_tools=["Read", "Bash"]
+            )
+        ),
+        not _workflow_metadata_messages(
+            {"workflow": {**valid["workflow"], "capabilities": {"shell": "runs git diff to scope the review"}}},
+            required=True,
+            runtime_tools=["Read", "Bash"],
+        ),
+        any(
+            "unused_capability" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "capabilities": {"web": "reads the release notes it cites"}}},
+                required=True,
+                runtime_tools=["Read"],
+            )
+        ),
+        any(
+            "workflow_capability_invalid" in message
+            for message in _workflow_metadata_messages(
+                {"workflow": {**valid["workflow"], "capabilities": {"shell": "git"}}},
+                required=True,
+                runtime_tools=["Read", "Bash"],
             )
         ),
         any(
@@ -2045,9 +2395,6 @@ def validate_workflow_role_contracts() -> list[Issue]:
         ):
             if token not in researcher:
                 issues.append(Issue(researcher_path, "error", f"researcher graph-first contract missing {token!r}"))
-        tools_line = re.search(r"^tools:\s*(.*)$", researcher, re.MULTILINE)
-        if tools_line is None or "Bash" in _runtime_tool_names(tools_line.group(1)):
-            issues.append(Issue(researcher_path, "error", "read-only researcher must not receive Bash"))
     workflow_path = REPO_ROOT / "agents/claude-md/mastermind-workflow.md"
     try:
         workflow = workflow_path.read_bytes()

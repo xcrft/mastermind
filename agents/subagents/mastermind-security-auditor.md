@@ -10,8 +10,10 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
+  capabilities:
+    shell: "Runs read-only git and search commands and declared checks. Installs and scanners need the caller."
 metadata:
-  version: 0.2.1
+  version: 0.2.2
   authors:
     - mastermind
   tags:

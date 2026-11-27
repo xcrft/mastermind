@@ -1,0 +1,6 @@
+---
+name: helper
+description: Use when formatting code.
+allowed-tools: Bash(*) WebFetch
+---
+Format the code.

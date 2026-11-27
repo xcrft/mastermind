@@ -358,6 +358,11 @@ struct WorkflowMetadata {
     schema_version: u32,
     activation: WorkflowActivation,
     mutability: WorkflowMutability,
+    /// Declared capabilities and their reasons. `scripts/validate.py` checks
+    /// them against the role's tools at the source. The audit only accepts
+    /// the field.
+    #[serde(default, rename = "capabilities")]
+    _capabilities: Option<serde_norway::Value>,
     #[serde(default)]
     skills: Vec<WorkflowSkillRelation>,
     #[serde(default)]
@@ -1894,6 +1899,22 @@ fn load_workflow_component(
     })
 }
 
+/// Parse a Markdown file's YAML frontmatter with the same safety limits as
+/// the workflow audit: no anchors, aliases, tags or tab indentation, and a
+/// bounded depth.
+pub(crate) fn parse_safe_frontmatter(text: &str) -> Result<serde_norway::Value, String> {
+    let (frontmatter_text, _) = split_frontmatter(text)?;
+    validate_yaml_safety(&frontmatter_text)?;
+    let frontmatter: serde_norway::Value = serde_norway::from_str(&frontmatter_text)
+        .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
+    if yaml_depth(&frontmatter) > MAX_WORKFLOW_YAML_DEPTH {
+        return Err(format!(
+            "YAML frontmatter exceeds depth {MAX_WORKFLOW_YAML_DEPTH}"
+        ));
+    }
+    Ok(frontmatter)
+}
+
 fn split_frontmatter(text: &str) -> Result<(String, String), String> {
     let normalized = text.replace("\r\n", "\n");
     let Some(rest) = normalized.strip_prefix("---\n") else {
@@ -2564,7 +2585,7 @@ fn bounded_registration_string(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4_096 && !value.chars().any(char::is_control)
 }
 
-fn canonical_mmcg_launcher(command: &str, args: &[&str]) -> bool {
+pub(crate) fn canonical_mmcg_launcher(command: &str, args: &[&str]) -> bool {
     if let [launcher, "serve"] = args {
         if crate::setup::npm_project_launcher(Path::new(command), Path::new(launcher)) {
             return true;

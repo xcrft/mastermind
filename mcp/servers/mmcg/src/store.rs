@@ -228,6 +228,11 @@ pub const INDEXED_COMMIT_META_KEY: &str = "indexed_commit";
 /// commit: the ones that differed from it while the index ran, and every path
 /// written later by anything other than a complete index.
 pub const INDEXED_CHANGED_PATHS_META_KEY: &str = "indexed_changed_paths";
+/// XOR of one SHA-256 per file row outside that list, over its path and
+/// content digest. A binary that does not know these keys can still write
+/// rows. When the rows outside the list no longer give this value, the
+/// recorded commit says nothing about them and is not used.
+pub const INDEXED_ROWS_FINGERPRINT_META_KEY: &str = "indexed_rows_fingerprint";
 /// Past this many listed paths the commit is dropped, and `impact` falls back
 /// to the full source scan.
 pub const INDEXED_CHANGED_PATH_LIMIT: usize = 1_000;
@@ -2796,57 +2801,156 @@ fn meta_value_on(connection: &Connection, key: &str) -> SqlResult<Option<String>
         .optional()
 }
 
-fn indexed_commit_on(connection: &Connection) -> SqlResult<Option<IndexedCommit>> {
+/// The recorded commit with the fingerprint stored for its rows, read as it
+/// is. [`indexed_commit_checked_on`] also checks the rows.
+struct RecordedCommit {
+    bound: IndexedCommit,
+    fingerprint: [u8; 32],
+}
+
+fn recorded_commit_on(connection: &Connection) -> SqlResult<Option<RecordedCommit>> {
     let Some(commit) = meta_value_on(connection, INDEXED_COMMIT_META_KEY)? else {
         return Ok(None);
     };
     let Some(paths) = meta_value_on(connection, INDEXED_CHANGED_PATHS_META_KEY)? else {
         return Ok(None);
     };
+    let Some(fingerprint) = meta_value_on(connection, INDEXED_ROWS_FINGERPRINT_META_KEY)? else {
+        return Ok(None);
+    };
     if !crate::git::is_full_git_oid(&commit) {
         return Ok(None);
     }
+    let Some(fingerprint) = fingerprint_from_hex(&fingerprint) else {
+        return Ok(None);
+    };
     let Ok(changed_paths) = serde_json::from_str::<BTreeSet<String>>(&paths) else {
         return Ok(None);
     };
     if changed_paths.len() > INDEXED_CHANGED_PATH_LIMIT {
         return Ok(None);
     }
-    Ok(Some(IndexedCommit {
-        commit,
-        changed_paths,
+    Ok(Some(RecordedCommit {
+        bound: IndexedCommit {
+            commit,
+            changed_paths,
+        },
+        fingerprint,
     }))
 }
 
-fn write_indexed_commit_on(connection: &Connection, bound: &IndexedCommit) -> SqlResult<()> {
-    if bound.changed_paths.len() > INDEXED_CHANGED_PATH_LIMIT {
+fn indexed_commit_checked_on(connection: &Connection) -> SqlResult<Option<IndexedCommit>> {
+    let Some(recorded) = recorded_commit_on(connection)? else {
+        return Ok(None);
+    };
+    if rows_fingerprint_on(connection, &recorded.bound.changed_paths)? != recorded.fingerprint {
+        return Ok(None);
+    }
+    Ok(Some(recorded.bound))
+}
+
+fn file_row_digest(path: &str, content_sha256: Option<&str>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(path.as_bytes());
+    digest.update([0]);
+    digest.update(content_sha256.unwrap_or("").as_bytes());
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest.finalize());
+    bytes
+}
+
+fn fingerprint_from_hex(value: &str) -> Option<[u8; 32]> {
+    if !crate::hex::is_lower(value, 64) {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (byte, pair) in bytes.iter_mut().zip(value.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
+    for (byte, other) in target.iter_mut().zip(value) {
+        *byte ^= other;
+    }
+}
+
+fn rows_fingerprint_on(
+    connection: &Connection,
+    excluded: &BTreeSet<String>,
+) -> SqlResult<[u8; 32]> {
+    let mut statement = connection.prepare_cached("SELECT path, content_sha256 FROM files")?;
+    let mut rows = statement.query([])?;
+    let mut fingerprint = [0u8; 32];
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        if excluded.contains(&path) {
+            continue;
+        }
+        let content: Option<String> = row.get(1)?;
+        xor_into(
+            &mut fingerprint,
+            &file_row_digest(&path, content.as_deref()),
+        );
+    }
+    Ok(fingerprint)
+}
+
+fn write_recorded_commit_on(connection: &Connection, recorded: &RecordedCommit) -> SqlResult<()> {
+    if recorded.bound.changed_paths.len() > INDEXED_CHANGED_PATH_LIMIT {
         return clear_indexed_commit_on(connection);
     }
-    let paths = serde_json::to_string(&bound.changed_paths)
+    let paths = serde_json::to_string(&recorded.bound.changed_paths)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    set_meta_on(connection, INDEXED_COMMIT_META_KEY, &bound.commit)?;
-    set_meta_on(connection, INDEXED_CHANGED_PATHS_META_KEY, &paths)
+    set_meta_on(connection, INDEXED_COMMIT_META_KEY, &recorded.bound.commit)?;
+    set_meta_on(connection, INDEXED_CHANGED_PATHS_META_KEY, &paths)?;
+    set_meta_on(
+        connection,
+        INDEXED_ROWS_FINGERPRINT_META_KEY,
+        &crate::hex::encode(&recorded.fingerprint),
+    )
 }
 
 fn clear_indexed_commit_on(connection: &Connection) -> SqlResult<()> {
     connection.execute(
-        "DELETE FROM meta WHERE key IN (?1, ?2)",
-        params![INDEXED_COMMIT_META_KEY, INDEXED_CHANGED_PATHS_META_KEY],
+        "DELETE FROM meta WHERE key IN (?1, ?2, ?3)",
+        params![
+            INDEXED_COMMIT_META_KEY,
+            INDEXED_CHANGED_PATHS_META_KEY,
+            INDEXED_ROWS_FINGERPRINT_META_KEY
+        ],
     )?;
     Ok(())
 }
 
-/// A file row written outside a complete index no longer matches the recorded
-/// commit, so its path joins the list `impact` compares. A complete index
-/// clears the commit before its first write, so its own writes skip this.
+/// A file row about to be written outside a complete index may stop matching
+/// the recorded commit, so its path joins the list `impact` compares and its
+/// current row leaves the fingerprint. Call it before the row changes, in the
+/// same transaction. A complete index clears the commit before its first
+/// write, so its own writes skip this.
 fn note_file_row_write_on(connection: &Connection, path: &str) -> SqlResult<()> {
-    let Some(mut bound) = indexed_commit_on(connection)? else {
+    let Some(mut recorded) = recorded_commit_on(connection)? else {
         return Ok(());
     };
-    if bound.changed_paths.insert(path.to_string()) {
-        write_indexed_commit_on(connection, &bound)?;
+    if !recorded.bound.changed_paths.insert(path.to_string()) {
+        return Ok(());
     }
-    Ok(())
+    let current: Option<Option<String>> = connection
+        .query_row(
+            "SELECT content_sha256 FROM files WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(content) = current {
+        xor_into(
+            &mut recorded.fingerprint,
+            &file_row_digest(path, content.as_deref()),
+        );
+    }
+    write_recorded_commit_on(connection, &recorded)
 }
 
 fn set_meta_on(connection: &Connection, key: &str, value: &str) -> SqlResult<()> {
@@ -5596,12 +5700,12 @@ impl Store {
         let result = (|| {
             let tx = self.conn.unchecked_transaction()?;
             let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
+            note_file_row_write_on(&tx, file_path)?;
             tx.execute(
                 "DELETE FROM symbols WHERE file_path = ?1",
                 params![file_path],
             )?;
             tx.execute("DELETE FROM files WHERE path = ?1", params![file_path])?;
-            note_file_row_write_on(&tx, file_path)?;
             if restore_contract && Self::concept_schema_objects_current_on(&tx)? {
                 update_concept_documentation_meta_on(&tx)?;
             }
@@ -5677,13 +5781,13 @@ impl Store {
         let restore_contract = Self::incremental_concept_contract_current_on(&tx)?;
         let restore_production = Self::production_classification_current_on(&tx)?;
 
+        note_file_row_write_on(&tx, &pending.path)?;
         // Purge any existing data for this file.
         tx.execute(
             "DELETE FROM symbols WHERE file_path = ?1",
             params![&pending.path],
         )?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![&pending.path])?;
-        note_file_row_write_on(&tx, &pending.path)?;
 
         // Insert symbols, remembering each rowid.
         let language = if pending.language.is_empty() {
@@ -5885,12 +5989,14 @@ impl Store {
     }
 
     pub fn upsert_file(&self, path: &str, mtime: i64, symbol_count: u32) -> SqlResult<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        note_file_row_write_on(&tx, path)?;
+        tx.execute(
             "INSERT INTO files(path, indexed_at, symbol_count, production) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET indexed_at=?2, symbol_count=?3, production=?4",
             params![path, mtime, symbol_count, is_production_path(path)],
         )?;
-        note_file_row_write_on(&self.conn, path)
+        tx.commit()
     }
 
     pub fn file_mtime(&self, path: &str) -> SqlResult<Option<i64>> {
@@ -5953,15 +6059,23 @@ impl Store {
 
     /// The commit the last complete index recorded, or `None` for an index
     /// built before the key existed, outside a Git repository, by a run that
-    /// did not finish, or with more than [`INDEXED_CHANGED_PATH_LIMIT`]
-    /// listed paths.
+    /// did not finish, with more than [`INDEXED_CHANGED_PATH_LIMIT`] listed
+    /// paths, or with rows outside the list that an older binary changed.
     pub fn indexed_commit(&self) -> SqlResult<Option<IndexedCommit>> {
-        indexed_commit_on(&self.conn)
+        indexed_commit_checked_on(&self.conn)
     }
 
+    /// Record `bound` with the fingerprint of the rows as they are now.
     pub(crate) fn set_indexed_commit(&self, bound: &IndexedCommit) -> SqlResult<()> {
         let tx = self.conn.unchecked_transaction()?;
-        write_indexed_commit_on(&tx, bound)?;
+        let fingerprint = rows_fingerprint_on(&tx, &bound.changed_paths)?;
+        write_recorded_commit_on(
+            &tx,
+            &RecordedCommit {
+                bound: bound.clone(),
+                fingerprint,
+            },
+        )?;
         tx.commit()
     }
 

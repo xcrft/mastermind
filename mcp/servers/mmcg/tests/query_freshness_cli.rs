@@ -413,3 +413,27 @@ fn impact_treats_an_oversized_source_like_other_skipped_files() {
     reindex(&repo);
     assert_current(&repo, &base, "the committed file after index");
 }
+
+/// A binary from before the recorded commit rewrites a row without listing
+/// its path. The rows no longer match the fingerprint, so impact checks every
+/// file and finds the row that differs from the files.
+#[test]
+fn impact_checks_every_file_after_an_unlisted_row_write() {
+    let repo = indexed(|_| {});
+    let root = repo.source.path();
+    std::fs::write(root.join("lib.rs"), "pub fn only_in_the_index() {}\n").unwrap();
+    let connection = rusqlite::Connection::open(&repo.index).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE files SET content_sha256 = ?1 WHERE path = 'lib.rs'",
+            [DIGEST],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(connection);
+    git(root, &["checkout", "-q", "--", "lib.rs"]);
+    later_mtime(&root.join("lib.rs"));
+    assert_stale(&repo, "HEAD", "lib.rs differs from its row");
+    reindex(&repo);
+    assert_current(&repo, "HEAD", "the same files after index");
+}

@@ -2889,15 +2889,22 @@ mod tests {
 
     #[test]
     fn global_npm_installs_write_the_node_and_launcher_npm_ran() {
-        let launcher = "/usr/local/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js";
+        // Absolute on this host: a Windows path needs a drive.
+        let root = if cfg!(windows) {
+            "C:/usr/local"
+        } else {
+            "/usr/local"
+        };
+        let launcher = format!("{root}/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js");
+        let node = format!("{root}/bin/node");
         let _guard = EnvGuard::set(&[
             ("MASTERMIND_INSTALL_MODE", "global"),
-            ("MASTERMIND_LAUNCHER_JS", launcher),
-            ("MASTERMIND_NODE", "/usr/local/bin/node"),
+            ("MASTERMIND_LAUNCHER_JS", launcher.as_str()),
+            ("MASTERMIND_NODE", node.as_str()),
         ]);
         assert_eq!(
             mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other).unwrap(),
-            json!({"command": "/usr/local/bin/node", "args": [launcher, "serve"]})
+            json!({"command": node, "args": [launcher, "serve"]})
         );
     }
 

@@ -59,6 +59,31 @@ indexed 3 (unchanged 124, purged 1, skipped binary 2, skipped large 1, failed 0)
 `index` and `ci` exit 1 when any source fails, after they print the failed
 paths. The rest of the run is still committed.
 
+Every `query`, `map`, `repo-map` and `impact` first compares the source tree
+with the index and warns on stderr when the index is not current. The check
+walks the whole source inventory, so on a large repository it can take seconds
+per command. `--skip-freshness-check` leaves the walk out and prints
+`freshness check skipped` on stderr instead:
+
+```bash
+mastermind query --skip-freshness-check callers commit_file
+mastermind map --skip-freshness-check
+mastermind impact --since main --skip-freshness-check
+```
+
+For `query` the flag goes before the subcommand. For the other commands it goes
+after the command name.
+
+| Index | Answer with the flag |
+|---|---|
+| Current with the files | The same answer as without it |
+| Behind the files: a file was changed, added or deleted after `index` | The old answer, with no warning |
+| Built by an older extractor | The answer, and the stale-index warning, because that check is one metadata read |
+| Missing or with an old schema | The same error and exit 1 as without it |
+
+Use the flag only when the index is built after every change, such as a mirror
+that runs `index` after each fetch. Never use it on a working tree.
+
 ### Which files get indexed
 
 Manual indexing, automatic refresh and the freshness check use one source

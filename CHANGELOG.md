@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--skip-freshness-check` for `query`, `map`, `repo-map` and `impact` leaves
+  out the walk of the source tree that checks if the index is current, and
+  prints `freshness check skipped` on stderr. The walk can take seconds per
+  command on a large repository. For `query` the flag goes before the
+  subcommand. When the index is behind the files, the answer is old and has no
+  warning, so use it only when you index after every change and never on a
+  working tree. An index from an older extractor still warns, and a missing or
+  old-schema index still fails.
 - A skill-selection corpus of 91 prompts in
   `evals/behavior/cases/selection.jsonl`. Each prompt expects one skill or
   subagent, or none, and rejects the near misses. `just check` runs

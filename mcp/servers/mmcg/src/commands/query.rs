@@ -34,21 +34,41 @@ pub(crate) fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::
 /// stale index, but they say so on stderr using the rule MCP enforces. Call it
 /// inside the command's work budget so the scan counts against
 /// `MMCG_QUERY_BUDGET_MS`.
-pub(crate) fn warn_if_stale(store: &Store) {
-    if let Some(reason) = mmcg::query_service::stale_index_reason(store) {
+///
+/// `check` is false only for `--skip-freshness-check`, whose caller indexes
+/// after every change. The scan walks the whole source inventory, which costs
+/// seconds on a large repository. Skipping it is said on stderr, because an
+/// index that is behind the files then answers with no warning. The extractor
+/// contract is one meta read, so an index from an older extractor still warns.
+pub(crate) fn check_freshness(store: &Store, check: bool) {
+    let reason = if check {
+        mmcg::query_service::stale_index_reason(store)
+    } else {
+        eprintln!("freshness check skipped");
+        match store.extractor_contract_current() {
+            Ok(true) => None,
+            Ok(false) => Some("the index was built by an older extractor".to_string()),
+            Err(_) => Some("the extractor contract could not be read".to_string()),
+        }
+    };
+    if let Some(reason) = reason {
         eprintln!(
             "warning: index is not current ({reason}); results may be outdated, run `mastermind index .`"
         );
     }
 }
 
-pub fn dispatch(q: QueryCmd, index_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn dispatch(
+    q: QueryCmd,
+    index_path: &Path,
+    check: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_query_store(index_path)?;
     store.push_work_budget(WorkBudget::from_millis(query_budget_ms_from_env(
         DEFAULT_CLI_BUDGET_MS,
     )));
     let budget_scope = WorkBudgetScope(&store);
-    warn_if_stale(&store);
+    check_freshness(&store, check);
     let is_explain = matches!(q, QueryCmd::Explain { .. });
     let result = execute(&store, q)?;
     drop(budget_scope);
@@ -81,12 +101,13 @@ pub fn dispatch_map(
     top: u32,
     production_only: bool,
     index_path: &Path,
+    check: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_query_store(index_path)?;
     let budget_ms = query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS);
     store.push_work_budget(WorkBudget::from_millis(budget_ms));
     let _budget_scope = WorkBudgetScope(&store);
-    warn_if_stale(&store);
+    check_freshness(&store, check);
     let map = queries::project_map_with_options(&store, path, depth, top, production_only)?;
     store.ensure_source_snapshot_current()?;
     match format {
@@ -108,12 +129,13 @@ pub fn dispatch_repo_map(
     payload: crate::RepoMapPayload,
     ranking: crate::RepoMapRanking,
     index_path: &Path,
+    check: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_query_store(index_path)?;
     let (symbols, graph) = store.with_work_budget(
         WorkBudget::from_millis(query_budget_ms_from_env(DEFAULT_CLI_BUDGET_MS)),
         || {
-            warn_if_stale(&store);
+            check_freshness(&store, check);
             let symbols = store.repo_map_symbols()?;
             let graph = if matches!(ranking, crate::RepoMapRanking::Graph)
                 && symbols.len() <= mmcg::repo_map::MAX_SYMBOLS

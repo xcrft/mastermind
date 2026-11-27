@@ -48,7 +48,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v10";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v11";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -433,7 +433,9 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         .to_ascii_lowercase();
     match ext.as_str() {
         "py" | "pyi" => Some(Box::new(PythonExtractor)),
-        "ts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
+        // `.mts` and `.cts` are ES-module and CommonJS TypeScript. Neither
+        // allows JSX, so both use the plain TypeScript grammar.
+        "ts" | "mts" | "cts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
         "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(JavascriptExtractor)),
         "rs" => Some(Box::new(RustExtractor)),
         "cs" => Some(Box::new(CsharpExtractor)),
@@ -2310,7 +2312,7 @@ pub(crate) fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("vue")
     } else if extension == "tsx" {
         Some("tsx")
-    } else if extension == "ts" {
+    } else if matches!(extension.as_str(), "ts" | "mts" | "cts") {
         Some("typescript")
     } else if matches!(extension.as_str(), "jsx" | "js" | "mjs" | "cjs") {
         // `.jsx` is a JavaScript dialect — store as "javascript", not a distinct

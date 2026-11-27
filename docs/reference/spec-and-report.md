@@ -244,7 +244,7 @@ language.
 | Scope | All tracked files with a supported extractor, or only the declared files |
 | Limits | 10,000 source files, 4 MiB of tree metadata, 5 MiB per blob, 64 MiB of blobs, 200,000 declarations |
 | Cannot prove uniqueness | Syntax errors, unsupported path encoding, incomplete diffs, missing baseline objects |
-| Extractor | `mmcg-extractors-v10`. Output from another contract needs a reindex |
+| Extractor | `mmcg-extractors-v11`. Output from another contract needs a reindex |
 
 | Language or case | Rule |
 |---|---|

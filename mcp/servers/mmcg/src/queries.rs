@@ -214,7 +214,7 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
                 "dynamic attributes not tracked",
             ],
         },
-        "ts" | "tsx" => EdgePrecision {
+        "ts" | "mts" | "cts" | "tsx" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
             target_resolution: "name_based_candidates",
@@ -323,7 +323,7 @@ fn lang_from_ext(ext: &str) -> &'static str {
         "java" => "java",
         "cs" => "csharp",
         "py" | "pyi" => "python",
-        "ts" | "tsx" => "typescript",
+        "ts" | "mts" | "cts" | "tsx" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "vue" => "vue",
         "php" | "phtml" => "php",
@@ -11386,9 +11386,9 @@ fn checks_value() { assert_eq!(value(), 1); }
     #[test]
     fn every_indexable_extension_reports_a_known_language_and_precision() {
         let extensions = [
-            "py", "pyi", "PY", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs", "go",
-            "java", "php", "phtml", "c", "cc", "cpp", "CPP", "cxx", "h", "hpp", "hh", "hxx", "ipp",
-            "tpp",
+            "py", "pyi", "PY", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs",
+            "cs", "go", "java", "php", "phtml", "c", "cc", "cpp", "CPP", "cxx", "h", "hpp", "hh",
+            "hxx", "ipp", "tpp",
         ];
         for ext in extensions {
             let path = format!("src/file.{ext}");

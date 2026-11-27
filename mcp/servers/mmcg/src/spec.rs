@@ -1173,9 +1173,9 @@ fn extract_mentioned_files_from_line(
 fn looks_like_path(s: &str) -> bool {
     let has_slash = s.contains('/');
     let has_known_ext = [
-        ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".go", ".java", ".php",
-        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".md", ".toml", ".json", ".yml", ".yaml",
-        ".sql", ".sh", ".html", ".css", ".scss",
+        ".rs", ".py", ".ts", ".mts", ".cts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".go",
+        ".java", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".md", ".toml", ".json",
+        ".yml", ".yaml", ".sql", ".sh", ".html", ".css", ".scss",
     ]
     .iter()
     .any(|ext| s.ends_with(ext));

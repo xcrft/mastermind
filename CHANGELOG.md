@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.mts` and `.cts` files are indexed as TypeScript.
+- The TypeScript extractor records enums, type aliases (kind `type`) and
+  namespaces (`namespace A.B { }` and `module A { }`), with their members as
+  children. Interface methods, abstract methods and `declare function`
+  signatures are methods and functions. An overload signature is left out
+  when its implementation is in the same scope.
+- TypeScript and JavaScript re-exports are `imports` edges of the module:
+  `export { foo } from './a'` is `foo` / `./a::foo`, `export * from './a'` is
+  `*` / `./a::*` and `export * as ns from './a'` is `ns` / `./a::*`.
+  `import fs = require('fs')` is `fs` / `fs::*`.
+
+### Changed
+
+- The extractor contract is `mmcg-extractors-v11`. The next `index` after an
+  upgrade rebuilds the codegraph.
+
 ## [5.0.0] - 2026-11-27
 
 ### Breaking

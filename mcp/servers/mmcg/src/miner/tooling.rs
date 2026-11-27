@@ -46,7 +46,7 @@ const EDITORCONFIG: usize = 9;
 const ESLINT: usize = 10;
 
 const RUST: &[&str] = &["rs"];
-const SCRIPT: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+const SCRIPT: &[&str] = &["ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs"];
 const PYTHON: &[&str] = &["py"];
 const GO: &[&str] = &["go"];
 const C_FAMILY: &[&str] = &["c", "h", "cc", "cpp", "cxx", "hpp", "hh"];

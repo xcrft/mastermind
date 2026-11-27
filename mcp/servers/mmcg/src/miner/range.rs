@@ -436,7 +436,7 @@ pub(super) fn language(path: &str) -> Option<&'static str> {
     let extension = name.rsplit_once('.')?.1;
     Some(match extension {
         "rs" => "Rust",
-        "ts" | "tsx" => "TypeScript",
+        "ts" | "mts" | "cts" | "tsx" => "TypeScript",
         "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
         "py" => "Python",
         "go" => "Go",

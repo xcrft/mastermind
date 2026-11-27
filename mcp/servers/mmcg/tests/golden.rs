@@ -606,3 +606,68 @@ function bump(step: number): void {
     assert!(!has_call(&store, "MyCard", "span"));
     assert!(has_import(&store, "MyCard.vue", "ref"));
 }
+
+#[test]
+fn golden_typescript_module_flavours_and_declarations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("src/billing")).unwrap();
+    fs::write(
+        root.join("src/billing/invoice.mts"),
+        "import { formatMoney } from '../money.cjs';\n\
+         export enum InvoiceState { Draft, Paid }\n\
+         export type InvoiceId = `inv_${string}`;\n\
+         export function totalOf(lines: number[]): string {\n\
+         \x20 return formatMoney(lines.reduce((a, b) => a + b, 0));\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/money.cts"),
+        "import assert = require('node:assert');\n\
+         export function formatMoney(cents: number): string {\n\
+         \x20 assert(Number.isInteger(cents));\n\
+         \x20 return (cents / 100).toFixed(2);\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/index.ts"),
+        "export { totalOf, InvoiceState } from './billing/invoice.mjs';\n\
+         export * from './money.cjs';\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/globals.d.mts"),
+        "declare global {\n\
+         \x20 interface Window { billing: BillingApi }\n\
+         }\n\
+         export interface BillingApi { refresh(force?: boolean): Promise<void>; }\n\
+         export declare function installBilling(target: Window): void;\n",
+    )
+    .unwrap();
+    let mut store = Store::open(root.join("mmcg.db")).unwrap();
+    Indexer::new(root).index_all(&mut store, true).unwrap();
+
+    for (name, kind) in [
+        ("InvoiceState", "enum"),
+        ("InvoiceId", "type"),
+        ("totalOf", "function"),
+        ("formatMoney", "function"),
+        ("BillingApi", "interface"),
+        ("refresh", "method"),
+        ("installBilling", "function"),
+    ] {
+        let hits = store
+            .search_symbols(name, Some(kind), Some("typescript"))
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{kind} {name}: {hits:?}");
+    }
+    assert!(has_call(&store, "totalOf", "formatMoney"));
+    assert!(has_call(&store, "formatMoney", "assert"));
+    assert!(has_import(&store, "src/billing/invoice.mts", "formatMoney"));
+    assert!(has_import(&store, "src/money.cts", "assert"));
+    assert!(has_import(&store, "src/index.ts", "totalOf"));
+    assert!(has_import(&store, "src/index.ts", "InvoiceState"));
+    assert!(has_import(&store, "src/index.ts", "*"));
+}

@@ -398,8 +398,9 @@ struct MapArgs {
     /// Exclude non-production path segments and conventional test filenames.
     #[arg(long)]
     production_only: bool,
-    /// Answer without first scanning the source tree for files that changed
-    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Skip the scan of the source tree for files that changed since the last
+    /// index, and print `freshness check skipped` on stderr. Only the time of
+    /// that scan is saved, so the gain is largest for query and repo-map.
     /// Only for a caller that indexes after every change, such as a mirror
     /// that indexes after each fetch. On an index that is behind the files the
     /// answer is old and comes with no warning.
@@ -421,8 +422,9 @@ struct RepoMapArgs {
     /// Graph ranking is experimental; lexical ranking remains the default.
     #[arg(long, value_enum, default_value_t = RepoMapRanking::Lexical)]
     ranking: RepoMapRanking,
-    /// Answer without first scanning the source tree for files that changed
-    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Skip the scan of the source tree for files that changed since the last
+    /// index, and print `freshness check skipped` on stderr. Only the time of
+    /// that scan is saved, so the gain is largest for query and repo-map.
     /// Only for a caller that indexes after every change, such as a mirror
     /// that indexes after each fetch. On an index that is behind the files the
     /// answer is old and comes with no warning.
@@ -442,11 +444,14 @@ struct ImpactArgs {
     top: u32,
     #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
-    /// Answer without first scanning the source tree for files that changed
-    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Skip the scan of the source tree for files that changed since the last
+    /// index, and print `freshness check skipped` on stderr. Only the time of
+    /// that scan is saved, so the gain is largest for query and repo-map.
     /// Only for a caller that indexes after every change, such as a mirror
     /// that indexes after each fetch. On an index that is behind the files the
     /// answer is old and comes with no warning.
+    /// impact still compares the changed files with the index and exits 1
+    /// with `index_stale` when they differ. The flag does not skip that.
     #[arg(long)]
     skip_freshness_check: bool,
 }
@@ -1773,8 +1778,9 @@ enum HabitCmd {
 
 #[derive(clap::Args)]
 struct QueryArgs {
-    /// Answer without first scanning the source tree for files that changed
-    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Skip the scan of the source tree for files that changed since the last
+    /// index, and print `freshness check skipped` on stderr. Only the time of
+    /// that scan is saved, so the gain is largest for query and repo-map.
     /// Only for a caller that indexes after every change, such as a mirror
     /// that indexes after each fetch. On an index that is behind the files the
     /// answer is old and comes with no warning.

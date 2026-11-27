@@ -2419,6 +2419,12 @@ mod tests {
     /// Windows such a path has no drive, so it is not absolute and reads as
     /// relative. Give it a drive there, so each example means the same on
     /// every host.
+    ///
+    /// Paths under /tmp and the other `TEMPORARY_DIRECTORIES` keep no drive
+    /// on purpose. A hook names them in Unix form, and doctor matches that
+    /// form on every host: a word that starts with `/` and lies under one of
+    /// those folders. `C:/tmp/tool` does not start with `/`, so with a drive
+    /// the temporary program examples would test nothing.
     fn on_host(text: &str) -> String {
         if !cfg!(windows) {
             return text.to_string();

@@ -81,6 +81,14 @@ after the command name.
 | Built by an older extractor | The answer, and the stale-index warning, because that check is one metadata read |
 | Missing or with an old schema | The same error and exit 1 as without it |
 
+The flag saves only the time of the scan. The gain is largest for `query` and
+`repo-map`. `map` and `impact` do more work of their own, so they gain less.
+
+`impact` keeps its own check of the changed files against the index, and the
+flag does not skip it. When a changed file differs from what the index holds,
+`impact` exits 1 with `index_stale`, with or without the flag. It reports a
+missing index or one with an old schema as `index_stale` too.
+
 Use the flag only when the index is built after every change, such as a mirror
 that runs `index` after each fetch. Never use it on a working tree.
 

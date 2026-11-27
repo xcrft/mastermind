@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A Pre-edit Snapshot item that starts with a file span, such as
   `` - `foo.vue` and `Widget` — 2 callers ``, claims `Widget`. It used to claim
-  the file name. An item whose only span is a file, such as
+  the file name. A span that puts the file before `::`, such as
+  `` `src/lib.rs::parse` `` or `` `src/foo.vue::Widget` ``, claims the part
+  after it. An item whose only span is a file, such as
   `` - `src/a.rs:12` — 5 callers ``, is `snapshot_line_unparsed`.
 
 - A spec that names an indexed source file in backticks lists it as a

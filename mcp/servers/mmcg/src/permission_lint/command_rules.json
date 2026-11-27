@@ -1,5 +1,5 @@
 {
-  "_comment": "Command tables shared by mastermind doctor (permission_lint/launch.rs) and scripts/validate.py. A Rust test checks that they match the Rust constants, and both sides test fetch_exec_corpus.json.",
+  "_comment": "Command tables shared by mastermind doctor (permission_lint/launch.rs) and scripts/validate.py. A Rust test checks that every table here equals its Rust constant, and both sides test fetch_exec_corpus.json. Logic is copied by hand, so only the corpus cases are sure to agree.",
   "shells": [
     "ash",
     "bash",
@@ -361,5 +361,118 @@
     "/private/var/tmp",
     "/var/folders",
     "/private/var/folders"
+  ],
+  "package_installers": {
+    "bun": [
+      "add",
+      "i",
+      "install"
+    ],
+    "cargo": [
+      "binstall",
+      "install"
+    ],
+    "gem": [
+      "install"
+    ],
+    "go": [
+      "install"
+    ],
+    "npm": [
+      "add",
+      "i",
+      "install"
+    ],
+    "pip": [
+      "install"
+    ],
+    "pipx": [
+      "install"
+    ],
+    "pnpm": [
+      "add",
+      "i",
+      "install"
+    ],
+    "uv": [
+      "tool"
+    ],
+    "yarn": [
+      "add",
+      "global"
+    ]
+  },
+  "install_value_options": [
+    "-c",
+    "-e",
+    "-i",
+    "-r",
+    "-t",
+    "--bin",
+    "--branch",
+    "--constraint",
+    "--editable",
+    "--extra-index-url",
+    "--features",
+    "--index",
+    "--index-url",
+    "--manifest-path",
+    "--path",
+    "--prefix",
+    "--profile",
+    "--python",
+    "--registry",
+    "--requirement",
+    "--rev",
+    "--root",
+    "--tag",
+    "--target",
+    "--target-dir",
+    "--vers",
+    "--version"
+  ],
+  "startup_files": [
+    ".bash_login",
+    ".bash_logout",
+    ".bash_profile",
+    ".bashrc",
+    ".cshrc",
+    ".kshrc",
+    ".login",
+    ".profile",
+    ".tcshrc",
+    ".zlogin",
+    ".zlogout",
+    ".zprofile",
+    ".zshenv",
+    ".zshrc",
+    "config.fish",
+    "microsoft.powershell_profile.ps1",
+    "profile.ps1"
+  ],
+  "autostart_directories": [
+    "library/launchagents/",
+    "library/launchdaemons/",
+    ".config/systemd/user/",
+    ".local/share/systemd/user/",
+    ".config/autostart/"
+  ],
+  "cron_paths": [
+    "/etc/cron",
+    "/var/spool/cron/",
+    "/usr/lib/cron/tabs/",
+    "/var/at/tabs/"
+  ],
+  "hook_directories": [
+    ".git/hooks/",
+    ".husky/"
+  ],
+  "trust_config_files": [
+    ".mcp.json",
+    ".claude.json"
+  ],
+  "later_run_directories": [
+    "~/.local/bin",
+    "$home/.local/bin"
   ]
 }

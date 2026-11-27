@@ -1484,13 +1484,16 @@ fn downloads(text: &str, shell: bool) -> bool {
         })
 }
 
+/// Folders of programs that are usually on `PATH`.
+const LATER_RUN_DIRECTORIES: &[&str] = &["~/.local/bin", "$home/.local/bin"];
+
 /// Whether a path is a file that may run later without asking: a direnv
 /// `.envrc`, or a program in `~/.local/bin`, which is usually on `PATH`.
 fn is_later_run_file(path: &str) -> bool {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let path = path.trim_end_matches('/');
     base == ".envrc"
-        || ["~/.local/bin", "$home/.local/bin"]
+        || LATER_RUN_DIRECTORIES
             .iter()
             .any(|dir| path == *dir || path.starts_with(&format!("{dir}/")))
 }
@@ -3231,6 +3234,13 @@ mod tests {
             ("shell_variables", SHELL_VARIABLES),
             ("remote_shells", REMOTE_SHELLS),
             ("temporary_directories", TEMPORARY_DIRECTORIES),
+            ("install_value_options", INSTALL_VALUE_OPTIONS),
+            ("startup_files", STARTUP_FILES),
+            ("autostart_directories", AUTOSTART_DIRECTORIES),
+            ("cron_paths", CRON_PATHS),
+            ("hook_directories", HOOK_DIRECTORIES),
+            ("trust_config_files", TRUST_CONFIG_FILES),
+            ("later_run_directories", LATER_RUN_DIRECTORIES),
         ] {
             assert_eq!(list(key), constant, "{key} in command_rules.json");
         }
@@ -3262,6 +3272,73 @@ mod tests {
             })
             .collect();
         assert_eq!(wrappers, constant, "wrappers in command_rules.json");
+        let installers: Vec<(String, Vec<String>)> = rules["package_installers"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, subs)| {
+                (
+                    name.clone(),
+                    subs.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|sub| sub.as_str().unwrap().to_string())
+                        .collect(),
+                )
+            })
+            .collect();
+        let constant: Vec<(String, Vec<String>)> = PACKAGE_INSTALLERS
+            .iter()
+            .map(|(name, subs)| {
+                (
+                    name.to_string(),
+                    subs.iter().map(|sub| sub.to_string()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            installers, constant,
+            "package_installers in command_rules.json"
+        );
+        // Every table in the file is one of the above, so none is left for
+        // the Python copy alone.
+        let keys: Vec<&str> = rules
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !key.starts_with('_'))
+            .collect();
+        assert_eq!(keys.len(), 22, "{keys:?}");
+    }
+
+    #[test]
+    fn the_shared_corpus_gives_doctors_persistence_findings() {
+        // Reviewer request: validate.py must make the same persistence
+        // decisions as doctor, so both check one list of writes.
+        let corpus: serde_json::Value = serde_json::from_str(SHARED_CORPUS).unwrap();
+        let cases = corpus["persistence"].as_array().unwrap();
+        assert!(cases.len() >= 40, "{}", cases.len());
+        let wrong: Vec<&str> = cases
+            .iter()
+            .filter(|case| {
+                let found = persistence_finding(case["command"].as_str().unwrap(), true)
+                    .map(|found| persistence_name(found.kind));
+                found != case["finding"].as_str()
+            })
+            .map(|case| case["command"].as_str().unwrap())
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The name the shared corpus gives a persistence finding.
+    fn persistence_name(kind: Kind) -> &'static str {
+        match kind {
+            Kind::WritesShellStartup => "shell_startup",
+            Kind::WritesAutostart => "autostart",
+            Kind::WritesLaterRun => "later_run",
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

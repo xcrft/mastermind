@@ -1057,9 +1057,11 @@ def _reason_problem(reason: object) -> str | None:
 
 
 # The `mastermind doctor` rules for fetched, written or decoded code that a
-# command runs. scripts/command_check.py is a line-by-line copy of doctor's
-# check, so this runs without building mmcg. It shares doctor's word tables and
-# its test corpus, so the two cannot drift.
+# command runs, and for writes to files that run later. scripts/command_check.py
+# is a line-by-line copy of doctor's checks, so this runs without building mmcg.
+# A Rust test keeps every word table it loads equal to doctor's, and both sides
+# must give the verdicts in the shared corpus. The logic is copied by hand, so a
+# command outside the corpus can still get a different answer.
 try:
     from scripts import command_check
 except ImportError:  # run as `python scripts/validate.py`
@@ -1070,6 +1072,17 @@ def _fetch_and_exec(command: str) -> str | None:
     """Why a hook command runs code it fetched, wrote or decoded, if it does."""
     if command_check.fetch_and_exec(command):
         return "runs downloaded or generated code"
+    return None
+
+
+def _persists(command: str) -> str | None:
+    """Why a hook command writes a file that runs later, when doctor gives
+    that an error. Warnings such as a `.envrc` are left to doctor."""
+    finding = command_check.persistence(command)
+    if finding == "shell_startup":
+        return "writes a shell startup file, so its code runs in every new shell"
+    if finding == "autostart":
+        return "writes a file that runs later on its own"
     return None
 
 
@@ -1210,6 +1223,8 @@ def _capability_messages(
         for command in hook_commands:
             if reason := _fetch_and_exec(command):
                 messages.append(f"[subagent_hook_fetch_exec] frontmatter hook {reason}")
+            elif reason := _persists(command):
+                messages.append(f"[subagent_hook_persistence] frontmatter hook {reason}")
     for capability in sorted(WORKFLOW_CAPABILITY_TOOLS):
         granted = granted_by_capability.get(capability, [])
         if granted and capability not in capabilities:

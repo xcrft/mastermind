@@ -4,8 +4,10 @@ This is a line-by-line Python copy of `detect` in
 `mcp/servers/mmcg/src/permission_lint/launch.rs`, so `just validate` can check
 subagent hooks without building mmcg. Its word lists come from
 `command_rules.json` beside the Rust code, which a Rust test keeps equal to the
-Rust constants, and both copies must give the verdicts in
-`fetch_exec_corpus.json`. Change all three together.
+Rust constants, and both copies must give the verdicts and persistence findings
+in `fetch_exec_corpus.json`. The logic is copied by hand, so a command outside
+the corpus can still get a different answer. Change all three together and
+add each new counter-example to the corpus.
 """
 
 from __future__ import annotations
@@ -41,6 +43,12 @@ TEMPORARY_DIRECTORIES = tuple(RULES["temporary_directories"])
 LOOKUPS = set(RULES["lookups"])
 SHELL_VARIABLES = set(RULES["shell_variables"])
 REMOTE_SHELLS = set(RULES["remote_shells"])
+STARTUP_FILES = set(RULES["startup_files"])
+AUTOSTART_DIRECTORIES = RULES["autostart_directories"]
+CRON_PATHS = RULES["cron_paths"]
+HOOK_DIRECTORIES = RULES["hook_directories"]
+TRUST_CONFIG_FILES = set(RULES["trust_config_files"])
+LATER_RUN_DIRECTORIES = RULES["later_run_directories"]
 
 
 def _ascii_lower(text: str) -> str:
@@ -577,25 +585,8 @@ def written_files(call: Call) -> list[str]:
     return files
 
 
-PACKAGE_INSTALLERS = {
-    "bun": {"add", "i", "install"},
-    "cargo": {"binstall", "install"},
-    "gem": {"install"},
-    "go": {"install"},
-    "npm": {"add", "i", "install"},
-    "pip": {"install"},
-    "pipx": {"install"},
-    "pnpm": {"add", "i", "install"},
-    "uv": {"tool"},
-    "yarn": {"add", "global"},
-}
-
-INSTALL_VALUE_OPTIONS = {
-    "-c", "-e", "-i", "-r", "-t", "--bin", "--branch", "--constraint", "--editable",
-    "--extra-index-url", "--features", "--index", "--index-url", "--manifest-path",
-    "--path", "--prefix", "--profile", "--python", "--registry", "--requirement",
-    "--rev", "--root", "--tag", "--target", "--target-dir", "--vers", "--version",
-}
+PACKAGE_INSTALLERS = {name: set(subs) for name, subs in RULES["package_installers"].items()}
+INSTALL_VALUE_OPTIONS = set(RULES["install_value_options"])
 
 
 def installed_specs(call: Call) -> list[str]:
@@ -867,3 +858,147 @@ def detect(text: str, depth: int = 0, shell: bool = True) -> bool:
 def fetch_and_exec(text: str) -> bool:
     """Whether `text` downloads, writes or decodes code and runs it, as doctor reads it."""
     return detect(text, 0, True)
+
+
+def _path_base(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def is_startup_file(path: str) -> bool:
+    base = _path_base(path)
+    return (
+        base in STARTUP_FILES
+        or "fish/conf.d/" in path
+        or "fish/functions/" in path
+        or path.startswith("/etc/profile")
+        or (path.startswith("/etc/") and base in {"bashrc", "bash.bashrc", "zshrc", "zprofile", "zshenv", "zlogin"})
+        or path == "$profile"
+    )
+
+
+def write_targets(call: Call) -> list[str]:
+    targets: list[str] = []
+    for index, arg in enumerate(call.args):
+        following = call.args[index + 1 : index + 2]
+        if arg in {">", "-o", "--output", "--output-document", "-outfile", "-filepath"}:
+            targets.extend(following)
+        elif (
+            call.name in NETWORK_TOOLS
+            and len(arg) > 2
+            and arg.startswith("-")
+            and not arg.startswith("--")
+            and all("a" <= c <= "z" or "A" <= c <= "Z" for c in arg[1:])
+            and arg.endswith("o")
+        ):
+            targets.extend(following)
+        for prefix in ("of=", "--output=", "--output-document="):
+            if arg.startswith(prefix):
+                targets.append(arg[len(prefix) :])
+    positional = call.positional()
+    name = call.name
+    if name in {"tee", "out-file", "add-content", "set-content"}:
+        targets.extend(positional)
+    elif name in {"sed", "perl"} and any(arg.startswith("-i") for arg in call.args):
+        targets.extend(positional)
+    elif name in {"cp", "mv", "ln", "install", "scp", "rsync"}:
+        targets.extend(positional[-1:])
+    elif name in {"tar", "bsdtar", "gtar", "unzip"} and extracted_archive(call) is not None:
+        option = "-d" if name == "unzip" else "-c"
+        for index, arg in enumerate(call.args):
+            if arg in {option, "--directory"}:
+                targets.extend(call.args[index + 1 : index + 2])
+            if arg.startswith("--directory="):
+                targets.append(arg[len("--directory=") :])
+    return targets
+
+
+def _anchored(path: str, folder: str) -> bool:
+    return path.startswith(folder) or f"/{folder}" in path
+
+
+def is_autostart_file(path: str) -> bool:
+    path = path.replace("//", "/")
+    return (
+        any(_anchored(path, folder) for folder in AUTOSTART_DIRECTORIES)
+        or any(path.startswith(prefix) for prefix in CRON_PATHS)
+        or path.startswith(("$git_dir/hooks/", "${git_dir}/hooks/"))
+    )
+
+
+def is_hook_file(path: str) -> bool:
+    path = path.replace("//", "/")
+    return any(_anchored(path, folder) for folder in HOOK_DIRECTORIES)
+
+
+def is_trust_config_file(path: str) -> bool:
+    path = path.replace("//", "/")
+    base = _path_base(path)
+    return (
+        base in TRUST_CONFIG_FILES
+        or (_anchored(path, ".claude/") and base.startswith("settings") and base.endswith(".json"))
+        or _anchored(path, ".codex/config.toml")
+    )
+
+
+def is_hook_or_trust_config(path: str) -> bool:
+    return is_hook_file(path) or is_trust_config_file(path)
+
+
+def is_later_run_file(path: str) -> bool:
+    base = _path_base(path)
+    path = path.rstrip("/")
+    return base == ".envrc" or any(path == folder or path.startswith(f"{folder}/") for folder in LATER_RUN_DIRECTORIES)
+
+
+def _normalised(text: str, shell: bool) -> str:
+    return deobfuscate(text) if shell else deobfuscate_word(text)
+
+
+def downloads(text: str, shell: bool = True) -> bool:
+    norm = _normalised(text, shell)
+    if "://" in norm:
+        return True
+    outer, holes = extract_substitutions(norm)
+    if any(downloads(hole, True) for hole in holes):
+        return True
+    for command in split_script(outer):
+        for stage in command:
+            call = resolve(stage)
+            if call is None:
+                continue
+            code = call.shell_code()
+            if produces_code(call) or (code is not None and downloads(" ".join(code), True)):
+                return True
+    return False
+
+
+def writes_matching(text: str, shell: bool, matches) -> bool:
+    norm = _normalised(text, shell)
+    outer, holes = extract_substitutions(norm)
+    if any(writes_matching(hole, True, matches) for hole in holes):
+        return True
+    for command in split_script(outer):
+        for stage in command:
+            call = resolve(stage)
+            if call is None:
+                continue
+            if any(matches(target) for target in write_targets(call)):
+                return True
+            code = call.shell_code()
+            if code is not None and writes_matching(" ".join(code), True, matches):
+                return True
+    return False
+
+
+def persistence(text: str, shell: bool = True) -> str | None:
+    """doctor's finding for a command that writes a file which runs later:
+    "shell_startup" and "autostart" are errors, "later_run" warns."""
+    if writes_matching(text, shell, is_startup_file):
+        return "shell_startup"
+    if writes_matching(text, shell, is_autostart_file):
+        return "autostart"
+    if writes_matching(text, shell, is_hook_or_trust_config):
+        return "autostart" if downloads(text, shell) else "later_run"
+    if writes_matching(text, shell, is_later_run_file):
+        return "later_run"
+    return None

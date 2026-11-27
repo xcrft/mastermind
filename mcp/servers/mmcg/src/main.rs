@@ -398,6 +398,13 @@ struct MapArgs {
     /// Exclude non-production path segments and conventional test filenames.
     #[arg(long)]
     production_only: bool,
+    /// Answer without first scanning the source tree for files that changed
+    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Only for a caller that indexes after every change, such as a mirror
+    /// that indexes after each fetch. On an index that is behind the files the
+    /// answer is old and comes with no warning.
+    #[arg(long)]
+    skip_freshness_check: bool,
 }
 
 #[derive(clap::Args)]
@@ -414,6 +421,13 @@ struct RepoMapArgs {
     /// Graph ranking is experimental; lexical ranking remains the default.
     #[arg(long, value_enum, default_value_t = RepoMapRanking::Lexical)]
     ranking: RepoMapRanking,
+    /// Answer without first scanning the source tree for files that changed
+    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Only for a caller that indexes after every change, such as a mirror
+    /// that indexes after each fetch. On an index that is behind the files the
+    /// answer is old and comes with no warning.
+    #[arg(long)]
+    skip_freshness_check: bool,
 }
 
 #[derive(clap::Args)]
@@ -428,6 +442,13 @@ struct ImpactArgs {
     top: u32,
     #[arg(long, default_value = ".", value_parser = absolute_path)]
     root: PathBuf,
+    /// Answer without first scanning the source tree for files that changed
+    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Only for a caller that indexes after every change, such as a mirror
+    /// that indexes after each fetch. On an index that is behind the files the
+    /// answer is old and comes with no warning.
+    #[arg(long)]
+    skip_freshness_check: bool,
 }
 
 #[derive(clap::Args)]
@@ -1753,9 +1774,10 @@ enum HabitCmd {
 #[derive(clap::Args)]
 struct QueryArgs {
     /// Answer without first scanning the source tree for files that changed
-    /// since the last index. For a caller that keeps the index current itself,
-    /// such as a mirror that indexes after every fetch. The answer comes from
-    /// the index either way, and only the staleness warning on stderr is left out.
+    /// since the last index, and print `freshness check skipped` on stderr.
+    /// Only for a caller that indexes after every change, such as a mirror
+    /// that indexes after each fetch. On an index that is behind the files the
+    /// answer is old and comes with no warning.
     #[arg(long)]
     skip_freshness_check: bool,
     #[command(subcommand)]
@@ -2279,9 +2301,16 @@ fn run_cli_inner(
             depth,
             top,
             production_only,
-        }) => {
-            commands::query::dispatch_map(&path, format, depth, top, production_only, &index_path)?
-        }
+            skip_freshness_check,
+        }) => commands::query::dispatch_map(
+            &path,
+            format,
+            depth,
+            top,
+            production_only,
+            &index_path,
+            !skip_freshness_check,
+        )?,
         Cmd::EffortRoute(options) => commands::effort::route(&options)?,
         Cmd::RepoMap(RepoMapArgs {
             question,
@@ -2289,6 +2318,7 @@ fn run_cli_inner(
             budget_bytes,
             payload,
             ranking,
+            skip_freshness_check,
         }) => {
             commands::query::dispatch_repo_map(
                 &question,
@@ -2297,6 +2327,7 @@ fn run_cli_inner(
                 payload,
                 ranking,
                 &index_path,
+                !skip_freshness_check,
             )?;
         }
         Cmd::Impact(ImpactArgs {
@@ -2305,6 +2336,7 @@ fn run_cli_inner(
             depth,
             top,
             root,
+            skip_freshness_check,
         }) => {
             let root = root
                 .canonicalize()
@@ -2322,7 +2354,7 @@ fn run_cli_inner(
             let response = if expired {
                 Err(mmcg::queries::ChangeImpactError::GitTimeout)
             } else {
-                commands::query::warn_if_stale(&store);
+                commands::query::check_freshness(&store, !skip_freshness_check);
                 impact_engine(&store, &root, &since, depth, top)
             };
             let interrupted = store.take_interrupt_source();

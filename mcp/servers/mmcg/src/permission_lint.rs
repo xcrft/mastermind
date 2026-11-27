@@ -122,10 +122,12 @@ pub enum Kind {
     BroadEditCoversTrustFiles,
     /// A command that writes a shell startup file such as `~/.zshrc`.
     WritesShellStartup,
-    /// A command that writes a git or Husky hook, a launch agent, a systemd
-    /// user unit or an autostart entry.
+    /// A command that writes a launch agent or daemon, a cron job, a systemd
+    /// user unit or an autostart entry, or writes downloaded content into a
+    /// git or Husky hook or the agent's own settings.
     WritesAutostart,
-    /// A command that writes a `.envrc` or a program into `~/.local/bin`.
+    /// A command that writes a git or Husky hook or the agent's settings from
+    /// local files, a `.envrc` or a program into `~/.local/bin`.
     WritesLaterRun,
     /// A program, or a script given to a shell or interpreter, in a
     /// temporary directory.
@@ -203,10 +205,10 @@ impl Kind {
                 "writes a shell startup file, so its code runs in every new shell"
             }
             Kind::WritesAutostart => {
-                "writes a git hook, login item or user service, so its code runs later on its own"
+                "writes a login item, scheduled job or user service, or downloaded code into a git hook or agent settings, so it runs later on its own"
             }
             Kind::WritesLaterRun => {
-                "writes a .envrc or a program in ~/.local/bin, which can run later without asking"
+                "writes a git hook, agent settings, a .envrc or a program in ~/.local/bin, which can run later without asking"
             }
             Kind::OverridesLauncher => {
                 "sets a MASTERMIND_ variable, which can change the launcher Mastermind trusts"

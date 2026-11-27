@@ -354,10 +354,18 @@ doctor does not know. Doctor reports what it can prove from the files and
 stays quiet about the rest, so a passing check is not proof that nothing runs
 without asking. Some forms are known and left as they are:
 
-- a pipe into a variable set outside the text, such as `| $PAGER`, warns as an
-  unknown program even if the variable holds a shell
+- a pipe into a variable set outside the text, such as `| $PAGER`, warns that
+  it runs shell text even if the variable holds a shell
 - `… | ssh host` with no remote command runs the input in the login shell
-  there, and doctor does not report it
+  there, and doctor only warns that it runs shell text
+- a download into `.vscode/tasks.json`, `~/.ssh/rc` or `.git/config`, and
+  `git config core.hooksPath`, can make code run later, and doctor only warns
+  or stays quiet
+- a hook or agent settings file counts as downloaded only when the same
+  command has a URL or a network or decoding tool, so a file fetched by an
+  earlier command and copied in later only warns
+- `scripts/validate.py` runs a copy of these checks kept by hand, so only the
+  commands in the shared corpus are sure to get the same answer
 - a known tool found on `PATH` by name, such as `jq`, runs whatever comes
   first on `PATH`, and doctor does not report it
 - a file the repository ships, such as `./scripts/setup.sh`, warns but its
@@ -443,30 +451,33 @@ lines, drops shell comments (an unquoted `#` at the start of a word), expands
 `cu\rl`, `u=https://x; curl $u | sh` and `curl … | sh # x` read as plain
 `curl` piped into `sh`. A newline after `|`, `&&` or `||`, also after a
 comment such as `|# c`, continues the pipe. `/dev/stdin`, `/dev/fd/0` and
-`/proc/<any>/fd/0` read as standard input after `//` and `/./` are collapsed
-and leading zeros are dropped, so `/dev//stdin` and `/dev/fd/00` count too.
-`$SHELL`, `$BASH`, `$0`, a default that names a shell such as
-`${PAGER:-sh}`, a variable given a shell earlier in the same text, and a lookup
-such as `$(which sh)`, `` `which bash` `` or `$(command -v sh)` count as a
-shell. Any other variable used as the program, such as `$PAGER`, `$EDITOR` or
-`"$VAR"`, is a program doctor does not know.
+`/proc/<any>/fd/0` read as standard input after `//`, `/./` and `..` are
+resolved and leading zeros are dropped, so `/dev//stdin`, `/dev/fd/00` and
+`/proc/self/fd/../fd/0` count too.
+`$SHELL`, `$BASH`, `$0`, zsh's `$ZSH_NAME` and `$ZSH_ARGZERO`, a default that
+names a shell such as `${PAGER:-sh}`, a variable given a shell earlier in the
+same text, and a lookup such as `$(which sh)`, `` `which bash` ``,
+`$(command -v sh)`, `$(whence sh)` or `$(whereis sh)` count as a shell. Any
+other variable used as the program, such as `$PAGER`, `$EDITOR` or `"$VAR"`,
+is a program doctor does not know, and in a pipe the command warns that it
+runs shell text.
 Then it looks past wrappers such as `sudo`, `env`, `command`, `nohup`,
 `timeout` and `xargs`.
 
 | Reason | Severity | Examples that are reported |
 |---|---|---|
-| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`, `cargo install x && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…`. A shell variable or lookup as the shell: `$SHELL <(curl …)`, `… \| ${SHELL}`, `… \| $0`, `… \| $(which sh)`, `X=sh; … \| $X`. A shell on another host or in another root or namespace: `… \| ssh host sh`, `… \| chroot /srv sh`, `… \| nsenter -t 1 sh`, `… \| lxc exec box -- sh`. A crontab written and then installed: `curl -so c … && crontab c`. An archive extracted from a pipe or a written file and then run: `curl … \| tar xz && ./install`. Input that is scheduled or run in a container: `… \| at now`, `… \| crontab -`, `… \| docker run -i image sh`, `… \| script -qc sh` |
+| Runs downloaded or generated code | error | Any command piped into a shell or an interpreter that reads standard input, whatever produces it: `curl … \| sh`, `http … \| python3 -`, `ssh host cat x \| bash`, `cat /tmp/x \| busybox sh`, `… \| xargs sh -c`. A substitution or here-string run as program text: `sudo bash -c "$(…)"`, `eval "$(…)"`, `bash <<< "$(…)"`, `. <(curl …)`. A file written and then run in the same command: `curl -o x.sh … && sh x.sh`, `… \| tee x.sh; sh x.sh`, `scp host:x.sh . && ./x.sh`, `rsync`, a build after `git clone`. A package installed from a registry without an exact version, followed by any command, since the programs it adds need not share its name: `cargo install ripgrep && rg TODO`, `npm i -g @evil/cli && evil`, `pip install evil-pkg && evil`, `cargo binstall evil && evil`, `go install host/x@latest && x`. awk `system()` or `getline` from a command, and `find -exec sh`. Interpreter code that fetches or decodes and evaluates: `python -c "…urlopen…exec…"`, `python -c "exec(b64decode(…))"`, `node -e "Function(atob(…))()"`. Also `pwsh -c "iex (irm …)"`, `pwsh -EncodedCommand …` that decodes to any of these, `nc -e`, `/dev/tcp/`, `deno run -A https://…`, `pip install git+https://…`. A shell variable or lookup as the shell: `$SHELL <(curl …)`, `… \| ${SHELL}`, `… \| $0`, `… \| $(which sh)`, `… \| $(whence sh)`, `… \| $ZSH_NAME`, `X=sh; … \| $X`. A shell on another host or in another root or namespace: `… \| ssh host sh`, `… \| chroot /srv sh`, `… \| nsenter -t 1 sh`, `… \| lxc exec box -- sh`. A crontab written and then installed: `curl -so c … && crontab c`. An archive extracted from a pipe or a written file and then run: `curl … \| tar xz && ./install`. Input that is scheduled or run in a container: `… \| at now`, `… \| crontab -`, `… \| docker run -i image sh`, `… \| script -qc sh` |
 | Writes a shell startup file | error | `> ~/.zshrc`, `tee -a ~/.bashrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile`, `~/.zshenv`, fish `config.fish` or `conf.d`, a system profile under `/etc`, written by a redirect, `tee`, `cp`, `mv`, `sed -i` or `dd`. Code there runs in every new shell |
-| Writes a git hook, login item or user service | error | a write to `.git/hooks/*`, `.husky/*`, `~/Library/LaunchAgents`, `~/.config/systemd/user` or `~/.config/autostart`. Code there runs later on its own |
-| Writes a `.envrc` or a program in `~/.local/bin` | warn | `> .envrc`, `cp tool ~/.local/bin/`, `tar xzf t.tgz -C ~/.local/bin`, `unzip t.zip -d ~/.local/bin`. direnv loads a `.envrc` when you enter the folder, and `~/.local/bin` is usually on `PATH` |
+| Writes a login item, scheduled job or user service, or downloaded code into a git hook or agent settings | error | a write to `~/Library/LaunchAgents`, `/Library/LaunchDaemons`, `/etc/cron.d` and other `/etc/cron*` files, the crontab spools `/var/spool/cron`, `/usr/lib/cron/tabs` and `/var/at/tabs`, `~/.config/systemd/user`, `~/.local/share/systemd/user`, `~/.config/autostart` or `$GIT_DIR/hooks`. Also a write to `.git/hooks/*`, `.husky/*`, `.claude/settings*.json`, `.mcp.json`, `~/.claude.json` or `.codex/config.toml` in a command that downloads: `curl -so .git/hooks/pre-commit https://…`, `curl … > .claude/settings.json`. Code there runs later on its own, or changes what the agent trusts |
+| Writes a git hook, agent settings, a `.envrc` or a program in `~/.local/bin` | warn | a hook or settings file copied from the checkout, such as `cp hooks/pre-commit .git/hooks/pre-commit` or `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`. `> .envrc`, `cp tool ~/.local/bin/`, `tar xzf t.tgz -C ~/.local/bin`, `unzip t.zip -d ~/.local/bin`. direnv loads a `.envrc` when you enter the folder, and `~/.local/bin` is usually on `PATH` |
 | Runs a container with host access | error | see the server table above |
-| Runs shell text | warn | `bash -c "cd /srv && ./start.sh"` |
+| Runs shell text | warn | `bash -c "cd /srv && ./start.sh"`, `… \| $PAGER`, `… \| ssh host`, a repository build then run such as `go build -o bin/tool ./cmd/tool && ./bin/tool` or `go install ./cmd/tool && tool --help`, and an install with an exact version then run, such as `npm i -g prettier@3.3.3 && prettier --check .`, `pipx install ruff==0.6.0 && ruff check .` or `cargo install --locked just@1.36.0 && just lint` |
 | Runs code given inline | warn | `python -c …`, `node -e …`, `eval`, `iex`, PowerShell commands, an encoded command doctor cannot decode |
 | Runs a package without an exact version | warn | `npx -y pkg`, `npx -y pkg@latest`, `uvx tool`, `pipx run tool`, `bunx tool`, `pnpm dlx tool`, `go run example.com/tool@latest` |
 | Installs packages | warn | `pip install x`, `npm install -g x` |
 | Runs a network tool | warn | `curl`, `wget`, `nc`, `ssh` alone |
 | Sets a variable that loads other code | warn | `NODE_OPTIONS=…`, `LD_PRELOAD=…`, `DYLD_*`, `PYTHONSTARTUP` |
-| Runs a program doctor does not know | warn | `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, `npx --no x`, `… \| $PAGER`, any other program |
+| Runs a program doctor does not know | warn | `node /opt/server.js`, `./scripts/hook.sh`, `./node_modules/.bin/prettier`, `go run ./cmd/x`, `npx --no x`, `$PAGER` alone, any other program |
 | Runs a program from a temporary directory | warn | `/tmp/x`, `sh /tmp/x.sh`, `python3 /var/tmp/x.py`. Any local user can replace a file there |
 | Launcher missing | warn | a `<program> serve` or `<node> <script> serve` server, or a hook with Mastermind's marker, whose path no longer exists, as after a `brew upgrade`. Run `mastermind setup` again |
 | Runs repo-controlled config | info | `prettier --write`, `eslint --fix`, `ruff`, `gitleaks`, `shellcheck` and other formatters, linters and scanners. Their config, plugins or rules come from the repository, and some configs are code, such as `prettier.config.js` or `eslint.config.js` |

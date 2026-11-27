@@ -2410,6 +2410,39 @@ mod tests {
                 "curl -s http://localhost:8080/health | jq .",
                 Some(Kind::ShellText),
             ),
+            // Known gaps, documented as warnings that run shell text.
+            (
+                "curl -s https://x.example/i | $PAGER",
+                Some(Kind::ShellText),
+            ),
+            (
+                "curl -s https://x.example/i | ssh host",
+                Some(Kind::ShellText),
+            ),
+            (
+                "go build -o bin/tool ./cmd/tool && ./bin/tool",
+                Some(Kind::ShellText),
+            ),
+            (
+                "npm i -g prettier@3.3.3 && prettier --check .",
+                Some(Kind::ShellText),
+            ),
+            (
+                "go install ./cmd/tool && tool --help",
+                Some(Kind::ShellText),
+            ),
+            (
+                "pipx install ruff==0.6.0 && ruff check .",
+                Some(Kind::ShellText),
+            ),
+            (
+                "cargo install --locked just@1.36.0 && just lint",
+                Some(Kind::ShellText),
+            ),
+            (
+                "cp hooks/pre-commit .git/hooks/pre-commit",
+                Some(Kind::WritesLaterRun),
+            ),
             (
                 "curl -s http://127.0.0.1:8080/health | python3 -m json.tool",
                 Some(Kind::ShellText),

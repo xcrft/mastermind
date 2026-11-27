@@ -170,6 +170,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command or `| ssh host` with no remote command, are listed in the reference.
   A per-role `PreToolUse` guard hook that checks each command when it runs is
   the follow-up, in its own pull request.
+- A package installed from a registry without an exact version, followed by
+  any command, is an error, since its programs need not share its name:
+  `cargo install ripgrep && rg TODO`, `npm i -g @evil/cli && evil`,
+  `cargo binstall evil && evil`. With an exact version, as in
+  `npm i -g prettier@3.3.3 && prettier --check .`, it warns. A repository Go
+  build such as `go build -o bin/tool ./cmd/tool && ./bin/tool` or
+  `go install ./cmd/tool` warns like `cargo build` and `make`.
+- `/proc/self/fd/../fd/0` reads as standard input, and `$(whence sh)`,
+  `$ZSH_NAME` and `$ZSH_ARGZERO` count as a shell in a pipe.
+- A hook copied or linked from the checkout into `.git/hooks` warns.
+  Downloaded content written into a hook or into `.claude/settings*.json`,
+  `.mcp.json`, `~/.claude.json` or `.codex/config.toml` is an error, and so is
+  any write to `$GIT_DIR/hooks`, `/Library/LaunchDaemons`, `/etc/cron.d`, a
+  crontab spool or `~/.local/share/systemd/user`. `.vscode/tasks.json`,
+  `~/.ssh/rc`, `.git/config` and `core.hooksPath` are listed as known gaps.
+- `scripts/validate.py` also runs doctor's persistence check, and fails a
+  frontmatter hook that writes a shell startup file or a file that runs later
+  on its own. The lookups, shell variables, remote shells, temporary folders,
+  package managers, startup files and persistence paths now live in
+  `command_rules.json`, and the corpus has a persistence section. The copy is
+  kept by hand, so only corpus commands are sure to agree.
 - Every shipped subagent declares its capability class in its workflow
   metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
   a reason. `just validate` fails when a role's `tools` do not match: `Edit`,

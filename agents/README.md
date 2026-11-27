@@ -92,11 +92,14 @@ is [`scripts/command_check.py`](../scripts/command_check.py), a line-by-line
 copy of the `mastermind doctor` command check, so it runs without building
 mmcg. It loads doctor's word tables from
 [`command_rules.json`](../mcp/servers/mmcg/src/permission_lint/command_rules.json),
-which a Rust test keeps equal to the Rust constants. Both copies must give the
-verdicts in
-[`fetch_exec_corpus.json`](../mcp/servers/mmcg/src/permission_lint/fetch_exec_corpus.json),
-so a change to one that the other does not follow fails `just check`. Add each
-new counter-example to the corpus. `mcp_tool` hooks are valid.
+which a Rust test keeps equal to the Rust constants. A hook that doctor would
+fail for writing a file that runs later, such as a shell startup file, a cron
+job or downloaded agent settings, fails too. Both copies must give the
+verdicts and persistence findings in
+[`fetch_exec_corpus.json`](../mcp/servers/mmcg/src/permission_lint/fetch_exec_corpus.json).
+The logic is copied by hand, so only the commands in the corpus are sure to
+get the same answer. Add each new counter-example to the corpus. `mcp_tool`
+hooks are valid.
 
 It also fails when:
 

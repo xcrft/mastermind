@@ -639,9 +639,18 @@ exec /usr/bin/git "$@"
             REPORT,
             "--json",
         ]);
+        // The indexer skips a file over 5 MiB, so the audit reads the change
+        // as one the report left out, not as a stale index.
         assert!(!audit.status.success());
+        let verdict: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+        assert_eq!(verdict["verdict"], "broken", "{audit:?}");
         assert!(
-            String::from_utf8_lossy(&audit.stderr).contains("index_stale"),
+            verdict["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["kind"] == "unexpected_file"
+                    && finding["file"] == "large.bin"),
             "{audit:?}"
         );
     }

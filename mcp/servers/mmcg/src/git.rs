@@ -212,7 +212,8 @@ pub(crate) fn working_tree_read_error(error: BoundedReadError) -> WorkingTreeDif
         BoundedReadError::Interrupted | BoundedReadError::DeadlineExceeded => {
             WorkingTreeDiffError::GitTimeout
         }
-        BoundedReadError::TooLarge { .. } => WorkingTreeDiffError::IndexStale,
+        // Callers that read a source treat a file over the size cap like the
+        // indexer does, as one it skips, before they get here.
         _ => WorkingTreeDiffError::SnapshotChanged,
     }
 }
@@ -1449,7 +1450,7 @@ pub(crate) fn working_tree_snapshot_token_controlled(
         digest.update(file.status.as_bytes());
         digest.update([0]);
         if file.status != "deleted" {
-            let bytes = read_repository_file(
+            match read_repository_file(
                 repo,
                 Path::new(&file.path),
                 MAX_INDEXABLE_FILE_SIZE,
@@ -1458,10 +1459,16 @@ pub(crate) fn working_tree_snapshot_token_controlled(
                     deadline,
                     interrupted,
                 },
-            )
-            .map_err(working_tree_read_error)?
-            .bytes;
-            digest.update(Sha256::digest(bytes));
+            ) {
+                Ok(file) => digest.update(Sha256::digest(file.bytes)),
+                // The indexer skips a source over the cap, so its size stands
+                // for its content here.
+                Err(BoundedReadError::TooLarge { size, .. }) => {
+                    digest.update(b"too_large\0");
+                    digest.update(size.to_be_bytes());
+                }
+                Err(error) => return Err(working_tree_read_error(error)),
+            }
         }
     }
     Ok(crate::hex::encode(&digest.finalize()))

@@ -85,16 +85,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider token commands. Approving a flagged `.mcp.json` server is an error,
   and so is an allow rule that lets the agent edit `.codex`. It still does not
   read server-managed settings, files passed with `--settings`, `--mcp-config`
-  or `--agents`, user-level skills and subagents, plugin skills, subagents and
-  servers, mods, or Codex skills; the reference lists them.
+  or `--agents`, user-level skills and subagents, plugin skills and subagents,
+  mods, or Codex skills. The reference lists them.
+- The command check that `permission rules` and `client hooks` share is now
+  structural. Any command piped into a shell or an interpreter that reads
+  standard input is an error whatever produces it, so `http`, `ssh`, `nc` or
+  `cat` of a temp file count as much as `curl`. So are a substitution or
+  here-string run as program text, a file written by a redirect, `tee`, `-o`,
+  `scp`, `rsync` or a package install that a later command runs, a build
+  after `git clone`, awk `system()`, `find -exec sh`, `xargs` into a shell,
+  and inline code that decodes and evaluates. The finding now reads "runs
+  downloaded or generated code". `go run module@latest` joins the unpinned
+  runner warning. Formatters and linters that read repository config, such as
+  `prettier` and `eslint`, get a new info note that keeps the check ok, and a
+  repository-relative `./node_modules/.bin` tool is no longer a known tool.
+- A hook or MCP server counts as Mastermind's own only when its plain absolute
+  path resolves to the install doctor runs from, or to that install's
+  `bin/mastermind.js` run by a real `node`. A bare `mastermind`,
+  `./node_modules/.bin/mastermind`, `npx`, a copy in a temp directory or
+  `/bin/sh x/mastermind.js` is checked like any other command. Global npm
+  setup now writes the node and launcher npm ran.
+- `Edit` and `Write` rules are matched as globs against the files that set
+  what an agent trusts. A rule aimed at `.codex`, `AGENTS.md` or
+  `.agents/skills`, such as `Edit(.cod*/**)` or `Edit(.*/**)`, is an error.
+  A bare or broad rule such as `Edit`, `Write(*)` or `Edit(~/**)` warns that
+  it can edit them. `Edit(.claude/worktrees/**)` is not reported.
+- `permission rules` also reads `gcpAuthRefresh`, treats
+  `CLAUDE_CODE_SHELL_PREFIX` as an error and checks its value, reads
+  commands, servers and environment policy in Codex profile files, reads the
+  MCP servers of enabled plugins, and reads Codex approval modes on every
+  server, local or remote, per tool, for apps and `apps._default`, and for
+  plugin servers, plus `destructive_enabled`. A file's `N flagged` now counts
+  servers, not findings. `client hooks` reads hooks files a plugin manifest
+  names and reports each wrong-typed hook entry on its own.
+- Static detection cannot be complete: a command can build what it runs in
+  ways no reader of its text can follow. A passing check is not proof that
+  nothing runs without asking, and a guard hook that checks each command when
+  it runs is the planned follow-up.
 - Every shipped subagent declares its capability class in its workflow
   metadata: `mutability` plus `capabilities`, where `shell` and `web` each need
   a reason. `just validate` fails when a role's `tools` do not match: `Edit`,
   `Write`, `NotebookEdit` or `MultiEdit` in a read-only role, `Bash` or
   `PowerShell` without `shell`, `WebFetch` or `WebSearch` without `web`, or a
   declared capability no tool needs. `Agent` and `Task` need `delegate`, tools
-  of MCP servers other than mmcg need `mcp`, and `BashOutput` and `KillShell`
-  count as shell. A read-only role cannot ask for `bypassPermissions` or
+  of MCP servers other than mmcg need `mcp`, and `BashOutput`, `KillShell`,
+  `Monitor`, `REPL` and `TaskStop` count as shell. `Workflow`,
+  `SendMessage`, `CronCreate` and `RemoteTrigger` need `delegate`, `Skill`
+  needs `skills`, and a subagent with frontmatter `hooks` must declare
+  `hooks`, and each hook command is checked for fetched or decoded code. A read-only role cannot ask for `bypassPermissions` or
   `acceptEdits`, a fixed deny list keeps the shell from the researcher and
   four other roles, and the comment and frontend auditors no longer get
   `Bash`. Six subagents that run commands declare `shell` with a reason.

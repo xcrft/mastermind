@@ -48,8 +48,8 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
 ## Declare capabilities
 
 Each subagent's `workflow` metadata names what it may do. `mutability` is
-`read-only` or `writer`, and `capabilities` adds `shell`, `web`, `delegate` or
-`mcp`, each with a reason that says what the role runs. Together they form the
+`read-only` or `writer`, and `capabilities` adds `shell`, `web`, `delegate`,
+`mcp`, `skills` or `hooks`, each with a reason that says what the role runs. Together they form the
 role's class, such as `read-only-with-shell`.
 
 ```yaml
@@ -67,10 +67,19 @@ workflow:
 | Tool | Needs |
 |---|---|
 | `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | `mutability: writer` |
-| `Bash`, `PowerShell`, `BashOutput`, `KillShell` | `capabilities.shell` |
+| `Bash`, `PowerShell`, `Monitor`, `REPL`, `BashOutput`, `KillShell`, `TaskStop` | `capabilities.shell` |
 | `WebFetch`, `WebSearch` | `capabilities.web` |
-| `Agent`, `Task` | `capabilities.delegate` |
+| `Agent`, `Task`, `Workflow`, `SendMessage`, `CronCreate`, `RemoteTrigger` | `capabilities.delegate` |
 | `mcp__<server>__...` for any server other than mmcg | `capabilities.mcp` |
+| `Skill`, which runs a skill with its own tools and hooks | `capabilities.skills` |
+| a `hooks:` block in the frontmatter | `capabilities.hooks` |
+
+Each frontmatter hook command is also checked for fetched or decoded code
+that runs, such as `curl … | sh`, `bash <(…)`, `eval "$(…)"` or
+`python -c "exec(b64decode(…))"`, and a malformed hook entry fails. The check
+is a small Python copy of the `mastermind doctor` command rules, so it runs
+without building mmcg. Doctor applies the full rules when the subagent is
+installed.
 
 It also fails when:
 

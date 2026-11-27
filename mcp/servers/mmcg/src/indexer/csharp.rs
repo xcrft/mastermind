@@ -226,8 +226,9 @@ fn walk(
                 } else {
                     statement_signature(&child, source)
                 };
+                let mut events = Vec::new();
                 for name in event_names(&child, source) {
-                    push_def_with_decorators(
+                    events.push(push_def_with_decorators(
                         pending,
                         name,
                         "event",
@@ -235,9 +236,16 @@ fn walk(
                         signature.clone(),
                         active_parent,
                         collect_attributes(&child, source),
-                    );
+                    ));
                 }
-                walk(child, source, pending, active_parent, module_index);
+                // Calls in `add { }` / `remove { }` or in the initializer of a
+                // single field event belong to that event. An initializer shared
+                // by `event E A, B = ...` stays with the enclosing type.
+                let owner = match events.as_slice() {
+                    [event] => Some(*event),
+                    _ => active_parent,
+                };
+                walk(child, source, pending, owner, module_index);
             }
             "property_declaration" => {
                 let name = name_field(&child, source).unwrap_or("<anon>").to_string();
@@ -753,7 +761,8 @@ mod tests {
              public delegate void PriceChanged(object sender, Money price);\n\
              public readonly struct Money {\n\
              \x20   public event PriceChanged? Changed, Cleared;\n\
-             \x20   public event EventHandler Audited { add { Log.Attach(value); } remove { } }\n\
+             \x20   public event EventHandler Audited { add { Log.Attach(value); } remove { Log.Detach(value); } }\n\
+             \x20   public event EventHandler Reset = (sender, args) => Pool.Drain();\n\
              \x20   public decimal this[int index] => Rates.Lookup(index);\n\
              \x20   public static Money operator +(Money a, Money b) => Money.Sum(a, b);\n\
              \x20   public static explicit operator decimal(Money m) { return Convert.ToDecimal(m); }\n\
@@ -775,6 +784,7 @@ mod tests {
             ("Changed", "event", money),
             ("Cleared", "event", money),
             ("Audited", "event", money),
+            ("Reset", "event", money),
             ("this", "property", money),
             ("operator +", "method", money),
             ("operator decimal", "method", money),
@@ -801,7 +811,9 @@ mod tests {
         assert_eq!(calls_from(find("operator +")), vec!["Sum"]);
         assert_eq!(calls_from(find("operator decimal")), vec!["ToDecimal"]);
         assert_eq!(calls_from(find("~Money")), vec!["Release"]);
-        assert_eq!(calls_from(money), vec!["Attach"]);
+        assert_eq!(calls_from(find("Audited")), vec!["Attach", "Detach"]);
+        assert_eq!(calls_from(find("Reset")), vec!["Drain"]);
+        assert!(calls_from(money).is_empty(), "{:?}", calls_from(money));
     }
 
     #[test]

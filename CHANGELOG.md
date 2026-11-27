@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The C# extractor records delegates (kind `delegate`), events (kind `event`),
   operators, conversion operators and finalizers as methods named
   `operator +`, `operator decimal` and `~Money`, and indexers as the property
-  `this`. Calls in their bodies belong to them instead of the enclosing type.
+  `this`. Calls in their bodies, in event `add` and `remove` accessors and in
+  the initializer of a single field event belong to them instead of the
+  enclosing type.
 
 ### Fixed
 

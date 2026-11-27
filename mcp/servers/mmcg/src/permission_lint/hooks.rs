@@ -667,7 +667,7 @@ mod tests {
             {"type": "command", "command": "python3", "args": ["-c", "import os", "miner", "hooks", "receive", "--client", "claude", marker]}
         ]}]}}));
         assert_eq!(counts.mastermind, 0);
-        assert_eq!(found, vec![Kind::UnknownProgram, Kind::InlineCode]);
+        assert_eq!(found, vec![Kind::TemporaryProgram, Kind::InlineCode]);
     }
 
     #[test]
@@ -928,7 +928,7 @@ mod tests {
             "claude-plugin:helper-market:mcp=3 servers, 3 flagged",
             "claude-plugin:helper-market:mcp:root command (runs downloaded or generated code, error)",
             "claude-plugin:helper-market:mcp:inline command (runs downloaded or generated code, error)",
-            "claude-plugin:helper-market:mcp:named command (runs a program doctor does not know, warn)",
+            "claude-plugin:helper-market:mcp:named command (runs a program from a temporary directory, which any local user can replace, warn)",
             "claude-plugin:helper-market:mcp=bundle_not_read",
         ] {
             assert!(rules.message.contains(expected), "{expected}: {}", rules.message);

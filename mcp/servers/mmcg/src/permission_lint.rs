@@ -122,6 +122,11 @@ pub enum Kind {
     BroadEditCoversTrustFiles,
     /// A command that writes a shell startup file such as `~/.zshrc`.
     WritesShellStartup,
+    /// A program, or a script given to a shell or interpreter, in a
+    /// temporary directory.
+    TemporaryProgram,
+    /// A Mastermind launcher whose path no longer exists.
+    LauncherMissing,
 }
 
 impl Kind {
@@ -178,6 +183,12 @@ impl Kind {
             }
             Kind::WritesShellStartup => {
                 "writes a shell startup file, so its code runs in every new shell"
+            }
+            Kind::TemporaryProgram => {
+                "runs a program from a temporary directory, which any local user can replace"
+            }
+            Kind::LauncherMissing => {
+                "launcher missing: its path no longer exists, for example after an upgrade, so run setup again"
             }
             Kind::AsksToWriteTrustSettings => {
                 "asks to let the agent rewrite its trust settings, which Claude Code still prompts for"
@@ -3854,7 +3865,7 @@ prefix_rule(pattern = ["npx"])
             ),
             vec![
                 ("apiKeyHelper", Kind::FetchAndExec),
-                ("awsAuthRefresh", Kind::UnknownProgram),
+                ("awsAuthRefresh", Kind::TemporaryProgram),
                 ("awsCredentialExport", Kind::InlineCode),
                 ("otelHeadersHelper", Kind::FetchAndExec),
                 ("statusLine", Kind::FetchAndExec),
@@ -3999,7 +4010,7 @@ prefix_rule(pattern = ["npx"])
             "mcp-user=1 servers, 1 flagged",
             "mcp-user:user-evil command (runs downloaded or generated code, error)",
             "mcp-local=1 servers, 1 flagged",
-            "mcp-local:local-tmp command (runs a program doctor does not know, warn)",
+            "mcp-local:local-tmp command (runs a program from a temporary directory, which any local user can replace, warn)",
             "claude-json:project:mcp-project:evil enabledMcpjsonServers (a flagged project MCP server is approved to start, error)",
         ] {
             assert!(message.contains(expected), "missing {expected:?} in {message}");
@@ -4087,7 +4098,7 @@ args = ["--fresh"]
             "{message}"
         );
         assert!(
-            message.contains("codex-user:config.toml:model_providers.corp.auth command (runs a program doctor does not know, warn)"),
+            message.contains("codex-user:config.toml:model_providers.corp.auth command (runs a program from a temporary directory, which any local user can replace, warn)"),
             "{message}"
         );
         assert!(

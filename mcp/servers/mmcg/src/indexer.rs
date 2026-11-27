@@ -2886,6 +2886,127 @@ mod incremental_tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A committed repository with `clean.rs` and `locked.rs`.
+    fn committed_repository(name: &str) -> (PathBuf, PathBuf) {
+        let (dir, db) = setup(name);
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("clean.rs"), "pub fn clean() {}\n").unwrap();
+        fs::write(repo.join("locked.rs"), "pub fn locked() {}\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        commit_all(&repo);
+        (repo, db)
+    }
+
+    /// Makes `locked.rs` unreadable so the next full index is incomplete.
+    /// Returns false where permissions do not stop reads, as for root.
+    fn lock_a_source(repo: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = repo.join("locked.rs");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::read(&locked).is_err()
+    }
+
+    fn unlock_and_remove(repo: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(repo.join("locked.rs"), fs::Permissions::from_mode(0o644)).ok();
+        fs::remove_dir_all(repo.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_incomplete_index_clears_the_commit_an_earlier_index_recorded() {
+        let (repo, db) = committed_repository("incomplete_clears");
+        let mut store = Store::open(&db).unwrap();
+        assert!(Indexer::new(&repo)
+            .index_all(&mut store, false)
+            .unwrap()
+            .complete());
+        assert!(store.indexed_commit().unwrap().is_some());
+        if lock_a_source(&repo) {
+            fs::write(repo.join("clean.rs"), "pub fn edited() {}\n").unwrap();
+            let stats = Indexer::new(&repo).index_all(&mut store, false).unwrap();
+            assert!(!stats.complete(), "{stats:?}");
+            for key in [
+                "indexed_commit",
+                "indexed_changed_paths",
+                "indexed_rows_fingerprint",
+            ] {
+                assert_eq!(store.meta_value(key).unwrap(), None, "{key}");
+            }
+        }
+        unlock_and_remove(&repo);
+    }
+
+    #[test]
+    fn an_incomplete_index_records_no_commit() {
+        let (repo, db) = committed_repository("incomplete_records_none");
+        let mut store = Store::open(&db).unwrap();
+        if lock_a_source(&repo) {
+            let stats = Indexer::new(&repo).index_all(&mut store, false).unwrap();
+            assert!(!stats.complete(), "{stats:?}");
+            assert_eq!(store.meta_value("indexed_commit").unwrap(), None);
+        }
+        unlock_and_remove(&repo);
+    }
+
+    #[test]
+    fn a_commit_made_during_an_index_is_not_recorded() {
+        let (repo, db) = committed_repository("commit_during_index");
+        let mut store = Store::open(&db).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_repo = repo.clone();
+        let indexer = Indexer::new(&repo).with_after_file_commit(move || {
+            if !done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                git(
+                    &hook_repo,
+                    &[
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "user.email=t@example.com",
+                        "-c",
+                        "commit.gpgsign=false",
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        "during the index",
+                    ],
+                );
+            }
+        });
+        assert!(indexer.index_all(&mut store, false).unwrap().complete());
+        assert_eq!(store.meta_value("indexed_commit").unwrap(), None);
+        assert_eq!(store.indexed_commit().unwrap(), None);
+        unlock_and_remove(&repo);
+    }
+
+    #[test]
+    fn a_source_edited_during_an_index_is_listed() {
+        let (repo, db) = committed_repository("edit_during_index");
+        let mut store = Store::open(&db).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_repo = repo.clone();
+        let indexer = Indexer::new(&repo).with_after_file_commit(move || {
+            if !done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                fs::write(
+                    hook_repo.join("clean.rs"),
+                    "pub fn edited_during_the_index() {}\n",
+                )
+                .unwrap();
+            }
+        });
+        assert!(indexer.index_all(&mut store, false).unwrap().complete());
+        let bound = store.indexed_commit().unwrap().expect("a recorded commit");
+        assert_eq!(bound.commit, head(&repo));
+        assert!(
+            bound.changed_paths.contains("clean.rs"),
+            "{:?}",
+            bound.changed_paths
+        );
+        unlock_and_remove(&repo);
+    }
+
     #[test]
     fn an_index_outside_a_git_worktree_records_no_commit() {
         let (dir, db) = setup("no_indexed_commit");

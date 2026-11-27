@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `namespace fs = std::filesystem;` is an `imports` edge `fs` /
   `std::filesystem::*`.
 - `.inl` files are indexed as C++.
+- The C# extractor records delegates (kind `delegate`), events (kind `event`),
+  operators, conversion operators and finalizers as methods named
+  `operator +`, `operator decimal` and `~Money`, and indexers as the property
+  `this`. Calls in their bodies belong to them instead of the enclosing type.
+
+### Fixed
+
+- A C# `global using System.Text.Json;` is the import `Json` /
+  `System.Text.Json::*`. The path used to start with `global using`, so it
+  never matched the namespace.
 
 ### Changed
 

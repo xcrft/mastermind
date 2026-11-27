@@ -554,12 +554,6 @@ def written_files(call: Call) -> list[str]:
         elif arg.startswith("--output="):
             push(arg[len("--output=") :])
 
-    def package(spec: str) -> str:
-        spec = spec.rsplit("/", 1)[-1]
-        for sep in "@=<>[~":
-            spec = spec.split(sep, 1)[0]
-        return spec
-
     name = call.name
     sub = positional[0] if positional else None
     if name == "tee" or name in {"scp", "rsync", "sftp"}:
@@ -576,11 +570,13 @@ def written_files(call: Call) -> list[str]:
             push(url)
         files.append(CLONED)
     elif name == "brew" and sub == "install":
-        files.extend(package(spec) for spec in positional[1:])
+        if len(positional) > 1:
+            files.append(INSTALLED)
     else:
+        # An unpinned install then a command warns like `npx -y` in doctor,
+        # so it is marked but never counts as running fetched code here.
         specs = installed_specs(call)
         if any(not pinned(spec) for spec in specs):
-            files.extend(package(spec) for spec in specs)
             files.append(INSTALLED)
     return files
 
@@ -819,8 +815,6 @@ def detect(text: str, depth: int = 0, shell: bool = True) -> bool:
         return True
     written: list[str] = []
     for command in split_script(outer):
-        if INSTALLED in written:
-            return True
         if any(xargs_runs_code(stage) for stage in command[1:]):
             return True
         calls = [call for call in (resolve(stage) for stage in command) if call]

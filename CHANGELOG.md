@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   standard input is an error whatever produces it, so `http`, `ssh`, `nc` or
   `cat` of a temp file count as much as `curl`. So are a substitution or
   here-string run as program text, a file written by a redirect, `tee`, `-o`,
-  `scp`, `rsync` or a package install that a later command runs, a build
+  `scp` or `rsync` that a later command runs, a build
   after `git clone`, awk `system()`, `find -exec sh`, `xargs` into a shell,
   and inline code that decodes and evaluates. The finding now reads "runs
   downloaded or generated code". `go run module@latest` joins the unpinned
@@ -171,11 +171,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A per-role `PreToolUse` guard hook that checks each command when it runs is
   the follow-up, in its own pull request.
 - A package installed from a registry without an exact version, followed by
-  any command, is an error, since its programs need not share its name:
-  `cargo install ripgrep && rg TODO`, `npm i -g @evil/cli && evil`,
-  `cargo binstall evil && evil`. With an exact version, as in
-  `npm i -g prettier@3.3.3 && prettier --check .`, it warns. A repository Go
-  build such as `go build -o bin/tool ./cmd/tool && ./bin/tool` or
+  any command, warns that it runs a package without an exact version, the
+  same as `npx -y`, since its programs need not share its name:
+  `npm i -D eslint && npx eslint .`, `pip install pytest && pytest`,
+  `cargo install evil-crate && evil`. A pipe into a shell, a file written and
+  then run, and decoded code run after the install are still errors. With an
+  exact version, as in `npm i -g prettier@3.3.3 && prettier --check .`, it
+  warns as shell text. A repository Go build such as `go build -o bin/tool ./cmd/tool && ./bin/tool` or
   `go install ./cmd/tool` warns like `cargo build` and `make`.
 - `/proc/self/fd/../fd/0` reads as standard input, and `$(whence sh)`,
   `$ZSH_NAME` and `$ZSH_ARGZERO` count as a shell in a pipe.

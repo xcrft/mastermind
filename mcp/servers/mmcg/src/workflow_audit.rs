@@ -2585,7 +2585,7 @@ fn bounded_registration_string(value: &str) -> bool {
     !value.is_empty() && value.len() <= 4_096 && !value.chars().any(char::is_control)
 }
 
-fn canonical_mmcg_launcher(command: &str, args: &[&str]) -> bool {
+pub(crate) fn canonical_mmcg_launcher(command: &str, args: &[&str]) -> bool {
     if let [launcher, "serve"] = args {
         if crate::setup::npm_project_launcher(Path::new(command), Path::new(launcher)) {
             return true;

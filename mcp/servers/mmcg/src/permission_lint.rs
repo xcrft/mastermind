@@ -86,10 +86,26 @@ pub enum Kind {
     ApprovesProjectMcpServers,
     FetchAndExec,
     ShellText,
-    ForeignHook,
     HttpHook,
     RepoSkillRunsCode,
     SubagentBypass,
+    UnknownProgram,
+    InlineCode,
+    UnpinnedRunner,
+    NetworkTool,
+    CodeLoadingVariable,
+    ContainerHostAccess,
+    MalformedHookGroup,
+    HookLimit,
+    SecretInConfig,
+    PlainHttpServer,
+    ApprovedFlaggedServer,
+    WritesTrustSettings,
+    McpServerTools,
+    ThirdPartyPlugin,
+    PluginMarketplace,
+    RedirectsModelTraffic,
+    ApprovesRemoteTools,
 }
 
 impl Kind {
@@ -118,10 +134,26 @@ impl Kind {
             Kind::ApprovesProjectMcpServers => "starts every project MCP server without asking",
             Kind::FetchAndExec => "downloads and runs code",
             Kind::ShellText => "runs shell text",
-            Kind::ForeignHook => "command hook Mastermind did not install",
             Kind::HttpHook => "sends hook events to a URL",
             Kind::RepoSkillRunsCode => "repository skill runs chosen code without asking",
             Kind::SubagentBypass => "repository subagent asks to bypass prompts",
+            Kind::UnknownProgram => "runs a program doctor does not know",
+            Kind::InlineCode => "runs code given inline",
+            Kind::UnpinnedRunner => "runs a package without an exact version",
+            Kind::NetworkTool => "runs a network tool",
+            Kind::CodeLoadingVariable => "sets a variable that loads other code",
+            Kind::ContainerHostAccess => "runs a container with host access",
+            Kind::MalformedHookGroup => "malformed hook group, which the client skips",
+            Kind::HookLimit => "more hooks than doctor lists",
+            Kind::SecretInConfig => "holds a secret in the URL or headers",
+            Kind::PlainHttpServer => "talks to a remote server over plain HTTP",
+            Kind::ApprovedFlaggedServer => "a flagged project MCP server is approved to start",
+            Kind::WritesTrustSettings => "lets the agent rewrite its own trust settings",
+            Kind::McpServerTools => "every tool of one MCP server",
+            Kind::ThirdPartyPlugin => "enables a plugin outside the official marketplace",
+            Kind::PluginMarketplace => "adds a plugin marketplace",
+            Kind::RedirectsModelTraffic => "sends model traffic through another host",
+            Kind::ApprovesRemoteTools => "approves a remote MCP server's tools without asking",
         }
     }
 
@@ -132,7 +164,10 @@ impl Kind {
             | Kind::NetworkNoApproval
             | Kind::ReadsSecrets
             | Kind::FetchAndExec
-            | Kind::RepoSkillRunsCode => Severity::Error,
+            | Kind::RepoSkillRunsCode
+            | Kind::ContainerHostAccess
+            | Kind::ApprovedFlaggedServer
+            | Kind::WritesTrustSettings => Severity::Error,
             _ => Severity::Warn,
         }
     }
@@ -1408,19 +1443,11 @@ fn parse_codex_config(bytes: &[u8]) -> Result<CodexConfig, &'static str> {
     let servers = match table.get("mcp_servers").and_then(toml::Value::as_table) {
         Some(servers) => servers
             .iter()
-            .filter_map(|(name, server)| {
-                let command = server.get("command")?.as_str()?;
-                let args: Vec<String> = server
-                    .get("args")
-                    .and_then(toml::Value::as_array)
-                    .map(|args| {
-                        args.iter()
-                            .map(|arg| arg.as_str().unwrap_or("").to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                launch::classify_argv(command, &args)
-                    .map(|finding| (project::safe_name(name), finding))
+            .flat_map(|(name, server)| {
+                let server = serde_json::to_value(server).unwrap_or_default();
+                project::lint_server(&server)
+                    .into_iter()
+                    .map(move |finding| (project::safe_name(name), finding))
             })
             .collect(),
         None => Vec::new(),
@@ -1507,10 +1534,20 @@ pub fn lint_codex_config(bytes: &[u8]) -> FileLint {
 }
 
 /// The files read for one run.
+#[derive(Debug, Default, Clone)]
 pub struct Locations {
     pub root: PathBuf,
     pub claude_config_dir: Option<PathBuf>,
     pub codex_home: Option<PathBuf>,
+    /// The system directory of Claude Code managed settings:
+    /// <https://code.claude.com/docs/en/managed-settings>.
+    pub claude_managed_dir: Option<PathBuf>,
+    /// `~/.claude.json`, or `.claude.json` in `CLAUDE_CONFIG_DIR` when set:
+    /// <https://code.claude.com/docs/en/claude-directory>.
+    pub claude_json: Option<PathBuf>,
+    /// The directory of the Codex system `hooks.json`:
+    /// <https://developers.openai.com/codex/hooks>.
+    pub codex_system_dir: Option<PathBuf>,
 }
 
 impl Locations {
@@ -1521,12 +1558,50 @@ impl Locations {
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
         };
+        let config_dir = from_env("CLAUDE_CONFIG_DIR");
+        let claude_managed_dir = if cfg!(target_os = "macos") {
+            Some(PathBuf::from("/Library/Application Support/ClaudeCode"))
+        } else if cfg!(windows) {
+            Some(PathBuf::from(r"C:\Program Files\ClaudeCode"))
+        } else {
+            Some(PathBuf::from("/etc/claude-code"))
+        };
+        let codex_system_dir = if cfg!(windows) {
+            from_env("ProgramData").map(|dir| dir.join("OpenAI").join("Codex"))
+        } else {
+            Some(PathBuf::from("/etc/codex"))
+        };
         Self {
             root: root.to_path_buf(),
-            claude_config_dir: from_env("CLAUDE_CONFIG_DIR")
+            claude_json: match &config_dir {
+                Some(dir) => Some(dir.join(".claude.json")),
+                None => home.as_ref().map(|home| home.join(".claude.json")),
+            },
+            claude_config_dir: config_dir
                 .or_else(|| home.as_ref().map(|home| home.join(".claude"))),
             codex_home: from_env("CODEX_HOME").or_else(|| home.map(|home| home.join(".codex"))),
+            claude_managed_dir,
+            codex_system_dir,
         }
+    }
+
+    /// Claude Code managed settings: `managed-settings.json` and the files in
+    /// `managed-settings.d`, merged by Claude Code.
+    pub(crate) fn claude_managed_files(&self) -> Vec<(String, PathBuf)> {
+        let Some(dir) = &self.claude_managed_dir else {
+            return Vec::new();
+        };
+        let mut files = vec![(
+            "claude-managed".to_string(),
+            dir.join("managed-settings.json"),
+        )];
+        let (dropins, _) = listed_files(&dir.join("managed-settings.d"), ".json");
+        files.extend(
+            dropins
+                .into_iter()
+                .map(|(name, path)| (format!("claude-managed:{name}"), path)),
+        );
+        files
     }
 
     pub(crate) fn claude_files(&self) -> Vec<(String, PathBuf)> {
@@ -2305,7 +2380,7 @@ prefix_rule(pattern = ["npx"])
             "approval_policy = \"never\"\ndefault_permissions = \":workspace\"\n",
             "approval_policy = \"on-request\"\nsandbox_mode = \"danger-full-access\"\n",
             "approval_policy = { granular = { rules = true } }\nsandbox_mode = \"danger-full-access\"\n",
-            "[mcp_servers.mmcg]\ncommand = \"mastermind\"\n",
+            "[mcp_servers.mmcg]\ncommand = \"mastermind\"\nargs = [\"serve\"]\n",
         ] {
             assert!(
                 matches!(lint_codex_config(text.as_bytes()), FileLint::Read { ref findings, .. } if findings.is_empty()),
@@ -2386,6 +2461,7 @@ prefix_rule(pattern = ["npx"])
             root: root.join("project"),
             claude_config_dir: Some(claude_dir.clone()),
             codex_home: Some(codex_home),
+            ..Locations::default()
         });
 
         assert_eq!(check.status, crate::doctor::Status::Warn);
@@ -2433,6 +2509,7 @@ prefix_rule(pattern = ["npx"])
                 root: root.join("project"),
                 claude_config_dir: None,
                 codex_home: Some(root.join("codex-home")),
+                ..Locations::default()
             })
         };
         let combined = check_with(&root);
@@ -2480,6 +2557,7 @@ prefix_rule(pattern = ["npx"])
             root: root.join("project"),
             claude_config_dir: None,
             codex_home: Some(root.join("codex-home")),
+            ..Locations::default()
         });
         assert_eq!(check.status, crate::doctor::Status::Warn);
         assert!(
@@ -2499,6 +2577,7 @@ prefix_rule(pattern = ["npx"])
             root: root.clone(),
             claude_config_dir: None,
             codex_home: None,
+            ..Locations::default()
         });
         assert_eq!(empty.status, crate::doctor::Status::Ok);
         assert_eq!(empty.message, "no permission settings found");
@@ -2513,6 +2592,7 @@ prefix_rule(pattern = ["npx"])
             root: root.clone(),
             claude_config_dir: None,
             codex_home: None,
+            ..Locations::default()
         });
         assert_eq!(narrow.status, crate::doctor::Status::Ok);
         assert_eq!(narrow.message, "claude-project=2 read");
@@ -2600,6 +2680,9 @@ prefix_rule(pattern = ["npx"])
             Kind::BypassMode,
             Kind::UnsandboxedNoApproval,
             Kind::NetworkNoApproval,
+            Kind::ContainerHostAccess,
+            Kind::ApprovedFlaggedServer,
+            Kind::WritesTrustSettings,
         ] {
             assert_eq!(kind.severity(), Severity::Error, "{kind:?}");
         }
@@ -2608,7 +2691,9 @@ prefix_rule(pattern = ["npx"])
             Kind::Publishes,
             Kind::WebAccess,
             Kind::SkipsPrompts,
-            Kind::ForeignHook,
+            Kind::UnknownProgram,
+            Kind::ShellText,
+            Kind::UnpinnedRunner,
             Kind::SubagentBypass,
             Kind::InheritsSecrets,
         ] {
@@ -2704,6 +2789,7 @@ prefix_rule(pattern = ["npx"])
             root: root.clone(),
             claude_config_dir: None,
             codex_home: None,
+            ..Locations::default()
         });
         assert_eq!(check.status, crate::doctor::Status::Fail);
         assert!(

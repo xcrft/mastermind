@@ -45,17 +45,141 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 /// Findings named by a printable server name.
 pub type ServerFindings = Vec<(String, Finding)>;
 
+/// Whether a header name usually carries a credential.
+fn secret_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "auth", "cookie", "key", "password", "secret", "session", "token",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
+}
+
+/// Whether a value is only `${VAR}` references, which the client fills in
+/// from the environment.
+fn only_references(value: &str) -> bool {
+    let mut rest = value.trim();
+    if let Some(after) = rest.strip_prefix("Bearer ") {
+        rest = after.trim();
+    }
+    !rest.is_empty()
+        && rest
+            .split_whitespace()
+            .all(|part| part.starts_with("${") && part.ends_with('}'))
+}
+
+/// Whether a server URL carries a credential: a user and password, or a
+/// query parameter named like one with a literal value.
+fn url_has_secret(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return true;
+    }
+    url.split_once('?').is_some_and(|(_, query)| {
+        query.split(['&', '#']).any(|pair| {
+            pair.split_once('=').is_some_and(|(name, value)| {
+                !value.is_empty() && secret_name(name) && !only_references(value)
+            }) || pair.split_once('=').is_some_and(|(name, _)| {
+                matches!(name.to_ascii_lowercase().as_str(), "sig" | "signature")
+            })
+        })
+    })
+}
+
+fn is_local_host(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if host.starts_with('[') {
+        host.split(']')
+            .next()
+            .unwrap_or(host)
+            .trim_start_matches('[')
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
+}
+
+/// Findings for one MCP server definition, in Claude Code `.mcp.json` and
+/// `~/.claude.json` shape or Codex `mcp_servers` shape. Values are never
+/// printed, so a secret in a URL or header is reported by presence only.
+pub(crate) fn lint_server(server: &serde_json::Value) -> Vec<Finding> {
+    if launch::is_mastermind_server(server) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let text = |key: &str| server.get(key).and_then(serde_json::Value::as_str);
+    if let Some(command) = text("command") {
+        let args = string_list(server.get("args"));
+        findings.extend(launch::classify_argv(command, &args));
+    }
+    for key in ["env", "env_vars"] {
+        if server
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|env| env.keys().any(|name| launch::loads_code(name)))
+        {
+            findings.push(Finding {
+                program: "env",
+                kind: Kind::CodeLoadingVariable,
+            });
+        }
+    }
+    let url = text("url");
+    let header_secret = ["headers", "http_headers"].iter().any(|key| {
+        server
+            .get(*key)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|headers| {
+                headers.iter().any(|(name, value)| {
+                    secret_name(name) && value.as_str().is_some_and(|value| !only_references(value))
+                })
+            })
+    });
+    if header_secret || url.is_some_and(url_has_secret) {
+        findings.push(Finding {
+            program: "url",
+            kind: Kind::SecretInConfig,
+        });
+    }
+    if url.is_some_and(|url| url.to_ascii_lowercase().starts_with("http://") && !is_local_host(url))
+    {
+        findings.push(Finding {
+            program: "url",
+            kind: Kind::PlainHttpServer,
+        });
+    }
+    for key in ["headersHelper", "http_headers_helper"] {
+        if let Some(helper) = text(key) {
+            findings.extend(launch::classify_shell_text(helper).map(|finding| Finding {
+                program: "headersHelper",
+                ..finding
+            }));
+        }
+    }
+    if url.is_some()
+        && text("default_tools_approval_mode")
+            .is_some_and(|mode| matches!(mode, "auto" | "approve"))
+    {
+        findings.push(Finding {
+            program: "default_tools_approval_mode",
+            kind: Kind::ApprovesRemoteTools,
+        });
+    }
+    findings
+}
+
 /// Findings for MCP server definitions keyed by name, as in `.mcp.json`
 /// `mcpServers` or an inline subagent server.
-pub(crate) fn lint_servers(
-    servers: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<(String, Finding)> {
+pub(crate) fn lint_servers(servers: &serde_json::Map<String, serde_json::Value>) -> ServerFindings {
     servers
         .iter()
-        .filter_map(|(name, server)| {
-            let command = server.get("command")?.as_str()?;
-            let args = string_list(server.get("args"));
-            launch::classify_argv(command, &args).map(|finding| (safe_name(name), finding))
+        .flat_map(|(name, server)| {
+            lint_server(server)
+                .into_iter()
+                .map(move |finding| (safe_name(name), finding))
         })
         .collect()
 }
@@ -148,7 +272,7 @@ pub fn lint_artifact(frontmatter: &serde_json::Value, subagent: bool) -> FileLin
             },
         ));
     }
-    match hooks::lint_hooks(frontmatter, &[]) {
+    match hooks::lint_hooks(frontmatter, None) {
         Ok(file) => findings.extend(file.findings.into_iter().map(|(_, position, finding)| {
             (
                 Some(position),

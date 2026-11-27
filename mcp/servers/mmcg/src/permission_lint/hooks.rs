@@ -520,7 +520,8 @@ mod tests {
 
     fn own() -> String {
         format!(
-            "'npx' '-y' '@xcraftmind/mastermind@4.0.1' miner hooks receive --client 'claude' --project-root '/repo' {}",
+            "'{}' miner hooks receive --client 'claude' --project-root '/repo' {}",
+            super::super::launch::own_binary(),
             crate::miner::hooks::registration_marker("claude", PROJECT)
         )
     }

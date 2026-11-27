@@ -234,7 +234,20 @@ fn npm_launcher_entry(platform: NpmLauncherPlatform, command: &str, args: Vec<St
 /// The `node <launcher> serve` entry setup writes for a project-local npm
 /// install. Doctor accepts a registration through the same rule.
 pub(crate) fn npm_project_launcher(node: &Path, launcher: &Path) -> bool {
-    node.is_absolute() && launcher.is_absolute() && launcher.ends_with("bin/mastermind.js")
+    let plain = |path: &Path| {
+        path.is_absolute()
+            && path.components().all(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+    };
+    let node_name = node
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "node.exe"));
+    plain(node) && plain(launcher) && node_name && launcher.ends_with("bin/mastermind.js")
 }
 
 fn mmcg_entry_for_platform(
@@ -287,7 +300,22 @@ fn mmcg_entry_for_platform(
             Ok(npm_launcher_entry(platform, bin, vec!["serve".into()]))
         }
         Some("global") | Some("unknown") => {
-            // `mastermind` is on PATH via npm's global bin directory.
+            // npm knows the node and launcher it ran. Writing them keeps the
+            // entry pointing at this install instead of whatever `mastermind`
+            // is first on PATH, and lets doctor confirm it is Mastermind's.
+            if platform == NpmLauncherPlatform::Other {
+                if let (Some(launcher), Some(node)) = (
+                    std::env::var_os("MASTERMIND_LAUNCHER_JS"),
+                    std::env::var_os("MASTERMIND_NODE"),
+                ) {
+                    let launcher = PathBuf::from(launcher);
+                    let node = PathBuf::from(node);
+                    if npm_project_launcher(&node, &launcher) {
+                        return Ok(json!({"command":node,"args":[launcher,"serve"]}));
+                    }
+                }
+            }
+            // Otherwise `mastermind` is on PATH via npm's global bin directory.
             let command = match platform {
                 NpmLauncherPlatform::Other => "mastermind",
                 NpmLauncherPlatform::Windows => "mastermind.cmd",
@@ -2844,6 +2872,33 @@ mod tests {
         assert!(!crate::workflow_audit::valid_mmcg_registration_entry(
             &json!({"command": "node", "args": [launcher_text, "serve"]})
         ));
+        // Reviewer counter-examples: another interpreter, or a path with `..`.
+        for (command, script) in [
+            ("/bin/sh", launcher_text.to_string()),
+            (
+                node_text,
+                format!("{root}/x/../node_modules/@xcraftmind/mastermind/bin/mastermind.js"),
+            ),
+        ] {
+            assert!(
+                !npm_project_launcher(Path::new(command), Path::new(&script)),
+                "{command} {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_npm_installs_write_the_node_and_launcher_npm_ran() {
+        let launcher = "/usr/local/lib/node_modules/@xcraftmind/mastermind/bin/mastermind.js";
+        let _guard = EnvGuard::set(&[
+            ("MASTERMIND_INSTALL_MODE", "global"),
+            ("MASTERMIND_LAUNCHER_JS", launcher),
+            ("MASTERMIND_NODE", "/usr/local/bin/node"),
+        ]);
+        assert_eq!(
+            mmcg_entry_for_platform(Path::new("/ignored"), NpmLauncherPlatform::Other).unwrap(),
+            json!({"command": "/usr/local/bin/node", "args": [launcher, "serve"]})
+        );
     }
 
     #[test]

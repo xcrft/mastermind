@@ -411,6 +411,9 @@ pub fn analyze(
         crate::lens::LensError::AnalysisTimeout
         | crate::lens::LensError::SnapshotTimeout
         | crate::lens::LensError::SnapshotTooLarge => TemporalError::SnapshotUnavailable,
+        crate::lens::LensError::IndexUnavailable => {
+            TemporalError::Impact(ChangeImpactError::IndexUnavailable)
+        }
         _ => TemporalError::Impact(ChangeImpactError::IndexStale),
     })?;
     let source_index_state = store

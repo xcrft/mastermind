@@ -437,3 +437,13 @@ fn impact_checks_every_file_after_an_unlisted_row_write() {
     reindex(&repo);
     assert_current(&repo, "HEAD", "the same files after index");
 }
+
+#[test]
+fn impact_without_an_index_says_index_missing() {
+    let repo = indexed(|_| {});
+    let missing = repo.index.with_file_name("missing.db");
+    let root = repo.source.path().to_str().unwrap();
+    let output = run(&missing, &["impact", "--since", "HEAD", "--root", root]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output).trim(), "index_missing");
+}

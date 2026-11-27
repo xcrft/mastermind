@@ -2810,7 +2810,7 @@ fn changed_since_root(
         .meta_value("index_root")
         .map_err(|error| HandlerError::internal("changed_since_root", error))?
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| HandlerError::InvalidArguments("index_stale".into()))?
+        .ok_or_else(|| HandlerError::InvalidArguments("index_missing".into()))?
         .canonicalize()
         .map_err(|_| HandlerError::InvalidArguments("root_mismatch".into()))?;
     let requested = match root_arg {
@@ -3029,7 +3029,7 @@ fn handle_temporal(store: &mut Store, args: &Value) -> Result<Value, HandlerErro
             .meta_value("index_root")
             .map_err(|error| HandlerError::internal("temporal_index_root", error))?
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| HandlerError::InvalidArguments("index_stale".to_string()))?
+            .ok_or_else(|| HandlerError::InvalidArguments("index_missing".to_string()))?
             .canonicalize()
             .map_err(|_| HandlerError::InvalidArguments("root_mismatch".to_string()))?,
         Some(Value::String(value)) if !value.trim().is_empty() => std::path::PathBuf::from(value)
@@ -4453,11 +4453,34 @@ mod tests {
         );
         let result = internal.result.unwrap();
         assert_eq!(result["isError"], true);
-        assert_eq!(unwrap_content(&result)["error"], "index_stale");
+        assert_eq!(unwrap_content(&result)["error"], "index_missing");
         assert!(!serde_json::to_string(&result)
             .unwrap()
             .contains("/path/that/does/not/exist"));
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn root_tools_without_an_index_say_index_missing() {
+        let path =
+            std::env::temp_dir().join(format!("mmcg_mcp_index_missing_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = crate::store::Store::open(&path).unwrap();
+        for (name, arguments) in [
+            ("mmcg_change_impact", json!({ "since": "HEAD" })),
+            ("mmcg_test_impact", json!({ "since": "HEAD" })),
+            ("mmcg_symbols_changed_since", json!({ "git_ref": "HEAD" })),
+        ] {
+            let result = handle_tools_call(
+                ProtocolVersion::Current,
+                &mut store,
+                &json!({ "name": name, "arguments": arguments }),
+            )
+            .unwrap();
+            assert_eq!(result["isError"], true, "{name}");
+            assert_eq!(unwrap_content(&result)["error"], "index_missing", "{name}");
+        }
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4479,7 +4502,7 @@ mod tests {
         });
         let typed = handle_tools_call(ProtocolVersion::Current, &mut store, &params).unwrap();
         let typed_debug = serde_json::to_string(&typed).unwrap();
-        assert_eq!(unwrap_content(&typed)["error"], "index_stale");
+        assert_eq!(unwrap_content(&typed)["error"], "index_missing");
         assert!(!typed_debug.contains(SENTINEL));
         assert!(!typed_debug.contains("No such file"));
 
@@ -4490,7 +4513,7 @@ mod tests {
         assert!(!public_diagnostic.contains("No such file"));
         assert_eq!(
             unwrap_content(&public_error.result.unwrap())["error"],
-            "index_stale"
+            "index_missing"
         );
 
         let _ = std::fs::remove_file(&path);

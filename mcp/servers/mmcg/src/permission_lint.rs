@@ -1198,16 +1198,45 @@ fn expand_braces(pattern: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// A glob with each `\\` escape read: an escaped `*`, `?`, `[`, `]`, `{`,
+/// `}`, `,`, `!` or `\\` becomes a private character that matches no trust
+/// file, so `src/\\[id\\].tsx` and `docs/\\*.md` are plain paths. Any other
+/// escaped character stands for itself, so `\\.codex` is `.codex`. `None`
+/// when the pattern ends in a lone `\\`.
+fn unescape_glob(pattern: &str) -> Option<String> {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let escaped = chars.next()?;
+        out.push(match escaped {
+            '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!' | '\\' => {
+                char::from_u32(0xE000 + escaped as u32).unwrap_or('\u{E000}')
+            }
+            other => other,
+        });
+    }
+    Some(out)
+}
+
 /// The finding for an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` rule:
 /// the trust files its pattern reaches, judged by glob matching rather than
 /// by the text of the pattern. A `{a,b}` list is read as each of its
-/// patterns, and the most serious finding of any of them counts. Syntax
-/// doctor does not read, such as a `\\` escape, a leading `!` or braces that
-/// do not pair up, is treated as broad.
+/// patterns, and the most serious finding of any of them counts. A `\\`
+/// escape is read as in gitignore. Syntax doctor does not read, such as a
+/// leading `!`, braces that do not pair up or a lone trailing `\\`, is
+/// treated as broad.
 fn edit_finding(spec: Option<&str>) -> Option<Kind> {
     let Some(spec) = spec.filter(|spec| !spec.is_empty()) else {
         return edit_pattern_finding(None);
     };
+    let Some(spec) = unescape_glob(spec) else {
+        return Some(Kind::BroadEditCoversTrustFiles);
+    };
+    let spec = spec.as_str();
     let unknown = |pattern: &str| {
         pattern.contains('\\') || pattern.split('/').any(|segment| segment.starts_with('!'))
     };
@@ -3730,8 +3759,29 @@ prefix_rule(pattern = ["npx"])
         ] {
             assert_eq!(claude(rule), None, "{rule}");
         }
+        // Reviewer counter-examples: an escaped glob character is a literal
+        // path, not syntax doctor cannot read.
+        for rule in [
+            "Edit(src/\\[id\\].tsx)",
+            "Edit(docs/\\*.md)",
+            "Edit(app/\\[slug\\]/page.tsx)",
+            "Edit(src/\\{a,b\\}.ts)",
+            "Edit(notes/\\!draft.md)",
+            "Edit(.cod\\*/**)",
+            "Edit(a\\\\b.md)",
+        ] {
+            assert_eq!(claude(rule), None, "{rule}");
+        }
+        // An escaped plain character stands for itself.
+        for rule in [
+            "Edit(\\.codex/**)",
+            "Edit(AGENTS\\.md)",
+            "Edit(\\.agents/skills/**)",
+        ] {
+            assert_eq!(claude(rule), Some(Kind::WritesTrustSettings), "{rule}");
+        }
         // Syntax doctor does not read is broad, not silent.
-        for rule in ["Edit(\\.codex/**)", "Edit({.codex/**)", "Edit(!src/**)"] {
+        for rule in ["Edit({.codex/**)", "Edit(!src/**)", "Edit(src\\)"] {
             assert_eq!(
                 claude(rule),
                 Some(Kind::BroadEditCoversTrustFiles),

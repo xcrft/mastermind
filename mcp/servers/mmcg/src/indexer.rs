@@ -2872,6 +2872,52 @@ def concatenated(value):
     }
 
     #[test]
+    fn ts_concept_documentation_attaches_jsdoc_to_namespaces_and_signatures() {
+        let (dir, db) = setup("ts_signature_documentation");
+        fs::write(
+            dir.join("api.d.ts"),
+            "/** namespacequartz billing api */\n\
+             export namespace Billing {\n\
+             \x20 /** innerquartz tax rules */\n\
+             \x20 namespace Tax {}\n\
+             }\n\
+             export interface Repository {\n\
+             \x20 /** signaturequartz lookup */\n\
+             \x20 find(id: string): string;\n\
+             }\n\
+             export abstract class Store {\n\
+             \x20 /** abstractquartz persist */\n\
+             \x20 abstract save(): void;\n\
+             }\n\
+             /** declarequartz emitter */\n\
+             export declare function emit(event: string): void;\n\
+             /** ambientquartz logger */\n\
+             declare function log(line: string): void;\n\
+             /** enumquartz states */\n\
+             export enum State { Draft }\n\
+             /** aliasquartz id */\n\
+             export type Id = string;\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        for (term, owner) in [
+            ("namespacequartz", "Billing"),
+            ("innerquartz", "Tax"),
+            ("signaturequartz", "find"),
+            ("abstractquartz", "save"),
+            ("declarequartz", "emit"),
+            ("ambientquartz", "log"),
+            ("enumquartz", "State"),
+            ("aliasquartz", "Id"),
+        ] {
+            assert_eq!(documentation_matches(&store, term), [owner], "{term}");
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn js_ts_concept_documentation_attaches_immediate_jsdoc_through_export() {
         let (dir, db) = setup("js_ts_concept_documentation");
         fs::write(

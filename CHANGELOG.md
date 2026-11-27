@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces (`namespace A.B { }` and `module A { }`), with their members as
   children. Interface methods, abstract methods and `declare function`
   signatures are methods and functions. An overload signature is left out
-  when its implementation is in the same scope.
+  when its implementation is in the same scope. A JSDoc comment on any of
+  these declarations is concept documentation for it, and
+  `symbols-changed-since` reports them like other symbols.
 - TypeScript and JavaScript re-exports are `imports` edges of the module:
   `export { foo } from './a'` is `foo` / `./a::foo`. As with an aliased
   import, `export { foo as bar } from './a'` is `bar` / `./a::foo`, so

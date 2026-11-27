@@ -659,6 +659,22 @@ fn owned_symbol_nodes<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
             .child_by_field_name("declaration")
             .map(owned_symbol_nodes)
             .unwrap_or_default(),
+        // `namespace A { }` is an expression statement at the top of a block,
+        // and `declare function f()` wraps the signature.
+        "expression_statement" | "ambient_declaration" => {
+            let mut cursor = node.walk();
+            let owned = node
+                .named_children(&mut cursor)
+                .filter(|child| {
+                    matches!(
+                        child.kind(),
+                        "internal_module" | "module" | "function_signature"
+                    ) || child.kind().ends_with("_declaration")
+                })
+                .flat_map(owned_symbol_nodes)
+                .collect();
+            owned
+        }
         "function_declaration"
         | "generator_function_declaration"
         | "class_declaration"
@@ -666,6 +682,11 @@ fn owned_symbol_nodes<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
         | "interface_declaration"
         | "enum_declaration"
         | "type_alias_declaration"
+        | "internal_module"
+        | "module"
+        | "method_signature"
+        | "abstract_method_signature"
+        | "function_signature"
         | "method_definition" => vec![node],
         "lexical_declaration" | "variable_declaration" => {
             let mut cursor = node.walk();

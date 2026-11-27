@@ -1597,6 +1597,75 @@ def body_only(): return 2
     }
 
     #[test]
+    fn typescript_namespaces_and_signatures_reach_the_symbol_diff() {
+        let dir = init_repo("ts_signatures");
+        write(
+            &dir,
+            "src/billing.d.ts",
+            "export namespace Billing {\n\
+             \x20 interface Repository {\n\
+             \x20   find(id: string): Invoice;\n\
+             \x20 }\n\
+             }\n\
+             export declare function emit(event: string): void;\n",
+        );
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "baseline"]);
+        run(&dir, &["tag", "baseline"]);
+        write(
+            &dir,
+            "src/billing.d.ts",
+            "export namespace Billing {\n\
+             \x20 interface Repository {\n\
+             \x20   find(id: string, tenant: string): Invoice;\n\
+             \x20 }\n\
+             \x20 namespace Tax {\n\
+             \x20   function rate(region: string): number;\n\
+             \x20 }\n\
+             }\n\
+             export declare function emit(event: string, payload: unknown): void;\n",
+        );
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "head"]);
+        let mut store = Store::open(dir.join(".mmcg.db")).unwrap();
+        crate::indexer::Indexer::new(&dir)
+            .index_all(&mut store, false)
+            .unwrap();
+
+        let diff = symbols_changed_since(&store, &dir, "baseline").unwrap();
+        let mut added: Vec<(&str, &str)> = diff
+            .added
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        added.sort();
+        assert_eq!(added, vec![("Tax", "namespace"), ("rate", "function")]);
+        assert!(diff.removed.is_empty(), "{diff:?}");
+        let mut changed: Vec<(&str, &str, Option<&str>)> = diff
+            .signature_changed
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind.as_str(), c.new_signature.as_deref()))
+            .collect();
+        changed.sort();
+        assert_eq!(
+            changed,
+            vec![
+                (
+                    "emit",
+                    "function",
+                    Some("function emit(event: string, payload: unknown): void")
+                ),
+                (
+                    "find",
+                    "method",
+                    Some("find(id: string, tenant: string): Invoice")
+                ),
+            ]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn nested_same_name_functions_keep_each_enclosing_scope() {
         let baseline = "def first():\n    def helper():\n        return 1\n    return helper()\n\ndef second():\n    def helper():\n        return 2\n    return helper()\n";
         let dir = init_repo("nested_scope_identity");

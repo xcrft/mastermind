@@ -127,6 +127,10 @@ pub enum Kind {
     TemporaryProgram,
     /// A Mastermind launcher whose path no longer exists.
     LauncherMissing,
+    /// Codex `open_world_enabled = true` for an app.
+    AllowsOpenWorldTools,
+    /// Codex `approvals_reviewer = "auto_review"`.
+    AutoReviewsApprovals,
 }
 
 impl Kind {
@@ -178,6 +182,12 @@ impl Kind {
             Kind::RedirectsModelTraffic => "sends model traffic through another host",
             Kind::ApprovesServerTools => "approves an MCP server's or app's tools without asking",
             Kind::AllowsDestructiveTools => "allows an app's destructive tools",
+            Kind::AllowsOpenWorldTools => {
+                "allows an app's open-world tools, which reach services outside the app"
+            }
+            Kind::AutoReviewsApprovals => {
+                "lets a reviewer subagent answer approval prompts instead of you"
+            }
             Kind::BroadEditCoversTrustFiles => {
                 "can edit .codex, AGENTS.md and other trust files without a prompt in default mode"
             }
@@ -2104,6 +2114,20 @@ fn parse_codex_layer(bytes: &[u8], user_level: bool) -> Result<CodexConfig, &'st
             }
         }
     }
+    // The top-level reviewer, which apps inherit unless they set their own.
+    if table
+        .get("approvals_reviewer")
+        .and_then(toml::Value::as_str)
+        == Some("auto_review")
+    {
+        servers.push((
+            "approvals_reviewer".to_string(),
+            Finding {
+                program: "auto_review",
+                kind: Kind::AutoReviewsApprovals,
+            },
+        ));
+    }
     if user_level {
         servers.extend(codex_user_commands(&table));
     }
@@ -3778,6 +3802,45 @@ prefix_rule(pattern = ["npx"])
         for text in [
             "[apps._default]\ndefault_tools_approval_mode = \"prompt\"\ndestructive_enabled = false\n",
             "[mcp_servers.docs]\nurl = \"https://mcp.example\"\ndefault_tools_approval_mode = \"writes\"\n[mcp_servers.docs.tools.read]\napproval_mode = \"prompt\"\n",
+        ] {
+            assert_eq!(found(text), vec![], "{text}");
+        }
+    }
+
+    #[test]
+    fn codex_open_world_and_auto_review_settings_warn() {
+        let found = |text: &str| match lint_codex_config(text.as_bytes()) {
+            FileLint::Read { findings, .. } => findings
+                .into_iter()
+                .map(|(_, finding)| (finding.program, finding.kind))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        // Reviewer counter-examples, confirmed in
+        // <https://developers.openai.com/codex/config-reference>.
+        assert_eq!(
+            found("approvals_reviewer = \"auto_review\"\n"),
+            vec![("auto_review", Kind::AutoReviewsApprovals)]
+        );
+        assert_eq!(
+            found("[apps._default]\nopen_world_enabled = true\napprovals_reviewer = \"auto_review\"\n"),
+            vec![
+                ("open_world_enabled", Kind::AllowsOpenWorldTools),
+                ("approvals_reviewer", Kind::AutoReviewsApprovals),
+            ]
+        );
+        assert_eq!(
+            found("[apps.github]\nopen_world_enabled = true\n[apps.drive.tools.\"files/delete\"]\napprovals_reviewer = \"auto_review\"\n"),
+            vec![
+                ("approvals_reviewer", Kind::AutoReviewsApprovals),
+                ("open_world_enabled", Kind::AllowsOpenWorldTools),
+            ]
+        );
+        assert_eq!(Kind::AllowsOpenWorldTools.severity(), Severity::Warn);
+        assert_eq!(Kind::AutoReviewsApprovals.severity(), Severity::Warn);
+        for text in [
+            "approvals_reviewer = \"user\"\n",
+            "[apps._default]\nopen_world_enabled = false\napprovals_reviewer = \"user\"\n",
         ] {
             assert_eq!(found(text), vec![], "{text}");
         }

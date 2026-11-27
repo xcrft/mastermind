@@ -198,6 +198,29 @@ pub(crate) fn approval_findings(value: &serde_json::Value) -> Vec<Finding> {
             kind: Kind::AllowsDestructiveTools,
         });
     }
+    // `open_world_enabled` and `approvals_reviewer` for apps, their
+    // defaults and their tools:
+    // <https://developers.openai.com/codex/config-reference>.
+    if value.get("open_world_enabled") == Some(&serde_json::Value::Bool(true)) {
+        findings.push(Finding {
+            program: "open_world_enabled",
+            kind: Kind::AllowsOpenWorldTools,
+        });
+    }
+    let auto_review = |value: Option<&serde_json::Value>| {
+        value.and_then(serde_json::Value::as_str) == Some("auto_review")
+    };
+    if auto_review(value.get("approvals_reviewer"))
+        || tools
+            .into_iter()
+            .flatten()
+            .any(|(_, tool)| auto_review(tool.get("approvals_reviewer")))
+    {
+        findings.push(Finding {
+            program: "approvals_reviewer",
+            kind: Kind::AutoReviewsApprovals,
+        });
+    }
     findings
 }
 

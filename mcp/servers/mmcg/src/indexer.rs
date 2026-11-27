@@ -2900,6 +2900,7 @@ mod incremental_tests {
 
     /// Makes `locked.rs` unreadable so the next full index is incomplete.
     /// Returns false where permissions do not stop reads, as for root.
+    #[cfg(unix)]
     fn lock_a_source(repo: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         let locked = repo.join("locked.rs");
@@ -2908,11 +2909,15 @@ mod incremental_tests {
     }
 
     fn unlock_and_remove(repo: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(repo.join("locked.rs"), fs::Permissions::from_mode(0o644)).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(repo.join("locked.rs"), fs::Permissions::from_mode(0o644)).ok();
+        }
         fs::remove_dir_all(repo.parent().unwrap()).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_incomplete_index_clears_the_commit_an_earlier_index_recorded() {
         let (repo, db) = committed_repository("incomplete_clears");
@@ -2937,6 +2942,7 @@ mod incremental_tests {
         unlock_and_remove(&repo);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_incomplete_index_records_no_commit() {
         let (repo, db) = committed_repository("incomplete_records_none");

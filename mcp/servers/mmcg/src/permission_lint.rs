@@ -1831,6 +1831,10 @@ impl Locations {
         } else {
             Some(PathBuf::from("/etc/codex"))
         };
+        // macOS links `/etc` to `/private/etc`, and the capped reader refuses
+        // a path through a link, so system paths are resolved first.
+        let claude_managed_dir = claude_managed_dir.map(|dir| resolve_system_dir(&dir));
+        let codex_system_dir = codex_system_dir.map(|dir| resolve_system_dir(&dir));
         Self {
             root: root.to_path_buf(),
             claude_json: match &config_dir {
@@ -1882,6 +1886,25 @@ impl Locations {
         }
         layers.push(("codex-project", self.root.join(".codex")));
         layers
+    }
+}
+
+/// Resolve the links in the part of a system path that exists, such as
+/// `/etc` in `/etc/codex`, and keep the rest as written.
+fn resolve_system_dir(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            return rest.iter().rev().fold(resolved, |dir, part| dir.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
@@ -3132,6 +3155,25 @@ prefix_rule(pattern = ["npx"])
             ),
             (vec![], 3)
         );
+    }
+
+    #[test]
+    fn system_paths_through_a_link_are_resolved() {
+        let root = temp_root();
+        std::fs::create_dir_all(root.join("private/etc")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("private/etc"), root.join("etc")).unwrap();
+            assert_eq!(
+                resolve_system_dir(&root.join("etc/codex")),
+                root.join("private/etc/codex")
+            );
+        }
+        assert_eq!(
+            resolve_system_dir(&root.join("none/x")),
+            root.join("none/x")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

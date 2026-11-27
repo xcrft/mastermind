@@ -47,6 +47,9 @@ pub mod project;
 /// warning widens what runs without asking but still has a boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
+    /// A note that does not change the status, such as a formatter that
+    /// reads repository config.
+    Info,
     Warn,
     Error,
 }
@@ -54,6 +57,7 @@ pub enum Severity {
 impl Severity {
     fn label(self) -> &'static str {
         match self {
+            Severity::Info => "info",
             Severity::Warn => "warn",
             Severity::Error => "error",
         }
@@ -92,6 +96,8 @@ pub enum Kind {
     UnknownProgram,
     InlineCode,
     UnpinnedRunner,
+    /// A known formatter or linter that reads repository config.
+    RepoConfigTool,
     NetworkTool,
     CodeLoadingVariable,
     ContainerHostAccess,
@@ -133,7 +139,8 @@ impl Kind {
             Kind::ReadsSecrets => "reads a secret store",
             Kind::ReadsAnyFile => "reads any file, secret stores included",
             Kind::ApprovesProjectMcpServers => "starts every project MCP server without asking",
-            Kind::FetchAndExec => "downloads and runs code",
+            Kind::FetchAndExec => "runs downloaded or generated code",
+            Kind::RepoConfigTool => "runs repo-controlled config",
             Kind::ShellText => "runs shell text",
             Kind::HttpHook => "sends hook events to a URL",
             Kind::RepoSkillRunsCode => "repository skill runs chosen code without asking",
@@ -173,6 +180,7 @@ impl Kind {
             | Kind::ContainerHostAccess
             | Kind::ApprovedFlaggedServer
             | Kind::WritesTrustSettings => Severity::Error,
+            Kind::RepoConfigTool => Severity::Info,
             _ => Severity::Warn,
         }
     }
@@ -2296,13 +2304,15 @@ pub fn check(locations: &Locations) -> crate::doctor::Check {
             message.push_str(&format!(", and {} more", summary.total - shown.len()));
         }
     }
-    let status = match summary.worst {
+    let worst = summary.worst;
+    let status = match worst {
         Some(Severity::Error) => crate::doctor::Status::Fail,
         Some(Severity::Warn) => crate::doctor::Status::Warn,
-        None if summary.unreadable => crate::doctor::Status::Warn,
-        None => crate::doctor::Status::Ok,
+        Some(Severity::Info) | None if summary.unreadable => crate::doctor::Status::Warn,
+        // An info note leaves the status as it would be without it.
+        Some(Severity::Info) | None => crate::doctor::Status::Ok,
     };
-    let hint = match summary.worst {
+    let hint = match worst {
         Some(Severity::Error) => Some(
             "an error lets a repository, a remote host or the agent run code or read secrets with \
              no prompt; remove that entry first, then narrow each warning to a fixed script, \
@@ -2314,10 +2324,10 @@ pub fn check(locations: &Locations) -> crate::doctor::Check {
              subcommand, host or path, such as `Bash(npm run test)`, and edit the file yourself"
                 .into(),
         ),
-        None if summary.unreadable => {
+        Some(Severity::Info) | None if summary.unreadable => {
             Some("fix, move or remove the file doctor could not read; doctor only reads it".into())
         }
-        None => None,
+        Some(Severity::Info) | None => None,
     };
     crate::doctor::Check {
         name: "permission rules",
@@ -3282,7 +3292,7 @@ prefix_rule(pattern = ["npx"])
         let message = check(&locations).message;
         for expected in [
             "mcp-user=1 servers, 1 flagged",
-            "mcp-user:user-evil command (downloads and runs code, error)",
+            "mcp-user:user-evil command (runs downloaded or generated code, error)",
             "mcp-local=1 servers, 1 flagged",
             "mcp-local:local-tmp command (runs a program doctor does not know, warn)",
             "claude-json:project:mcp-project:evil enabledMcpjsonServers (a flagged project MCP server is approved to start, error)",
@@ -3335,7 +3345,7 @@ prefix_rule(pattern = ["npx"])
         .message;
         for expected in [
             "claude-managed #1 python (interpreter, warn)",
-            "claude-managed:10-team.json apiKeyHelper (downloads and runs code, error)",
+            "claude-managed:10-team.json apiKeyHelper (runs downloaded or generated code, error)",
             "mcp-managed:corp command (runs a container with host access, error)",
             "claude-nested:apps/web:skill:deploy #1 bash (repository skill runs chosen code without asking, error)",
         ] {
@@ -3366,8 +3376,9 @@ args = ["--fresh"]
         })
         .message;
         assert!(
-            message
-                .contains("codex-user:config.toml:notify command (downloads and runs code, error)"),
+            message.contains(
+                "codex-user:config.toml:notify command (runs downloaded or generated code, error)"
+            ),
             "{message}"
         );
         assert!(

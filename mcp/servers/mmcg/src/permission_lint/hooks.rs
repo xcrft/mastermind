@@ -508,8 +508,9 @@ pub fn check(files: &[(String, Result<FileHooks, &'static str>)]) -> crate::doct
     let status = match worst {
         Some(Severity::Error) => crate::doctor::Status::Fail,
         Some(Severity::Warn) => crate::doctor::Status::Warn,
-        None if unreadable => crate::doctor::Status::Warn,
-        None => crate::doctor::Status::Ok,
+        Some(Severity::Info) | None if unreadable => crate::doctor::Status::Warn,
+        // An info note leaves the status as it would be without it.
+        Some(Severity::Info) | None => crate::doctor::Status::Ok,
     };
     let hint = match worst {
         Some(Severity::Error) => Some(
@@ -518,8 +519,8 @@ pub fn check(files: &[(String, Result<FileHooks, &'static str>)]) -> crate::doct
         Some(Severity::Warn) => Some(
             "hooks Mastermind did not install run with no prompt; keep the ones you wrote or trust and remove the rest, `/hooks` shows each command".into(),
         ),
-        None if unreadable => Some("fix, move or remove the file doctor could not read; doctor only reads it".into()),
-        None => None,
+        Some(Severity::Info) | None if unreadable => Some("fix, move or remove the file doctor could not read; doctor only reads it".into()),
+        Some(Severity::Info) | None => None,
     };
     crate::doctor::Check {
         name: "client hooks",
@@ -578,6 +579,8 @@ mod tests {
             vec![
                 Kind::FetchAndExec,
                 Kind::UnpinnedRunner,
+                Kind::RepoConfigTool,
+                Kind::RepoConfigTool,
                 Kind::HttpHook,
                 Kind::FetchAndExec
             ]
@@ -698,7 +701,7 @@ mod tests {
         assert_eq!(check.status, crate::doctor::Status::Warn);
         assert_eq!(
             check.message,
-            "claude-project=1 hook (0 Mastermind, 1 other), turned off | claude-project Stop #1 (downloads and runs code, warn, turned off)"
+            "claude-project=1 hook (0 Mastermind, 1 other), turned off | claude-project Stop #1 (runs downloaded or generated code, warn, turned off)"
         );
     }
 
@@ -779,11 +782,11 @@ mod tests {
         let check = check(&files);
         assert_eq!(check.status, crate::doctor::Status::Fail);
         for expected in [
-            "claude-managed Stop #1 (downloads and runs code, error)",
-            "claude-plugin:helper-market Stop #1 (downloads and runs code, warn, turned off)",
+            "claude-managed Stop #1 (runs downloaded or generated code, error)",
+            "claude-plugin:helper-market Stop #1 (runs downloaded or generated code, warn, turned off)",
             "claude-plugin:helper-market Stop #1 (sends hook events to a URL, warn, turned off)",
-            "codex-system Stop #1 (downloads and runs code, error)",
-            "codex-user:config.toml Stop #1 (downloads and runs code, error)",
+            "codex-system Stop #1 (runs downloaded or generated code, error)",
+            "codex-user:config.toml Stop #1 (runs downloaded or generated code, error)",
             "claude-user=0 hooks, disableAllHooks",
         ] {
             assert!(

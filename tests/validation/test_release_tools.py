@@ -51,8 +51,12 @@ class ReleaseVersionTests(unittest.TestCase):
             self.assertEqual(release_version.release_notes(changelog, "99.0.0"), notes)
             with self.assertRaisesRegex(ValueError, "no notes for 98.0.0"):
                 release_version.release_notes(changelog, "98.0.0")
-            for relative in {path for path, _, _ in release_version.LOCATIONS}:
-                self.assertNotIn(f'"{old}"', (root / relative).read_text(encoding="utf-8"), relative)
+            for relative, pattern, count in release_version.LOCATIONS:
+                found = [
+                    match.group(1)
+                    for match in re.finditer(pattern, (root / relative).read_text(encoding="utf-8"))
+                ]
+                self.assertEqual(found, ["99.0.0"] * count, relative)
 
     def test_drift_is_named_and_blocks_the_bump_without_writing(self):
         with tempfile.TemporaryDirectory() as directory:

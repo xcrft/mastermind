@@ -207,16 +207,40 @@ fn a_missing_or_old_schema_index_still_fails_with_the_flag() {
             "--skip-freshness-check",
         ],
     ];
-    for index in [&missing, &repo.index] {
+    // impact reports an index it cannot open as `index_stale`, the same code
+    // as its own check of the changed files. The other commands name the
+    // problem.
+    let missing_text = format!("index `{}` does not exist", missing.display());
+    let schema_text = format!(
+        "index schema at `{}` is missing or outdated",
+        repo.index.display()
+    );
+    for (index, said) in [(&missing, &missing_text), (&repo.index, &schema_text)] {
         for args in &commands {
             let output = run(index, args);
+            let error = stderr(&output);
             assert_eq!(
                 output.status.code(),
                 Some(1),
-                "{args:?} on {index:?}: {}",
-                stderr(&output)
+                "{args:?} on {index:?}: {error}"
             );
             assert!(output.stdout.is_empty(), "{args:?} printed no answer");
+            assert!(
+                !error.contains(SKIPPED),
+                "{args:?} failed before the skip: {error}"
+            );
+            if args[0] == "impact" {
+                assert_eq!(error.trim(), "index_stale", "{args:?} on {index:?}");
+            } else {
+                assert!(
+                    error.contains(said.as_str()),
+                    "{args:?} on {index:?}: {error}"
+                );
+                assert!(
+                    !error.contains("index_stale"),
+                    "{args:?} on {index:?}: {error}"
+                );
+            }
         }
     }
 }

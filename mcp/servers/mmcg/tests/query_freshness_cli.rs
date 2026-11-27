@@ -391,3 +391,25 @@ fn impact_names_a_newer_or_damaged_index() {
         (Some(1), "index_unavailable".to_string())
     );
 }
+
+/// Larger than the 5 MiB the indexer reads, so it skips the file.
+fn write_oversized(root: &Path) {
+    let line = "// an oversized source line that the indexer never reads\n";
+    let body = line.repeat(5 * 1024 * 1024 / line.len() + 2);
+    std::fs::write(root.join("huge.rs"), body).unwrap();
+}
+
+#[test]
+fn impact_treats_an_oversized_source_like_other_skipped_files() {
+    let repo = indexed(write_oversized);
+    let base = head(repo.source.path());
+    assert_current(&repo, "HEAD", "an untracked oversized source");
+    reindex(&repo);
+    assert_current(&repo, "HEAD", "the same file after index");
+    git(repo.source.path(), &["add", "huge.rs"]);
+    git(repo.source.path(), &["commit", "-q", "-m", "huge"]);
+    assert_current(&repo, &base, "the file committed inside the since diff");
+    assert_current(&repo, "HEAD", "the file committed before HEAD");
+    reindex(&repo);
+    assert_current(&repo, &base, "the committed file after index");
+}

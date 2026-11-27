@@ -127,6 +127,9 @@ pub enum Kind {
     TemporaryProgram,
     /// A Mastermind launcher whose path no longer exists.
     LauncherMissing,
+    /// A `MASTERMIND_*` variable set from config, which can change which
+    /// launcher, node or install Mastermind trusts.
+    OverridesLauncher,
     /// Codex `open_world_enabled = true` for an app.
     AllowsOpenWorldTools,
     /// Codex `approvals_reviewer = "auto_review"`.
@@ -194,6 +197,9 @@ impl Kind {
             Kind::WritesShellStartup => {
                 "writes a shell startup file, so its code runs in every new shell"
             }
+            Kind::OverridesLauncher => {
+                "sets a MASTERMIND_ variable, which can change the launcher Mastermind trusts"
+            }
             Kind::TemporaryProgram => {
                 "runs a program from a temporary directory, which any local user can replace"
             }
@@ -219,6 +225,7 @@ impl Kind {
             | Kind::ApprovedFlaggedServer
             | Kind::WritesTrustSettings
             | Kind::WritesShellStartup
+            | Kind::OverridesLauncher
             | Kind::ShellPrefix => Severity::Error,
             Kind::RepoConfigTool => Severity::Info,
             _ => Severity::Warn,
@@ -1391,6 +1398,14 @@ const CLAUDE_HELPERS: &[&str] = &[
 /// every shell command, so the value is checked as a command too.
 const COMMAND_VARIABLES: &[&str] = &["CLAUDE_CODE_SHELL_PREFIX"];
 
+/// Whether a variable name is one of Mastermind's own, such as
+/// `MASTERMIND_NODE` or `MASTERMIND_LAUNCHER_JS`. The npm launcher sets
+/// these for the process it starts, so a value from config is a launcher
+/// override.
+fn overrides_launcher(name: &str) -> bool {
+    name.to_ascii_uppercase().starts_with("MASTERMIND_")
+}
+
 /// Settings whose `command` Claude Code runs to draw the status line or
 /// suggest files.
 const CLAUDE_COMMAND_OBJECTS: &[&str] = &["statusLine", "fileSuggestion"];
@@ -1440,7 +1455,12 @@ fn claude_extras(object: &serde_json::Map<String, serde_json::Value>) -> Vec<Fin
     }
     if let Some(env) = object.get("env").and_then(serde_json::Value::as_object) {
         for (name, value) in env {
-            if COMMAND_VARIABLES.contains(&name.as_str()) {
+            if overrides_launcher(name) {
+                findings.push(Finding {
+                    program: "env",
+                    kind: Kind::OverridesLauncher,
+                });
+            } else if COMMAND_VARIABLES.contains(&name.as_str()) {
                 // A prefix wraps every Bash command, so it is an error
                 // whatever it is, and its own command is checked as well.
                 findings.push(Finding {
@@ -2125,6 +2145,20 @@ fn parse_codex_layer(bytes: &[u8], user_level: bool) -> Result<CodexConfig, &'st
             Finding {
                 program: "auto_review",
                 kind: Kind::AutoReviewsApprovals,
+            },
+        ));
+    }
+    // `shell_environment_policy.set` gives every command these variables.
+    if policy
+        .and_then(|policy| policy.get("set"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|set| set.keys().any(|name| overrides_launcher(name)))
+    {
+        servers.push((
+            "shell_environment_policy.set".to_string(),
+            Finding {
+                program: "shell_environment_policy",
+                kind: Kind::OverridesLauncher,
             },
         ));
     }
@@ -3805,6 +3839,51 @@ prefix_rule(pattern = ["npx"])
         ] {
             assert_eq!(found(text), vec![], "{text}");
         }
+    }
+
+    #[test]
+    fn mastermind_variables_set_from_config_are_errors() {
+        // Decision: a `MASTERMIND_*` key in Claude settings `env` or in Codex
+        // `shell_environment_policy.set` is a launcher override.
+        let claude = |text: &str| match lint_claude_settings(text.as_bytes()) {
+            FileLint::Read { findings, .. } => findings
+                .into_iter()
+                .map(|(_, finding)| (finding.program, finding.kind))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        for name in [
+            "MASTERMIND_NODE",
+            "MASTERMIND_LAUNCHER_JS",
+            "mastermind_share_dir",
+        ] {
+            assert_eq!(
+                claude(&format!(r#"{{"env":{{"{name}":"/x"}}}}"#)),
+                vec![("env", Kind::OverridesLauncher)],
+                "{name}"
+            );
+        }
+        assert_eq!(claude(r#"{"env":{"EDITOR":"vim"}}"#), vec![]);
+        let codex = |text: &str| match lint_codex_config(text.as_bytes()) {
+            FileLint::Read { findings, .. } => findings
+                .into_iter()
+                .map(|(_, finding)| (finding.program, finding.kind))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            codex("[shell_environment_policy]\nset = { MASTERMIND_NODE = \"/x/node\" }\n"),
+            vec![("shell_environment_policy", Kind::OverridesLauncher)]
+        );
+        assert_eq!(
+            codex("[shell_environment_policy.set]\nMASTERMIND_LAUNCHER_JS = \"/x/m.js\"\n"),
+            vec![("shell_environment_policy", Kind::OverridesLauncher)]
+        );
+        assert_eq!(
+            codex("[shell_environment_policy]\nset = { PATH_EXTRA = \"/x\" }\n"),
+            vec![]
+        );
+        assert_eq!(Kind::OverridesLauncher.severity(), Severity::Error);
     }
 
     #[test]

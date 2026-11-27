@@ -66,11 +66,30 @@ WORKFLOW_MUTABILITIES = {"read-only", "writer"}
 # declares. Each declared capability needs a reason, and every tool that needs
 # a capability must have it declared.
 WORKFLOW_CAPABILITY_TOOLS = {
-    "shell": {"Bash", "PowerShell"},
+    # BashOutput and KillShell read and stop shells the role started, so
+    # they are shell tools too.
+    "shell": {"Bash", "PowerShell", "BashOutput", "KillShell"},
     "web": {"WebFetch", "WebSearch"},
+    # Agent and Task start another subagent with its own tools.
+    "delegate": {"Agent", "Task"},
+    # MCP tools of any server other than mmcg. Matched by prefix below.
+    "mcp": set(),
 }
 WORKFLOW_MUTATION_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 WORKFLOW_CAPABILITY_REASON_MIN = 20
+WORKFLOW_CAPABILITY_REASON_WORDS = 4
+# Permission modes that approve edits or every tool. A read-only role must not
+# ask for them.
+WORKFLOW_READ_ONLY_FORBIDDEN_MODES = {"bypassPermissions", "acceptEdits"}
+# Role and capability pairs no declaration can unlock. These roles must work
+# from Read, Grep, Glob and mmcg, or from what the caller hands them.
+WORKFLOW_DENIED_CAPABILITIES = {
+    "mastermind-researcher": {"shell", "delegate", "web", "mcp"},
+    "mastermind-critic": {"shell", "delegate"},
+    "mastermind-prompt-refiner": {"shell", "delegate", "web", "mcp"},
+    "mastermind-comment-auditor": {"shell", "delegate"},
+    "mastermind-frontend-auditor": {"shell", "delegate"},
+}
 WORKFLOW_RUNTIMES = {"claude", "codex", "portable", "controller"}
 WORKFLOW_MAX_RELATIONS = 512
 WORKFLOW_MAX_WRITES = 64
@@ -932,7 +951,7 @@ def _workflow_metadata_messages(
                 )
                 break
 
-    messages.extend(_capability_messages(workflow, runtime_tools))
+    messages.extend(_capability_messages(workflow, runtime_tools, frontmatter))
     return messages
 
 
@@ -944,10 +963,41 @@ def workflow_capability_class(workflow: dict) -> str:
     return name + "".join(f"-with-{capability}" for capability in declared)
 
 
-def _capability_messages(workflow: dict, runtime_tools: list[str]) -> list[str]:
+def _tool_base(tool: str) -> str:
+    """The tool name without a `(specifier)`, such as `Agent` for `Agent(x)`."""
+    return tool.split("(", 1)[0].strip()
+
+
+def _tool_capability(tool: str) -> str | None:
+    base = _tool_base(tool)
+    if base.startswith("mcp__"):
+        return None if base.startswith("mcp__mmcg__") else "mcp"
+    for capability, tools in WORKFLOW_CAPABILITY_TOOLS.items():
+        if base in tools:
+            return capability
+    return None
+
+
+def _reason_problem(reason: object) -> str | None:
+    """Why a capability reason is too weak to explain what the role runs."""
+    if not isinstance(reason, str) or len(reason.strip()) < WORKFLOW_CAPABILITY_REASON_MIN:
+        return f"needs a reason of at least {WORKFLOW_CAPABILITY_REASON_MIN} characters"
+    words = re.findall(r"[A-Za-z][A-Za-z'-]+", reason)
+    if len(set(word.lower() for word in words)) < WORKFLOW_CAPABILITY_REASON_WORDS:
+        return f"needs a reason of at least {WORKFLOW_CAPABILITY_REASON_WORDS} different words"
+    letters = [c.lower() for c in reason if c.isalnum()]
+    if len(set(letters)) < 6:
+        return "needs a reason that is not one repeated character"
+    return None
+
+
+def _capability_messages(
+    workflow: dict, runtime_tools: list[str], frontmatter: dict | None = None
+) -> list[str]:
     capabilities = workflow.get("capabilities", {})
     if not isinstance(capabilities, dict):
         return ["[workflow_capability_invalid] workflow capabilities must be a mapping of capability to reason"]
+    frontmatter = frontmatter or {}
     messages: list[str] = []
     for capability, reason in capabilities.items():
         if capability not in WORKFLOW_CAPABILITY_TOOLS:
@@ -955,21 +1005,50 @@ def _capability_messages(workflow: dict, runtime_tools: list[str]) -> list[str]:
                 f"[workflow_capability_invalid] unknown capability {capability!r}, "
                 f"use {', '.join(sorted(WORKFLOW_CAPABILITY_TOOLS))}"
             )
-        elif not isinstance(reason, str) or len(reason.strip()) < WORKFLOW_CAPABILITY_REASON_MIN:
+        elif problem := _reason_problem(reason):
             messages.append(
-                f"[workflow_capability_invalid] capability {capability!r} needs a reason of at least "
-                f"{WORKFLOW_CAPABILITY_REASON_MIN} characters that says what the role runs"
+                f"[workflow_capability_invalid] capability {capability!r} {problem} that says what the role runs"
             )
-    tools = set(runtime_tools)
+    reasons = [
+        " ".join(reason.lower().split())
+        for reason in capabilities.values()
+        if isinstance(reason, str)
+    ]
+    if len(reasons) != len(set(reasons)):
+        messages.append(
+            "[workflow_capability_invalid] each capability needs its own reason, not one copied across capabilities"
+        )
+    # Claude Code removes `disallowedTools` from the granted set:
+    # <https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields>.
+    disallowed = {_tool_base(tool) for tool in _runtime_tool_names(frontmatter.get("disallowedTools"))}
+    tools = {tool for tool in runtime_tools if _tool_base(tool) not in disallowed}
+    bases = {_tool_base(tool) for tool in tools}
     role = workflow_capability_class(workflow)
-    if workflow.get("mutability") == "read-only":
-        mutation = sorted(WORKFLOW_MUTATION_TOOLS & tools)
+    read_only = workflow.get("mutability") == "read-only"
+    if read_only:
+        mutation = sorted(WORKFLOW_MUTATION_TOOLS & bases)
         if mutation:
             messages.append(
                 f"[readonly_mutation_capability] {role} role grants {', '.join(mutation)}"
             )
-    for capability, needs in sorted(WORKFLOW_CAPABILITY_TOOLS.items()):
-        granted = sorted(needs & tools)
+        mode = frontmatter.get("permissionMode")
+        if mode in WORKFLOW_READ_ONLY_FORBIDDEN_MODES:
+            messages.append(
+                f"[readonly_permission_mode] {role} role asks for permissionMode {mode!r}, "
+                "which approves edits or every tool"
+            )
+    elif workflow.get("mutability") == "writer" and runtime_tools and not WORKFLOW_MUTATION_TOOLS & bases:
+        messages.append(
+            f"[writer_without_edit_tools] {role} role grants no Edit, Write, NotebookEdit or MultiEdit; "
+            "declare it read-only and say in the shell reason what its commands write"
+        )
+    granted_by_capability: dict[str, list[str]] = {}
+    for tool in sorted(tools):
+        capability = _tool_capability(tool)
+        if capability:
+            granted_by_capability.setdefault(capability, []).append(tool)
+    for capability in sorted(WORKFLOW_CAPABILITY_TOOLS):
+        granted = granted_by_capability.get(capability, [])
         if granted and capability not in capabilities:
             messages.append(
                 f"[undeclared_capability] {role} role grants {', '.join(granted)} without "
@@ -981,6 +1060,12 @@ def _capability_messages(workflow: dict, runtime_tools: list[str]) -> list[str]:
             messages.append(
                 f"[unused_capability] workflow capability {capability!r} is declared but no tool needs it"
             )
+    denied = WORKFLOW_DENIED_CAPABILITIES.get(str(frontmatter.get("name")), set())
+    for capability in sorted(denied & (set(granted_by_capability) | set(capabilities))):
+        messages.append(
+            f"[denied_capability] {frontmatter.get('name')} must never get {capability!r}, "
+            "even with a declared reason"
+        )
     return messages
 
 

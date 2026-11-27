@@ -1,7 +1,7 @@
 ---
 name: mastermind-frontend-auditor
 description: "Use after a React or Vue change is implemented. Not for checking the live page (use mastermind-browser-verification) or the spec contract (use mastermind-auditor). Read-only, from the codegraph: unrendered components, props changed without callers, reinvented components, raw values over tokens."
-tools: Read, Grep, Glob, Bash, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_change_impact, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
+tools: Read, Grep, Glob, mcp__mmcg__mmcg_status, mcp__mmcg__mmcg_change_impact, mcp__mmcg__mmcg_callers, mcp__mmcg__mmcg_search, mcp__mmcg__mmcg_centrality
 model: sonnet
 mcpServers: [mmcg]
 maxTurns: 15
@@ -10,13 +10,11 @@ workflow:
   schema_version: 1
   activation: conditional
   mutability: read-only
-  capabilities:
-    shell: "Runs git diff to scope the changed components."
   skills:
     - id: mastermind-frontend-audit
       required: false
 metadata:
-  version: 0.1.7
+  version: 0.1.8
   authors: [mastermind]
   tags: [code-review, frontend, components, mmcg]
 ---
@@ -53,8 +51,10 @@ as unrendered.
 
 ## Method
 
-1. `git diff --name-status <baseline>` for scope, then read the changed
-   components. The diff shows what the change did; the graph shows what the rest
+1. Take the changed component files from the caller. When the caller did not
+   pass them, `mmcg_change_impact` with `since: <baseline>` lists the changed
+   files and symbols, uncommitted work included. You have no shell, so do not
+   try to run `git diff`. Then read the changed components. The diff shows what the change did; the graph shows what the rest
    of the codebase expects.
 2. For every added component: `mmcg_callers <Name>`. A zero is a missing-wiring
    hypothesis, not proof. Check route tables, lazy `import()`, stories, tests,

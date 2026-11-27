@@ -325,7 +325,10 @@ class SubagentCapabilityTests(unittest.TestCase):
     def test_critic_with_shell_and_web_fails(self):
         critic = self.load("mastermind-critic")
         tools = critic["tools"] + ", Bash, WebFetch"
-        self.assertEqual(self.codes(critic, tools), ["[undeclared_capability]", "[undeclared_capability]"])
+        self.assertEqual(
+            self.codes(critic, tools),
+            ["[undeclared_capability]", "[undeclared_capability]", "[denied_capability]"],
+        )
 
     def test_read_only_roles_cannot_edit_even_with_capabilities(self):
         auditor = self.load("mastermind-auditor")
@@ -341,10 +344,90 @@ class SubagentCapabilityTests(unittest.TestCase):
 
     def test_stale_or_unknown_capabilities_are_reported(self):
         critic = self.load("mastermind-critic")
-        stale = {**critic, "workflow": {**critic["workflow"], "capabilities": {"shell": "runs git diff to scope review"}}}
+        stale = {**critic, "workflow": {**critic["workflow"], "capabilities": {"web": "reads the release notes it cites"}}}
         self.assertEqual(self.codes(stale), ["[unused_capability]"])
         unknown = {**critic, "workflow": {**critic["workflow"], "capabilities": {"network": "fetches pages it cites"}}}
         self.assertEqual(self.codes(unknown), ["[workflow_capability_invalid]"])
+
+    def with_tools(self, name, tools, **workflow):
+        frontmatter = self.load(name)
+        return {**frontmatter, "tools": tools, "workflow": {**frontmatter["workflow"], **workflow}}
+
+    def test_delegation_needs_a_declared_capability(self):
+        # Reviewer counter-example: Agent and Task passed as plain tools.
+        for tool in ("Agent", "Task", "Agent(mastermind-task-executor)"):
+            with self.subTest(tool=tool):
+                auditor = self.with_tools("mastermind-auditor", f"Read, Bash, {tool}")
+                self.assertEqual(self.codes(auditor), ["[undeclared_capability]"])
+                declared = self.with_tools(
+                    "mastermind-auditor",
+                    f"Read, Bash, {tool}",
+                    capabilities={
+                        "shell": "Runs git diff and the declared VERIFY commands.",
+                        "delegate": "Starts the test auditor on the same baseline.",
+                    },
+                )
+                self.assertEqual(self.codes(declared), [])
+
+    def test_other_mcp_servers_need_a_declared_capability(self):
+        auditor = self.with_tools("mastermind-auditor", "Read, Bash, mcp__github__get_issue, mcp__mmcg__mmcg_status")
+        self.assertEqual(self.codes(auditor), ["[undeclared_capability]"])
+        self.assertIn("mcp__github__get_issue", validate._workflow_metadata_messages(
+            auditor, required=True, runtime_tools=validate._runtime_tool_names(auditor["tools"])
+        )[0])
+
+    def test_shell_output_tools_count_as_shell(self):
+        for tool in ("BashOutput", "KillShell"):
+            with self.subTest(tool=tool):
+                critic = self.with_tools("mastermind-test-auditor", f"Read, {tool}", capabilities={})
+                self.assertEqual(self.codes(critic), ["[undeclared_capability]"])
+
+    def test_read_only_roles_cannot_ask_for_edit_or_bypass_modes(self):
+        for mode in ("bypassPermissions", "acceptEdits"):
+            with self.subTest(mode=mode):
+                critic = {**self.load("mastermind-critic"), "permissionMode": mode}
+                self.assertEqual(self.codes(critic), ["[readonly_permission_mode]"])
+        plan = {**self.load("mastermind-critic"), "permissionMode": "plan"}
+        self.assertEqual(self.codes(plan), [])
+
+    def test_disallowed_tools_are_removed_before_the_class_check(self):
+        auditor = {**self.load("mastermind-auditor"), "disallowedTools": "Bash"}
+        self.assertEqual(self.codes(auditor), ["[unused_capability]"])
+        critic = {**self.load("mastermind-critic"), "disallowedTools": ["Write"]}
+        self.assertEqual(self.codes(critic, critic["tools"] + ", Write"), [])
+
+    def test_weak_or_copied_reasons_are_rejected(self):
+        for reason in ("x" * 40, "aaaa aaaa aaaa aaaa aaaa", "needs the shell for work", "shell shell shell shell shell"):
+            with self.subTest(reason=reason):
+                auditor = self.with_tools("mastermind-auditor", "Read, Bash", capabilities={"shell": reason})
+                codes = self.codes(auditor)
+                if reason == "needs the shell for work":
+                    self.assertEqual(codes, [])
+                else:
+                    self.assertEqual(codes, ["[workflow_capability_invalid]"])
+        copied = "Runs git diff and the declared VERIFY commands."
+        auditor = self.with_tools("mastermind-auditor", "Read, Bash, WebFetch", capabilities={"shell": copied, "web": copied})
+        self.assertEqual(self.codes(auditor), ["[workflow_capability_invalid]"])
+
+    def test_denied_pairs_cannot_be_unlocked_by_a_reason(self):
+        researcher = self.with_tools(
+            "mastermind-researcher",
+            self.load("mastermind-researcher")["tools"] + ", Bash",
+            capabilities={"shell": "Runs git log to date the history it cites."},
+        )
+        self.assertEqual(self.codes(researcher), ["[denied_capability]"])
+        for name in ("mastermind-comment-auditor", "mastermind-frontend-auditor"):
+            with self.subTest(name=name):
+                role = self.with_tools(
+                    name,
+                    self.load(name)["tools"] + ", Bash",
+                    capabilities={"shell": "Runs git diff to scope the changed files."},
+                )
+                self.assertEqual(self.codes(role), ["[denied_capability]"])
+
+    def test_writer_needs_an_edit_tool(self):
+        collector = self.with_tools("mastermind-feedback-collector", "Read, Bash", mutability="writer")
+        self.assertEqual(self.codes(collector), ["[writer_without_edit_tools]"])
 
     def test_every_shipped_subagent_matches_its_class(self):
         classes = {}
@@ -356,10 +439,10 @@ class SubagentCapabilityTests(unittest.TestCase):
             classes,
             {
                 "mastermind-auditor": "read-only-with-shell",
-                "mastermind-comment-auditor": "read-only-with-shell",
+                "mastermind-comment-auditor": "read-only",
                 "mastermind-critic": "read-only",
-                "mastermind-feedback-collector": "writer-with-shell",
-                "mastermind-frontend-auditor": "read-only-with-shell",
+                "mastermind-feedback-collector": "read-only-with-shell",
+                "mastermind-frontend-auditor": "read-only",
                 "mastermind-investigator": "read-only-with-shell",
                 "mastermind-prompt-refiner": "read-only",
                 "mastermind-researcher": "read-only",

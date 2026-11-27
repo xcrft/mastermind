@@ -8,11 +8,11 @@ effort: medium
 workflow:
   schema_version: 1
   activation: manual
-  mutability: writer
+  mutability: read-only
   capabilities:
-    shell: "Runs the mastermind feedback commands that collect candidates."
+    shell: "Runs mastermind miner collect and sync, which write candidates only to the private inbox in ~/.mastermind/style.db and never to repository files."
 metadata:
-  version: 0.9.3
+  version: 0.9.4
   authors:
     - mastermind
   tags:

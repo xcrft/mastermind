@@ -48,9 +48,9 @@ asked for. Codex does not install these roles. `just validate` checks the shape:
 ## Declare capabilities
 
 Each subagent's `workflow` metadata names what it may do. `mutability` is
-`read-only` or `writer`, and `capabilities` adds `shell` or `web`, each with a
-reason that says what the role runs. Together they form the role's class, such
-as `read-only-with-shell`.
+`read-only` or `writer`, and `capabilities` adds `shell`, `web`, `delegate` or
+`mcp`, each with a reason that says what the role runs. Together they form the
+role's class, such as `read-only-with-shell`.
 
 ```yaml
 workflow:
@@ -58,20 +58,38 @@ workflow:
   activation: conditional
   mutability: read-only
   capabilities:
-    shell: "Runs git diff to scope the changed components."
+    shell: "Runs git diff and the declared VERIFY commands."
 ```
 
-`just validate` checks the class against `tools`:
+`just validate` checks the class against `tools`, after it removes anything in
+`disallowedTools`:
 
 | Tool | Needs |
 |---|---|
 | `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | `mutability: writer` |
-| `Bash`, `PowerShell` | `capabilities.shell` with a reason of at least 20 characters |
-| `WebFetch`, `WebSearch` | `capabilities.web` with a reason of at least 20 characters |
+| `Bash`, `PowerShell`, `BashOutput`, `KillShell` | `capabilities.shell` |
+| `WebFetch`, `WebSearch` | `capabilities.web` |
+| `Agent`, `Task` | `capabilities.delegate` |
+| `mcp__<server>__...` for any server other than mmcg | `capabilities.mcp` |
 
-A declared capability that no tool needs fails too. A shell can still write
-files, so `read-only-with-shell` is a promise in the prompt, not a sandbox.
-Keep `shell` off a role that can work from `Read`, `Grep`, `Glob` and mmcg.
+It also fails when:
+
+- a reason is shorter than 20 characters, has fewer than 4 different words,
+  is one repeated character, or is copied across two capabilities;
+- a declared capability no tool needs;
+- a read-only role asks for `permissionMode: bypassPermissions` or
+  `acceptEdits`;
+- a writer grants no edit tool. A role that only writes through its own
+  commands is read-only, and its shell reason says what those commands write;
+- a role gets a capability on the fixed deny list in
+  `WORKFLOW_DENIED_CAPABILITIES` in [`scripts/validate.py`](../scripts/validate.py).
+  No reason unlocks it. `mastermind-researcher` never gets a shell, and the
+  critic, prompt refiner, comment auditor and frontend auditor work without one.
+
+A shell can still write files, so `read-only-with-shell` is a promise in the
+prompt, not a sandbox. Keep `shell` off a role that can work from `Read`,
+`Grep`, `Glob`, mmcg or what the caller hands it. A per-role hook that blocks
+tools at run time is not built yet.
 
 ## Untrusted content
 

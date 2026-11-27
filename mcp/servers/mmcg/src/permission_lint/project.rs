@@ -159,13 +159,43 @@ pub(crate) fn lint_server(server: &serde_json::Value) -> Vec<Finding> {
             }));
         }
     }
-    if url.is_some()
-        && text("default_tools_approval_mode")
+    findings.extend(approval_findings(server));
+    findings
+}
+
+/// Findings for the Codex approval settings of a server, an app or a plugin
+/// server, local or remote: `default_tools_approval_mode` and each
+/// `tools.<tool>.approval_mode` set to `auto` or `approve`, and
+/// `destructive_enabled = true`:
+/// <https://developers.openai.com/codex/config-reference#configtoml>.
+pub(crate) fn approval_findings(value: &serde_json::Value) -> Vec<Finding> {
+    let approves = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
             .is_some_and(|mode| matches!(mode, "auto" | "approve"))
-    {
+    };
+    let mut findings = Vec::new();
+    if approves(value.get("default_tools_approval_mode")) {
         findings.push(Finding {
             program: "default_tools_approval_mode",
-            kind: Kind::ApprovesRemoteTools,
+            kind: Kind::ApprovesServerTools,
+        });
+    }
+    let tools = value.get("tools").and_then(serde_json::Value::as_object);
+    if tools
+        .into_iter()
+        .flatten()
+        .any(|(_, tool)| approves(tool.get("approval_mode")))
+    {
+        findings.push(Finding {
+            program: "approval_mode",
+            kind: Kind::ApprovesServerTools,
+        });
+    }
+    if value.get("destructive_enabled") == Some(&serde_json::Value::Bool(true)) {
+        findings.push(Finding {
+            program: "destructive_enabled",
+            kind: Kind::AllowsDestructiveTools,
         });
     }
     findings
@@ -381,17 +411,20 @@ pub(super) fn add_servers(
     servers: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<String> {
     let findings = lint_servers(servers);
+    let mut names = Vec::new();
+    for (name, _) in &findings {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    // The count is of servers, so a server with two findings counts once.
     let mut status = format!("{label}={} servers", servers.len());
-    if !findings.is_empty() {
-        status.push_str(&format!(", {} flagged", findings.len()));
+    if !names.is_empty() {
+        status.push_str(&format!(", {} flagged", names.len()));
     }
     summary.statuses.push(status);
-    let mut names = Vec::new();
     for (name, finding) in findings {
         summary.finding(&format!("{label}:{name}"), None, &finding);
-        if !names.contains(&name) {
-            names.push(name);
-        }
     }
     names
 }

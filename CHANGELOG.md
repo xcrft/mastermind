@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `billing::tax::rate`. An anonymous namespace adds no symbol. Declarations
   inside a namespace in a header are recorded as before.
 - C/C++ `using X = ...` and `typedef` names are `type` symbols. A typedef that
-  repeats the name of the struct it defines adds no second row.
+  repeats its struct, union, enum or class tag adds no row, so
+  `typedef struct Node Node;` and `typedef struct Node { } Node;` both leave
+  only the struct. A forward `enum Color;` adds no enum row, the same as a
+  class forward declaration.
   `namespace fs = std::filesystem;` is an `imports` edge `fs` /
   `std::filesystem::*`.
 - `.inl` files are indexed as C++.

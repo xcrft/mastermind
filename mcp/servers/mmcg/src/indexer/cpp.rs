@@ -159,7 +159,9 @@ fn walk(
             }
             "enum_specifier" => {
                 let name = name_field(&child, source).map(String::from);
-                if name.is_none() {
+                // `enum Color;` and `typedef enum Color Color;` only refer to
+                // the enum, like a class forward declaration.
+                if name.is_none() || child.child_by_field_name("body").is_none() {
                     continue;
                 }
                 let signature = signature_until_body(&child, source);
@@ -436,8 +438,10 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
     }
 }
 
-/// One `type` symbol per typedef name. `typedef struct Node { } Node;` names
-/// the struct it defines, which is already a symbol, so that name is skipped.
+/// One `type` symbol per typedef name. A typedef that repeats its struct,
+/// union, enum or class tag, as in `typedef struct Node Node;` or
+/// `typedef struct Node { } Node;`, adds no row: the tag's definition is the
+/// symbol, with or without a body in this typedef.
 fn push_typedef_names(
     definition: &Node,
     source: &[u8],
@@ -446,7 +450,12 @@ fn push_typedef_names(
 ) {
     let tag = definition
         .child_by_field_name("type")
-        .and_then(|tag| tag.child_by_field_name("body").and(Some(tag)))
+        .filter(|tag| {
+            matches!(
+                tag.kind(),
+                "struct_specifier" | "union_specifier" | "enum_specifier" | "class_specifier"
+            )
+        })
         .and_then(|tag| name_field(&tag, source));
     let mut cursor = definition.walk();
     let declarators: Vec<_> = definition
@@ -789,6 +798,39 @@ mod tests {
         assert!(pending.edges.iter().any(|e| e.kind == "imports"
             && e.to_name == "fs"
             && e.to_path.as_deref() == Some("std::filesystem::*")));
+    }
+
+    #[test]
+    fn a_typedef_that_repeats_its_tag_adds_no_type_row() {
+        let path = common::write_tmp(
+            "cpp",
+            "list.h",
+            "typedef struct Node Node;\n\
+             typedef enum Color Color;\n\
+             typedef struct Node *NodeRef;\n\
+             struct Node { int value; NodeRef next; };\n\
+             typedef struct Pair { int left; int right; } Pair, *PairRef;\n\
+             typedef struct { int x; } Point;\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let rows: Vec<(&str, &str)> = pending
+            .symbols
+            .iter()
+            .filter(|s| s.kind != "module")
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("NodeRef", "type"),
+                ("Node", "struct"),
+                ("PairRef", "type"),
+                ("Pair", "struct"),
+                ("Point", "type"),
+                ("<anon>", "struct"),
+            ]
+        );
     }
 
     #[test]

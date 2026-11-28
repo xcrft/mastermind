@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `impact` no longer reports every index it cannot use as `index_stale`. A
+  missing or empty index, or one that never indexed a repository, is
+  `index_missing`. An older or newer schema is `schema_incompatible`, the code
+  MCP already uses. A file that does not open as an index is
+  `index_unavailable`. `index_stale` is left for a source file that differs
+  from the index and the other cases listed in the `impact` reference. A
+  script that matches `index_stale` to catch a missing index needs the new
+  codes. `ChangeImpactError` in the `mmcg` crate has the three new variants.
+- Over MCP, `mmcg_change_impact`, `mmcg_test_impact`,
+  `mmcg_symbols_changed_since`, `mmcg_change_class` and `mmcg_temporal` return
+  `{"error": "index_missing"}` for an index that never indexed a repository.
+  They used to return `index_stale`. `mmcg_temporal` returns
+  `index_unavailable` when its index does not open. An old schema over MCP is
+  still the `schema_incompatible` code of the refresh check.
+
 ### Added
 
 - `.mts` and `.cts` files are indexed as TypeScript.
@@ -67,6 +84,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The extractor contract is `mmcg-extractors-v11`. The next `index` after an
   upgrade rebuilds the codegraph.
+- `impact` exits 1 with `index_stale` when any source file was changed, added
+  or deleted after `index`, committed or not, with or without
+  `--skip-freshness-check`. It used to compare only the changed and new files
+  in the `--since` diff, so a deleted file, a file committed after indexing and
+  outside that diff, or a stale file elsewhere in the graph gave an old answer
+  with exit 0. A complete `index` now records the `HEAD` commit and the source
+  files that differ from it in the index metadata, and `impact` asks Git what
+  differs from that commit. An index with no recorded commit falls back to the
+  full source scan until the next complete `index`. The schema version does not
+  change.
+- A changed source that the indexer skips, such as a binary file or one larger
+  than 5 MiB, no longer makes `impact` fail with `index_stale` when the index
+  has no row for it.
+- `impact` no longer trusts the recorded commit after mastermind 5.0.0 or
+  older writes to the index. The index also records a fingerprint of its file
+  rows, and every write by this version keeps it current. A row an older
+  version changes no longer matches, so `impact` falls back to the full source
+  scan until the next complete `index`.
 
 ## [5.0.0] - 2026-11-27
 

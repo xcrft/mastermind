@@ -207,8 +207,33 @@ for a source that differs from the recorded commit and
 | `index_missing` | No index file, an empty one, or one that never indexed a repository | `mastermind index .` |
 | `schema_incompatible` | The index has an older or newer schema than this binary | `mastermind index .` for an older one, a newer mastermind for a newer one |
 | `index_unavailable` | The file exists but does not open as an index | Move it away and run `mastermind index .` |
-| `index_stale` | A source file differs from the index | `mastermind index .` |
+| `index_stale` | A source file differs from the index, or another case in the list below | `mastermind index .` |
 | `root_mismatch` | The index belongs to another repository root | Pass the right `--index` or `--root` |
+
+#### When `index_stale` is returned
+
+CLI `impact`, and the `error` of `mmcg_change_impact` and `mmcg_test_impact`,
+return `index_stale` when:
+
+- a source file differs from the index, found from the recorded commit or by
+  the full source scan
+- the `--since` diff holds a source file and the index was built by an older
+  extractor
+- Mastermind cannot read the index rows it compares, or cannot parse a changed
+  file from the `--since` commit for a reason other than a binary or oversized
+  file
+- the full source scan fails for a reason other than a timeout or a file that
+  changes while it is read
+- the project history files cannot be listed for the same kind of reason
+
+Other surfaces add their own cases:
+
+| Surface | Also `index_stale` when |
+|---|---|
+| MCP refresh check, before any refreshable tool | The bounded refresh fails or cannot run. This is `{"code": "index_stale"}` with coverage fields, not `error` |
+| `mmcg_temporal` | Its whole-index check fails for any reason except an index that does not open, a timeout or a snapshot that is too large. This covers an older schema or extractor, no recorded repository root, an indexed path that is not a plain relative path, a tracked path the index cannot hold, and a file that differs from its row |
+| `mmcg_symbols_changed_since` | Its index was built by an older extractor, or its diff cannot read the index rows or parse a changed file, as in the list above |
+| `mmcg_brief` | The list above, its project history is stale, or its own index lost its repository root. The brief opens or builds that index first, so `index_missing` and `index_unavailable` from the check become `index_stale` |
 
 ### Question-specific shortlist (`repo-map`)
 

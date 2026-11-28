@@ -102,7 +102,7 @@ inventory.
 | Unreadable directory | Skipped when the index holds no source under it. Otherwise the run fails with `cannot read the directory that holds indexed source PATH` |
 | Git path list | At most 64 MiB, then `source_inventory_bytes` |
 | Untracked file with a non-UTF-8 name | Skipped. If it has a supported extension, the run fails |
-| Extensions | Case-insensitive. `.pyi` parses as Python. UTF-16 sources with a BOM are decoded |
+| Extensions | Case-insensitive. `.pyi` parses as Python, `.mts` and `.cts` as TypeScript. UTF-16 sources with a BOM are decoded |
 | Binary (NUL in the first 8 KiB) or larger than 5 MiB | Skipped and counted with up to 20 sample paths |
 | Not a regular file, such as a symlink | Counted as `failed` and printed as `not a regular file, never indexes`. It does not make the index stale |
 | Read error | Counted as `failed`. Its indexed rows stay |
@@ -120,7 +120,7 @@ inventory.
 
 The index records its canonical project root on the first run and rejects any
 other root before a write, so use a separate `--index` for another root. It
-also stores its schema, extractor contract (`mmcg-extractors-v10`) and concept
+also stores its schema, extractor contract (`mmcg-extractors-v11`) and concept
 contract (`mmcg-concepts-v5`). After an upgrade changes one, the next `index`
 rebuilds what it needs. An index written by a newer mmcg is refused on every
 open. `status` checks source and history freshness within 30 seconds, and
@@ -135,15 +135,15 @@ imports and statements. Call targets keep their literal spelling, so
 | Language | Symbols | Calls | Imports, as name / path | Known gaps |
 |---|---|---|---|---|
 | Python | function, method, class, module constant | Direct and `obj.method()` | `from collections.abc import Iterable as Iter` is `Iter` / `collections.abc.Iterable` | Star imports, `getattr` dispatch, `__all__` re-exports |
-| TypeScript | function, arrow function, method, class, interface, type alias | Calls, `new Foo()`, `<Component />` JSX | `import { foo as bar } from './a'` is `bar` / `./a::foo`. Default `<src>::default`, namespace `<src>::*` | Anonymous default exports lose their name. `export * from` is not expanded |
-| JavaScript | function, arrow function, method, class | Same walker as TS | ES imports as in TS | No CommonJS `require()` edge |
+| TypeScript | function, arrow function, method, class, interface, enum, type alias (`type`), namespace. Interface methods, abstract methods and `declare function` signatures. An overload signature is dropped when its implementation is in the same scope | Calls, `new Foo()`, `<Component />` JSX | `import { foo as bar } from './a'` is `bar` / `./a::foo`. Default `<src>::default`, namespace `<src>::*`, `import fs = require('fs')` `fs` / `fs::*`. Re-exports: `export { foo } from './a'` is `foo` / `./a::foo`, `export { foo as bar } from './a'` is `bar` / `./a::foo`, `export * from './a'` is `*` / `./a::*` | Anonymous default exports lose their name. `export * from` is one `*` edge, not expanded. `declare module 'pkg'` adds no namespace |
+| JavaScript | function, arrow function, method, class | Same walker as TS | ES imports and re-exports as in TS | No CommonJS `require()` edge |
 | Vue SFC | The file as a component, plus script symbols | `<BaseButton />` and `<base-button />` as PascalCase | The script block's ES imports | Template expressions and auto-imported components |
 | Rust | function, method, struct, enum, trait, impl block, mod, macro call | Calls, `Crate::fn()`, `macro!` | `use foo::bar::Baz as Q` is `Q` / `foo::bar::Baz`. Glob `foo::*` | Proc macros. `derive` is a decorator, not a call |
-| C# | class, struct, record, interface, enum, method, property, namespace | Calls, `new Foo()` | `using System.Collections.Generic;` is `Generic` / `System.Collections.Generic::*` | Lambdas unnamed. `partial class` stored per file, collapsed on query |
+| C# | class, struct, record, interface, enum, delegate, method, property, event, namespace. Operators (`operator +`), conversions (`operator decimal`) and finalizers (`~Money`) are methods, an indexer is the property `this` | Calls, `new Foo()` | `using System.Collections.Generic;` is `Generic` / `System.Collections.Generic::*`, also with `global` or `static` | Lambdas unnamed. `partial class` stored per file, collapsed on query |
 | Go | function, method, struct, interface, type | Calls, `Foo{}`, `pkg.Fn()` | `import f "fmt"` is `f` / `fmt::*` | Goroutine launches, closures |
 | Java | class, interface, enum, record, method, constructor | Calls, `new Foo()` | `import java.util.List` is `List` / `java.util.List`. Wildcard `java.util::*` | Anonymous inner classes, lambdas |
 | PHP | namespace, class, interface, trait, enum, method, function | Calls, `new Foo`, `Foo::bar()`, `$this->method()` | `use App\Foo as Bar` is `Bar` / `App\Foo`. Groups expand per item | Magic method targets |
-| C/C++ | Function and method definitions and declarations, class, struct, union, enum | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows |
+| C/C++ | Function and method definitions and declarations, class, struct, union, enum, namespace, type alias (`using X = ...` and `typedef`, kind `type`). A typedef that repeats its struct, union, enum or class tag adds no row. An opaque enum (`enum class Tone : int;`) is an enum row, and its definition elsewhere is a second one. `.h` and `.inl` parse as C++ | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files. `namespace fs = std::filesystem;` is `fs` / `std::filesystem::*` | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows. An anonymous namespace adds no symbol. C++20 modules |
 
 ### Explain a symbol query
 

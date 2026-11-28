@@ -7,43 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Breaking
+### Added
 
-- `impact` no longer reports every index it cannot use as `index_stale`. A
-  missing or empty index, or one that never indexed a repository, is
-  `index_missing`. An older or newer schema is `schema_incompatible`, the code
-  MCP already uses. A file that does not open as an index is
-  `index_unavailable`. `index_stale` now means only that a source file differs
-  from the index. A script that matches `index_stale` to catch a missing index
-  needs the new codes. `ChangeImpactError` in the `mmcg` crate has the three
-  new variants.
-- Over MCP, `mmcg_change_impact`, `mmcg_test_impact`,
-  `mmcg_symbols_changed_since`, `mmcg_change_class` and `mmcg_temporal` return
-  `{"error": "index_missing"}` for an index that never indexed a repository.
-  They used to return `index_stale`. `mmcg_temporal` returns
-  `index_unavailable` when its index does not open. An old schema over MCP is
-  still the `schema_incompatible` code of the refresh check.
+- `.mts` and `.cts` files are indexed as TypeScript.
+- The TypeScript extractor records enums, type aliases (kind `type`) and
+  namespaces (`namespace A.B { }` and `module A { }`), with their members as
+  children. Interface methods, abstract methods and `declare function`
+  signatures are methods and functions. An overload signature is left out
+  when its implementation is in the same scope. A JSDoc comment on any of
+  these declarations is concept documentation for it, and
+  `symbols-changed-since` reports them like other symbols.
+- TypeScript and JavaScript re-exports are `imports` edges of the module:
+  `export { foo } from './a'` is `foo` / `./a::foo`. As with an aliased
+  import, `export { foo as bar } from './a'` is `bar` / `./a::foo`, so
+  `query imported-by bar` finds it. `export * from './a'` is
+  `*` / `./a::*` and `export * as ns from './a'` is `ns` / `./a::*`.
+  `import fs = require('fs')` is `fs` / `fs::*`.
+- C/C++ namespaces are symbols that own their members, so a spec can name
+  `billing::tax::rate`. An anonymous namespace adds no symbol. Declarations
+  inside a namespace in a header are recorded as before.
+- C/C++ `using X = ...` and `typedef` names are `type` symbols. A typedef that
+  repeats its struct, union, enum or class tag adds no row, so
+  `typedef struct Node Node;` and `typedef struct Node { } Node;` both leave
+  only the struct. An opaque enum, `enum class Tone : int;`,
+  `enum Level : char;` or `enum struct Mode;`, is an enum row. A plain
+  `enum Color` with no body and no underlying type only refers to an enum and
+  adds no row, as in `typedef enum Color Color;`.
+  `namespace fs = std::filesystem;` is an `imports` edge `fs` /
+  `std::filesystem::*`.
+- `.inl` files are indexed as C++.
+- The C# extractor records delegates (kind `delegate`), events (kind `event`),
+  operators, conversion operators and finalizers as methods named
+  `operator +`, `operator decimal` and `~Money`, and indexers as the property
+  `this`. Calls in their bodies, in event `add` and `remove` accessors and in
+  the initializer of a single field event belong to them instead of the
+  enclosing type.
+
+### Fixed
+
+- A Pre-edit Snapshot item that starts with a file span, such as
+  `` - `foo.vue` and `Widget` — 2 callers ``, claims `Widget`. It used to claim
+  the file name. An item whose only span is a file, such as
+  `` - `src/a.rs:12` — 5 callers ``, is `snapshot_line_unparsed`.
+
+- A spec that names an indexed source file in backticks lists it as a
+  mentioned file for every indexed extension. `.pyi`, `.vue`, `.phtml`, `.hh`,
+  `.hxx`, `.inl`, `.ipp` and `.tpp` were missing. A `.clang-format` scope now
+  covers `.hxx`, `.inl`, `.ipp` and `.tpp` files too.
+
+- A C# `global using System.Text.Json;` is the import `Json` /
+  `System.Text.Json::*`. The path used to start with `global using`, so it
+  never matched the namespace.
 
 ### Changed
 
-- `impact` exits 1 with `index_stale` when any source file was changed, added
-  or deleted after `index`, committed or not, with or without
-  `--skip-freshness-check`. It used to compare only the changed and new files
-  in the `--since` diff, so a deleted file, a file committed after indexing and
-  outside that diff, or a stale file elsewhere in the graph gave an old answer
-  with exit 0. A complete `index` now records the `HEAD` commit and the source
-  files that differ from it in the index metadata, and `impact` asks Git what
-  differs from that commit. An index with no recorded commit falls back to the
-  full source scan until the next complete `index`. The schema version does not
-  change.
-- A changed source that the indexer skips, such as a binary file or one larger
-  than 5 MiB, no longer makes `impact` fail with `index_stale` when the index
-  has no row for it.
-- `impact` no longer trusts the recorded commit after mastermind 5.0.0 or
-  older writes to the index. The index also records a fingerprint of its file
-  rows, and every write by this version keeps it current. A row an older
-  version changes no longer matches, so `impact` falls back to the full source
-  scan until the next complete `index`.
+- The extractor contract is `mmcg-extractors-v11`. The next `index` after an
+  upgrade rebuilds the codegraph.
 
 ## [5.0.0] - 2026-11-27
 

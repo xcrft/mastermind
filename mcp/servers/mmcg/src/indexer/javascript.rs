@@ -62,6 +62,33 @@ mod tests {
     }
 
     #[test]
+    fn reexports_are_import_edges_of_the_module() {
+        let path = common::write_tmp(
+            "js",
+            "index.mjs",
+            "export { parse, format as formatDate } from './dates.mjs';\n\
+             export * from './errors.mjs';\n\
+             export const local = 1;\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &JavascriptExtractor).unwrap();
+        let imports: Vec<(&str, Option<&str>)> = pending
+            .edges
+            .iter()
+            .filter(|e| e.kind == "imports")
+            .map(|e| (e.to_name.as_str(), e.to_path.as_deref()))
+            .collect();
+        assert_eq!(
+            imports,
+            vec![
+                ("parse", Some("./dates.mjs::parse")),
+                ("formatDate", Some("./dates.mjs::format")),
+                ("*", Some("./errors.mjs::*")),
+            ]
+        );
+    }
+
+    #[test]
     fn extracts_imports_with_paths() {
         let path = common::write_tmp(
             "js",

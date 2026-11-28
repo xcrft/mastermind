@@ -48,7 +48,7 @@ pub use vue::VueExtractor;
 /// Semantic contract for the extractor output stored in SQLite. Bump this when
 /// an extractor or grammar change can alter symbols, edges, ownership, or paths
 /// without requiring a database schema migration.
-pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v10";
+pub const EXTRACTOR_CONTRACT_VERSION: &str = "mmcg-extractors-v11";
 pub const EXTRACTOR_CONTRACT_META_KEY: &str = "extractor_contract_version";
 
 /// Bind a persisted codegraph to the repository it was built from.
@@ -433,7 +433,9 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         .to_ascii_lowercase();
     match ext.as_str() {
         "py" | "pyi" => Some(Box::new(PythonExtractor)),
-        "ts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
+        // `.mts` and `.cts` are ES-module and CommonJS TypeScript. Neither
+        // allows JSX, so both use the plain TypeScript grammar.
+        "ts" | "mts" | "cts" | "tsx" => Some(Box::new(TypescriptExtractor::new(ext == "tsx"))),
         "js" | "jsx" | "mjs" | "cjs" => Some(Box::new(JavascriptExtractor)),
         "rs" => Some(Box::new(RustExtractor)),
         "cs" => Some(Box::new(CsharpExtractor)),
@@ -444,7 +446,7 @@ pub fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
         // C / C++ share one tree-sitter-cpp grammar — OK since C is mostly a C++
         // subset; rare C-only keyword identifiers (e.g. `new` as a var) may
         // mis-parse — see cpp.rs precision disclaimer.
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => {
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp" => {
             Some(Box::new(CppExtractor))
         }
         _ => None,
@@ -2378,7 +2380,7 @@ pub(crate) fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("vue")
     } else if extension == "tsx" {
         Some("tsx")
-    } else if extension == "ts" {
+    } else if matches!(extension.as_str(), "ts" | "mts" | "cts") {
         Some("typescript")
     } else if matches!(extension.as_str(), "jsx" | "js" | "mjs" | "cjs") {
         // `.jsx` is a JavaScript dialect — store as "javascript", not a distinct
@@ -2398,7 +2400,7 @@ pub(crate) fn guess_language_for(rel_path: &str) -> Option<&'static str> {
         Some("php")
     } else if matches!(
         extension.as_str(),
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp"
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp"
     ) {
         Some("cpp")
     } else {
@@ -3160,6 +3162,52 @@ def concatenated(value):
                 documentation_matches(&store, rejected).is_empty(),
                 "unexpected Python documentation match for {rejected}"
             );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ts_concept_documentation_attaches_jsdoc_to_namespaces_and_signatures() {
+        let (dir, db) = setup("ts_signature_documentation");
+        fs::write(
+            dir.join("api.d.ts"),
+            "/** namespacequartz billing api */\n\
+             export namespace Billing {\n\
+             \x20 /** innerquartz tax rules */\n\
+             \x20 namespace Tax {}\n\
+             }\n\
+             export interface Repository {\n\
+             \x20 /** signaturequartz lookup */\n\
+             \x20 find(id: string): string;\n\
+             }\n\
+             export abstract class Store {\n\
+             \x20 /** abstractquartz persist */\n\
+             \x20 abstract save(): void;\n\
+             }\n\
+             /** declarequartz emitter */\n\
+             export declare function emit(event: string): void;\n\
+             /** ambientquartz logger */\n\
+             declare function log(line: string): void;\n\
+             /** enumquartz states */\n\
+             export enum State { Draft }\n\
+             /** aliasquartz id */\n\
+             export type Id = string;\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&db).unwrap();
+        Indexer::new(&dir).index_all(&mut store, true).unwrap();
+
+        for (term, owner) in [
+            ("namespacequartz", "Billing"),
+            ("innerquartz", "Tax"),
+            ("signaturequartz", "find"),
+            ("abstractquartz", "save"),
+            ("declarequartz", "emit"),
+            ("ambientquartz", "log"),
+            ("enumquartz", "State"),
+            ("aliasquartz", "Id"),
+        ] {
+            assert_eq!(documentation_matches(&store, term), [owner], "{term}");
         }
         fs::remove_dir_all(&dir).ok();
     }

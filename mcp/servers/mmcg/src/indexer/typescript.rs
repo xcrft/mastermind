@@ -1,4 +1,5 @@
-//! TypeScript / TSX extractor — declarations, methods, classes, interfaces, calls, imports.
+//! TypeScript / TSX extractor — functions, methods, classes, interfaces, enums,
+//! type aliases, namespaces, calls, imports and re-exports.
 
 use super::common::{
     line_of, name_field, node_text, push_call_with_type, push_def, push_import,
@@ -152,12 +153,146 @@ pub(super) fn walk(
                 }
                 walk(child, source, pending, parent_index, module_index);
             }
+            "enum_declaration" => {
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                let signature = signature_until_body(&child, source);
+                let idx = push_def(pending, name, "enum", &child, signature, parent_index);
+                if let Some(body) = child.child_by_field_name("body") {
+                    walk(body, source, pending, Some(idx), module_index);
+                }
+            }
+            "type_alias_declaration" => {
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                let signature = type_alias_signature(&child, source);
+                push_def(pending, name, "type", &child, signature, parent_index);
+            }
+            // `namespace A.B { }` and `module A { }`. A quoted ambient module,
+            // `declare module 'pkg' { }`, augments another module rather than
+            // declaring a name here, so its members keep the enclosing parent.
+            "internal_module" | "module" => {
+                let name_node = child.child_by_field_name("name");
+                let body = child.child_by_field_name("body");
+                match name_node.filter(|name| name.kind() != "string") {
+                    Some(name_node) => {
+                        let name = node_text(&name_node, source)
+                            .unwrap_or("<anon>")
+                            .to_string();
+                        let signature = Some(format!("namespace {name}"));
+                        let idx =
+                            push_def(pending, name, "namespace", &child, signature, parent_index);
+                        if let Some(body) = body {
+                            walk(body, source, pending, Some(idx), module_index);
+                        }
+                    }
+                    None => {
+                        if let Some(body) = body {
+                            walk(body, source, pending, parent_index, module_index);
+                        }
+                    }
+                }
+            }
+            // Interface members and abstract methods exist only as signatures.
+            // A class overload signature is kept only when no implementation
+            // with the same name follows, so `foo` is not listed once per
+            // overload.
+            "method_signature" | "abstract_method_signature" => {
+                let in_interface = matches!(
+                    parent_index.map(|p| pending.symbols[p].kind.as_str()),
+                    Some("interface")
+                );
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                if in_interface
+                    || child.kind() == "abstract_method_signature"
+                    || !has_sibling_implementation(&child, &name, "method_definition", source)
+                {
+                    let kind = match parent_index {
+                        Some(p)
+                            if matches!(
+                                pending.symbols[p].kind.as_str(),
+                                "class" | "interface"
+                            ) =>
+                        {
+                            "method"
+                        }
+                        _ => "function",
+                    };
+                    let signature = signature_text(&child, source);
+                    push_def(pending, name, kind, &child, signature, parent_index);
+                }
+            }
+            // `declare function f(): void;` in a `.d.ts` file, or an overload
+            // signature, which is dropped when the implementation follows.
+            "function_signature" => {
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                if !has_sibling_implementation(&child, &name, "function_declaration", source) {
+                    let signature = signature_text(&child, source);
+                    push_def(pending, name, "function", &child, signature, parent_index);
+                }
+            }
             "import_statement" => {
                 collect_import_names(&child, source, pending, module_index);
+            }
+            "export_statement" if child.child_by_field_name("source").is_some() => {
+                collect_reexport_names(&child, source, pending, module_index);
             }
             _ => walk(child, source, pending, parent_index, module_index),
         }
     }
+}
+
+/// `type Id<T> = ...` up to the `=`, so the signature names the alias and its
+/// type parameters without the full type expression.
+fn type_alias_signature(node: &Node, source: &[u8]) -> Option<String> {
+    let value = node.child_by_field_name("value")?;
+    let text = std::str::from_utf8(&source[node.start_byte()..value.start_byte()]).ok()?;
+    let trimmed = text.trim_end_matches(|c: char| c == '=' || c.is_whitespace());
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A body-less declaration as written, without the closing `;` or `,`.
+fn signature_text(node: &Node, source: &[u8]) -> Option<String> {
+    let text = node_text(node, source)?
+        .trim()
+        .trim_end_matches([';', ','])
+        .trim_end();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// True when the scope that holds `signature` also holds an implementation of
+/// `name`: a `function_declaration` in the same block or module, directly or
+/// under `export`, or a `method_definition` in the same class body.
+fn has_sibling_implementation(
+    signature: &Node,
+    name: &str,
+    implementation_kind: &str,
+    source: &[u8],
+) -> bool {
+    let mut scope = signature.parent();
+    while let Some(node) = scope {
+        if matches!(
+            node.kind(),
+            "program" | "statement_block" | "class_body" | "interface_body"
+        ) {
+            break;
+        }
+        scope = node.parent();
+    }
+    let Some(scope) = scope else {
+        return false;
+    };
+    let mut cursor = scope.walk();
+    let found = scope.named_children(&mut cursor).any(|child| {
+        let declaration = if child.kind() == "export_statement" {
+            child.child_by_field_name("declaration")
+        } else {
+            Some(child)
+        };
+        declaration.is_some_and(|declaration| {
+            declaration.kind() == implementation_kind
+                && name_field(&declaration, source) == Some(name)
+        })
+    });
+    found
 }
 
 fn call_target_with_type(
@@ -288,6 +423,26 @@ fn collect_import_names(
         .and_then(|n| node_text(&n, source))
         .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string());
 
+    // `import fs = require('fs')` binds the whole module, like `import * as fs`.
+    if let Some(require) = find_child_of_kind(import_stmt, "import_require_clause") {
+        let module = require
+            .child_by_field_name("source")
+            .and_then(|n| node_text(&n, source))
+            .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string());
+        let binding =
+            find_child_of_kind(&require, "identifier").and_then(|n| node_text(&n, source));
+        if let (Some(name), Some(module)) = (binding, module) {
+            push_import(
+                pending,
+                module_index,
+                name.to_string(),
+                Some(format!("{module}::*")),
+                line,
+            );
+        }
+        return;
+    }
+
     let clause = match import_stmt.child_by_field_name("import_clause") {
         Some(c) => c,
         None => match find_child_of_kind(import_stmt, "import_clause") {
@@ -339,6 +494,81 @@ fn collect_import_names(
             }
             _ => {}
         }
+    }
+}
+
+/// `export { a, b as c } from './m'`, `export * from './m'` and
+/// `export * as ns from './m'`. Like an aliased import, the edge name is the
+/// binding this module exports and the path keeps the original name:
+/// `a` / `./m::a`, `c` / `./m::b`, `*` / `./m::*`, or `ns` / `./m::*`.
+fn collect_reexport_names(
+    export_stmt: &Node,
+    source: &[u8],
+    pending: &mut PendingFile,
+    module_index: usize,
+) {
+    let line = line_of(export_stmt);
+    let Some(module_source) = export_stmt
+        .child_by_field_name("source")
+        .and_then(|n| node_text(&n, source))
+        .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string())
+    else {
+        return;
+    };
+    let mut cursor = export_stmt.walk();
+    let mut named = false;
+    for child in export_stmt.children(&mut cursor) {
+        match child.kind() {
+            "export_clause" => {
+                named = true;
+                let mut specifiers = child.walk();
+                for spec in child.named_children(&mut specifiers) {
+                    if spec.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let unquote = |n: Node| {
+                        node_text(&n, source).map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+                    };
+                    let orig = spec.child_by_field_name("name").and_then(unquote);
+                    let alias = spec.child_by_field_name("alias").and_then(unquote);
+                    if let Some(orig) = orig {
+                        let binding = alias.unwrap_or(orig);
+                        push_import(
+                            pending,
+                            module_index,
+                            binding.to_string(),
+                            Some(format!("{module_source}::{orig}")),
+                            line,
+                        );
+                    }
+                }
+            }
+            "namespace_export" => {
+                named = true;
+                let alias = child
+                    .named_child(0)
+                    .and_then(|n| node_text(&n, source))
+                    .map(|n| n.trim_matches(|c| c == '"' || c == '\''))
+                    .unwrap_or("*");
+                push_import(
+                    pending,
+                    module_index,
+                    alias.to_string(),
+                    Some(format!("{module_source}::*")),
+                    line,
+                );
+            }
+            _ => {}
+        }
+    }
+    if !named {
+        push_import(
+            pending,
+            module_index,
+            "*".to_string(),
+            Some(format!("{module_source}::*")),
+            line,
+        );
     }
 }
 
@@ -429,11 +659,34 @@ fn owned_symbol_nodes<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
             .child_by_field_name("declaration")
             .map(owned_symbol_nodes)
             .unwrap_or_default(),
+        // `namespace A { }` is an expression statement at the top of a block,
+        // and `declare function f()` wraps the signature.
+        "expression_statement" | "ambient_declaration" => {
+            let mut cursor = node.walk();
+            let owned = node
+                .named_children(&mut cursor)
+                .filter(|child| {
+                    matches!(
+                        child.kind(),
+                        "internal_module" | "module" | "function_signature"
+                    ) || child.kind().ends_with("_declaration")
+                })
+                .flat_map(owned_symbol_nodes)
+                .collect();
+            owned
+        }
         "function_declaration"
         | "generator_function_declaration"
         | "class_declaration"
         | "abstract_class_declaration"
         | "interface_declaration"
+        | "enum_declaration"
+        | "type_alias_declaration"
+        | "internal_module"
+        | "module"
+        | "method_signature"
+        | "abstract_method_signature"
+        | "function_signature"
         | "method_definition" => vec![node],
         "lexical_declaration" | "variable_declaration" => {
             let mut cursor = node.walk();
@@ -544,6 +797,194 @@ mod tests {
         let kinds: Vec<&str> = pending.symbols.iter().map(|s| s.kind.as_str()).collect();
         assert!(kinds.contains(&"class"));
         assert!(kinds.contains(&"method"));
+    }
+
+    fn symbol<'a>(
+        pending: &'a PendingFile,
+        name: &str,
+        kind: &str,
+    ) -> &'a crate::store::PendingSymbol {
+        pending
+            .symbols
+            .iter()
+            .find(|s| s.name == name && s.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} {name} in {:#?}", pending.symbols))
+    }
+
+    fn parent_name<'a>(pending: &'a PendingFile, symbol: &crate::store::PendingSymbol) -> &'a str {
+        pending.symbols[symbol.parent_index.expect("parent")]
+            .name
+            .as_str()
+    }
+
+    fn imports(pending: &PendingFile) -> Vec<(&str, Option<&str>)> {
+        pending
+            .edges
+            .iter()
+            .filter(|e| e.kind == "imports")
+            .map(|e| (e.to_name.as_str(), e.to_path.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn extracts_enums_type_aliases_and_namespaces_with_their_members() {
+        let path = common::write_tmp(
+            "ts",
+            "billing.ts",
+            "export enum InvoiceState { Draft = 'draft', Paid = 'paid' }\n\
+             export const enum Flags { None = 0, Overdue = 1 << 0 }\n\
+             export type InvoiceId = string & { readonly brand: unique symbol };\n\
+             type Handler<T> = (event: T) => Promise<void>;\n\
+             export namespace Billing.Tax {\n\
+             \x20 export function rate(region: string): number { return lookup(region); }\n\
+             \x20 export enum Region { Eu, Us }\n\
+             }\n\
+             module Legacy { export class Ledger {} }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(false)).unwrap();
+
+        symbol(&pending, "InvoiceState", "enum");
+        symbol(&pending, "Flags", "enum");
+        let alias = symbol(&pending, "InvoiceId", "type");
+        assert_eq!(alias.signature.as_deref(), Some("type InvoiceId"));
+        let generic = symbol(&pending, "Handler", "type");
+        assert_eq!(generic.signature.as_deref(), Some("type Handler<T>"));
+
+        let namespace = symbol(&pending, "Billing.Tax", "namespace");
+        assert_eq!(namespace.line_start, 5);
+        assert_eq!(namespace.line_end, 8);
+        let rate = symbol(&pending, "rate", "function");
+        assert_eq!(parent_name(&pending, rate), "Billing.Tax");
+        let region = symbol(&pending, "Region", "enum");
+        assert_eq!(parent_name(&pending, region), "Billing.Tax");
+        let ledger = symbol(&pending, "Ledger", "class");
+        assert_eq!(parent_name(&pending, ledger), "Legacy");
+
+        let rate_index = pending
+            .symbols
+            .iter()
+            .position(|s| s.name == "rate")
+            .unwrap();
+        assert!(pending
+            .edges
+            .iter()
+            .any(|e| e.kind == "calls" && e.to_name == "lookup" && e.from_index == rate_index));
+    }
+
+    #[test]
+    fn quoted_ambient_module_members_keep_the_enclosing_parent() {
+        let path = common::write_tmp(
+            "ts",
+            "express.d.ts",
+            "declare module 'express-serve-static-core' {\n\
+             \x20 interface Request { user?: SessionUser; currentTenant(): string; }\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(false)).unwrap();
+        assert!(!pending.symbols.iter().any(|s| s.kind == "namespace"));
+        let request = symbol(&pending, "Request", "interface");
+        assert_eq!(parent_name(&pending, request), "<module>");
+        let method = symbol(&pending, "currentTenant", "method");
+        assert_eq!(parent_name(&pending, method), "Request");
+    }
+
+    #[test]
+    fn signatures_become_symbols_only_without_an_implementation() {
+        let path = common::write_tmp(
+            "ts",
+            "repository.ts",
+            "export interface Repository<T> {\n\
+             \x20 find(id: string): Promise<T | undefined>;\n\
+             \x20 save(entity: T): Promise<void>;\n\
+             }\n\
+             export abstract class BaseRepository<T> implements Repository<T> {\n\
+             \x20 abstract find(id: string): Promise<T | undefined>;\n\
+             \x20 save(entity: T): Promise<void>;\n\
+             \x20 save(entity: T, force: boolean): Promise<void>;\n\
+             \x20 async save(entity: T, force = false): Promise<void> { await this.write(entity, force); }\n\
+             }\n\
+             export function parse(input: string): number;\n\
+             export function parse(input: number): number;\n\
+             export function parse(input: string | number): number { return Number(input); }\n\
+             declare function emit(event: string): void;\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(false)).unwrap();
+
+        for name in ["find", "save"] {
+            let method = pending
+                .symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == "method" && s.line_start <= 4)
+                .unwrap_or_else(|| panic!("interface method {name}"));
+            assert_eq!(parent_name(&pending, method), "Repository");
+        }
+        let abstract_find = pending
+            .symbols
+            .iter()
+            .find(|s| s.name == "find" && s.line_start == 6)
+            .expect("abstract method");
+        assert_eq!(abstract_find.kind, "method");
+        assert_eq!(
+            abstract_find.signature.as_deref(),
+            Some("abstract find(id: string): Promise<T | undefined>")
+        );
+        assert_eq!(
+            pending
+                .symbols
+                .iter()
+                .filter(|s| s.name == "save" && s.line_start >= 5)
+                .map(|s| s.line_start)
+                .collect::<Vec<_>>(),
+            vec![9],
+            "class overloads collapse to the implementation"
+        );
+        assert_eq!(
+            pending
+                .symbols
+                .iter()
+                .filter(|s| s.name == "parse")
+                .map(|s| s.line_start)
+                .collect::<Vec<_>>(),
+            vec![13],
+            "function overloads collapse to the implementation"
+        );
+        let emit = symbol(&pending, "emit", "function");
+        assert_eq!(
+            emit.signature.as_deref(),
+            Some("function emit(event: string): void")
+        );
+    }
+
+    #[test]
+    fn extracts_import_require_and_reexports() {
+        let path = common::write_tmp(
+            "ts",
+            "index.cts",
+            "import fs = require('node:fs');\n\
+             import type { Config } from './config';\n\
+             export { createServer, Router as AppRouter } from './server';\n\
+             export type { Session } from './session';\n\
+             export * from './errors';\n\
+             export * as metrics from './metrics';\n\
+             export { Config };\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &TypescriptExtractor::new(false)).unwrap();
+        assert_eq!(
+            imports(&pending),
+            vec![
+                ("fs", Some("node:fs::*")),
+                ("Config", Some("./config::Config")),
+                ("createServer", Some("./server::createServer")),
+                ("AppRouter", Some("./server::Router")),
+                ("Session", Some("./session::Session")),
+                ("*", Some("./errors::*")),
+                ("metrics", Some("./metrics::*")),
+            ]
+        );
     }
 
     #[test]

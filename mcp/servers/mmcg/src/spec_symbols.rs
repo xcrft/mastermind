@@ -248,6 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn cpp_claims_resolve_through_namespaces() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("graph.db")).unwrap();
+        add_source(
+            &mut store,
+            "src/tax.hpp",
+            "namespace billing::tax {\nint rate(const char* region);\n}\n\
+             namespace shipping::tax {\nint rate(const char* region);\n}\n",
+        );
+        let selected = resolve(&store, "billing::tax::rate", &[]).unwrap();
+        assert_eq!(selected.symbol.line_start, 2);
+        let error = resolve(&store, "rate", &[]).unwrap_err();
+        assert_eq!(error.reason, "ambiguous");
+    }
+
+    #[test]
     fn qualified_claims_keep_parent_file_and_language_scope() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("graph.db")).unwrap();

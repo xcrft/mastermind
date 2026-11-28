@@ -1,5 +1,6 @@
-//! C# extractor — namespaces, classes/structs/records/interfaces, methods,
-//! properties, using directives, calls, attributes.
+//! C# extractor — namespaces, classes/structs/records/interfaces, delegates,
+//! methods, operators, finalizers, properties, indexers, events, using
+//! directives, calls, attributes.
 
 use super::common::{
     line_of, name_field, node_text, push_call_with_type, push_def_with_decorators, push_import,
@@ -164,6 +165,88 @@ fn walk(
                     walk(body, source, pending, Some(idx), module_index);
                 }
             }
+            // `~Cache()`, `operator +`, `explicit operator Money` and
+            // `this[int]` are members whose bodies hold calls of their own.
+            "destructor_declaration"
+            | "operator_declaration"
+            | "conversion_operator_declaration" => {
+                let Some(name) = special_member_name(&child, source) else {
+                    walk(child, source, pending, active_parent, module_index);
+                    continue;
+                };
+                let kind = method_kind_for(active_parent, pending);
+                let signature = signature_until_body(&child, source);
+                let idx = push_def_with_decorators(
+                    pending,
+                    name,
+                    kind,
+                    &child,
+                    signature,
+                    active_parent,
+                    collect_attributes(&child, source),
+                );
+                if let Some(body) = child.child_by_field_name("body") {
+                    walk(body, source, pending, Some(idx), module_index);
+                }
+            }
+            "indexer_declaration" => {
+                let idx = push_def_with_decorators(
+                    pending,
+                    "this".to_string(),
+                    "property",
+                    &child,
+                    property_signature(&child, source),
+                    active_parent,
+                    collect_attributes(&child, source),
+                );
+                for field in ["accessors", "value"] {
+                    if let Some(body) = child.child_by_field_name(field) {
+                        walk(body, source, pending, Some(idx), module_index);
+                    }
+                }
+            }
+            "delegate_declaration" => {
+                let name = name_field(&child, source).unwrap_or("<anon>").to_string();
+                push_def_with_decorators(
+                    pending,
+                    name,
+                    "delegate",
+                    &child,
+                    statement_signature(&child, source),
+                    active_parent,
+                    collect_attributes(&child, source),
+                );
+            }
+            // `public event EventHandler Changed;` declares one event per
+            // variable. The accessor form `event Handler Changed { add; remove; }`
+            // declares one with a name field.
+            "event_declaration" | "event_field_declaration" => {
+                let signature = if child.kind() == "event_declaration" {
+                    property_signature(&child, source)
+                } else {
+                    statement_signature(&child, source)
+                };
+                let mut events = Vec::new();
+                for name in event_names(&child, source) {
+                    events.push(push_def_with_decorators(
+                        pending,
+                        name,
+                        "event",
+                        &child,
+                        signature.clone(),
+                        active_parent,
+                        collect_attributes(&child, source),
+                    ));
+                }
+                // Calls in `add { }` / `remove { }` or in the initializer of a
+                // single field event belong to that event. An initializer shared
+                // by `event E A, B = ...` stays with the enclosing type.
+                let owner = match events.as_slice() {
+                    [event] => Some(*event),
+                    _ => active_parent,
+                };
+                walk(child, source, pending, owner, module_index);
+            }
             "property_declaration" => {
                 let name = name_field(&child, source).unwrap_or("<anon>").to_string();
                 let signature = property_signature(&child, source);
@@ -217,6 +300,56 @@ fn walk(
             _ => walk(child, source, pending, active_parent, module_index),
         }
     }
+}
+
+fn special_member_name(node: &Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "destructor_declaration" => Some(format!("~{}", name_field(node, source)?)),
+        "operator_declaration" => {
+            let operator = node
+                .child_by_field_name("operator")
+                .and_then(|n| node_text(&n, source))?;
+            Some(format!("operator {operator}"))
+        }
+        "conversion_operator_declaration" => {
+            let target = node
+                .child_by_field_name("type")
+                .and_then(|n| node_text(&n, source))?;
+            Some(format!("operator {target}"))
+        }
+        _ => None,
+    }
+}
+
+fn event_names(node: &Node, source: &[u8]) -> Vec<String> {
+    if let Some(name) = name_field(node, source) {
+        return vec![name.to_string()];
+    }
+    let mut names = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "variable_declaration" {
+            continue;
+        }
+        let mut declarators = child.walk();
+        for declarator in child.named_children(&mut declarators) {
+            if declarator.kind() == "variable_declarator" {
+                if let Some(name) = name_field(&declarator, source) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// A declaration that ends in `;`, as written without it.
+fn statement_signature(node: &Node, source: &[u8]) -> Option<String> {
+    let text = node_text(node, source)?
+        .trim()
+        .trim_end_matches(';')
+        .trim_end();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn method_kind_for(parent_index: Option<usize>, pending: &PendingFile) -> &'static str {
@@ -354,7 +487,11 @@ fn collect_using(directive: &Node, source: &[u8], pending: &mut PendingFile, mod
         return;
     };
     let raw = text.trim().trim_end_matches(';').trim();
-    // Strip leading `using` (and optional `static`).
+    // Strip leading `global` (C# 10) and `using`, then optional `static`.
+    let raw = raw
+        .strip_prefix("global")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map_or(raw, str::trim_start);
     let after_using = raw.strip_prefix("using").unwrap_or(raw).trim_start();
     let after_static = after_using
         .strip_prefix("static ")
@@ -586,6 +723,97 @@ mod tests {
         assert!(imports.contains(&"Generic"));
         assert!(imports.contains(&"Math"));
         assert!(imports.contains(&"Collections"));
+    }
+
+    #[test]
+    fn global_usings_import_the_namespace() {
+        let path = common::write_tmp(
+            "cs",
+            "GlobalUsings.cs",
+            "global using System.Text.Json;\n\
+             global using static System.Math;\n\
+             global using Json = System.Text.Json.JsonSerializer;\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CsharpExtractor).unwrap();
+        let imports: Vec<(&str, Option<&str>)> = pending
+            .edges
+            .iter()
+            .filter(|e| e.kind == "imports")
+            .map(|e| (e.to_name.as_str(), e.to_path.as_deref()))
+            .collect();
+        assert_eq!(
+            imports,
+            vec![
+                ("Json", Some("System.Text.Json::*")),
+                ("Math", Some("System.Math::*")),
+                ("JsonSerializer", Some("System.Text.Json.JsonSerializer::*")),
+            ]
+        );
+    }
+
+    #[test]
+    fn records_delegates_events_operators_indexers_and_finalizers() {
+        let path = common::write_tmp(
+            "cs",
+            "Money.cs",
+            "namespace Shop.Pricing;\n\
+             public delegate void PriceChanged(object sender, Money price);\n\
+             public readonly struct Money {\n\
+             \x20   public event PriceChanged? Changed, Cleared;\n\
+             \x20   public event EventHandler Audited { add { Log.Attach(value); } remove { Log.Detach(value); } }\n\
+             \x20   public event EventHandler Reset = (sender, args) => Pool.Drain();\n\
+             \x20   public decimal this[int index] => Rates.Lookup(index);\n\
+             \x20   public static Money operator +(Money a, Money b) => Money.Sum(a, b);\n\
+             \x20   public static explicit operator decimal(Money m) { return Convert.ToDecimal(m); }\n\
+             \x20   ~Money() { Pool.Release(); }\n\
+             }\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CsharpExtractor).unwrap();
+        let find = |name: &str| {
+            pending
+                .symbols
+                .iter()
+                .position(|s| s.name == name)
+                .unwrap_or_else(|| panic!("no {name} in {:#?}", pending.symbols))
+        };
+        let money = find("Money");
+        let expected = [
+            ("PriceChanged", "delegate", find("Shop.Pricing")),
+            ("Changed", "event", money),
+            ("Cleared", "event", money),
+            ("Audited", "event", money),
+            ("Reset", "event", money),
+            ("this", "property", money),
+            ("operator +", "method", money),
+            ("operator decimal", "method", money),
+            ("~Money", "method", money),
+        ];
+        for (name, kind, parent) in expected {
+            let symbol = &pending.symbols[find(name)];
+            assert_eq!(symbol.kind, kind, "{name}");
+            assert_eq!(symbol.parent_index, Some(parent), "{name}");
+        }
+        assert_eq!(
+            pending.symbols[find("PriceChanged")].signature.as_deref(),
+            Some("public delegate void PriceChanged(object sender, Money price)")
+        );
+        let calls_from = |caller: usize| -> Vec<&str> {
+            pending
+                .edges
+                .iter()
+                .filter(|e| e.kind == "calls" && e.from_index == caller)
+                .map(|e| e.to_name.as_str())
+                .collect()
+        };
+        assert_eq!(calls_from(find("this")), vec!["Lookup"]);
+        assert_eq!(calls_from(find("operator +")), vec!["Sum"]);
+        assert_eq!(calls_from(find("operator decimal")), vec!["ToDecimal"]);
+        assert_eq!(calls_from(find("~Money")), vec!["Release"]);
+        assert_eq!(calls_from(find("Audited")), vec!["Attach", "Detach"]);
+        assert_eq!(calls_from(find("Reset")), vec!["Drain"]);
+        assert!(calls_from(money).is_empty(), "{:?}", calls_from(money));
     }
 
     #[test]

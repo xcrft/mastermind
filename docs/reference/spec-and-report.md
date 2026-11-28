@@ -244,7 +244,7 @@ language.
 | Scope | All tracked files with a supported extractor, or only the declared files |
 | Limits | 10,000 source files, 4 MiB of tree metadata, 5 MiB per blob, 64 MiB of blobs, 200,000 declarations |
 | Cannot prove uniqueness | Syntax errors, unsupported path encoding, incomplete diffs, missing baseline objects |
-| Extractor | `mmcg-extractors-v10`. Output from another contract needs a reindex |
+| Extractor | `mmcg-extractors-v11`. Output from another contract needs a reindex |
 
 | Language or case | Rule |
 |---|---|
@@ -300,6 +300,7 @@ A snapshot item reads `` - `name` — N callers; signature `sig` ``, the form
 | Count | The whole number nearest before `caller` or `callers` in the same clause. `no callers` reads 0 |
 | Clause end | `,`, `;`, `:`, a parenthesis or a dash, but not between digits |
 | Not extra symbols | File locations such as `` `src/a.rs:12` ``, the span after `signature`, and spans after the count |
+| Name | The first span that is not a file location, so `` - `foo.vue` and `Widget` — 2 callers `` names `Widget`. An item whose only span is a file is `snapshot_line_unparsed` |
 | No count or signature | A planner note |
 | Snapshot heading | A top-level `##` heading whose words start with `pre edit` and name a snapshot, after an optional number |
 

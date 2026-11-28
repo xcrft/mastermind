@@ -74,7 +74,7 @@ Repetitions of four public tasks are still four tasks, not 36 independent sample
   "mmcg": {
     "path": "/absolute/path/to/mmcg", "sha256": "executable-sha256", "version": "exact-version",
     "source_revision": "same-full-tool-commit-id", "origin": "runtime-source",
-    "index_contract": {"schema_version": "9", "extractor_contract_version": "mmcg-extractors-v10", "concept_normalization_version": "mmcg-concepts-v5"}
+    "index_contract": {"schema_version": "9", "extractor_contract_version": "mmcg-extractors-v11", "concept_normalization_version": "mmcg-concepts-v5"}
   },
   "limits": {"timeout_seconds": 300, "trace_bytes": 2097152, "stderr_bytes": 65536, "answer_bytes": 65536, "max_turns": 8, "max_output_tokens": 4096}
 }

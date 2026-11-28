@@ -766,7 +766,9 @@ fn extract_snapshot(body: &str, unparsed: &mut Vec<UnparsedLine>) -> Vec<SymbolC
             .to_ascii_lowercase()
             .find("signature")
             .unwrap_or(text.len())];
-        let name = item.and(first_code_span(head));
+        // A leading file span, as in `` `foo.vue` and `Widget` ``, locates the
+        // symbol, so the name is the first span that is not a location.
+        let name = item.and(first_symbol_span(head));
         let counts = caller_counts(&prose);
         let states_count = !counts.is_empty();
         let signatures = signatures(text, &prose);
@@ -842,6 +844,17 @@ fn signatures<'a>(text: &'a str, prose: &str) -> Vec<Option<&'a str>> {
 /// Content of the code span `text` starts with, or of the first one in it
 /// when `text` does not start with a backtick. A span closes on a run of the
 /// same number of backticks.
+fn first_symbol_span(text: &str) -> Option<&str> {
+    let mut offset = 0;
+    while let Some((span, end)) = next_code_span(&text[offset..]) {
+        offset += end;
+        if !span.is_empty() && !is_location(span) {
+            return Some(span);
+        }
+    }
+    None
+}
+
 fn first_code_span(text: &str) -> Option<&str> {
     next_code_span(text)
         .map(|(span, _)| span)
@@ -1172,13 +1185,14 @@ fn extract_mentioned_files_from_line(
 
 fn looks_like_path(s: &str) -> bool {
     let has_slash = s.contains('/');
-    let has_known_ext = [
-        ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".go", ".java", ".php",
-        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".md", ".toml", ".json", ".yml", ".yaml",
-        ".sql", ".sh", ".html", ".css", ".scss",
-    ]
-    .iter()
-    .any(|ext| s.ends_with(ext));
+    // Every indexed source extension, so this list cannot fall behind the
+    // indexer, plus the non-source files a spec often names.
+    let has_known_ext = crate::indexer::guess_language_for(s).is_some()
+        || [
+            ".md", ".toml", ".json", ".yml", ".yaml", ".sql", ".sh", ".html", ".css", ".scss",
+        ]
+        .iter()
+        .any(|ext| s.ends_with(ext));
     has_slash || has_known_ext
 }
 
@@ -1386,6 +1400,26 @@ fn parse_backticked(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_indexed_extension_is_a_mentioned_file() {
+        for ext in [
+            "py", "pyi", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs",
+            "go", "java", "php", "phtml", "c", "cc", "cpp", "cxx", "h", "hpp", "hh", "hxx", "inl",
+            "ipp", "tpp",
+        ] {
+            let name = format!("widget.{ext}");
+            assert!(
+                crate::indexer::extractor_for_path(std::path::Path::new(&name)).is_some(),
+                "{ext} is not indexed, drop it from this list"
+            );
+            assert_eq!(
+                extract_mentioned_files(&format!("Touch `{name}` only.")),
+                vec![name.clone()],
+                "{ext}"
+            );
+        }
+    }
 
     #[test]
     fn parse_file_rejects_specs_over_the_bundle_limit() {
@@ -2387,6 +2421,34 @@ id: \"1\"
         assert!(s.frontmatter.is_some());
         assert!(s.section_order.iter().any(|n| n.starts_with("Goals")));
         assert!(s.section_order.iter().any(|n| n.starts_with("Tests Plan")));
+    }
+
+    #[test]
+    fn snapshot_names_the_symbol_after_a_leading_file_span() {
+        let body = "## Pre-edit symbol snapshot\n\
+                    - `foo.vue` and `Widget` — 2 callers\n\
+                    - `src/lib.rs`: `parse` — 3 callers; signature `fn parse()`\n\
+                    - `lib.rs` — 4 callers\n\
+                    - `src/a.rs:12` — 5 callers\n";
+        let s = parse_str("t.md", body);
+        let claims: Vec<(&str, Option<u32>, Option<&str>)> = s
+            .pre_edit_snapshot
+            .iter()
+            .map(|c| (c.name.as_str(), c.callers, c.signature.as_deref()))
+            .collect();
+        assert_eq!(
+            claims,
+            vec![
+                ("Widget", Some(2), None),
+                ("parse", Some(3), Some("fn parse()")),
+            ]
+        );
+        let unparsed: Vec<&str> = s.unparsed_lines.iter().map(|l| l.line.as_str()).collect();
+        assert_eq!(
+            unparsed,
+            vec!["- `lib.rs` — 4 callers", "- `src/a.rs:12` — 5 callers"],
+            "a line that names only a file has no symbol"
+        );
     }
 
     #[test]

@@ -1666,7 +1666,7 @@ fn lang_for_path(path: &str) -> Lang {
     let ext = path.rsplit('.').next().unwrap_or("");
     match ext {
         "rs" => Lang::Rust,
-        "ts" | "tsx" => Lang::Ts,
+        "ts" | "mts" | "cts" | "tsx" => Lang::Ts,
         "js" | "jsx" | "mjs" | "cjs" => Lang::Js,
         "py" => Lang::Py,
         "go" => Lang::Go,

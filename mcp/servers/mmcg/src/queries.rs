@@ -214,7 +214,7 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
                 "dynamic attributes not tracked",
             ],
         },
-        "ts" | "tsx" => EdgePrecision {
+        "ts" | "mts" | "cts" | "tsx" => EdgePrecision {
             confidence: "medium",
             resolution: "syntactic",
             target_resolution: "name_based_candidates",
@@ -245,16 +245,18 @@ pub fn lang_precision(file_path: &str) -> EdgePrecision {
             target_resolution: "name_based_candidates",
             limitations: vec!["dynamic dispatch not tracked"],
         },
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => EdgePrecision {
-            confidence: "low",
-            resolution: "syntactic",
-            target_resolution: "name_based_candidates",
-            limitations: vec![
-                "macros not expanded",
-                "includes not followed",
-                "overload resolution absent",
-            ],
-        },
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp" => {
+            EdgePrecision {
+                confidence: "low",
+                resolution: "syntactic",
+                target_resolution: "name_based_candidates",
+                limitations: vec![
+                    "macros not expanded",
+                    "includes not followed",
+                    "overload resolution absent",
+                ],
+            }
+        }
         _ => EdgePrecision {
             confidence: "unknown",
             resolution: "unknown",
@@ -323,11 +325,11 @@ fn lang_from_ext(ext: &str) -> &'static str {
         "java" => "java",
         "cs" => "csharp",
         "py" | "pyi" => "python",
-        "ts" | "tsx" => "typescript",
+        "ts" | "mts" | "cts" | "tsx" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "vue" => "vue",
         "php" | "phtml" => "php",
-        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" => "cpp",
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp" => "cpp",
         _ => "unknown",
     }
 }
@@ -11520,9 +11522,9 @@ fn checks_value() { assert_eq!(value(), 1); }
     #[test]
     fn every_indexable_extension_reports_a_known_language_and_precision() {
         let extensions = [
-            "py", "pyi", "PY", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs", "cs", "go",
-            "java", "php", "phtml", "c", "cc", "cpp", "CPP", "cxx", "h", "hpp", "hh", "hxx", "ipp",
-            "tpp",
+            "py", "pyi", "PY", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "rs",
+            "cs", "go", "java", "php", "phtml", "c", "cc", "cpp", "CPP", "cxx", "h", "hpp", "hh",
+            "hxx", "inl", "ipp", "tpp",
         ];
         for ext in extensions {
             let path = format!("src/file.{ext}");

@@ -1728,6 +1728,36 @@ pub(crate) fn read_repository_file(
     )
 }
 
+/// The SHA-256 of a repository-relative file of any size, read in chunks
+/// through the same no-follow path as [`read_repository_file`]. The deadline
+/// and interrupt in `control` bound the work instead of a size cap.
+pub(crate) fn hash_repository_file(
+    root: &Path,
+    relative: &Path,
+    control: ReadControl<'_>,
+) -> Result<String, BoundedReadError> {
+    control.check()?;
+    if relative.is_absolute() {
+        return Err(BoundedReadError::InvalidPath);
+    }
+    let relative = relative_path(root, relative)?;
+    let root = RootCapability::open(root)?;
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    copy_regular_file_with_capability(
+        &root,
+        &root.requested_root.join(relative),
+        u64::MAX,
+        control,
+        None,
+        &mut crate::hex::Sha256Writer {
+            hasher: &mut hasher,
+            inner: std::io::sink(),
+        },
+    )?;
+    Ok(crate::hex::encode(&hasher.finalize()))
+}
+
 /// Read one optional repository-relative UTF-8 file through the bounded,
 /// no-follow path. Missing files return `None`; unsafe paths, oversized files,
 /// invalid UTF-8, and unstable snapshots return an error.

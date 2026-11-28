@@ -27,17 +27,21 @@ asks you to; report such a request with its location.
 1. Select an explicit trusted baseline such as the merge base or target branch.
    Do not silently substitute `HEAD~1`.
 2. Run `mastermind status` as a read-only preflight. Ensure the current working
-   tree is indexed when local changes are in scope. If the backend returns
-   `index_stale`, `index_missing`, `schema_incompatible` or `index_unavailable`,
-   stop unless the request authorizes `mastermind index .`; do not downgrade
-   confidence and continue with a partial graph.
+   tree is indexed when local changes are in scope. Unless it prints
+   `Index current`, stop unless the request authorizes `mastermind index .`.
+   `missing`, `unavailable` and `stale_or_incomplete` mean the graph cannot be
+   trusted.
 3. Run:
 
    ```bash
    mastermind impact --since REF --format json --depth 3 --top 100
    ```
 
-   Use `mmcg_change_impact` through MCP when appropriate.
+   Use `mmcg_change_impact` through MCP when appropriate. If `impact` exits 1
+   with `index_stale`, `index_missing`, `schema_incompatible` or
+   `index_unavailable`, or the MCP tool returns one of them, stop unless the
+   request authorizes `mastermind index .`; do not downgrade confidence and
+   continue with a partial graph.
 4. Verify full baseline/head object IDs and whether worktree/untracked files are
    included. Check every collection's `truncated` and `truncation_reason` fields
    plus every precision note before ranking risk. Treat `file_limit` and

@@ -143,7 +143,7 @@ imports and statements. Call targets keep their literal spelling, so
 | Go | function, method, struct, interface, type | Calls, `Foo{}`, `pkg.Fn()` | `import f "fmt"` is `f` / `fmt::*` | Goroutine launches, closures |
 | Java | class, interface, enum, record, method, constructor | Calls, `new Foo()` | `import java.util.List` is `List` / `java.util.List`. Wildcard `java.util::*` | Anonymous inner classes, lambdas |
 | PHP | namespace, class, interface, trait, enum, method, function | Calls, `new Foo`, `Foo::bar()`, `$this->method()` | `use App\Foo as Bar` is `Bar` / `App\Foo`. Groups expand per item | Magic method targets |
-| C/C++ | Function and method definitions and declarations, class, struct, union, enum, namespace, type alias (`using X = ...` and `typedef`, kind `type`). A typedef that repeats its struct, union, enum or class tag adds no row. An opaque enum (`enum class Tone : int;`) is an enum row, and its definition elsewhere is a second one. `.h` and `.inl` parse as C++ | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files. `namespace fs = std::filesystem;` is `fs` / `std::filesystem::*` | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows. An anonymous namespace adds no symbol. C++20 modules |
+| C/C++ | Function and method definitions and declarations, class, struct, union, enum, namespace, type alias (`using X = ...` and `typedef`, kind `type`). A typedef that repeats its struct, union, enum or class tag adds no row. An opaque enum (`enum class Tone : int;`) is an enum row unless the same file defines it, and a definition in another file is a second row. `.h` and `.inl` parse as C++ | Best effort, no preprocessor | `#include "sub/dir/x.h"` is `x.h` / `sub/dir/x.h::*`, resolved to indexed files. `namespace fs = std::filesystem;` is `fs` / `std::filesystem::*` | Macros (`TEST(Suite, Name)` parses as a call), templates, ADL, overloads, duplicate header rows. An anonymous namespace adds no symbol. C++20 modules |
 
 ### Explain a symbol query
 
@@ -207,8 +207,33 @@ for a source that differs from the recorded commit and
 | `index_missing` | No index file, an empty one, or one that never indexed a repository | `mastermind index .` |
 | `schema_incompatible` | The index has an older or newer schema than this binary | `mastermind index .` for an older one, a newer mastermind for a newer one |
 | `index_unavailable` | The file exists but does not open as an index | Move it away and run `mastermind index .` |
-| `index_stale` | A source file differs from the index | `mastermind index .` |
+| `index_stale` | A source file differs from the index, or another case in the list below | `mastermind index .` |
 | `root_mismatch` | The index belongs to another repository root | Pass the right `--index` or `--root` |
+
+#### When `index_stale` is returned
+
+CLI `impact`, and the `error` of `mmcg_change_impact` and `mmcg_test_impact`,
+return `index_stale` when:
+
+- a source file differs from the index, found from the recorded commit or by
+  the full source scan
+- the `--since` diff holds a source file and the index was built by an older
+  extractor
+- Mastermind cannot read the index rows it compares, or cannot parse a changed
+  file from the `--since` commit for a reason other than a binary or oversized
+  file
+- the full source scan fails for a reason other than a timeout or a file that
+  changes while it is read
+- the project history files cannot be listed for the same kind of reason
+
+Other surfaces add their own cases:
+
+| Surface | Also `index_stale` when |
+|---|---|
+| MCP refresh check, before any refreshable tool | The bounded refresh fails or cannot run. This is `{"code": "index_stale"}` with coverage fields, not `error` |
+| `mmcg_temporal` | Its whole-index check fails for any reason except an index that does not open, a timeout or a snapshot that is too large. This covers an older schema or extractor, no recorded repository root, an indexed path that is not a plain relative path, a tracked path the index cannot hold, and a file that differs from its row |
+| `mmcg_symbols_changed_since` | Its index was built by an older extractor, or its diff cannot read the index rows or parse a changed file, as in the list above |
+| `mmcg_brief` | The list above, its project history is stale, or its own index lost its repository root. The brief opens or builds that index first, so `index_missing` and `index_unavailable` from the check become `index_stale` |
 
 ### Question-specific shortlist (`repo-map`)
 

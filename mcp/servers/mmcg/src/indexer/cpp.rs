@@ -169,6 +169,11 @@ fn walk(
                 if name.is_none() || !(has_body || opaque) {
                     continue;
                 }
+                // `enum class Hue : int;` before `enum class Hue : int { }` in
+                // the same file is one enum, so the definition is its row.
+                if opaque && file_defines_enum(&child, source, name.as_deref().unwrap()) {
+                    continue;
+                }
                 let signature = if has_body {
                     signature_until_body(&child, source)
                 } else {
@@ -445,6 +450,58 @@ fn leaf_and_path(node: &Node, source: &[u8]) -> Option<(String, Option<String>, 
         }
         _ => None,
     }
+}
+
+/// Whether the file that holds the opaque enum `declaration` also defines
+/// that enum with a body, in the same scope or out of line as `S::E`.
+fn file_defines_enum(declaration: &Node, source: &[u8], name: &str) -> bool {
+    let key = enum_key(declaration, source, name);
+    let mut root = *declaration;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        if node.kind() == "enum_specifier" && node.child_by_field_name("body").is_some() {
+            if let Some(defined) = name_field(&node, source) {
+                if enum_key(&node, source, defined) == key {
+                    return true;
+                }
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return false;
+            }
+        }
+    }
+}
+
+/// `name` qualified by the named namespaces and classes around `node`.
+fn enum_key(node: &Node, source: &[u8], name: &str) -> String {
+    let mut scopes = Vec::new();
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if matches!(
+            scope.kind(),
+            "namespace_definition" | "class_specifier" | "struct_specifier" | "union_specifier"
+        ) {
+            if let Some(scope_name) = name_field(&scope, source) {
+                scopes.push(scope_name);
+            }
+        }
+        current = scope.parent();
+    }
+    scopes.reverse();
+    scopes.push(name);
+    scopes.join("::")
 }
 
 /// `enum class` or `enum struct`.
@@ -885,6 +942,40 @@ mod tests {
             .symbols
             .iter()
             .any(|s| s.name == "Color" && s.kind == "type"));
+    }
+
+    #[test]
+    fn an_opaque_enum_defined_in_the_same_file_is_one_row() {
+        let path = common::write_tmp(
+            "cpp",
+            "hue.cpp",
+            "enum class Hue : int;\n\
+             namespace paint {\n\
+             enum struct Hue;\n\
+             struct Brush { enum Tip : char; };\n\
+             enum struct Hue { Red };\n\
+             }\n\
+             enum paint::Brush::Tip : char { Round };\n\
+             enum class Hue : int { Red, Green };\n\
+             enum class Shade : int;\n",
+        );
+        let root = path.parent().unwrap();
+        let pending = parse_one(&path, root, &CppExtractor).unwrap();
+        let enums: Vec<(&str, u32)> = pending
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "enum")
+            .map(|s| (s.name.as_str(), s.line_start))
+            .collect();
+        assert_eq!(
+            enums,
+            vec![
+                ("Hue", 5),
+                ("paint::Brush::Tip", 7),
+                ("Hue", 8),
+                ("Shade", 9)
+            ]
+        );
     }
 
     #[test]

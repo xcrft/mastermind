@@ -6,7 +6,9 @@
 //! baseline blob reads and the snapshot token that proves a working tree did
 //! not change between two reads.
 
-use crate::bounded_fs::{read_repository_file, BoundedReadError, ReadControl};
+use crate::bounded_fs::{
+    hash_repository_file, read_repository_file, BoundedReadError, ReadControl,
+};
 use crate::indexer::MAX_INDEXABLE_FILE_SIZE;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1461,11 +1463,20 @@ pub(crate) fn working_tree_snapshot_token_controlled(
                 },
             ) {
                 Ok(file) => digest.update(Sha256::digest(file.bytes)),
-                // The indexer skips a source over the cap, so its size stands
-                // for its content here.
-                Err(BoundedReadError::TooLarge { size, .. }) => {
+                // The indexer skips a source over the cap, but the token must
+                // still change when its bytes do, so hash it in chunks.
+                Err(BoundedReadError::TooLarge { .. }) => {
+                    let hash = hash_repository_file(
+                        repo,
+                        Path::new(&file.path),
+                        ReadControl {
+                            deadline,
+                            interrupted,
+                        },
+                    )
+                    .map_err(working_tree_read_error)?;
                     digest.update(b"too_large\0");
-                    digest.update(size.to_be_bytes());
+                    digest.update(hash.as_bytes());
                 }
                 Err(error) => return Err(working_tree_read_error(error)),
             }
@@ -1512,6 +1523,44 @@ pub(crate) mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn a_same_size_edit_to_an_oversized_file_changes_the_snapshot_token() {
+        let dir = init_repo("oversized_token");
+        write(&dir, "lib.rs", "pub fn lib() {}\n");
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "-q", "-m", "start"]);
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let head = head.trim();
+        let size = MAX_INDEXABLE_FILE_SIZE as usize + 1024;
+        let mut bytes = vec![b'a'; size];
+        fs::write(dir.join("huge.rs"), &bytes).unwrap();
+        let files = [WorkingTreeChangedFile {
+            path: "huge.rs".to_string(),
+            status: "untracked".to_string(),
+        }];
+        let token = |dir: &Path| {
+            working_tree_snapshot_token_controlled(dir, head, &files, None, None).unwrap()
+        };
+        let before = token(&dir);
+        assert_eq!(before, token(&dir), "the same bytes give the same token");
+        bytes[size / 2] = b'b';
+        fs::write(dir.join("huge.rs"), &bytes).unwrap();
+        assert_eq!(
+            fs::metadata(dir.join("huge.rs")).unwrap().len(),
+            size as u64
+        );
+        assert_ne!(before, token(&dir), "a same-size edit changes the token");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

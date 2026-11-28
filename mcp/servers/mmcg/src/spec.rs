@@ -841,18 +841,27 @@ fn signatures<'a>(text: &'a str, prose: &str) -> Vec<Option<&'a str>> {
         .collect()
 }
 
-/// Content of the code span `text` starts with, or of the first one in it
-/// when `text` does not start with a backtick. A span closes on a run of the
-/// same number of backticks.
+/// The symbol in the first code span of `text` that names one. A span that
+/// is only a location, such as `` `foo.vue` `` or `` `src/a.rs:12` ``, names
+/// none. A span that qualifies a symbol by its file, as in
+/// `` `src/lib.rs::parse` ``, names the part after the file.
 fn first_symbol_span(text: &str) -> Option<&str> {
     let mut offset = 0;
     while let Some((span, end)) = next_code_span(&text[offset..]) {
         offset += end;
-        if !span.is_empty() && !is_location(span) {
-            return Some(span);
+        if let Some(symbol) = span_symbol(span) {
+            return Some(symbol);
         }
     }
     None
+}
+
+fn span_symbol(span: &str) -> Option<&str> {
+    let span = match span.split_once("::") {
+        Some((file, symbol)) if is_location(file) => symbol.trim(),
+        _ => span,
+    };
+    (!span.is_empty() && !is_location(span)).then_some(span)
 }
 
 fn first_code_span(text: &str) -> Option<&str> {
@@ -2429,7 +2438,11 @@ id: \"1\"
                     - `foo.vue` and `Widget` — 2 callers\n\
                     - `src/lib.rs`: `parse` — 3 callers; signature `fn parse()`\n\
                     - `lib.rs` — 4 callers\n\
-                    - `src/a.rs:12` — 5 callers\n";
+                    - `src/a.rs:12` — 5 callers\n\
+                    - `src/lib.rs::parse` — 6 callers\n\
+                    - `src/foo.vue::Widget` — 7 callers\n\
+                    - `std::fs::read` — 8 callers\n\
+                    - `src/lib.rs::` — 9 callers\n";
         let s = parse_str("t.md", body);
         let claims: Vec<(&str, Option<u32>, Option<&str>)> = s
             .pre_edit_snapshot
@@ -2441,12 +2454,19 @@ id: \"1\"
             vec![
                 ("Widget", Some(2), None),
                 ("parse", Some(3), Some("fn parse()")),
+                ("parse", Some(6), None),
+                ("Widget", Some(7), None),
+                ("std::fs::read", Some(8), None),
             ]
         );
         let unparsed: Vec<&str> = s.unparsed_lines.iter().map(|l| l.line.as_str()).collect();
         assert_eq!(
             unparsed,
-            vec!["- `lib.rs` — 4 callers", "- `src/a.rs:12` — 5 callers"],
+            vec![
+                "- `lib.rs` — 4 callers",
+                "- `src/a.rs:12` — 5 callers",
+                "- `src/lib.rs::` — 9 callers",
+            ],
             "a line that names only a file has no symbol"
         );
     }

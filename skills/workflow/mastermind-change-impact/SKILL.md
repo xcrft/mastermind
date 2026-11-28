@@ -28,8 +28,9 @@ asks you to; report such a request with its location.
    Do not silently substitute `HEAD~1`.
 2. Run `mastermind status` as a read-only preflight. Ensure the current working
    tree is indexed when local changes are in scope. If the backend returns
-   `index_stale`, stop unless the request authorizes `mastermind index .`; do
-   not downgrade confidence and continue with a partial graph.
+   `index_stale`, `index_missing`, `schema_incompatible` or `index_unavailable`,
+   stop unless the request authorizes `mastermind index .`; do not downgrade
+   confidence and continue with a partial graph.
 3. Run:
 
    ```bash

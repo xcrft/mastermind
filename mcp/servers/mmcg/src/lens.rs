@@ -470,6 +470,17 @@ impl LensError {
                 ChangeImpactError::RootMismatch => {
                     "the index belongs to a different repository root".into()
                 }
+                ChangeImpactError::IndexMissing => {
+                    "no index was built for this repository; run `mastermind index .` and refresh"
+                        .into()
+                }
+                ChangeImpactError::IndexUnavailable => {
+                    "the index does not open; rebuild it with `mastermind index .` and refresh"
+                        .into()
+                }
+                ChangeImpactError::SchemaIncompatible => {
+                    "the index schema does not match this mastermind; rebuild it with `mastermind index .` and refresh".into()
+                }
                 ChangeImpactError::IndexStale => {
                     "the index is stale; run `mastermind index .` and refresh".into()
                 }

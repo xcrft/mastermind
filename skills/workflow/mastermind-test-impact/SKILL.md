@@ -25,7 +25,8 @@ asks you to; report such a request with its location.
 ## Workflow
 
 1. Choose the same trusted baseline and fresh index used for change analysis.
-   Run `mastermind status` first. Stop on `index_stale` unless re-indexing is
+   Run `mastermind status` first. Stop on `index_stale`, `index_missing`,
+   `schema_incompatible` or `index_unavailable` unless re-indexing is
    authorized; never infer candidates from a stale graph.
 2. Run `mastermind impact --since REF --format json`, or call
    `mmcg_test_impact` for the exact test projection.

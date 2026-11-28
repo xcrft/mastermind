@@ -30,6 +30,34 @@ pub(crate) fn open_query_store(index_path: &Path) -> Result<Store, Box<dyn std::
     Ok(store)
 }
 
+/// `impact` prints only an error code, so an index it cannot use keeps the
+/// reason in that code: `index_missing` for no index file or an empty one,
+/// `schema_incompatible` for an older or newer schema, and
+/// `index_unavailable` for a file that does not open as an index.
+pub(crate) fn open_impact_store(index_path: &Path) -> Result<Store, queries::ChangeImpactError> {
+    use queries::ChangeImpactError;
+    if let Err(error) = index_path.symlink_metadata() {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Err(ChangeImpactError::IndexMissing);
+        }
+    }
+    let store = Store::open_read_only(index_path).map_err(|error| {
+        if mmcg::store::is_newer_index_error(&error) {
+            ChangeImpactError::SchemaIncompatible
+        } else {
+            ChangeImpactError::IndexUnavailable
+        }
+    })?;
+    match store.schema_current() {
+        Ok(true) => Ok(store),
+        Ok(false) => match store.meta_value("schema_version") {
+            Ok(Some(_)) => Err(ChangeImpactError::SchemaIncompatible),
+            _ => Err(ChangeImpactError::IndexMissing),
+        },
+        Err(_) => Err(ChangeImpactError::IndexUnavailable),
+    }
+}
+
 /// CLI queries answer from whatever the index holds. They do not block on a
 /// stale index, but they say so on stderr using the rule MCP enforces. Call it
 /// inside the command's work budget so the scan counts against

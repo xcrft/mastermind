@@ -448,10 +448,10 @@ struct ImpactArgs {
     /// index, and print `freshness check skipped` on stderr. Only the time of
     /// that scan is saved, so the gain is largest for query and repo-map.
     /// Only for a caller that indexes after every change, such as a mirror
-    /// that indexes after each fetch. On an index that is behind the files the
-    /// answer is old and comes with no warning.
-    /// impact still compares the changed files with the index and exits 1
-    /// with `index_stale` when they differ. The flag does not skip that.
+    /// that indexes after each fetch.
+    /// impact still exits 1 with `index_stale` when any indexable file was
+    /// changed, added or deleted after indexing. It finds them with Git from
+    /// the commit the index recorded, so that check is not skipped.
     #[arg(long)]
     skip_freshness_check: bool,
 }
@@ -2348,8 +2348,7 @@ fn run_cli_inner(
                 .canonicalize()
                 .map_err(|_| mmcg::queries::ChangeImpactError::RootMismatch)?;
             let index_path = index_path_for_root(index_override.as_deref(), &root);
-            let store = commands::query::open_query_store(&index_path)
-                .map_err(|_| mmcg::queries::ChangeImpactError::IndexStale)?;
+            let store = commands::query::open_impact_store(&index_path)?;
             let top =
                 usize::try_from(top).map_err(|_| mmcg::queries::ChangeImpactError::InvalidRef)?;
             store.set_default_work_budget_ms(mmcg::store::query_budget_ms_from_env(
@@ -4091,6 +4090,18 @@ mod tests {
                 mmcg::queries::ChangeImpactError::RootMismatch,
                 "root_mismatch",
             ),
+            (
+                mmcg::queries::ChangeImpactError::IndexMissing,
+                "index_missing",
+            ),
+            (
+                mmcg::queries::ChangeImpactError::IndexUnavailable,
+                "index_unavailable",
+            ),
+            (
+                mmcg::queries::ChangeImpactError::SchemaIncompatible,
+                "schema_incompatible",
+            ),
             (mmcg::queries::ChangeImpactError::IndexStale, "index_stale"),
             (
                 mmcg::queries::ChangeImpactError::SnapshotChanged,
@@ -4157,7 +4168,7 @@ mod tests {
             error
                 .downcast_ref::<mmcg::queries::ChangeImpactError>()
                 .map(|error| error.code()),
-            Some("index_stale")
+            Some("index_missing")
         );
         assert!(!index.exists());
         assert!(!root.join("missing").exists());

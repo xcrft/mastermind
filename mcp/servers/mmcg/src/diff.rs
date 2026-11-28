@@ -753,9 +753,13 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
             .map_err(|_| WorkingTreeDiffError::IndexStale)?;
         let old_blob = old_blobs.get(rel).and_then(|v| v.as_deref());
         let old_symbols = match (old_blob, extractor_for_path(Path::new(rel))) {
-            (Some(bytes), Some(extractor)) => parse_blob(rel, bytes, 0, extractor.as_ref())
-                .map(|p| p.symbols)
-                .map_err(|_| WorkingTreeDiffError::IndexStale)?,
+            (Some(bytes), Some(extractor)) => match parse_blob(rel, bytes, 0, extractor.as_ref()) {
+                Ok(parsed) => parsed.symbols,
+                // A binary or oversized baseline has no symbols, as the
+                // indexer gives the same file.
+                Err(crate::indexer::IndexError::Skipped(_)) => Vec::new(),
+                Err(_) => return Err(WorkingTreeDiffError::IndexStale),
+            },
             _ => Vec::new(),
         };
 
@@ -798,17 +802,19 @@ pub(crate) fn symbols_changed_in_worktree_with_task(
                 deadline,
                 interrupted,
             };
-            Some(
-                read_repository_file(
-                    repo_root,
-                    Path::new(rel),
-                    MAX_INDEXABLE_FILE_SIZE,
-                    MAX_INDEXABLE_FILE_SIZE,
-                    control,
-                )
-                .map_err(working_tree_read_error)?
-                .bytes,
-            )
+            match read_repository_file(
+                repo_root,
+                Path::new(rel),
+                MAX_INDEXABLE_FILE_SIZE,
+                MAX_INDEXABLE_FILE_SIZE,
+                control,
+            ) {
+                Ok(file) => Some(file.bytes),
+                // The indexer skips a source over the cap, so it has no
+                // current symbols to compare.
+                Err(crate::bounded_fs::BoundedReadError::TooLarge { .. }) => None,
+                Err(error) => return Err(working_tree_read_error(error)),
+            }
         };
         let indexed_code =
             declarations.current_files.contains(rel.as_str()) && !new_symbols.is_empty();
